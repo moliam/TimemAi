@@ -89,10 +89,9 @@ Example without sourcing an env file:
 timem \
   --data-dir data \
   --space .test_mem \
-  --gateway-provider custom \
-  --api-protocol anthropic \
-  --base-url https://your-gateway.example/v1 \
-  --model aws-claude-sonnet-4-6 \
+  --gateway-provider aliyun \
+  --api-protocol openai-compatible \
+  --model qwen-plus \
   --max-llm-context 100K \
   --bash-approval ask
 ```
@@ -131,15 +130,6 @@ export TIMEM_MAX_LLM_CONTEXT=100K
 ```
 
 ```bash
-# Custom internal gateway
-export TIMEM_GATEWAY_PROVIDER=custom
-export TIMEM_API_KEY=...
-export TIMEM_API_PROTOCOL=anthropic
-export TIMEM_BASE_URL=https://your-gateway.example/v1
-export TIMEM_MAX_LLM_CONTEXT=100K
-```
-
-```bash
 # OpenAI
 export TIMEM_GATEWAY_PROVIDER=openai
 export TIMEM_API_KEY=...
@@ -160,8 +150,9 @@ export TIMEM_API_PROTOCOL=anthropic
 - `anthropic`
 
 If `TIMEM_API_PROTOCOL` is omitted, `TIMEM_GATEWAY_PROVIDER=anthropic` uses
-Anthropic protocol, `TIMEM_GATEWAY_PROVIDER=custom` also defaults to Anthropic
-protocol, and other providers use OpenAI-compatible chat completions.
+Anthropic protocol, and other providers use OpenAI-compatible chat
+completions. For a custom gateway, set both `TIMEM_API_PROTOCOL` and
+`TIMEM_BASE_URL` explicitly.
 
 `TIMEM_MAX_LLM_CONTEXT` defaults to `100K`. Runtime asks the model to consider
 `prompt_shrink` when the observed provider input tokens plus the new prompt
@@ -251,7 +242,7 @@ TIMEM_API_KEY=... \
 cargo run -p timem_shell -- --space .test_mem --model qwen-plus
 ```
 
-Custom example:
+Custom gateway example:
 
 ```bash
 TIMEM_GATEWAY_PROVIDER=custom \
@@ -288,3 +279,7 @@ cargo test -p timem_shell
 ```
 
 One real-provider test is intentionally ignored unless a real local key file exists.
+
+## Contributors
+
+TimemAi is developed by limo with assistance from Claude and Codex.

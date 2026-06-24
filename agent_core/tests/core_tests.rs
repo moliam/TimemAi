@@ -521,9 +521,7 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(final_turn
-        .response_to_user
-        .contains("example_3x.mp4"));
+    assert!(final_turn.response_to_user.contains("example_3x.mp4"));
     assert!(!final_turn.response_to_user.contains("```json"));
     assert_eq!(final_turn.repair_issue, None);
 }
@@ -780,6 +778,27 @@ fn unsupported_action_is_not_executed_silently() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("unsupported_action:delete_file"));
+}
+
+#[test]
+fn scratch_actions_are_not_claimed_without_runtime_support() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scratch_action_boundary"),
+    );
+    let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create a task checkpoint.","input":{"content":"continue this task later"}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("unsupported_action:scratch_write"));
+    assert!(!prompt.contains("Action result: scratch_write"));
 }
 
 #[test]
@@ -1375,6 +1394,36 @@ fn memory_sql_query_rejects_raw_update_sql() {
     };
     assert!(prompt.contains("Action result: memory_sql_query"));
     assert!(prompt.contains("error: read_only_sql_required"));
+}
+
+#[test]
+fn memory_sql_query_rejects_chat_history_delete_sql() {
+    let root = tmp_dir("chat_delete_rejected");
+    let dir = root.join("memory");
+    fs::create_dir_all(&dir).unwrap();
+    let audit_file = root.join("api_audit.jsonl");
+    fs::write(
+        &audit_file,
+        r#"{"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"需要保留的聊天"}
+{"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"这条聊天仍应只读。"}
+"#,
+    )
+    .unwrap();
+    let before = fs::read_to_string(&audit_file).unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("删除聊天记录", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Attempt to delete chat history through SQL.","input":{"sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memory_sql_query"));
+    assert!(prompt.contains("error: read_only_sql_required"));
+    assert_eq!(fs::read_to_string(&audit_file).unwrap(), before);
 }
 
 #[test]

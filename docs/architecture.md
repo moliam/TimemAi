@@ -364,6 +364,19 @@ Timem separates three layers:
 Do not collapse these layers. A chat-history lookup is not durable memory, and
 durable memory does not prove that a visible chat transcript exists.
 
+Current implemented surface:
+
+- Chat history search: `chat_history_query` and `memory_sql_query` over
+  `chat_messages`.
+- Chat history deletion: not implemented. `chat_messages` is read-only in the
+  SQL surface.
+- Durable memory search: `query_memory` and `memory_sql_query` over `memories`.
+- Durable memory insert/update/delete: `memory_update`.
+- Git-backed memory layer updates: not implemented in this standalone shell
+  package.
+- Scratch notes/checkpoints: described as a design need in the static prompt,
+  but no executable `scratch_*` runtime action exists yet.
+
 ### Read-only SQL
 
 `memory_sql_query` reads a restricted SQLite surface:
@@ -434,7 +447,7 @@ Examples:
 aliyun    -> OpenAI-compatible by default
 openai    -> OpenAI-compatible by default
 anthropic -> Anthropic by default
-custom       -> Anthropic by default
+custom    -> set TIMEM_API_PROTOCOL and TIMEM_BASE_URL explicitly
 ```
 
 `TIMEM_BASE_URL` can override the provider default. API keys are read from

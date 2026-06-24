@@ -10,13 +10,14 @@
 # Keep the copied env file private. Do not commit API keys.
 
 # Traffic platform. It selects the default base URL and vendor fallback keys.
-# Known values: aliyun, dashscope, openai, anthropic, custom.
+# Known values: aliyun, dashscope, openai, anthropic.
+# Use custom only when you also set TIMEM_BASE_URL explicitly.
 # export TIMEM_GATEWAY_PROVIDER=aliyun
 
 # Wire protocol / request payload format.
 # Known values: openai-compatible, anthropic.
-# If omitted, anthropic and custom default to anthropic; others default to
-# openai-compatible.
+# If omitted, anthropic defaults to anthropic; others default to
+# openai-compatible. For custom gateways, set this explicitly.
 # export TIMEM_API_PROTOCOL=openai-compatible
 
 # Generic API key. Prefer env/source over command-line flags so secrets do not
@@ -59,4 +60,4 @@
 # aliyun/dashscope: https://dashscope.aliyuncs.com/compatible-mode/v1
 # openai: https://api.openai.com/v1
 # anthropic: https://api.anthropic.com
-# custom: https://your-gateway.example/v1
+# custom: set TIMEM_BASE_URL to your own gateway URL.

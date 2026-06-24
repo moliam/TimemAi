@@ -370,8 +370,8 @@ impl ProviderConfig {
                 // Anthropic 原生 endpoint 为 /v1/messages。
                 // 对 api.anthropic.com，base_url 通常到 https://api.anthropic.com，
                 // 拼接后得到 https://api.anthropic.com/v1/messages。
-                // 对 custom 等网关，base_url 已经包含 /v1（如 .../llm-gateway/v1），
-                // 此时不应再重复追加 /v1。
+                // Custom gateways may already expose a /v1 base path; do not
+                // append /v1 again in that case.
                 let base = self.base_url.trim_end_matches('/');
                 if base.ends_with("/v1") {
                     format!("{}/messages", base)
@@ -571,9 +571,6 @@ fn parse_api_protocol(value: &str) -> Result<ApiProtocol, String> {
 fn default_api_protocol(provider: &str) -> ApiProtocol {
     match provider {
         "anthropic" => ApiProtocol::Anthropic,
-        // custom 网关同时支持 OpenAI-compatible 和 Anthropic 原生协议。
-        // 走 Anthropic 原生才能用 cache_control，避免 17K static prompt 每轮重算。
-        "custom" => ApiProtocol::Anthropic,
         _ => ApiProtocol::OpenAiCompatible,
     }
 }
@@ -591,10 +588,6 @@ fn default_base_url(provider: &str) -> &str {
         "openai" => "https://api.openai.com/v1",
         "anthropic" => "https://api.anthropic.com",
         "aliyun" | "dashscope" => "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        // Anthropic 原生协议下 endpoint() 会拼成 {base}/v1/messages，
-        // 而 custom 网关的 anthropic 路径正好是 /llm-gateway/v1/messages，
-        // 所以 base_url 保留到 .../v1 即可，与 OpenAI 兼容路径共用。
-        "custom" => "https://your-gateway.example/v1",
         _ => "https://dashscope.aliyuncs.com/compatible-mode/v1",
     }
 }
@@ -1119,11 +1112,6 @@ mod tests {
                 "https://api.anthropic.com",
                 ApiProtocol::Anthropic,
             ),
-            (
-                "custom",
-                "https://your-gateway.example/v1",
-                ApiProtocol::Anthropic,
-            ),
         ];
 
         for (provider, expected_base_url, expected_protocol) in cases {
@@ -1321,6 +1309,7 @@ mod tests {
             &CliOptions {
                 provider: Some("custom".into()),
                 api_protocol: Some("openai-compatible".into()),
+                base_url: Some("https://your-gateway.example/v1".into()),
                 model: Some("aws-claude-opus-4-7".into()),
                 ..CliOptions::default()
             },
@@ -1329,10 +1318,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.provider, "custom");
-        assert_eq!(
-            config.base_url,
-            "https://your-gateway.example/v1"
-        );
+        assert_eq!(config.base_url, "https://your-gateway.example/v1");
         assert_eq!(config.api_protocol, ApiProtocol::OpenAiCompatible);
         assert_eq!(
             config.endpoint(),
@@ -1442,10 +1428,12 @@ mod tests {
     }
 
     #[test]
-    fn custom_default_protocol_is_anthropic_for_cache_control() {
+    fn custom_gateway_can_use_anthropic_protocol_for_cache_control() {
         let config = provider_config_from_env(
             &CliOptions {
                 provider: Some("custom".into()),
+                api_protocol: Some("anthropic".into()),
+                base_url: Some("https://your-gateway.example/v1".into()),
                 ..CliOptions::default()
             },
             &env(&[("TIMEM_API_KEY", "k")]),
