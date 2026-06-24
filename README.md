@@ -133,7 +133,7 @@ export TIMEM_MAX_LLM_CONTEXT=100K
 # OpenAI
 export TIMEM_GATEWAY_PROVIDER=openai
 export TIMEM_API_KEY=...
-export TIMEM_API_PROTOCOL=openai-compatible
+export TIMEM_API_PROTOCOL=openai-responses
 ```
 
 ```bash
@@ -147,12 +147,18 @@ export TIMEM_API_PROTOCOL=anthropic
 `TIMEM_API_PROTOCOL` chooses the request/response format. Supported values:
 
 - `openai-compatible`
+- `openai-responses`
 - `anthropic`
 
-If `TIMEM_API_PROTOCOL` is omitted, `TIMEM_GATEWAY_PROVIDER=anthropic` uses
-Anthropic protocol, and other providers use OpenAI-compatible chat
-completions. For a custom gateway, set both `TIMEM_API_PROTOCOL` and
-`TIMEM_BASE_URL` explicitly.
+`openai-compatible` means the Chat Completions-compatible shape
+(`/chat/completions`). `openai-responses` means OpenAI's Responses API shape
+(`/responses`), where output text and usage fields differ from Chat
+Completions.
+
+If `TIMEM_API_PROTOCOL` is omitted, `TIMEM_GATEWAY_PROVIDER=openai` uses
+OpenAI Responses, `TIMEM_GATEWAY_PROVIDER=anthropic` uses Anthropic protocol,
+and other providers use OpenAI-compatible chat completions. For a custom
+gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 
 `TIMEM_MAX_LLM_CONTEXT` defaults to `100K`. Runtime asks the model to consider
 `prompt_shrink` when the observed provider input tokens plus the new prompt

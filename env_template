@@ -15,9 +15,10 @@
 # export TIMEM_GATEWAY_PROVIDER=aliyun
 
 # Wire protocol / request payload format.
-# Known values: openai-compatible, anthropic.
-# If omitted, anthropic defaults to anthropic; others default to
-# openai-compatible. For custom gateways, set this explicitly.
+# Known values: openai-compatible, openai-responses, anthropic.
+# If omitted, openai defaults to openai-responses, anthropic defaults to
+# anthropic, and other providers default to openai-compatible. For custom
+# gateways, set this explicitly.
 # export TIMEM_API_PROTOCOL=openai-compatible
 
 # Generic API key. Prefer env/source over command-line flags so secrets do not

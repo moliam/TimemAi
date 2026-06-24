@@ -328,6 +328,7 @@ fn weekday_en(weekday: i32) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiProtocol {
     OpenAiCompatible,
+    OpenAiResponses,
     Anthropic,
 }
 
@@ -335,6 +336,7 @@ impl ApiProtocol {
     pub fn label(&self) -> &'static str {
         match self {
             ApiProtocol::OpenAiCompatible => "openai-compatible",
+            ApiProtocol::OpenAiResponses => "openai-responses",
             ApiProtocol::Anthropic => "anthropic",
         }
     }
@@ -365,6 +367,9 @@ impl ProviderConfig {
         match self.api_protocol {
             ApiProtocol::OpenAiCompatible => {
                 format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+            }
+            ApiProtocol::OpenAiResponses => {
+                format!("{}/responses", self.base_url.trim_end_matches('/'))
             }
             ApiProtocol::Anthropic => {
                 // Anthropic 原生 endpoint 为 /v1/messages。
@@ -561,15 +566,17 @@ fn parse_api_protocol(value: &str) -> Result<ApiProtocol, String> {
     match value.trim().to_lowercase().as_str() {
         "openai" | "openai-compatible" | "openai_compatible" | "chat-completions"
         | "chat_completions" => Ok(ApiProtocol::OpenAiCompatible),
+        "openai-responses" | "openai_responses" | "responses" => Ok(ApiProtocol::OpenAiResponses),
         "anthropic" | "claude" | "messages" => Ok(ApiProtocol::Anthropic),
         other => Err(format!(
-            "invalid_api_protocol: {other}; expected openai-compatible or anthropic"
+            "invalid_api_protocol: {other}; expected openai-compatible, openai-responses, or anthropic"
         )),
     }
 }
 
 fn default_api_protocol(provider: &str) -> ApiProtocol {
     match provider {
+        "openai" => ApiProtocol::OpenAiResponses,
         "anthropic" => ApiProtocol::Anthropic,
         _ => ApiProtocol::OpenAiCompatible,
     }
@@ -672,6 +679,12 @@ pub fn build_request(config: &ProviderConfig, prompt: &str) -> Value {
             ],
             "max_tokens": config.max_tokens
         }),
+        ApiProtocol::OpenAiResponses => json!({
+            "model": config.model,
+            "instructions": system_prompt,
+            "input": user_prompt,
+            "max_output_tokens": config.max_tokens
+        }),
         ApiProtocol::Anthropic => json!({
             "model": config.model,
             "max_tokens": config.max_tokens,
@@ -707,6 +720,39 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
                 as u32;
             let cached_tokens = usage
                 .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+                .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+                .unwrap_or(0) as u32;
+            (
+                content,
+                UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    cached_tokens,
+                    ..UsageStats::zero()
+                },
+            )
+        }
+        ApiProtocol::OpenAiResponses => {
+            let content = extract_openai_response_text(raw);
+            let usage = raw.get("usage").unwrap_or(&Value::Null);
+            let prompt_tokens = usage
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            let completion_tokens = usage
+                .get("output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            let total_tokens = usage
+                .get("total_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(prompt_tokens as u64 + completion_tokens as u64)
+                as u32;
+            let cached_tokens = usage
+                .pointer("/input_tokens_details/cached_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u32;
             (
@@ -771,6 +817,34 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
         model_name: config.model.clone(),
         usage,
     })
+}
+
+fn extract_openai_response_text(raw: &Value) -> String {
+    if let Some(text) = raw.get("output_text").and_then(Value::as_str) {
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+
+    raw.get("output")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .flat_map(|item| {
+                    item.get("content")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                })
+                .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+                    Some("output_text") => part.get("text").and_then(Value::as_str),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 pub fn redact_value(value: &Value) -> Value {
@@ -841,7 +915,7 @@ pub fn call_model(
         .arg("-H")
         .arg("Content-Type: application/json");
     match config.api_protocol {
-        ApiProtocol::OpenAiCompatible => {
+        ApiProtocol::OpenAiCompatible | ApiProtocol::OpenAiResponses => {
             command
                 .arg("-H")
                 .arg(format!("Authorization: Bearer {}", config.api_key));
@@ -1105,7 +1179,7 @@ mod tests {
             (
                 "openai",
                 "https://api.openai.com/v1",
-                ApiProtocol::OpenAiCompatible,
+                ApiProtocol::OpenAiResponses,
             ),
             (
                 "anthropic",
@@ -1301,6 +1375,33 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["role"], "user");
         assert_eq!(body["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn build_request_uses_official_openai_responses_shape() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("openai".into()),
+                max_tokens: Some(2048),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        assert_eq!(config.api_protocol, ApiProtocol::OpenAiResponses);
+        assert_eq!(config.endpoint(), "https://api.openai.com/v1/responses");
+
+        let prompt = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC_GLOBAL\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\nprompt_type: user_question\nUser question:\nhello\ntime: 1\n[END SEGMENT 1: prompt_delta]";
+        let body = build_request(&config, prompt);
+        assert_eq!(body["model"], "gpt-4o");
+        assert_eq!(body["max_output_tokens"], 2048);
+        assert!(body["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("STATIC_GLOBAL"));
+        assert!(body["input"].as_str().unwrap().contains("[BEGIN SEGMENT 1"));
+        assert!(body.get("messages").is_none());
+        assert!(body.get("max_tokens").is_none());
     }
 
     #[test]
@@ -1541,6 +1642,93 @@ mod tests {
         assert_eq!(response.usage.prompt_tokens, 3019);
         assert_eq!(response.usage.completion_tokens, 104);
         assert_eq!(response.usage.cached_tokens, 2048);
+    }
+
+    #[test]
+    fn openai_compatible_usage_reads_anthropic_cache_read_tokens() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("custom".into()),
+                api_protocol: Some("openai-compatible".into()),
+                base_url: Some("https://your-gateway.example/v1".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        let raw = json!({
+            "choices":[{"message":{"content":"{\"response_to_user\":\"hi\"}"}}],
+            "usage":{
+                "prompt_tokens":8868,
+                "cache_creation_input_tokens":0,
+                "cache_read_input_tokens":4096,
+                "completion_tokens":1095,
+                "total_tokens":9963
+            }
+        });
+        let response = parse_llm_response(&config, &raw).unwrap();
+        assert_eq!(response.usage.prompt_tokens, 8868);
+        assert_eq!(response.usage.completion_tokens, 1095);
+        assert_eq!(response.usage.cached_tokens, 4096);
+    }
+
+    #[test]
+    fn openai_responses_usage_reads_official_cached_tokens() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("openai".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        let raw = json!({
+            "output_text":"{\"response_to_user\":\"hi\"}",
+            "usage":{
+                "input_tokens":8438,
+                "input_tokens_details":{"cached_tokens":4096},
+                "output_tokens":398,
+                "output_tokens_details":{"reasoning_tokens":0},
+                "total_tokens":8836
+            }
+        });
+        let response = parse_llm_response(&config, &raw).unwrap();
+        assert_eq!(response.content, "{\"response_to_user\":\"hi\"}");
+        assert_eq!(response.usage.prompt_tokens, 8438);
+        assert_eq!(response.usage.completion_tokens, 398);
+        assert_eq!(response.usage.total_tokens, 8836);
+        assert_eq!(response.usage.cached_tokens, 4096);
+    }
+
+    #[test]
+    fn openai_responses_extracts_text_from_output_items() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("openai".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        let raw = json!({
+            "output":[{
+                "type":"message",
+                "role":"assistant",
+                "content":[{"type":"output_text","text":"{\"response_to_user\":\"from output\"}","annotations":[]}]
+            }],
+            "usage":{
+                "input_tokens":32,
+                "input_tokens_details":{"cached_tokens":0},
+                "output_tokens":18,
+                "output_tokens_details":{"reasoning_tokens":0},
+                "total_tokens":50
+            }
+        });
+        let response = parse_llm_response(&config, &raw).unwrap();
+        assert_eq!(response.content, "{\"response_to_user\":\"from output\"}");
+        assert_eq!(response.usage.prompt_tokens, 32);
+        assert_eq!(response.usage.completion_tokens, 18);
+        assert_eq!(response.usage.cached_tokens, 0);
     }
 
     #[test]
