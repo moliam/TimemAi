@@ -893,7 +893,7 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("\"run_bash\""));
         assert!(STATIC_PROMPT.contains("OS/system info"));
         assert!(STATIC_PROMPT.contains("\"intent_required\""));
-        assert!(STATIC_PROMPT.contains("ask prompts before bash"));
+        assert!(STATIC_PROMPT.contains("use only the returned action result as evidence"));
         assert!(STATIC_PROMPT.contains("\"thought?\""));
         assert!(STATIC_PROMPT.contains("no_result_terminate"));
         assert!(STATIC_PROMPT.contains("self_audit"));

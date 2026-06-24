@@ -213,7 +213,7 @@
       "intent_required": "Every next_actions item must include a concise top-level intent string; runtime displays it in UI and rejects missing intent once for repair.",
       "sql_safety": "memory_sql_query is read-only; writes must use memory_update. SQL params must match placeholders exactly.",
       "sql_tables": "memories(id, created_at_ms, content) stores durable facts. chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) stores UI-visible user/assistant chat transcript. Use chat_messages for questions about prior chats, exact wording, dates, last conversation, or recent N-day logs.",
-      "bash_safety": "run_bash execution approval is controlled by shell startup config: ask prompts before bash, approve runs bash directly. Normal shell syntax such as pipes, redirects, variables, and command chaining is allowed after approval. Prefer one minimal command per step and use the returned action result as evidence; if approval is denied or unavailable, do not claim the command ran."
+      "bash_safety": "For run_bash, request the minimal command needed for the task and use only the returned action result as evidence. If the action result says the command did not run, was denied, or is unavailable, do not claim it ran."
     }
   },
   "Response_rule": {

@@ -3,5 +3,6 @@
 /.timem_native_shell/
 /data/
 /env
+/*_env
 *.log
 *.tmp
