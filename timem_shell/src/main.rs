@@ -20,6 +20,15 @@ use timem_shell::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.json");
+const ANSI_RESET: &str = timem_shell::ANSI_RESET;
+const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
+
+struct ConfigRow {
+    key: &'static str,
+    value: String,
+    desc: &'static str,
+    highlight: bool,
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -665,60 +674,84 @@ fn render_startup_banner(
     audit_file: &std::path::Path,
     bash_approval_mode: BashApprovalMode,
 ) -> String {
+    let default_protocol = timem_shell::default_api_protocol_for_provider(&config.provider);
+    let default_base_url = timem_shell::default_base_url_for_provider(&config.provider);
     let rows = [
-        ("TIMEM_SPACE", space.to_string(), "记忆空间"),
-        (
-            "TIMEM_GATEWAY_PROVIDER",
-            config.provider.clone(),
-            "流量平台，决定默认 base url",
-        ),
-        (
-            "TIMEM_API_PROTOCOL",
-            config.api_protocol.label().to_string(),
-            "API 提交网络包格式",
-        ),
-        ("TIMEM_BASE_URL", config.base_url.clone(), "网关 base url"),
-        ("TIMEM_MODEL", config.model.clone(), "模型名称"),
-        (
-            "TIMEM_MAX_LLM_CONTEXT",
-            format_token_count(config.max_llm_context_tokens),
-            "最大上下文窗口",
-        ),
-        (
-            "TIMEM_BASH_APPROVAL",
-            bash_approval_mode_label(bash_approval_mode).to_string(),
-            "bash 允许策略，approve/ask",
-        ),
-        (
-            "TIMEM_DATA_DIR",
-            absolute_display_path(&data_root()),
-            "运行时记忆、日志存储",
-        ),
-        (
-            "local_audit",
-            absolute_display_path(audit_file),
-            "原始流量审计存储",
-        ),
+        ConfigRow {
+            key: "TIMEM_SPACE",
+            value: space.to_string(),
+            desc: "记忆空间",
+            highlight: false,
+        },
+        ConfigRow {
+            key: "TIMEM_GATEWAY_PROVIDER",
+            value: config.provider.clone(),
+            desc: "流量平台，决定默认 base url",
+            highlight: false,
+        },
+        ConfigRow {
+            key: "TIMEM_API_PROTOCOL",
+            value: config.api_protocol.label().to_string(),
+            desc: "API 提交网络包格式",
+            highlight: config.api_protocol != default_protocol,
+        },
+        ConfigRow {
+            key: "TIMEM_BASE_URL",
+            value: config.base_url.clone(),
+            desc: "网关 base url",
+            highlight: config.base_url.trim_end_matches('/')
+                != default_base_url.trim_end_matches('/'),
+        },
+        ConfigRow {
+            key: "TIMEM_MODEL",
+            value: config.model.clone(),
+            desc: "模型名称",
+            highlight: false,
+        },
+        ConfigRow {
+            key: "TIMEM_MAX_LLM_CONTEXT",
+            value: format_token_count(config.max_llm_context_tokens),
+            desc: "最大上下文窗口",
+            highlight: false,
+        },
+        ConfigRow {
+            key: "TIMEM_BASH_APPROVAL",
+            value: bash_approval_mode_label(bash_approval_mode).to_string(),
+            desc: "bash 允许策略，approve/ask",
+            highlight: false,
+        },
+        ConfigRow {
+            key: "TIMEM_DATA_DIR",
+            value: absolute_display_path(&data_root()),
+            desc: "运行时记忆、日志存储",
+            highlight: false,
+        },
+        ConfigRow {
+            key: "local_audit",
+            value: absolute_display_path(audit_file),
+            desc: "原始流量审计存储",
+            highlight: false,
+        },
     ];
     boxed_config_table(&rows)
 }
 
-fn boxed_config_table(rows: &[(&str, String, &str)]) -> String {
+fn boxed_config_table(rows: &[ConfigRow]) -> String {
     let key_width = rows
         .iter()
-        .map(|row| display_width(row.0))
+        .map(|row| display_width(row.key))
         .max()
         .unwrap_or(0)
         .max("TIMEM_GATEWAY_PROVIDER".len());
     let value_width = rows
         .iter()
-        .map(|row| display_width(&row.1))
+        .map(|row| display_width(&row.value))
         .max()
         .unwrap_or(0)
         .clamp(12, 72);
     let desc_width = rows
         .iter()
-        .map(|row| display_width(row.2))
+        .map(|row| display_width(row.desc))
         .max()
         .unwrap_or(0)
         .clamp(8, 32);
@@ -730,12 +763,18 @@ fn boxed_config_table(rows: &[(&str, String, &str)]) -> String {
     let border = format!("+{}{}{}+\n", "-".repeat(left), title, "-".repeat(right));
     let mut out = String::new();
     out.push_str(&border);
-    for (key, value, desc) in rows {
+    for row in rows {
+        let value = fit_display(&row.value, value_width);
+        let value = if row.highlight {
+            format!("{ANSI_HIGHLIGHT}{value}{ANSI_RESET}")
+        } else {
+            value
+        };
         out.push_str(&format!(
             "| {} | {} | {} |\n",
-            fit_display(key, key_width),
-            fit_display(value, value_width),
-            fit_display(desc, desc_width)
+            fit_display(row.key, key_width),
+            value,
+            fit_display(row.desc, desc_width)
         ));
     }
     out.push_str(&border);
@@ -747,7 +786,25 @@ fn boxed_config_table(rows: &[(&str, String, &str)]) -> String {
 }
 
 fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
+    UnicodeWidthStr::width(strip_ansi(text).as_str())
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code_ch in chars.by_ref() {
+                if code_ch.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn fit_display(text: &str, target_width: usize) -> String {
@@ -855,7 +912,7 @@ mod static_prompt_tests {
     use super::{
         display_width, epoch_millis, help_text, random_spinner_tick, read_approval_key,
         render_approval_choices, render_startup_banner, render_user_approval_prompt,
-        sanitize_user_input, ApprovalChoice, ApprovalKey, STATIC_PROMPT,
+        sanitize_user_input, ApprovalChoice, ApprovalKey, ANSI_HIGHLIGHT, STATIC_PROMPT,
     };
     use agent_core::{ApprovalRequest, BashApprovalMode};
     use std::fs;
@@ -960,6 +1017,54 @@ mod static_prompt_tests {
         assert!(banner.contains("/data"));
         assert!(!banner.contains("TIMEM_API_KEY=secret"));
         let table_lines: Vec<&str> = banner
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .collect();
+        let first_width = display_width(table_lines[0]);
+        assert!(table_lines
+            .iter()
+            .all(|line| display_width(line) == first_width));
+    }
+
+    #[test]
+    fn startup_banner_highlights_protocol_and_url_overrides() {
+        let default_config = ProviderConfig {
+            provider: "aliyun".to_string(),
+            api_protocol: ApiProtocol::OpenAiCompatible,
+            api_key: "secret".to_string(),
+            model: "qwen-plus".to_string(),
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            timeout_secs: 120,
+            max_tokens: 4096,
+            max_llm_context_tokens: 100_000,
+        };
+        let default_banner = render_startup_banner(
+            ".test_mem",
+            &default_config,
+            std::path::Path::new(".test_mem/shell_audit.jsonl"),
+            BashApprovalMode::Ask,
+        );
+        assert!(!default_banner.contains(ANSI_HIGHLIGHT));
+
+        let override_config = ProviderConfig {
+            provider: "aliyun".to_string(),
+            api_protocol: ApiProtocol::Anthropic,
+            api_key: "secret".to_string(),
+            model: "qwen-plus".to_string(),
+            base_url: "https://example.com/v1".to_string(),
+            timeout_secs: 120,
+            max_tokens: 4096,
+            max_llm_context_tokens: 100_000,
+        };
+        let override_banner = render_startup_banner(
+            ".test_mem",
+            &override_config,
+            std::path::Path::new(".test_mem/shell_audit.jsonl"),
+            BashApprovalMode::Ask,
+        );
+        assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}anthropic")));
+        assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}https://example.com/v1")));
+        let table_lines: Vec<&str> = override_banner
             .lines()
             .filter(|line| line.starts_with('|'))
             .collect();

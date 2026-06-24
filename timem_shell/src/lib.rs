@@ -593,6 +593,10 @@ fn default_api_protocol(provider: &str) -> ApiProtocol {
     }
 }
 
+pub fn default_api_protocol_for_provider(provider: &str) -> ApiProtocol {
+    default_api_protocol(&provider.to_lowercase())
+}
+
 fn default_model(provider: &str) -> &str {
     match provider {
         "openai" => "gpt-4o",
@@ -608,6 +612,10 @@ fn default_base_url(provider: &str) -> &str {
         "aliyun" | "dashscope" => "https://dashscope.aliyuncs.com/compatible-mode/v1",
         _ => "https://dashscope.aliyuncs.com/compatible-mode/v1",
     }
+}
+
+pub fn default_base_url_for_provider(provider: &str) -> String {
+    default_base_url(&provider.to_lowercase()).to_string()
 }
 
 fn vendor_api_key(provider: &str, env: &HashMap<String, String>) -> Option<String> {
