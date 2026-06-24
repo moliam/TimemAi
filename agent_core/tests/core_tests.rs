@@ -840,6 +840,104 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
 }
 
 #[test]
+fn scratch_query_empty_query_lists_recent_notes_with_limit() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scratch_query_recent"),
+    );
+    fs::write(
+        core.scratch_file(),
+        r#"{"id":"scratch_old","created_at_ms":1,"content":"old checkpoint"}
+{"id":"scratch_new","created_at_ms":2,"content":"new checkpoint"}
+"#,
+    )
+    .unwrap();
+
+    let _ = core.begin_turn("列出最近一条草稿", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"List recent checkpoints.","input":{"query":"","limit":1}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: scratch_query"));
+    assert!(prompt.contains("scratch_new"));
+    assert!(prompt.contains("new checkpoint"));
+    assert!(!prompt.contains("old checkpoint"));
+}
+
+#[test]
+fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scratch_protocol_repair"),
+    );
+
+    let _ = core.begin_turn("写一条空草稿", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create empty checkpoint.","input":{}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("input.content_required"));
+    assert!(!core.scratch_file().exists());
+
+    let _ = core.begin_turn("删除一条没有 id 的草稿", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_delete","intent":"Delete checkpoint.","input":{}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("input.id_required"));
+}
+
+#[test]
+fn scratch_delete_missing_id_is_non_destructive() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scratch_delete_missing"),
+    );
+    fs::write(
+        core.scratch_file(),
+        r#"{"id":"scratch_keep","created_at_ms":1,"content":"keep this checkpoint"}
+"#,
+    )
+    .unwrap();
+
+    let _ = core.begin_turn("删除不存在的草稿", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_delete","intent":"Delete missing checkpoint.","input":{"id":"scratch_missing"}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: scratch_delete"));
+    assert!(prompt.contains("deleted: false"));
+    assert!(fs::read_to_string(core.scratch_file())
+        .unwrap()
+        .contains("keep this checkpoint"));
+}
+
+#[test]
 fn memory_write_action_requires_content_or_query() {
     let mut core = AgentCore::new(
         "STATIC",

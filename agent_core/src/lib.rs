@@ -8,8 +8,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreProfile {
@@ -959,7 +962,7 @@ impl FileMemoryStore {
             return Ok(());
         }
         let record = MemoryRecord {
-            id: format!("mem_{}", now_ms()),
+            id: unique_id("mem"),
             created_at_ms: now_ms(),
             content: clean.to_string(),
         };
@@ -1300,7 +1303,7 @@ impl FileScratchStore {
             return Err("content_required".to_string());
         }
         let record = ScratchNoteRecord {
-            id: format!("scratch_{}", now_ms()),
+            id: unique_id("scratch"),
             created_at_ms: now_ms(),
             content: clean.to_string(),
         };
@@ -2448,6 +2451,11 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn unique_id(prefix: &str) -> String {
+    let seq = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}_{}_{}", prefix, now_ms(), seq)
 }
 
 #[derive(Debug, Deserialize)]

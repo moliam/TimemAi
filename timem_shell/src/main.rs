@@ -886,6 +886,10 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("\"memory_schema\""));
         assert!(STATIC_PROMPT.contains("\"memory_sql_query\""));
         assert!(STATIC_PROMPT.contains("\"memory_update\""));
+        assert!(STATIC_PROMPT.contains("\"chat_history_delete\""));
+        assert!(STATIC_PROMPT.contains("\"scratch_write\""));
+        assert!(STATIC_PROMPT.contains("\"scratch_query\""));
+        assert!(STATIC_PROMPT.contains("\"scratch_delete\""));
         assert!(STATIC_PROMPT.contains("\"run_bash\""));
         assert!(STATIC_PROMPT.contains("OS/system info"));
         assert!(STATIC_PROMPT.contains("\"intent_required\""));
