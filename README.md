@@ -53,6 +53,8 @@ For Aliyun/Qwen, the minimum config is:
 ```bash
 export TIMEM_GATEWAY_PROVIDER=aliyun
 export TIMEM_API_KEY=your_api_key_here
+export TIMEM_MODEL=qwen-plus
+export TIMEM_SPACE=.test_mem
 ```
 
 Run:
@@ -60,7 +62,7 @@ Run:
 ```bash
 source /path/to/your/env
 
-timem --space .test_mem --model qwen-plus
+timem
 ```
 
 That is the normal installed path. `timem` does not load any env file
@@ -72,7 +74,7 @@ use `cargo run` from the clone root. It compiles the current files and runs the
 debug binary:
 
 ```bash
-cargo run -p timem_shell -- --space .test_mem --model qwen-plus
+cargo run -p timem_shell
 ```
 
 Every env-backed setting can also be passed on the command line. See:
@@ -184,7 +186,7 @@ data/<space>/shell_history.txt
 Use a fixed data root if you do not want data under the current directory:
 
 ```bash
-TIMEM_DATA_DIR=/path/to/data timem --space .test_mem --model qwen-plus
+TIMEM_DATA_DIR=/path/to/data timem
 ```
 
 Env files are independent from runtime data. `timem` only reads process env, so
@@ -245,7 +247,9 @@ cd ~/timemai
 
 TIMEM_GATEWAY_PROVIDER=aliyun \
 TIMEM_API_KEY=... \
-cargo run -p timem_shell -- --space .test_mem --model qwen-plus
+TIMEM_MODEL=qwen-plus \
+TIMEM_SPACE=.test_mem \
+cargo run -p timem_shell
 ```
 
 Custom gateway example:
@@ -255,7 +259,9 @@ TIMEM_GATEWAY_PROVIDER=custom \
 TIMEM_API_PROTOCOL=anthropic \
 TIMEM_BASE_URL=https://your-gateway.example/v1 \
 TIMEM_API_KEY=... \
-cargo run -p timem_shell -- --space .test_mem --model aws-claude-sonnet-4-6
+TIMEM_MODEL=aws-claude-sonnet-4-6 \
+TIMEM_SPACE=.test_mem \
+cargo run -p timem_shell
 ```
 
 ## Uninstall
