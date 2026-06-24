@@ -1,0 +1,8 @@
+[workspace]
+members = ["agent_core", "timem_shell"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.4.0"
+license = "UNLICENSED"

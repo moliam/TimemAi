@@ -1,0 +1,7 @@
+/target/
+/key
+/.timem_native_shell/
+/data/
+/env
+*.log
+*.tmp

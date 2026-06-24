@@ -1,0 +1,62 @@
+# Timem shell environment template.
+# Copy this file to any private path, edit it, then source it before running
+# timem or cargo run.
+#
+# Recommended local copy inside this clone:
+#   cp env_template env
+#   $EDITOR env
+#   source /absolute/path/to/env
+#
+# Keep the copied env file private. Do not commit API keys.
+
+# Traffic platform. It selects the default base URL and vendor fallback keys.
+# Known values: aliyun, dashscope, openai, anthropic, custom.
+# export TIMEM_GATEWAY_PROVIDER=aliyun
+
+# Wire protocol / request payload format.
+# Known values: openai-compatible, anthropic.
+# If omitted, anthropic and custom default to anthropic; others default to
+# openai-compatible.
+# export TIMEM_API_PROTOCOL=openai-compatible
+
+# Generic API key. Prefer env/source over command-line flags so secrets do not
+# land in shell history.
+# export TIMEM_API_KEY=
+
+# Optional base URL override. Leave commented to use provider defaults.
+# export TIMEM_BASE_URL=
+
+# Model name.
+# export TIMEM_MODEL=qwen-plus
+
+# Memory/audit space name.
+# export TIMEM_SPACE=.test_mem
+
+# Runtime data root for memory, audit logs, and shell history.
+# export TIMEM_DATA_DIR=data
+
+# Provider HTTP timeout in seconds.
+# export TIMEM_TIMEOUT=120
+
+# Maximum response tokens.
+# export TIMEM_MAX_TOKENS=2048
+
+# Maximum LLM context window. Accepts plain numbers or K suffix, such as 100K.
+# export TIMEM_MAX_LLM_CONTEXT=100K
+
+# Bash approval policy.
+# ask: prompt before bash execution.
+# approve: execute requested bash actions directly.
+# export TIMEM_BASH_APPROVAL=ask
+
+# Vendor-specific fallback keys.
+# export DASHSCOPE_API_KEY=
+# export OPENAI_API_KEY=
+# export ANTHROPIC_API_KEY=
+# export ANTHROPIC_AUTH_TOKEN=
+
+# Provider default URLs:
+# aliyun/dashscope: https://dashscope.aliyuncs.com/compatible-mode/v1
+# openai: https://api.openai.com/v1
+# anthropic: https://api.anthropic.com
+# custom: https://your-gateway.example/v1
