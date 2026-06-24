@@ -126,6 +126,12 @@ pub struct MemoryRecord {
     pub content: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScratchNoteRecord {
+    pub id: String,
+    pub created_at_ms: i64,
+    pub content: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatHistoryRecord {
     pub session: String,
     pub turn_id: String,
@@ -186,6 +192,7 @@ pub struct AgentCore {
     static_prompt: String,
     profile: CoreProfile,
     memory: FileMemoryStore,
+    scratch: FileScratchStore,
     chat_history: FileChatHistoryStore,
     deltas: Vec<PromptDelta>,
     max_llm_context_tokens: u32,
@@ -209,6 +216,7 @@ impl AgentCore {
             static_prompt: static_prompt.into(),
             profile,
             memory: FileMemoryStore::new(memory_dir),
+            scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
             deltas: Vec::new(),
             max_llm_context_tokens: 100_000,
@@ -233,6 +241,12 @@ impl AgentCore {
     }
     pub fn memory_file(&self) -> PathBuf {
         self.memory.file.clone()
+    }
+    pub fn scratch_file(&self) -> PathBuf {
+        self.scratch.file.clone()
+    }
+    pub fn memory_git_commit_count(&self) -> usize {
+        self.memory.git_commit_count()
     }
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
         self.current_round = 0;
@@ -662,6 +676,22 @@ impl AgentCore {
                     )
                 }
             }
+            "chat_history_delete" => {
+                self.current_stats.tool_calls += 1;
+                match self.chat_history.delete(
+                    &action.id,
+                    &action.query,
+                    action.limit,
+                    action.after_ms,
+                    action.before_ms,
+                ) {
+                    Ok(deleted) => format!(
+                        "Action result: chat_history_delete\nid: {}\nquery: {}\ndeleted_count: {}",
+                        action.id, action.query, deleted
+                    ),
+                    Err(err) => format!("Action result: chat_history_delete\nerror: {}", err),
+                }
+            }
             "query_memory" | "memory_query" => {
                 self.current_stats.tool_calls += 1;
                 self.current_stats.mem_reads += 1;
@@ -757,6 +787,58 @@ impl AgentCore {
                         result
                     }
                     Err(err) => format!("Action result: memory_update\nerror: {}", err),
+                }
+            }
+            "scratch_write" => {
+                self.current_stats.tool_calls += 1;
+                match self.scratch.write(&action.content) {
+                    Ok(record) => format!(
+                        "Action result: scratch_write\nid: {}\nstored: {}",
+                        record.id, record.content
+                    ),
+                    Err(err) => format!("Action result: scratch_write\nerror: {}", err),
+                }
+            }
+            "scratch_query" => {
+                self.current_stats.tool_calls += 1;
+                match self.scratch.query(&action.query, action.limit) {
+                    Ok(rows) if rows.is_empty() => format!(
+                        "Action result: scratch_query\nquery: {}\nresults: none",
+                        action.query
+                    ),
+                    Ok(rows) => {
+                        let lines = rows
+                            .into_iter()
+                            .map(|row| {
+                                format!(
+                                    "- id={} time_ms={} content={}",
+                                    row.id,
+                                    row.created_at_ms,
+                                    compact_text(&row.content, 240)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!(
+                            "Action result: scratch_query\nquery: {}\nresults:\n{}",
+                            action.query, lines
+                        )
+                    }
+                    Err(err) => format!("Action result: scratch_query\nerror: {}", err),
+                }
+            }
+            "scratch_delete" => {
+                self.current_stats.tool_calls += 1;
+                match self.scratch.delete(&action.id) {
+                    Ok(true) => format!(
+                        "Action result: scratch_delete\nid: {}\ndeleted: true",
+                        action.id
+                    ),
+                    Ok(false) => format!(
+                        "Action result: scratch_delete\nid: {}\ndeleted: false",
+                        action.id
+                    ),
+                    Err(err) => format!("Action result: scratch_delete\nerror: {}", err),
                 }
             }
             "prompt_shrink" => {
@@ -860,12 +942,14 @@ impl AgentCore {
 
 #[derive(Debug, Clone)]
 struct FileMemoryStore {
+    dir: PathBuf,
     file: PathBuf,
 }
 impl FileMemoryStore {
     fn new(dir: &Path) -> Self {
         let _ = fs::create_dir_all(dir);
         Self {
+            dir: dir.to_path_buf(),
             file: dir.join("memory.jsonl"),
         }
     }
@@ -887,7 +971,9 @@ impl FileMemoryStore {
             file,
             "{}",
             serde_json::to_string(&record).unwrap_or_default()
-        )
+        )?;
+        self.snapshot_with_git("memory write");
+        Ok(())
     }
     fn query(&self, query: &str, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
         let terms = search_terms(query);
@@ -1002,7 +1088,59 @@ impl FileMemoryStore {
         for row in rows {
             writeln!(file, "{}", serde_json::to_string(row).unwrap_or_default())?;
         }
+        self.snapshot_with_git("memory update");
         Ok(())
+    }
+
+    fn snapshot_with_git(&self, message: &str) {
+        if !self.file.exists() {
+            return;
+        }
+        if Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .arg("init")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| !status.success())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["config", "user.name", "timem-memory"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["config", "user.email", "timem-memory@example.invalid"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["add", "memory.jsonl"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| !status.success())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["commit", "-m", message])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 
     fn read_all(&self) -> std::io::Result<Vec<MemoryRecord>> {
@@ -1020,9 +1158,27 @@ impl FileMemoryStore {
         Ok(rows)
     }
 
+    fn git_commit_count(&self) -> usize {
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    String::from_utf8(output.stdout).ok()
+                } else {
+                    None
+                }
+            })
+            .and_then(|text| text.trim().parse::<usize>().ok())
+            .unwrap_or_default()
+    }
+
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\nsafe_interfaces: memory_schema, memory_sql_query, memory_update, memory_write, chat_history_query\nrules: memory_sql_query accepts SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memory_update for durable memory insert/update/delete; chat_messages is read-only chat transcript evidence. Empty chat_history_query.query lists recent chat records. loaded_chat_records={}.",
+            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, content TEXT)\nsafe_interfaces: memory_schema, memory_sql_query, memory_update, memory_write, chat_history_query, chat_history_delete, scratch_write, scratch_query, scratch_delete\nrules: memory_sql_query accepts SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memory_update for durable memory insert/update/delete; use chat_history_delete for explicit chat transcript deletion; use scratch_* for temporary task checkpoints. Empty chat_history_query.query lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -1126,6 +1282,102 @@ impl FileMemoryStore {
 }
 
 #[derive(Debug, Clone)]
+struct FileScratchStore {
+    file: PathBuf,
+}
+
+impl FileScratchStore {
+    fn new(dir: &Path) -> Self {
+        let _ = fs::create_dir_all(dir);
+        Self {
+            file: dir.join("scratch_notes.jsonl"),
+        }
+    }
+
+    fn write(&self, content: &str) -> Result<ScratchNoteRecord, String> {
+        let clean = content.trim();
+        if clean.is_empty() {
+            return Err("content_required".to_string());
+        }
+        let record = ScratchNoteRecord {
+            id: format!("scratch_{}", now_ms()),
+            created_at_ms: now_ms(),
+            content: clean.to_string(),
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file)
+            .map_err(|_| "scratch_open_failed".to_string())?;
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&record).unwrap_or_default()
+        )
+        .map_err(|_| "scratch_write_failed".to_string())?;
+        Ok(record)
+    }
+
+    fn query(&self, query: &str, limit: usize) -> Result<Vec<ScratchNoteRecord>, String> {
+        let terms = search_terms(query);
+        let mut rows = self.read_all()?;
+        if !terms.is_empty() {
+            rows.retain(|record| {
+                let normalized = record.content.to_lowercase();
+                terms.iter().any(|term| normalized.contains(term))
+            });
+        }
+        rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        rows.truncate(limit.max(1).min(50));
+        Ok(rows)
+    }
+
+    fn delete(&self, id: &str) -> Result<bool, String> {
+        let clean_id = id.trim();
+        if clean_id.is_empty() {
+            return Err("id_required".to_string());
+        }
+        let mut rows = self.read_all()?;
+        let before = rows.len();
+        rows.retain(|record| record.id != clean_id);
+        if rows.len() == before {
+            return Ok(false);
+        }
+        self.write_all(&rows)?;
+        Ok(true)
+    }
+
+    fn read_all(&self) -> Result<Vec<ScratchNoteRecord>, String> {
+        let file = match OpenOptions::new().read(true).open(&self.file) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err("scratch_read_failed".to_string()),
+        };
+        let mut rows = Vec::new();
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if let Ok(record) = serde_json::from_str::<ScratchNoteRecord>(&line) {
+                rows.push(record);
+            }
+        }
+        Ok(rows)
+    }
+
+    fn write_all(&self, rows: &[ScratchNoteRecord]) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.file)
+            .map_err(|_| "scratch_open_failed".to_string())?;
+        for row in rows {
+            writeln!(file, "{}", serde_json::to_string(row).unwrap_or_default())
+                .map_err(|_| "scratch_write_failed".to_string())?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
 struct FileChatHistoryStore {
     audit_file: PathBuf,
 }
@@ -1154,6 +1406,64 @@ impl FileChatHistoryStore {
         rows.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
         rows.truncate(limit.max(1).min(50));
         Ok(rows)
+    }
+
+    fn delete(
+        &self,
+        id: &str,
+        query: &str,
+        limit: usize,
+        after_ms: Option<i64>,
+        before_ms: Option<i64>,
+    ) -> Result<usize, String> {
+        let clean_id = id.trim();
+        let targets = if clean_id.is_empty() {
+            self.query(query, limit, after_ms, before_ms)
+                .map_err(|_| "chat_history_read_failed".to_string())?
+                .into_iter()
+                .map(|record| record.turn_id)
+                .collect::<HashSet<_>>()
+        } else {
+            let mut ids = HashSet::new();
+            ids.insert(clean_id.to_string());
+            ids
+        };
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        let file = match OpenOptions::new().read(true).open(&self.audit_file) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(_) => return Err("chat_history_read_failed".to_string()),
+        };
+        let mut retained = Vec::new();
+        let mut deleted_turn_ids = HashSet::new();
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let turn_id = serde_json::from_str::<Value>(&line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("turn_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_default();
+            if !turn_id.is_empty() && targets.contains(&turn_id) {
+                deleted_turn_ids.insert(turn_id);
+                continue;
+            }
+            retained.push(line);
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.audit_file)
+            .map_err(|_| "chat_history_write_failed".to_string())?;
+        for line in retained {
+            writeln!(file, "{}", line).map_err(|_| "chat_history_write_failed".to_string())?;
+        }
+        Ok(deleted_turn_ids.len())
     }
 
     fn read_all(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
@@ -1495,6 +1805,13 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 let normalized_name = name.as_str();
                 match normalized_name {
                     "chat_history_query" => {}
+                    "chat_history_delete" => {
+                        if id.is_empty() && query.is_empty() {
+                            repair_issue =
+                                Some(format!("next_actions[{idx}].input.id_or_query_required"));
+                            break;
+                        }
+                    }
                     "query_memory" | "memory_query" => {
                         if query.is_empty() {
                             repair_issue =
@@ -1524,6 +1841,20 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                             break;
                         }
                         if matches!(operation.as_str(), "delete" | "update") && id.is_empty() {
+                            repair_issue = Some(format!("next_actions[{idx}].input.id_required"));
+                            break;
+                        }
+                    }
+                    "scratch_write" => {
+                        if content.is_empty() {
+                            repair_issue =
+                                Some(format!("next_actions[{idx}].input.content_required"));
+                            break;
+                        }
+                    }
+                    "scratch_query" => {}
+                    "scratch_delete" => {
+                        if id.is_empty() {
                             repair_issue = Some(format!("next_actions[{idx}].input.id_required"));
                             break;
                         }

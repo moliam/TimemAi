@@ -51,6 +51,24 @@
           }
         }
       },
+      "chat_history_delete": {
+        "when": "Delete UI-visible chat records from local chat history when the user explicitly asks to delete chat transcript records. Use id/turn_id when known, otherwise use a narrow query and time window. This does not delete durable memory.",
+        "input": {
+          "id?": "turn_id string when known",
+          "query?": "string; used to select matching chat records when id is not known",
+          "after_ms?": "integer inclusive lower created_at_ms bound",
+          "before_ms?": "integer exclusive upper created_at_ms bound",
+          "limit?": "integer <= 50"
+        },
+        "example": {
+          "action": "chat_history_delete",
+          "intent": "Delete the chat transcript record the user explicitly selected.",
+          "input": {
+            "query": "blue umbrella",
+            "limit": 5
+          }
+        }
+      },
       "query_memory": {
         "when": "Lexical search over durable local memory when the answer depends on stored user facts.",
         "input": {
@@ -107,6 +125,47 @@
             "operation": "upsert",
             "id": "user_name",
             "content": "用户的名字是默默"
+          }
+        }
+      },
+      "scratch_write": {
+        "when": "Write a temporary task checkpoint or working note when work is likely to continue across turns. Scratch notes are task-local working memory, not durable user facts.",
+        "input": {
+          "content": "string"
+        },
+        "example": {
+          "action": "scratch_write",
+          "intent": "Save a checkpoint before stopping.",
+          "input": {
+            "content": "Task: continue release validation. Tried: tests passed. Next: verify install script."
+          }
+        }
+      },
+      "scratch_query": {
+        "when": "Search or list temporary task checkpoints and working notes.",
+        "input": {
+          "query?": "string; empty means list recent scratch notes",
+          "limit?": "integer <= 50"
+        },
+        "example": {
+          "action": "scratch_query",
+          "intent": "Find the previous task checkpoint.",
+          "input": {
+            "query": "release validation",
+            "limit": 5
+          }
+        }
+      },
+      "scratch_delete": {
+        "when": "Delete a scratch note after it is obsolete or the user explicitly asks to remove it.",
+        "input": {
+          "id": "scratch note id returned by scratch_query or scratch_write"
+        },
+        "example": {
+          "action": "scratch_delete",
+          "intent": "Remove completed checkpoint.",
+          "input": {
+            "id": "scratch_1782200000000"
           }
         }
       },

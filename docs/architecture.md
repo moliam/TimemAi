@@ -346,9 +346,10 @@ fails, the shell blocks raw model text and shows a safe fallback instead.
 ```mermaid
 flowchart TB
     Model["Model envelope"] --> Core["agent_core validator"]
-    Core --> Chat["chat_history_query\nUI-visible chat records"]
+    Core --> Chat["chat_history_query / chat_history_delete\nUI-visible chat records"]
     Core --> Memory["query_memory / memory_update\ndurable facts"]
     Core --> SQL["memory_sql_query\nread-only SQLite snapshot"]
+    Core --> Scratch["scratch_write/query/delete\ntask checkpoints"]
     Core --> Bash["run_bash\nlocal command"]
     Core --> Shrink["prompt_shrink\nremove delta/slice context"]
 ```
@@ -368,14 +369,14 @@ Current implemented surface:
 
 - Chat history search: `chat_history_query` and `memory_sql_query` over
   `chat_messages`.
-- Chat history deletion: not implemented. `chat_messages` is read-only in the
-  SQL surface.
+- Chat history deletion: `chat_history_delete`. The SQL surface remains
+  read-only and cannot delete `chat_messages`.
 - Durable memory search: `query_memory` and `memory_sql_query` over `memories`.
 - Durable memory insert/update/delete: `memory_update`.
-- Git-backed memory layer updates: not implemented in this standalone shell
-  package.
-- Scratch notes/checkpoints: described as a design need in the static prompt,
-  but no executable `scratch_*` runtime action exists yet.
+- Durable memory versioning: `memory_update` snapshots `memory.jsonl` in a local
+  git repository under the selected memory directory when git is available.
+- Scratch notes/checkpoints: `scratch_write`, `scratch_query`, and
+  `scratch_delete` over `scratch_notes.jsonl`.
 
 ### Read-only SQL
 

@@ -781,11 +781,11 @@ fn unsupported_action_is_not_executed_silently() {
 }
 
 #[test]
-fn scratch_actions_are_not_claimed_without_runtime_support() {
+fn scratch_notes_can_be_written_queried_and_deleted() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("scratch_action_boundary"),
+        tmp_dir("scratch_notes"),
     );
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
     let step = core.apply_model_response(LlmResponse {
@@ -797,8 +797,46 @@ fn scratch_actions_are_not_claimed_without_runtime_support() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("unsupported_action:scratch_write"));
-    assert!(!prompt.contains("Action result: scratch_write"));
+    assert!(prompt.contains("Action result: scratch_write"));
+    assert!(prompt.contains("stored: continue this task later"));
+    let stored = fs::read_to_string(core.scratch_file()).unwrap();
+    let scratch_id = stored
+        .lines()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .and_then(|value| {
+            value
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
+        .expect("scratch id should exist");
+
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"Find task checkpoint.","input":{"query":"continue","limit":5}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: scratch_query"));
+    assert!(prompt.contains("continue this task later"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: format!(r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_delete","intent":"Remove completed checkpoint.","input":{{"id":"{}"}}}}]}}"#, scratch_id),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: scratch_delete"));
+    assert!(prompt.contains("deleted: true"));
+    assert!(!fs::read_to_string(core.scratch_file())
+        .unwrap()
+        .contains("continue this task later"));
 }
 
 #[test]
@@ -1427,6 +1465,40 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
 }
 
 #[test]
+fn chat_history_delete_removes_matching_turn_from_audit_log() {
+    let root = tmp_dir("chat_delete_action");
+    let dir = root.join("memory");
+    fs::create_dir_all(&dir).unwrap();
+    let audit_file = root.join("api_audit.jsonl");
+    fs::write(
+        &audit_file,
+        r#"{"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"删除目标聊天"}
+{"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"删除目标回复"}
+{"type":"turn_start","session":"shell_old","turn_id":"turn_1781846400000","user_input":"保留聊天"}
+{"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"保留回复"}
+"#,
+    )
+    .unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("删除包含目标的聊天记录", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"chat_history_delete","intent":"Delete matching chat record.","input":{"query":"删除目标","limit":10}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: chat_history_delete"));
+    assert!(prompt.contains("deleted_count: 1"));
+    let stored = fs::read_to_string(&audit_file).unwrap();
+    assert!(!stored.contains("删除目标"));
+    assert!(stored.contains("保留聊天"));
+    assert!(stored.contains("保留回复"));
+}
+
+#[test]
 fn memory_update_insert_update_and_delete_are_wrapped() {
     let dir = tmp_dir("memory_update_wrapped");
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
@@ -1442,6 +1514,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     };
     assert!(prompt.contains("Action result: memory_update"));
     assert!(prompt.contains("id: user_name"));
+    assert!(core.memory_git_commit_count() >= 1);
     assert!(fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("用户的名字是默默"));
@@ -1459,6 +1532,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     let stored = fs::read_to_string(core.memory_file()).unwrap();
     assert!(stored.contains("用户的名字是默默2"));
     assert!(!stored.contains("用户的名字是默默\""));
+    assert!(core.memory_git_commit_count() >= 2);
 
     let step = core.apply_model_response(LlmResponse {
         content: r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"delete","id":"user_name"}}]}"#.to_string(),
@@ -1473,6 +1547,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     assert!(!fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("user_name"));
+    assert!(core.memory_git_commit_count() >= 3);
 }
 
 #[test]
