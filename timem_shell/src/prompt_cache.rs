@@ -1,0 +1,154 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptBlockRole {
+    System,
+    User,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheControl {
+    None,
+    Ephemeral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptBlock {
+    pub role: PromptBlockRole,
+    pub text: String,
+    pub cache: CacheControl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptParts {
+    pub static_prompt: String,
+    pub old_deltas: String,
+    pub new_delta: String,
+}
+
+pub fn split_prompt(full_prompt: &str) -> (String, String) {
+    const BEGIN_MARKER: &str = "[BEGIN SEGMENT 0: prompt_0]";
+    const END_MARKER: &str = "[END SEGMENT 0: prompt_0]";
+    let Some(begin_idx) = full_prompt.find(BEGIN_MARKER) else {
+        return (String::new(), full_prompt.to_string());
+    };
+    let content_start = begin_idx + BEGIN_MARKER.len();
+    let Some(end_idx) = full_prompt[content_start..].find(END_MARKER) else {
+        return (String::new(), full_prompt.to_string());
+    };
+    let static_content = full_prompt[content_start..content_start + end_idx]
+        .trim()
+        .to_string();
+    let dynamic_part = full_prompt[content_start + end_idx + END_MARKER.len()..]
+        .trim_start_matches(['\n', '\r', ' ', '\t'])
+        .to_string();
+    (static_content, dynamic_part)
+}
+
+pub fn split_old_and_new_delta(dynamic_prompt: &str) -> (String, String) {
+    let dynamic_prompt = dynamic_prompt.trim();
+    if dynamic_prompt.is_empty() {
+        return (String::new(), String::new());
+    }
+    let starts = prompt_delta_segment_starts(dynamic_prompt);
+    let Some(last_start) = starts.last().copied() else {
+        return (String::new(), dynamic_prompt.to_string());
+    };
+    let last_delta_id = segment_delta_id(&dynamic_prompt[last_start..]);
+    if let Some(last_delta_id) = last_delta_id {
+        for start in starts {
+            if segment_delta_id(&dynamic_prompt[start..]).as_deref() == Some(last_delta_id.as_str())
+            {
+                let old_deltas = dynamic_prompt[..start].trim_end().to_string();
+                let new_delta = dynamic_prompt[start..].trim_start().to_string();
+                return (old_deltas, new_delta);
+            }
+        }
+    }
+    let old_deltas = dynamic_prompt[..last_start].trim_end().to_string();
+    let new_delta = dynamic_prompt[last_start..].trim_start().to_string();
+    (old_deltas, new_delta)
+}
+
+pub fn prompt_parts_from_rendered_prompt(rendered_prompt: &str) -> PromptParts {
+    let (static_prompt, dynamic_prompt) = split_prompt(rendered_prompt);
+    let dynamic_prompt = if dynamic_prompt.is_empty() {
+        rendered_prompt.to_string()
+    } else {
+        dynamic_prompt
+    };
+    let static_prompt = if static_prompt.is_empty() {
+        rendered_prompt.to_string()
+    } else {
+        static_prompt
+    };
+    let (old_deltas, new_delta) = split_old_and_new_delta(&dynamic_prompt);
+    let new_delta = if new_delta.is_empty() {
+        dynamic_prompt
+    } else {
+        new_delta
+    };
+    PromptParts {
+        static_prompt,
+        old_deltas,
+        new_delta,
+    }
+}
+
+pub fn plan_incremental_cache(parts: PromptParts) -> Vec<PromptBlock> {
+    let mut blocks = vec![PromptBlock {
+        role: PromptBlockRole::System,
+        text: parts.static_prompt,
+        cache: CacheControl::Ephemeral,
+    }];
+    if !parts.old_deltas.trim().is_empty() {
+        blocks.push(PromptBlock {
+            role: PromptBlockRole::User,
+            text: parts.old_deltas,
+            cache: CacheControl::Ephemeral,
+        });
+    }
+    if !parts.new_delta.trim().is_empty() {
+        blocks.push(PromptBlock {
+            role: PromptBlockRole::User,
+            text: parts.new_delta,
+            cache: CacheControl::None,
+        });
+    }
+    blocks
+}
+
+pub fn plan_prompt_cache(rendered_prompt: &str) -> Vec<PromptBlock> {
+    plan_incremental_cache(prompt_parts_from_rendered_prompt(rendered_prompt))
+}
+
+pub fn stable_text_fingerprint(text: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn prompt_delta_segment_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    if text.starts_with("[BEGIN SEGMENT ") {
+        starts.push(0);
+    }
+    let marker = "\n[BEGIN SEGMENT ";
+    let mut offset = 0;
+    while let Some(relative) = text[offset..].find(marker) {
+        let start = offset + relative + 1;
+        starts.push(start);
+        offset = start + 1;
+    }
+    starts
+}
+
+fn segment_delta_id(segment: &str) -> Option<String> {
+    segment.lines().find_map(|line| {
+        line.strip_prefix("delta_id:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}

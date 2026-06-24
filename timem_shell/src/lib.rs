@@ -7,6 +7,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod prompt_cache;
+mod protocol_adapter;
+
+pub use prompt_cache::{
+    plan_incremental_cache, plan_prompt_cache, prompt_parts_from_rendered_prompt,
+    split_old_and_new_delta, split_prompt, stable_text_fingerprint, CacheControl, PromptBlock,
+    PromptBlockRole, PromptParts,
+};
+
 pub const TIMEM_LOGO: &str = "𝓣𝓲𝓶𝓮𝓶";
 pub const ANSI_RESET: &str = "\x1b[0m";
 pub const ANSI_BRIGHT_TIMEM: &str = "\x1b[92;1m";
@@ -639,61 +648,31 @@ fn validate_api_key(api_key: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn split_prompt(full_prompt: &str) -> (String, String) {
-    const BEGIN_MARKER: &str = "[BEGIN SEGMENT 0: prompt_0]";
-    const END_MARKER: &str = "[END SEGMENT 0: prompt_0]";
-    let Some(begin_idx) = full_prompt.find(BEGIN_MARKER) else {
-        return (String::new(), full_prompt.to_string());
-    };
-    let content_start = begin_idx + BEGIN_MARKER.len();
-    let Some(end_idx) = full_prompt[content_start..].find(END_MARKER) else {
-        return (String::new(), full_prompt.to_string());
-    };
-    let static_content = full_prompt[content_start..content_start + end_idx]
-        .trim()
-        .to_string();
-    let dynamic_part = full_prompt[content_start + end_idx + END_MARKER.len()..]
-        .trim_start_matches(['\n', '\r', ' ', '\t'])
-        .to_string();
-    (static_content, dynamic_part)
+pub fn build_request(config: &ProviderConfig, prompt: &str) -> Value {
+    let blocks = prompt_cache::plan_prompt_cache(prompt);
+    protocol_adapter::build_request_from_blocks(config, &blocks)
 }
 
-pub fn build_request(config: &ProviderConfig, prompt: &str) -> Value {
-    let (system_prompt, user_prompt) = split_prompt(prompt);
-    let user_prompt = if user_prompt.is_empty() {
-        prompt.to_string()
-    } else {
-        user_prompt
-    };
-    let system_prompt = if system_prompt.is_empty() {
-        prompt.to_string()
-    } else {
-        system_prompt
-    };
-    match config.api_protocol {
-        ApiProtocol::OpenAiCompatible => json!({
-            "model": config.model,
-            "messages": [
-                {"role":"system", "content": system_prompt, "cache_control": {"type":"ephemeral"}},
-                {"role":"user", "content": user_prompt}
-            ],
-            "max_tokens": config.max_tokens
-        }),
-        ApiProtocol::OpenAiResponses => json!({
-            "model": config.model,
-            "instructions": system_prompt,
-            "input": user_prompt,
-            "max_output_tokens": config.max_tokens
-        }),
-        ApiProtocol::Anthropic => json!({
-            "model": config.model,
-            "max_tokens": config.max_tokens,
-            "system": [
-                {"type":"text", "text": system_prompt, "cache_control": {"type":"ephemeral"}}
-            ],
-            "messages": [{"role":"user", "content": user_prompt}]
-        }),
-    }
+fn prompt_cache_plan_audit(blocks: &[PromptBlock]) -> Value {
+    Value::Array(
+        blocks
+            .iter()
+            .map(|block| {
+                json!({
+                    "role": match block.role {
+                        PromptBlockRole::System => "system",
+                        PromptBlockRole::User => "user",
+                    },
+                    "cache": match block.cache {
+                        CacheControl::None => "none",
+                        CacheControl::Ephemeral => "ephemeral",
+                    },
+                    "chars": block.text.chars().count(),
+                    "hash": stable_text_fingerprint(&block.text),
+                })
+            })
+            .collect(),
+    )
 }
 
 pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmResponse, String> {
@@ -891,13 +870,15 @@ pub fn call_model(
     prompt: &str,
     audit_file: &Path,
 ) -> Result<LlmResponse, String> {
-    let request_body = build_request(config, prompt);
+    let prompt_blocks = prompt_cache::plan_prompt_cache(prompt);
+    let request_body = protocol_adapter::build_request_from_blocks(config, &prompt_blocks);
     let endpoint = config.endpoint();
     let request_audit = json!({
         "type":"llm_request",
         "provider":config.provider,
         "model":config.model,
         "endpoint":endpoint,
+        "prompt_cache_plan": prompt_cache_plan_audit(&prompt_blocks),
         "body": redact_value(&request_body)
     });
     let _ = append_audit(audit_file, &request_audit);
@@ -1378,6 +1359,91 @@ mod tests {
     }
 
     #[test]
+    fn prompt_cache_strategy_marks_incremental_prefixes() {
+        let prompt1 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]";
+        let blocks1 = plan_prompt_cache(prompt1);
+        assert_eq!(blocks1.len(), 2);
+        assert_eq!(blocks1[0].role, PromptBlockRole::System);
+        assert_eq!(blocks1[0].text, "STATIC");
+        assert_eq!(blocks1[0].cache, CacheControl::Ephemeral);
+        assert!(blocks1[1].text.contains("delta1"));
+        assert_eq!(blocks1[1].cache, CacheControl::None);
+
+        let prompt2 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta2\n[END SEGMENT 2: prompt_delta]";
+        let blocks2 = plan_prompt_cache(prompt2);
+        assert_eq!(blocks2.len(), 3);
+        assert!(blocks2[1].text.contains("delta1"));
+        assert!(!blocks2[1].text.contains("delta2"));
+        assert_eq!(blocks2[1].cache, CacheControl::Ephemeral);
+        assert!(blocks2[2].text.contains("delta2"));
+        assert_eq!(blocks2[2].cache, CacheControl::None);
+
+        let prompt3 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta2\n[END SEGMENT 2: prompt_delta]\n[BEGIN SEGMENT 3: prompt_delta]\ndelta3\n[END SEGMENT 3: prompt_delta]";
+        let blocks3 = plan_prompt_cache(prompt3);
+        assert_eq!(blocks3.len(), 3);
+        assert!(blocks3[1].text.contains("delta1"));
+        assert!(blocks3[1].text.contains("delta2"));
+        assert!(!blocks3[1].text.contains("delta3"));
+        assert_eq!(blocks3[1].cache, CacheControl::Ephemeral);
+        assert!(blocks3[2].text.contains("delta3"));
+        assert_eq!(blocks3[2].cache, CacheControl::None);
+    }
+
+    #[test]
+    fn prompt_cache_strategy_keeps_multi_slice_delta_together() {
+        let prompt = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta_id: pd_1\nslice_id: ps_1_s001\nslice: 1/1\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta_id: pd_2\nslice_id: ps_2_s001\nslice: 1/2\ndelta2 slice1\n[END SEGMENT 2: prompt_delta]\n[BEGIN SEGMENT 3: prompt_delta]\ndelta_id: pd_2\nslice_id: ps_2_s002\nslice: 2/2\ndelta2 slice2\n[END SEGMENT 3: prompt_delta]";
+        let blocks = plan_prompt_cache(prompt);
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks[1].text.contains("delta1"));
+        assert!(!blocks[1].text.contains("delta2"));
+        assert!(blocks[2].text.contains("delta2 slice1"));
+        assert!(blocks[2].text.contains("delta2 slice2"));
+        assert_eq!(blocks[2].cache, CacheControl::None);
+    }
+
+    #[test]
+    fn anthropic_request_maps_cache_strategy_blocks_to_content_blocks() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("anthropic".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        let prompt = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta2\n[END SEGMENT 2: prompt_delta]";
+        let body = build_request(&config, prompt);
+        assert_eq!(body["system"][0]["text"], "STATIC");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("delta1"));
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(body["messages"][0]["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("delta2"));
+        assert!(body["messages"][0]["content"][1]
+            .get("cache_control")
+            .is_none());
+    }
+
+    #[test]
+    fn prompt_cache_audit_summary_has_hashes_without_text() {
+        let blocks = plan_prompt_cache("[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]");
+        let summary = prompt_cache_plan_audit(&blocks);
+        let rendered = summary.to_string();
+        assert!(rendered.contains("\"hash\""));
+        assert!(rendered.contains("\"chars\""));
+        assert!(!rendered.contains("STATIC"));
+        assert!(!rendered.contains("delta1"));
+    }
+
+    #[test]
     fn build_request_uses_official_openai_responses_shape() {
         let config = provider_config_from_env(
             &CliOptions {
@@ -1469,7 +1535,10 @@ mod tests {
         assert_eq!(body["system"][0]["text"], "hello");
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["messages"][0]["content"], "hello");
+        assert_eq!(body["messages"][0]["content"][0]["text"], "hello");
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
     }
 
     #[test]
