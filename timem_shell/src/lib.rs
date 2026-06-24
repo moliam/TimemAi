@@ -9,12 +9,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod prompt_cache;
 mod protocol_adapter;
+mod structured_output;
 
 pub use prompt_cache::{
     plan_incremental_cache, plan_prompt_cache, prompt_parts_from_rendered_prompt,
     split_old_and_new_delta, split_prompt, stable_text_fingerprint, CacheControl, PromptBlock,
     PromptBlockRole, PromptParts,
 };
+pub use structured_output::{plan_structured_output, StructuredOutputHint};
 
 pub const TIMEM_LOGO: &str = "𝓣𝓲𝓶𝓮𝓶";
 pub const ANSI_RESET: &str = "\x1b[0m";
@@ -650,7 +652,8 @@ fn validate_api_key(api_key: &str) -> Result<(), String> {
 
 pub fn build_request(config: &ProviderConfig, prompt: &str) -> Value {
     let blocks = prompt_cache::plan_prompt_cache(prompt);
-    protocol_adapter::build_request_from_blocks(config, &blocks)
+    let structured_output = structured_output::plan_structured_output(config);
+    protocol_adapter::build_request_from_blocks(config, &blocks, structured_output)
 }
 
 fn prompt_cache_plan_audit(blocks: &[PromptBlock]) -> Value {
@@ -871,7 +874,9 @@ pub fn call_model(
     audit_file: &Path,
 ) -> Result<LlmResponse, String> {
     let prompt_blocks = prompt_cache::plan_prompt_cache(prompt);
-    let request_body = protocol_adapter::build_request_from_blocks(config, &prompt_blocks);
+    let structured_output = structured_output::plan_structured_output(config);
+    let request_body =
+        protocol_adapter::build_request_from_blocks(config, &prompt_blocks, structured_output);
     let endpoint = config.endpoint();
     let request_audit = json!({
         "type":"llm_request",
@@ -879,6 +884,10 @@ pub fn call_model(
         "model":config.model,
         "endpoint":endpoint,
         "prompt_cache_plan": prompt_cache_plan_audit(&prompt_blocks),
+        "structured_output": match structured_output {
+            StructuredOutputHint::None => "none",
+            StructuredOutputHint::JsonObject => "json_object",
+        },
         "body": redact_value(&request_body)
     });
     let _ = append_audit(audit_file, &request_audit);
@@ -1356,6 +1365,54 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["role"], "user");
         assert_eq!(body["messages"][1]["content"], "hello");
+        assert_eq!(body["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn structured_output_strategy_is_provider_and_protocol_specific() {
+        let aliyun = provider_config_from_env(
+            &CliOptions {
+                provider: Some("aliyun".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        assert_eq!(
+            plan_structured_output(&aliyun),
+            StructuredOutputHint::JsonObject
+        );
+
+        let custom = provider_config_from_env(
+            &CliOptions {
+                provider: Some("custom".into()),
+                api_protocol: Some("openai-compatible".into()),
+                base_url: Some("https://your-gateway.example/v1".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        assert_eq!(plan_structured_output(&custom), StructuredOutputHint::None);
+        assert!(build_request(&custom, "hello")
+            .get("response_format")
+            .is_none());
+
+        let anthropic = provider_config_from_env(
+            &CliOptions {
+                provider: Some("anthropic".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        assert_eq!(
+            plan_structured_output(&anthropic),
+            StructuredOutputHint::None
+        );
+        assert!(build_request(&anthropic, "hello")
+            .get("response_format")
+            .is_none());
     }
 
     #[test]
