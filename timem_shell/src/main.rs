@@ -706,7 +706,7 @@ fn render_startup_banner(
             key: "TIMEM_MODEL",
             value: config.model.clone(),
             desc: "模型名称",
-            highlight: false,
+            highlight: !timem_shell::is_default_model_for_provider(&config.provider, &config.model),
         },
         ConfigRow {
             key: "TIMEM_MAX_LLM_CONTEXT",
@@ -1027,12 +1027,12 @@ mod static_prompt_tests {
     }
 
     #[test]
-    fn startup_banner_highlights_protocol_and_url_overrides() {
+    fn startup_banner_highlights_values_outside_provider_defaults() {
         let default_config = ProviderConfig {
             provider: "aliyun".to_string(),
             api_protocol: ApiProtocol::OpenAiCompatible,
             api_key: "secret".to_string(),
-            model: "qwen-plus".to_string(),
+            model: "qwen-max".to_string(),
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             timeout_secs: 120,
             max_tokens: 4096,
@@ -1050,7 +1050,7 @@ mod static_prompt_tests {
             provider: "aliyun".to_string(),
             api_protocol: ApiProtocol::Anthropic,
             api_key: "secret".to_string(),
-            model: "qwen-plus".to_string(),
+            model: "aws-claude-sonnet-4-6".to_string(),
             base_url: "https://example.com/v1".to_string(),
             timeout_secs: 120,
             max_tokens: 4096,
@@ -1064,6 +1064,7 @@ mod static_prompt_tests {
         );
         assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}anthropic")));
         assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}https://example.com/v1")));
+        assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}aws-claude-sonnet-4-6")));
         let table_lines: Vec<&str> = override_banner
             .lines()
             .filter(|line| line.starts_with('|'))

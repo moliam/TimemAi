@@ -605,6 +605,17 @@ fn default_model(provider: &str) -> &str {
     }
 }
 
+pub fn is_default_model_for_provider(provider: &str, model: &str) -> bool {
+    let provider = provider.to_lowercase();
+    let model = model.to_lowercase();
+    match provider.as_str() {
+        "openai" => model.contains("gpt"),
+        "anthropic" => model.contains("claude"),
+        "aliyun" | "dashscope" => model.contains("qwen"),
+        _ => model == default_model(&provider),
+    }
+}
+
 fn default_base_url(provider: &str) -> &str {
     match provider {
         "openai" => "https://api.openai.com/v1",
