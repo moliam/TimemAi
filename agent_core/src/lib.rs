@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -979,7 +979,7 @@ impl AgentCore {
             }
             "shell_job_status" => {
                 self.current_stats.tool_calls += 1;
-                self.shell_jobs.status(&action.job_id)
+                self.shell_jobs.status(&action.job_id, action.timeout_ms)
             }
             "run_bash" => {
                 self.current_stats.tool_calls += 1;
@@ -1580,7 +1580,7 @@ impl FileShellJobStore {
         )
     }
 
-    fn status(&self, job_id: &str) -> String {
+    fn status(&self, job_id: &str, wait_ms: u64) -> String {
         let clean_id = job_id.trim();
         if clean_id.is_empty() {
             return "Action result: shell_job_status\nerror: job_id_required".to_string();
@@ -1591,25 +1591,36 @@ impl FileShellJobStore {
                 clean_id
             );
         };
-        let status_text = fs::read_to_string(&record.status_file)
-            .ok()
-            .map(|text| text.trim().to_string());
-        let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-        match status_text {
-            Some(code) if !code.is_empty() => format!(
-                "Action result: shell_job_status\njob_id: {}\nstate: finished\nexit_code: {}\noutput_file: {}\noutput:\n{}",
-                record.id,
-                code,
-                record.output_file,
-                compact_text(&output, 4000)
-            ),
-            _ => format!(
-                "Action result: shell_job_status\njob_id: {}\nstate: running\npid: {}\noutput_file: {}\npartial_output:\n{}",
-                record.id,
-                record.pid,
-                record.output_file,
-                compact_text(&output, 2000)
-            ),
+        let wait = Duration::from_millis(wait_ms.min(15000));
+        let started = Instant::now();
+        loop {
+            if let Some(code) = fs::read_to_string(&record.status_file)
+                .ok()
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+            {
+                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                return format!(
+                    "Action result: shell_job_status\njob_id: {}\nstate: finished\nexit_code: {}\nwaited_ms: {}\noutput_file: {}\noutput:\n{}",
+                    record.id,
+                    code,
+                    started.elapsed().as_millis(),
+                    record.output_file,
+                    compact_text(&output, 4000)
+                );
+            }
+            if started.elapsed() >= wait {
+                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                return format!(
+                    "Action result: shell_job_status\njob_id: {}\nstate: running\npid: {}\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
+                    record.id,
+                    record.pid,
+                    started.elapsed().as_millis(),
+                    record.output_file,
+                    compact_text(&output, 2000)
+                );
+            }
+            thread::sleep(Duration::from_millis(200));
         }
     }
 
@@ -2103,10 +2114,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .get("timeout_sec")
                     .or_else(|| action.get("timeout_sec"))
                     .and_then(Value::as_u64);
-                let timeout_ms = timeout_ms_raw
-                    .or_else(|| timeout_sec_raw.map(|seconds| seconds.saturating_mul(1000)))
-                    .unwrap_or(5000)
-                    .clamp(1000, 15000);
+                let timeout_ms_provided = timeout_ms_raw.is_some() || timeout_sec_raw.is_some();
                 let after_ms = input
                     .get("after_ms")
                     .or_else(|| action.get("after_ms"))
@@ -2184,6 +2192,11 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                                 Some(format!("next_actions[{idx}].input.job_id_required"));
                             break;
                         }
+                        if !timeout_ms_provided {
+                            repair_issue =
+                                Some(format!("next_actions[{idx}].input.timeout_ms_required"));
+                            break;
+                        }
                     }
                     "run_bash" => {
                         if command.is_empty() && read_back_command.is_empty() {
@@ -2212,6 +2225,13 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                         break;
                     }
                 }
+                let parsed_timeout_ms = timeout_ms_raw
+                    .or_else(|| timeout_sec_raw.map(|seconds| seconds.saturating_mul(1000)));
+                let timeout_ms = if normalized_name == "shell_job_status" {
+                    parsed_timeout_ms.unwrap_or(0).min(15000)
+                } else {
+                    parsed_timeout_ms.unwrap_or(5000).clamp(1000, 15000)
+                };
                 next_actions.push(ParsedAction {
                     action: name,
                     intent: intent.to_string(),

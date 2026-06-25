@@ -190,7 +190,7 @@
         }
       },
       "run_bash": {
-        "when": "Run a shell command on the local machine. Must be careful, never be harmful. Be efficient and use compound commands to do multiple things if possible, saving interactions. Use background=true or mode=background for long-running commands that should return a job_id instead of blocking. Provide read_back_command when stdout needs verification. Opt-in via large_readback_opt_in if output truncated.",
+        "when": "Run a shell command on the local machine. Must be careful, never be harmful. Use compound commands to do multiple things if possible, saving interactions. Use background=true or mode=background for long-running commands that should return a job_id instead of blocking. Provide read_back_command when stdout needs verification. Opt-in via large_readback_opt_in if output truncated.",
         "input": {
           "command?": "string",
           "read_back_command?": "string",
@@ -209,15 +209,17 @@
         }
       },
       "shell_job_status": {
-        "when": "Check a long-running background shell job previously started by run_bash with background=true or mode=background.",
+        "when": "Check a long-running background shell job previously started by run_bash with background=true or mode=background. You must choose timeout_ms explicitly; runtime waits up to that value before returning, so prefer one status check with a reasonable timeout instead of rapid repeated checks.",
         "input": {
-          "job_id": "string returned by the background run_bash result"
+          "job_id": "string returned by the background run_bash result",
+          "timeout_ms": "integer wait budget for this status check; 0 means immediate check, max 15000"
         },
         "example": {
           "action": "shell_job_status",
           "intent": "Check whether the background build finished.",
           "input": {
-            "job_id": "job_1782200000000_1"
+            "job_id": "job_1782200000000_1",
+            "timeout_ms": 10000
           }
         }
       }
@@ -229,7 +231,7 @@
       "intent_required": "Every next_actions item must include a concise top-level intent string; runtime displays it in UI and rejects missing intent once for repair.",
       "sql_safety": "memory_sql_query is read-only; writes must use memory_update. SQL params must match placeholders exactly.",
       "sql_tables": "memories(id, created_at_ms, content) stores durable facts. chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) stores UI-visible user/assistant chat transcript. Use chat_messages for questions about prior chats, exact wording, dates, last conversation, or recent N-day logs.",
-      "bash_safety": "For run_bash, request the minimal command needed for the task and use only the returned action result as evidence. Write-capable shell commands are allowed when the user requests local project changes; approval behavior is controlled by runtime config, not by the model. Never invent a read-only limitation for run_bash. Use background=true or mode=background for long-running tests, builds, package installs, video processing, or other commands likely to exceed the foreground limit; then poll with shell_job_status. If the action result says the command did not run, was denied, or is unavailable, do not claim it ran."
+      "bash_safety": "For run_bash, request the minimal command needed for the task and use only the returned action result as evidence. Write-capable shell commands are allowed when the user requests local project changes; approval behavior is controlled by runtime config, not by the model. Never invent a read-only limitation for run_bash. Use background=true or mode=background for long-running tests, builds, package installs, video processing, or other commands likely to exceed the foreground limit; then poll with shell_job_status and set a reasonable timeout_ms so runtime waits locally instead of wasting model turns on rapid polling. If the action result says the command did not run, was denied, or is unavailable, do not claim it ran."
     }
   },
   "Response_rule": {

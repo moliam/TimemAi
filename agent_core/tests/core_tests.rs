@@ -2030,7 +2030,7 @@ fn run_bash_can_start_and_poll_background_job() {
     std::thread::sleep(std::time::Duration::from_millis(250));
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"response_to_user":"","next_actions":[{{"action":"shell_job_status","intent":"Poll background task.","input":{{"job_id":"{}"}}}}]}}"#,
+            r#"{{"response_to_user":"","next_actions":[{{"action":"shell_job_status","intent":"Poll background task.","input":{{"job_id":"{}","timeout_ms":1000}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2044,6 +2044,65 @@ fn run_bash_can_start_and_poll_background_job() {
     assert!(prompt.contains("state: finished"));
     assert!(prompt.contains("exit_code: 0"));
     assert!(prompt.contains("background-ok"));
+}
+
+#[test]
+fn shell_job_status_requires_model_chosen_timeout() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_background_timeout_required"),
+    );
+    let _ = core.begin_turn("poll a long task", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"shell_job_status","intent":"Poll background task.","input":{"job_id":"job_1"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("input.timeout_ms_required"));
+}
+
+#[test]
+fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_background_wait"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("run a long task", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","input":{"command":"sleep 0.4; printf waited-ok","background":true}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let job_id = action_result_field(&prompt, "job_id");
+    assert!(job_id.starts_with("job_"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"response_to_user":"","next_actions":[{{"action":"shell_job_status","intent":"Wait for background task.","input":{{"job_id":"{}","timeout_ms":1500}}}}]}}"#,
+            job_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: shell_job_status"));
+    assert!(prompt.contains("state: finished"));
+    assert!(prompt.contains("waited-ok"));
+    assert!(prompt.contains("waited_ms:"));
 }
 
 #[test]
