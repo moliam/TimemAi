@@ -235,6 +235,7 @@ pub struct AgentCore {
     current_round: u32,
     current_stats: UsageStats,
     repair_attempted: bool,
+    last_repair_issue: Option<String>,
     pending_approval: Option<PendingApproval>,
     bash_approval_mode: BashApprovalMode,
 }
@@ -261,6 +262,7 @@ impl AgentCore {
             current_round: 0,
             current_stats: UsageStats::zero(),
             repair_attempted: false,
+            last_repair_issue: None,
             pending_approval: None,
             bash_approval_mode: BashApprovalMode::Ask,
         }
@@ -300,6 +302,7 @@ impl AgentCore {
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
+        self.last_repair_issue = None;
         self.pending_approval = None;
     }
     pub fn memory_git_commit_count(&self) -> usize {
@@ -310,6 +313,7 @@ impl AgentCore {
         self.round_budget = self.configured_round_budget;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
+        self.last_repair_issue = None;
         self.pending_approval = None;
         let should_memory_precheck = supporting_context
             .map(should_run_memory_precheck)
@@ -376,8 +380,7 @@ impl AgentCore {
                 );
             }
             let final_text = if parsed.response_to_user.trim().is_empty() {
-                "模型的回复不符合本地协议，已拦截原始报文展示。请重试或换一个更具体的问题。"
-                    .to_string()
+                repair_failure_message(self.last_repair_issue.as_deref().unwrap_or(&issue), &issue)
             } else {
                 parsed.response_to_user
             };
@@ -559,6 +562,7 @@ impl AgentCore {
 
     fn request_protocol_repair(&mut self, issue: &str, instruction: &str) -> CoreStep {
         self.repair_attempted = true;
+        self.last_repair_issue = Some(issue.to_string());
         self.append_delta(vec![(
             "result_of_llm_action".to_string(),
             format!("Protocol repair request\nissue: {}\n{}", issue, instruction),
@@ -1994,6 +1998,15 @@ fn durable_score_label(score: Option<u8>) -> String {
     score
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unscored".to_string())
+}
+
+fn repair_failure_message(first_issue: &str, final_issue: &str) -> String {
+    if first_issue == "truncated_model_output" || final_issue == "truncated_model_output" {
+        return "模型回复被 API 提供商按最大输出 token 限制截断（例如 stop_reason=max_tokens），导致返回的 JSON 协议不完整。请调大 TIMEM_MAX_LLM_OUTPUT，或在交互提示中选择增加 10K 后重试。".to_string();
+    }
+    format!(
+        "模型的回复不符合本地协议，已拦截原始报文展示。原因：{final_issue}。请重试或换一个更具体的问题。"
+    )
 }
 
 fn shell_quote_path(path: &Path) -> String {

@@ -866,7 +866,7 @@ fn malformed_response_gets_one_repair_then_fallback() {
     };
     assert_eq!(
         final_turn.response_to_user,
-        "模型的回复不符合本地协议，已拦截原始报文展示。请重试或换一个更具体的问题。"
+        "模型的回复不符合本地协议，已拦截原始报文展示。原因：invalid_json。请重试或换一个更具体的问题。"
     );
     assert_eq!(final_turn.repair_issue.as_deref(), Some("invalid_json"));
 }
@@ -892,6 +892,40 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
     assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("truncated_model_output"));
     assert!(prompt.contains("max output token limit"));
+}
+
+#[test]
+fn truncated_repair_failure_explains_provider_max_token_reason() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("truncated_repair_failure"),
+    );
+    let _ = core.begin_turn("写一个很长的报告", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: "{\"response_to_user\":\"partial".to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: true,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: "{\"response_to_user\":\"still partial".to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: true,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("API 提供商"));
+    assert!(final_turn
+        .response_to_user
+        .contains("stop_reason=max_tokens"));
+    assert!(final_turn.response_to_user.contains("TIMEM_MAX_LLM_OUTPUT"));
+    assert_eq!(final_turn.repair_issue.as_deref(), Some("invalid_json"));
 }
 
 #[test]
