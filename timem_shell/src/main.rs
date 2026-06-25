@@ -1129,12 +1129,12 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("\"scratch_delete\""));
         assert!(STATIC_PROMPT.contains("\"run_bash\""));
         assert!(STATIC_PROMPT.contains("\"shell_job_status\""));
-        assert!(STATIC_PROMPT.contains("file edits and git commands"));
-        assert!(STATIC_PROMPT.contains("git add, git commit"));
+        assert!(STATIC_PROMPT.contains("background=true"));
+        assert!(STATIC_PROMPT.contains("read_back_command"));
         assert!(STATIC_PROMPT.contains("Never invent a read-only limitation for run_bash"));
         assert!(STATIC_PROMPT.contains("\"durable_ctx_score\""));
         assert!(STATIC_PROMPT.contains("Every model response must score"));
-        assert!(STATIC_PROMPT.contains("OS/system info"));
+        assert!(STATIC_PROMPT.contains("local machine"));
         assert!(STATIC_PROMPT.contains("\"intent_required\""));
         assert!(STATIC_PROMPT.contains("use only the returned action result as evidence"));
         assert!(STATIC_PROMPT.contains("\"thought?\""));

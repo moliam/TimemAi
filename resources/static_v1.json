@@ -190,7 +190,7 @@
         }
       },
       "run_bash": {
-        "when": "Shell sessions only: inspect the user's local computer such as OS/system info, current folder, logs, prompt artifacts, line counts, or make bounded local file edits when user asks and memory/chat tools are insufficient. It may execute normal shell commands, including file edits and git commands, when requested by the user and permitted by the configured approval mode. If the user asks to apply a patch, edit files, git add, git commit, or otherwise change the local project, request run_bash with the needed command sequence instead of telling the user to do it manually. Do not claim edits, commits, or local changes must be done manually unless an action result says run_bash is unavailable, denied, failed, or timed out.",
+        "when": "Run a shell command on the local machine. Must be careful, never be harmful. Be efficient and use compound commands to do multiple things if possible, saving interactions. Use background=true or mode=background for long-running commands that should return a job_id instead of blocking. Provide read_back_command when stdout needs verification. Opt-in via large_readback_opt_in if output truncated.",
         "input": {
           "command?": "string",
           "read_back_command?": "string",
