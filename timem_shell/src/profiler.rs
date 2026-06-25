@@ -4,6 +4,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_RESET: &str = "\x1b[0m";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeProfiler {
     models: BTreeMap<String, ModelProfile>,
@@ -90,29 +93,38 @@ pub fn render_prof_report(
 ) -> String {
     let storage = collect_storage_profile(memory_dir, audit_file);
     let mut out = String::new();
-    out.push_str("Timem runtime profiling\n\n");
-    out.push_str("Token 监控（per model）\n");
+    out.push_str(&format!(
+        "{ANSI_BOLD}Timem runtime profiling{ANSI_RESET}\n\n"
+    ));
+    out.push_str(&section_title("Token 监控（per model）"));
     if profiler.models().is_empty() {
         out.push_str("  暂无模型调用。\n");
     } else {
-        out.push_str(
-            "  model | calls | input | output | cached | cache hit | avg wait / 1K output\n",
-        );
-        out.push_str("  --- | ---: | ---: | ---: | ---: | ---: | ---:\n");
         for (model, profile) in profiler.models() {
+            out.push_str(&format!("  ┌─ {ANSI_BOLD}{}{ANSI_RESET}\n", model));
             out.push_str(&format!(
-                "  {} | {} | {} | {} | {} | {} | {}\n",
-                model,
+                "  │ calls {:>4}   input {:>8}   output {:>8}   cached {:>8}\n",
                 profile.llm_calls,
                 format_count(profile.input_tokens),
                 format_count(profile.output_tokens),
-                format_count(profile.cached_tokens),
+                format_count(profile.cached_tokens)
+            ));
+            out.push_str(&format!(
+                "  └─ cache hit {:>6}   avg wait / 1K output {:>8}\n",
                 format_percent(profile.cached_tokens, profile.input_tokens),
                 format_wait_per_1k_output(profile.wait, profile.output_tokens)
             ));
         }
+        out.push_str(&format!(
+            "  total input {}   output {}   cached {}   cache hit {}\n",
+            format_count(total_input_tokens(profiler)),
+            format_count(total_output_tokens(profiler)),
+            format_count(total_cached_tokens(profiler)),
+            format_percent(total_cached_tokens(profiler), total_input_tokens(profiler))
+        ));
     }
-    out.push_str("\n底层性能\n");
+    out.push('\n');
+    out.push_str(&section_title("底层性能"));
     out.push_str(&format!(
         "  等待模型回复: {}\n",
         format_duration(profiler.model_wait())
@@ -122,7 +134,8 @@ pub fn render_prof_report(
         format_duration(profiler.local_work())
     ));
     out.push_str("  预留: 后续可加入 bash 执行、文件读写、增删文件等监控。\n");
-    out.push_str("\n存储\n");
+    out.push('\n');
+    out.push_str(&section_title("存储"));
     out.push_str(&format!(
         "  durable_mem: {} 条, {}\n",
         storage.durable_entries,
@@ -138,6 +151,34 @@ pub fn render_prof_report(
         format_bytes(storage.audit_bytes)
     ));
     out
+}
+
+fn section_title(title: &str) -> String {
+    format!("{ANSI_BOLD}▸ {title}{ANSI_RESET}\n")
+}
+
+fn total_input_tokens(profiler: &RuntimeProfiler) -> u64 {
+    profiler
+        .models()
+        .values()
+        .map(|profile| profile.input_tokens)
+        .sum()
+}
+
+fn total_output_tokens(profiler: &RuntimeProfiler) -> u64 {
+    profiler
+        .models()
+        .values()
+        .map(|profile| profile.output_tokens)
+        .sum()
+}
+
+fn total_cached_tokens(profiler: &RuntimeProfiler) -> u64 {
+    profiler
+        .models()
+        .values()
+        .map(|profile| profile.cached_tokens)
+        .sum()
 }
 
 fn count_jsonl_entries(path: &Path) -> usize {
@@ -250,9 +291,12 @@ mod tests {
             std::path::Path::new("/missing/memory"),
             std::path::Path::new("/missing/audit.jsonl"),
         );
-        assert!(report.contains("aliyun:qwen-plus | 2 | 1.5K | 500 | 800"));
+        assert!(report.contains("\x1b[1m▸ Token 监控（per model）\x1b[0m"));
+        assert!(report.contains("┌─ \x1b[1maliyun:qwen-plus\x1b[0m"));
+        assert!(report.contains("calls    2   input     1.5K   output      500   cached      800"));
         assert!(report.contains("53.3%"));
         assert!(report.contains("avg wait / 1K output"));
+        assert!(report.contains("total input 1.5K   output 500   cached 800"));
     }
 
     #[test]
