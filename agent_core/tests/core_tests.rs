@@ -108,7 +108,13 @@ fn field_values(prompt: &str, field: &str) -> Vec<String> {
 fn prompt_is_append_only_and_segmented() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("append"));
     let first = match core.begin_turn("你好", Some("runtime_time: now")) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
+        CoreStep::NeedModel {
+            prompt,
+            rounds_remaining,
+        } => {
+            assert_eq!(rounds_remaining, 20);
+            prompt
+        }
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(first.contains("[BEGIN SEGMENT 0: prompt_0]"));
@@ -133,6 +139,76 @@ fn prompt_is_append_only_and_segmented() {
     assert!(second.contains("[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]"));
     assert!(second.contains("User question:\n你好"));
     assert!(second.contains("prompt_type: llm_response"));
+}
+
+#[test]
+fn default_max_rounds_is_twenty() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("default_rounds"),
+    );
+    let step = core.begin_turn("你好", None);
+    let CoreStep::NeedModel {
+        prompt,
+        rounds_remaining,
+    } = step
+    else {
+        panic!("unexpected step: {step:?}");
+    };
+    assert_eq!(rounds_remaining, 20);
+    assert!(prompt.contains("rounds_remaining: 20"));
+}
+
+#[test]
+fn round_limit_can_be_continued_without_model_visible_task_reset() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("round_limit_continue"),
+    );
+    core.set_max_rounds(1);
+    let _ = core.begin_turn("需要两步完成", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Need evidence.","input":{"query":"x","limit":1}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let CoreStep::RoundLimitReached { max_rounds } = step else {
+        panic!("unexpected step: {step:?}");
+    };
+    assert_eq!(max_rounds, 1);
+    let limited_prompt = core.render_prompt();
+    assert!(limited_prompt.contains("Action result: query_memory"));
+
+    let step = core.continue_after_round_limit();
+    let CoreStep::NeedModel {
+        prompt,
+        rounds_remaining,
+    } = step
+    else {
+        panic!("unexpected step: {step:?}");
+    };
+    assert_eq!(rounds_remaining, 20);
+    assert!(prompt.contains("User question:\n需要两步完成"));
+    assert!(prompt.contains("Action result: query_memory"));
+    assert!(prompt.contains("Runtime round budget continued by user."));
+    assert!(prompt.contains("rounds_remaining: 20"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Need evidence after continuation.","input":{"query":"x","limit":1}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let CoreStep::NeedModel {
+        prompt,
+        rounds_remaining,
+    } = step
+    else {
+        panic!("unexpected step: {step:?}");
+    };
+    assert_eq!(rounds_remaining, 19);
+    assert!(prompt.contains("Action result: query_memory"));
 }
 
 #[test]

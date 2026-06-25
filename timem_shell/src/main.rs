@@ -324,6 +324,37 @@ fn run_turn(
                     status.resume_after_user_approval();
                 }
             }
+            CoreStep::RoundLimitReached { max_rounds } => {
+                if let Some(status) = status.as_deref_mut() {
+                    status.pause_for_user_approval();
+                }
+                let should_continue =
+                    interactive_approval && request_round_limit_continue(max_rounds);
+                let _ = append_audit(
+                    audit_file,
+                    &json!({
+                        "type":"round_limit",
+                        "session":session,
+                        "turn_id":turn_id,
+                        "max_rounds":max_rounds,
+                        "continued":should_continue
+                    }),
+                );
+                if should_continue {
+                    step = core.continue_after_round_limit();
+                    if let Some(status) = status.as_deref_mut() {
+                        status.resume_after_user_approval();
+                    }
+                } else {
+                    break (
+                        format!(
+                            "已达到本轮最大交互次数 {max_rounds}，已停止。你可以继续输入来开启新一轮。"
+                        ),
+                        core.current_stats().clone(),
+                        Some("round_limit_reached".to_string()),
+                    );
+                }
+            }
             CoreStep::Final(turn) => {
                 break (turn.response_to_user, turn.stats, turn.repair_issue);
             }
@@ -510,6 +541,13 @@ fn request_user_approval(request: &ApprovalRequest) -> bool {
     }
 }
 
+fn request_round_limit_continue(max_rounds: u32) -> bool {
+    match choose_round_limit_continue(max_rounds) {
+        ApprovalChoice::Allow => true,
+        ApprovalChoice::Deny => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApprovalChoice {
     Allow,
@@ -537,10 +575,37 @@ fn render_approval_choices(selected: ApprovalChoice) -> String {
     }
 }
 
+fn render_round_limit_prompt(max_rounds: u32) -> String {
+    format!(
+        "\n本轮已达到最大交互次数 {max_rounds}。\n继续后会为模型重新充值 rounds_remaining 为 20，当前任务上下文保持不变。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n"
+    )
+}
+
+fn render_round_limit_choices(selected: ApprovalChoice) -> String {
+    let allow_label = "继续";
+    let deny_label = "停止";
+    match selected {
+        ApprovalChoice::Allow => format!("\x1b[7m[ {} ]\x1b[0m   {}", allow_label, deny_label),
+        ApprovalChoice::Deny => format!("  {}   \x1b[7m[ {} ]\x1b[0m", allow_label, deny_label),
+    }
+}
+
 fn choose_user_approval(request: &ApprovalRequest) -> ApprovalChoice {
     print!("{}", render_user_approval_prompt(request));
-    let mut selected = ApprovalChoice::Deny;
-    print!("{}", render_approval_choices(selected));
+    choose_with_keyboard(render_approval_choices, ApprovalChoice::Deny)
+}
+
+fn choose_round_limit_continue(max_rounds: u32) -> ApprovalChoice {
+    print!("{}", render_round_limit_prompt(max_rounds));
+    choose_with_keyboard(render_round_limit_choices, ApprovalChoice::Allow)
+}
+
+fn choose_with_keyboard(
+    render_choices: fn(ApprovalChoice) -> String,
+    initial: ApprovalChoice,
+) -> ApprovalChoice {
+    let mut selected = initial;
+    print!("{}", render_choices(selected));
     let _ = io::stdout().flush();
 
     let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") else {
@@ -570,12 +635,12 @@ fn choose_user_approval(request: &ApprovalRequest) -> ApprovalChoice {
                     ApprovalChoice::Allow => ApprovalChoice::Deny,
                     ApprovalChoice::Deny => ApprovalChoice::Allow,
                 };
-                print!("\r\x1b[2K{}", render_approval_choices(selected));
+                print!("\r\x1b[2K{}", render_choices(selected));
                 let _ = io::stdout().flush();
             }
             ApprovalKey::Select(choice) => {
                 selected = choice;
-                print!("\r\x1b[2K{}", render_approval_choices(selected));
+                print!("\r\x1b[2K{}", render_choices(selected));
                 let _ = io::stdout().flush();
             }
             ApprovalKey::Enter => break selected,
@@ -1089,7 +1154,8 @@ fn time_label() -> String {
 mod static_prompt_tests {
     use super::{
         cancelled_turn_result, consume_turn_cancel_request, display_width, epoch_millis, help_text,
-        random_spinner_tick, read_approval_key, render_approval_choices, render_startup_banner,
+        random_spinner_tick, read_approval_key, render_approval_choices,
+        render_round_limit_choices, render_round_limit_prompt, render_startup_banner,
         render_user_approval_prompt, sanitize_user_input, ApprovalChoice, ApprovalKey,
         ANSI_HIGHLIGHT, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
@@ -1400,6 +1466,23 @@ mod static_prompt_tests {
         assert_eq!(
             render_approval_choices(ApprovalChoice::Allow),
             "\x1b[7m[ 执行一次 ]\x1b[0m   取消"
+        );
+    }
+
+    #[test]
+    fn round_limit_prompt_uses_keyboard_choices_and_defaults_to_continue() {
+        let prompt = render_round_limit_prompt(20);
+        assert!(prompt.contains("本轮已达到最大交互次数 20"));
+        assert!(prompt.contains("重新充值 rounds_remaining 为 20"));
+        assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
+        assert!(!prompt.contains("输入 yes"));
+        assert_eq!(
+            render_round_limit_choices(ApprovalChoice::Allow),
+            "\x1b[7m[ 继续 ]\x1b[0m   停止"
+        );
+        assert_eq!(
+            render_round_limit_choices(ApprovalChoice::Deny),
+            "  继续   \x1b[7m[ 停止 ]\x1b[0m"
         );
     }
 

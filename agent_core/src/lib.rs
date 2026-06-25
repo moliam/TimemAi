@@ -102,6 +102,9 @@ pub enum CoreStep {
     NeedsUserApproval {
         request: ApprovalRequest,
     },
+    RoundLimitReached {
+        max_rounds: u32,
+    },
     Final(TurnFinal),
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,6 +209,7 @@ struct PendingApproval {
 }
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
+const DEFAULT_ROUND_BUDGET: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ActionExecution {
@@ -225,7 +229,8 @@ pub struct AgentCore {
     max_llm_context_tokens: u32,
     next_shrink_review_prompt_tokens: u32,
     last_observed_prompt_tokens: u32,
-    max_rounds: u32,
+    configured_round_budget: u32,
+    round_budget: u32,
     current_round: u32,
     current_stats: UsageStats,
     repair_attempted: bool,
@@ -250,7 +255,8 @@ impl AgentCore {
             max_llm_context_tokens: 100_000,
             next_shrink_review_prompt_tokens: 0,
             last_observed_prompt_tokens: 0,
-            max_rounds: 8,
+            configured_round_budget: DEFAULT_ROUND_BUDGET,
+            round_budget: DEFAULT_ROUND_BUDGET,
             current_round: 0,
             current_stats: UsageStats::zero(),
             repair_attempted: false,
@@ -264,6 +270,10 @@ impl AgentCore {
     pub fn set_max_llm_context_tokens(&mut self, max_tokens: u32) {
         self.max_llm_context_tokens = max_tokens.max(3_000);
     }
+    pub fn set_max_rounds(&mut self, max_rounds: u32) {
+        self.configured_round_budget = max_rounds.max(1);
+        self.round_budget = self.configured_round_budget;
+    }
     pub fn profile(&self) -> &CoreProfile {
         &self.profile
     }
@@ -273,11 +283,15 @@ impl AgentCore {
     pub fn scratch_file(&self) -> PathBuf {
         self.scratch.file.clone()
     }
+    pub fn current_stats(&self) -> &UsageStats {
+        &self.current_stats
+    }
     pub fn memory_git_commit_count(&self) -> usize {
         self.memory.git_commit_count()
     }
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
         self.current_round = 0;
+        self.round_budget = self.configured_round_budget;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
         self.pending_approval = None;
@@ -294,7 +308,7 @@ impl AgentCore {
             text.push_str("\n\nLong-context maintenance:\n");
             text.push_str(&shrink_review);
         }
-        text.push_str(&format!("\nrounds_remaining: {}", self.max_rounds));
+        text.push_str(&format!("\nrounds_remaining: {}", self.round_budget));
         let mut slices = vec![("user_question".to_string(), text)];
         if should_memory_precheck {
             let result = self.runtime_memory_precheck(user_input, 5);
@@ -303,7 +317,7 @@ impl AgentCore {
         self.append_delta(slices);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
-            rounds_remaining: self.max_rounds,
+            rounds_remaining: self.round_budget,
         }
     }
     pub fn apply_model_response(&mut self, response: LlmResponse) -> CoreStep {
@@ -357,7 +371,7 @@ impl AgentCore {
                 repair_issue: Some(issue),
             });
         }
-        if !parsed.next_actions.is_empty() && self.remaining_rounds() > 0 {
+        if !parsed.next_actions.is_empty() {
             let mut result_lines = Vec::new();
             for action in parsed.next_actions {
                 match self.execute_action(action) {
@@ -383,6 +397,11 @@ impl AgentCore {
                 ));
             }
             self.append_delta(slices);
+            if self.remaining_rounds() == 0 {
+                return CoreStep::RoundLimitReached {
+                    max_rounds: self.round_budget,
+                };
+            }
             return CoreStep::NeedModel {
                 prompt: self.render_prompt(),
                 rounds_remaining: self.remaining_rounds(),
@@ -448,6 +467,26 @@ impl AgentCore {
             )
         };
         self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
+        if self.remaining_rounds() == 0 {
+            return CoreStep::RoundLimitReached {
+                max_rounds: self.round_budget,
+            };
+        }
+        CoreStep::NeedModel {
+            prompt: self.render_prompt(),
+            rounds_remaining: self.remaining_rounds(),
+        }
+    }
+    pub fn continue_after_round_limit(&mut self) -> CoreStep {
+        self.current_round = 0;
+        self.round_budget = DEFAULT_ROUND_BUDGET;
+        self.append_delta(vec![(
+            "result_of_llm_action".to_string(),
+            format!(
+                "Runtime round budget continued by user.\nrounds_remaining: {}",
+                self.round_budget
+            ),
+        )]);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
             rounds_remaining: self.remaining_rounds(),
@@ -485,7 +524,7 @@ impl AgentCore {
             .collect::<Vec<_>>()
     }
     fn remaining_rounds(&self) -> u32 {
-        self.max_rounds.saturating_sub(self.current_round)
+        self.round_budget.saturating_sub(self.current_round)
     }
 
     fn has_unscored_prompt_delta(&self) -> bool {
@@ -2930,6 +2969,16 @@ pub extern "C" fn timem_core_resolve_user_approval(
 }
 
 #[no_mangle]
+pub extern "C" fn timem_core_continue_after_round_limit(
+    handle: *mut AgentCoreHandle,
+) -> *mut c_char {
+    let Some(handle) = handle_mut(handle) else {
+        return json_string(json_error("null_handle"));
+    };
+    json_string(step_to_json(handle.core.continue_after_round_limit()))
+}
+
+#[no_mangle]
 pub extern "C" fn timem_core_free(handle: *mut AgentCoreHandle) {
     if !handle.is_null() {
         unsafe {
@@ -2994,6 +3043,11 @@ fn step_to_json(step: CoreStep) -> serde_json::Value {
             "ok": true,
             "step": "needs_user_approval",
             "approval": request
+        }),
+        CoreStep::RoundLimitReached { max_rounds } => serde_json::json!({
+            "ok": true,
+            "step": "round_limit_reached",
+            "max_rounds": max_rounds
         }),
         CoreStep::Final(turn) => serde_json::json!({
             "ok": true,
