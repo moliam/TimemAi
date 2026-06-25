@@ -230,6 +230,52 @@ fn model_can_score_delta_by_explicit_delta_id() {
 }
 
 #[test]
+fn shorthand_score_targets_latest_unscored_delta_when_older_unscored_exists() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("durable_ctx_latest_unscored"),
+    );
+    let first_prompt = match core.begin_turn("first unscored", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let first_delta_id = first_field_value(&first_prompt, "delta_id");
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"first answer without score","acceptance_check":{"is_satisfied":true}}"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let second_prompt = match core.begin_turn("second unscored", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_ids = field_values(&second_prompt, "delta_id");
+    let latest_delta_id = delta_ids.last().cloned().unwrap();
+    assert_ne!(first_delta_id, latest_delta_id);
+
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"score latest only","durable_ctx_score":2,"acceptance_check":{"is_satisfied":true}}"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = core.render_prompt();
+    assert!(prompt.contains(&format!(
+        "delta_id: {}\ndurable_ctx_score: 2",
+        latest_delta_id
+    )));
+    assert!(prompt.contains(&format!(
+        "delta_id: {}\ndurable_ctx_score: unscored",
+        first_delta_id
+    )));
+}
+
+#[test]
 fn runtime_does_not_infer_durable_score_from_user_text_semantics() {
     let mut core = AgentCore::new(
         "STATIC",
