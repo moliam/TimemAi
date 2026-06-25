@@ -211,11 +211,7 @@ fn run_turn(
 
     let (text, stats, repair_issue) = loop {
         if consume_turn_cancel_request() {
-            break (
-                "已取消本轮。".to_string(),
-                UsageStats::zero(),
-                Some("cancelled_by_user".to_string()),
-            );
+            break cancelled_turn_result();
         }
         match step {
             CoreStep::NeedModel { prompt, .. } => {
@@ -226,11 +222,7 @@ fn run_turn(
                 match call_model(config, &prompt, audit_file) {
                     Ok(response) => {
                         if consume_turn_cancel_request() {
-                            break (
-                                "已取消本轮。".to_string(),
-                                UsageStats::zero(),
-                                Some("cancelled_by_user".to_string()),
-                            );
+                            break cancelled_turn_result();
                         }
                         if let Some(status) = status.as_deref_mut() {
                             status.set_usage(response.usage.clone());
@@ -242,6 +234,9 @@ fn run_turn(
                         step = core.apply_model_response(response);
                     }
                     Err(err) => {
+                        if consume_turn_cancel_request() {
+                            break cancelled_turn_result();
+                        }
                         let _ = append_audit(
                             audit_file,
                             &json!({"type":"turn_error","session":session,"turn_id":turn_id,"error":err}),
@@ -305,6 +300,14 @@ fn run_turn(
 
 fn consume_turn_cancel_request() -> bool {
     TURN_CANCEL_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+fn cancelled_turn_result() -> (String, UsageStats, Option<String>) {
+    (
+        "已取消本轮。".to_string(),
+        UsageStats::zero(),
+        Some("cancelled_by_user".to_string()),
+    )
 }
 
 struct ThinkingStatus {
@@ -982,8 +985,8 @@ fn time_label() -> String {
 #[cfg(test)]
 mod static_prompt_tests {
     use super::{
-        consume_turn_cancel_request, display_width, epoch_millis, help_text, random_spinner_tick,
-        read_approval_key, render_approval_choices, render_startup_banner,
+        cancelled_turn_result, consume_turn_cancel_request, display_width, epoch_millis, help_text,
+        random_spinner_tick, read_approval_key, render_approval_choices, render_startup_banner,
         render_user_approval_prompt, sanitize_user_input, ApprovalChoice, ApprovalKey,
         ANSI_HIGHLIGHT, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
@@ -1039,6 +1042,15 @@ mod static_prompt_tests {
         TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
         assert!(consume_turn_cancel_request());
         assert!(!consume_turn_cancel_request());
+    }
+
+    #[test]
+    fn cancelled_turn_message_does_not_look_like_model_failure() {
+        let (text, stats, issue) = cancelled_turn_result();
+        assert_eq!(text, "已取消本轮。");
+        assert!(!text.contains("模型调用失败"));
+        assert_eq!(stats.llm_calls, 0);
+        assert_eq!(issue.as_deref(), Some("cancelled_by_user"));
     }
 
     #[test]
