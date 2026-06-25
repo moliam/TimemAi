@@ -390,9 +390,9 @@ impl ThinkingStatus {
         let thread_rendered_lines = Arc::clone(&rendered_lines);
         let handle = thread::spawn(move || {
             while thread_running.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(1500));
+                thread::sleep(Duration::from_millis(1000));
                 if let Ok(mut snapshot) = thread_state.lock() {
-                    snapshot.status.tick = snapshot.status.tick.wrapping_add(4);
+                    snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
                     rerender_thinking(&snapshot, &thread_rendered_lines);
                 }
             }
@@ -493,9 +493,9 @@ impl ThinkingStatus {
         let thread_rendered_lines = Arc::clone(&self.rendered_lines);
         self.handle = Some(thread::spawn(move || {
             while thread_running.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(1500));
+                thread::sleep(Duration::from_millis(1000));
                 if let Ok(mut snapshot) = thread_state.lock() {
-                    snapshot.status.tick = snapshot.status.tick.wrapping_add(4);
+                    snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
                     rerender_thinking(&snapshot, &thread_rendered_lines);
                 }
             }
