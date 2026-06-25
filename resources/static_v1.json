@@ -190,7 +190,7 @@
         }
       },
       "run_bash": {
-        "when": "Shell sessions only: inspect the user's local computer such as OS/system info, current folder, logs, prompt artifacts, line counts, or make bounded local file edits when user asks and memory/chat tools are insufficient. It may execute normal shell commands, including file edits and git commands, when requested by the user and permitted by the configured approval mode. Do not claim edits, commits, or local changes must be done manually unless an action result says run_bash is unavailable, denied, failed, or timed out.",
+        "when": "Shell sessions only: inspect the user's local computer such as OS/system info, current folder, logs, prompt artifacts, line counts, or make bounded local file edits when user asks and memory/chat tools are insufficient. It may execute normal shell commands, including file edits and git commands, when requested by the user and permitted by the configured approval mode. If the user asks to apply a patch, edit files, git add, git commit, or otherwise change the local project, request run_bash with the needed command sequence instead of telling the user to do it manually. Do not claim edits, commits, or local changes must be done manually unless an action result says run_bash is unavailable, denied, failed, or timed out.",
         "input": {
           "command?": "string",
           "read_back_command?": "string",
@@ -229,7 +229,7 @@
       "intent_required": "Every next_actions item must include a concise top-level intent string; runtime displays it in UI and rejects missing intent once for repair.",
       "sql_safety": "memory_sql_query is read-only; writes must use memory_update. SQL params must match placeholders exactly.",
       "sql_tables": "memories(id, created_at_ms, content) stores durable facts. chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) stores UI-visible user/assistant chat transcript. Use chat_messages for questions about prior chats, exact wording, dates, last conversation, or recent N-day logs.",
-      "bash_safety": "For run_bash, request the minimal command needed for the task and use only the returned action result as evidence. Use background=true or mode=background for long-running tests, builds, package installs, video processing, or other commands likely to exceed the foreground limit; then poll with shell_job_status. If the action result says the command did not run, was denied, or is unavailable, do not claim it ran."
+      "bash_safety": "For run_bash, request the minimal command needed for the task and use only the returned action result as evidence. Write-capable shell commands are allowed when the user requests local project changes; approval behavior is controlled by runtime config, not by the model. Never invent a read-only limitation for run_bash. Use background=true or mode=background for long-running tests, builds, package installs, video processing, or other commands likely to exceed the foreground limit; then poll with shell_job_status. If the action result says the command did not run, was denied, or is unavailable, do not claim it ran."
     }
   },
   "Response_rule": {
