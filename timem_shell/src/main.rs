@@ -1,12 +1,13 @@
 use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreStep, UsageStats};
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fs;
+use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -118,36 +119,23 @@ fn main() {
     println!("输入 /prof 查看运行 profiling；输入 /exit 退出；Ctrl+C 取消当前输入。\n");
 
     let history_file = audit_file.with_file_name("shell_history.txt");
-    let mut editor = match DefaultEditor::new() {
-        Ok(editor) => editor,
-        Err(err) => {
-            eprintln!("[input_error] failed to initialize line editor: {err}");
-            return;
-        }
-    };
-    let _ = editor.load_history(&history_file);
+    let mut editor = ShellLineEditor::new(history_file);
     let mut prompt_status = PromptStatusBar::default();
 
     loop {
         let prompt = format!("[{}] 你 > ", time_label());
-        let input = match editor.readline(&prompt) {
-            Ok(input) => {
-                if !input.trim().is_empty() {
-                    let _ = editor.add_history_entry(input.as_str());
-                    let _ = editor.save_history(&history_file);
-                }
-                input
-            }
-            Err(ReadlineError::Interrupted) => {
+        let (input, submitted_display) = match editor.readline(&prompt) {
+            ShellReadline::Line { text, display } => (text, display),
+            ShellReadline::Interrupted => {
                 prompt_status.show_info("已取消当前输入。Ctrl+D 退出。");
                 continue;
             }
-            Err(ReadlineError::Eof) => {
+            ShellReadline::Eof => {
                 prompt_status.clear_before_exit();
                 println!("Bye.");
                 break;
             }
-            Err(err) => {
+            ShellReadline::Error(err) => {
                 eprintln!("[input_error] {err}");
                 break;
             }
@@ -170,7 +158,7 @@ fn main() {
             continue;
         }
 
-        rewrite_submitted_user_line(&input, prompt_status.take_visible());
+        rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
 
         let mut status = ThinkingStatus::start(&config.provider, &config.model);
         let (text, stats, elapsed) = run_turn(
@@ -619,7 +607,7 @@ fn choose_with_keyboard(
         return ApprovalChoice::Deny;
     }
     let mut raw = original;
-    raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
     raw.c_cc[libc::VMIN] = 1;
     raw.c_cc[libc::VTIME] = 1;
     if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
@@ -801,6 +789,532 @@ fn strip_csi_sequences(input: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+enum ShellReadline {
+    Line { text: String, display: String },
+    Interrupted,
+    Eof,
+    Error(String),
+}
+
+struct ShellLineEditor {
+    history_file: PathBuf,
+    history: Vec<String>,
+}
+
+enum ShellInputSource {
+    Tty(File),
+    Stdin(File),
+}
+
+impl ShellInputSource {
+    fn open() -> io::Result<Self> {
+        if let Ok(tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") {
+            return Ok(Self::Tty(tty));
+        }
+        let fd = unsafe { libc::dup(libc::STDIN_FILENO) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        Ok(Self::Stdin(file))
+    }
+}
+
+impl Read for ShellInputSource {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            ShellInputSource::Tty(file) | ShellInputSource::Stdin(file) => file.read(buf),
+        }
+    }
+}
+
+impl AsRawFd for ShellInputSource {
+    fn as_raw_fd(&self) -> i32 {
+        match self {
+            ShellInputSource::Tty(file) | ShellInputSource::Stdin(file) => file.as_raw_fd(),
+        }
+    }
+}
+
+impl ShellLineEditor {
+    fn new(history_file: PathBuf) -> Self {
+        let history = fs::read_to_string(&history_file)
+            .map(|content| {
+                content
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            history_file,
+            history,
+        }
+    }
+
+    fn readline(&mut self, prompt: &str) -> ShellReadline {
+        let Ok(mut input) = ShellInputSource::open() else {
+            return ShellReadline::Error("failed to open terminal input".to_string());
+        };
+        let fd = input.as_raw_fd();
+        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+            return ShellReadline::Error("failed to read terminal mode".to_string());
+        }
+        let mut raw = original;
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+        raw.c_cc[libc::VMIN] = 1;
+        raw.c_cc[libc::VTIME] = 1;
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+            return ShellReadline::Error("failed to enter raw terminal mode".to_string());
+        }
+        let mut terminal_mode = TerminalModeGuard::new(fd, original);
+        print!("\x1b[?2004h");
+
+        let mut buffer = ShellInputBuffer::default();
+        let mut rendered_rows = 0usize;
+        let mut history_cursor: Option<usize> = None;
+        render_shell_input(prompt, &buffer, &mut rendered_rows);
+
+        let result = loop {
+            match read_shell_key(&mut input) {
+                ShellInputKey::Char(ch) => {
+                    buffer.insert_text(&ch.to_string());
+                    history_cursor = None;
+                }
+                ShellInputKey::Paste(text) => {
+                    buffer.insert_paste(&sanitize_user_input(&text));
+                    history_cursor = None;
+                }
+                ShellInputKey::Backspace => {
+                    buffer.delete_before_cursor();
+                    history_cursor = None;
+                }
+                ShellInputKey::Delete => {
+                    buffer.delete_at_cursor();
+                    history_cursor = None;
+                }
+                ShellInputKey::Left => buffer.move_left(),
+                ShellInputKey::Right => buffer.move_right(),
+                ShellInputKey::HistoryPrev => {
+                    if !self.history.is_empty() {
+                        let next = history_cursor
+                            .map(|idx| idx.saturating_sub(1))
+                            .unwrap_or_else(|| self.history.len().saturating_sub(1));
+                        history_cursor = Some(next);
+                        buffer = ShellInputBuffer::from_text(self.history[next].clone());
+                    }
+                }
+                ShellInputKey::HistoryNext => {
+                    if let Some(idx) = history_cursor {
+                        let next = idx + 1;
+                        if next < self.history.len() {
+                            history_cursor = Some(next);
+                            buffer = ShellInputBuffer::from_text(self.history[next].clone());
+                        } else {
+                            history_cursor = None;
+                            buffer = ShellInputBuffer::default();
+                        }
+                    }
+                }
+                ShellInputKey::Enter => {
+                    buffer.move_to_end();
+                    render_shell_input(prompt, &buffer, &mut rendered_rows);
+                    let text = buffer.submit_text();
+                    let display = buffer.display_plain();
+                    println!();
+                    if !text.trim().is_empty() {
+                        self.push_history(&text);
+                    }
+                    break ShellReadline::Line { text, display };
+                }
+                ShellInputKey::Cancel => {
+                    println!();
+                    break ShellReadline::Interrupted;
+                }
+                ShellInputKey::Eof => {
+                    println!();
+                    break ShellReadline::Eof;
+                }
+                ShellInputKey::Other => {}
+            }
+            render_shell_input(prompt, &buffer, &mut rendered_rows);
+        };
+
+        print!("\x1b[?2004l");
+        let _ = io::stdout().flush();
+        terminal_mode.restore();
+        result
+    }
+
+    fn push_history(&mut self, text: &str) {
+        if text.contains('\n') {
+            return;
+        }
+        if self.history.last().is_some_and(|last| last == text) {
+            return;
+        }
+        self.history.push(text.to_string());
+        if self.history.len() > 500 {
+            let drain = self.history.len() - 500;
+            self.history.drain(0..drain);
+        }
+        let mut content = self.history.join("\n");
+        content.push('\n');
+        let _ = fs::write(&self.history_file, content);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ShellInputToken {
+    Text(String),
+    MultiLinePaste {
+        placeholder: String,
+        content: String,
+    },
+}
+
+impl ShellInputToken {
+    fn display_plain(&self) -> &str {
+        match self {
+            ShellInputToken::Text(text) => text,
+            ShellInputToken::MultiLinePaste { placeholder, .. } => placeholder,
+        }
+    }
+
+    fn submit_text(&self) -> &str {
+        match self {
+            ShellInputToken::Text(text) => text,
+            ShellInputToken::MultiLinePaste { content, .. } => content,
+        }
+    }
+
+    fn display_len(&self) -> usize {
+        self.display_plain().chars().count()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ShellInputBuffer {
+    tokens: Vec<ShellInputToken>,
+    cursor: usize,
+}
+
+impl ShellInputBuffer {
+    fn from_text(text: String) -> Self {
+        let cursor = text.chars().count();
+        Self {
+            tokens: vec![ShellInputToken::Text(text)],
+            cursor,
+        }
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.replace_visible_range(
+            self.cursor,
+            self.cursor,
+            vec![ShellInputToken::Text(text.to_string())],
+        );
+        self.cursor += text.chars().count();
+    }
+
+    fn insert_paste(&mut self, text: &str) {
+        let line_count = pasted_line_count(text);
+        if line_count <= 1 {
+            self.insert_text(text);
+            return;
+        }
+        let placeholder = format!("[ {line_count} lines ]");
+        let placeholder_len = placeholder.chars().count();
+        self.replace_visible_range(
+            self.cursor,
+            self.cursor,
+            vec![ShellInputToken::MultiLinePaste {
+                placeholder,
+                content: text.to_string(),
+            }],
+        );
+        self.cursor += placeholder_len;
+    }
+
+    fn delete_before_cursor(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let start = self.cursor - 1;
+        self.replace_visible_range(start, self.cursor, Vec::new());
+        self.cursor = start;
+    }
+
+    fn delete_at_cursor(&mut self) {
+        if self.cursor >= self.visible_len() {
+            return;
+        }
+        self.replace_visible_range(self.cursor, self.cursor + 1, Vec::new());
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.visible_len());
+    }
+
+    fn move_to_end(&mut self) {
+        self.cursor = self.visible_len();
+    }
+
+    fn visible_len(&self) -> usize {
+        self.tokens.iter().map(ShellInputToken::display_len).sum()
+    }
+
+    fn display_plain(&self) -> String {
+        self.tokens
+            .iter()
+            .map(ShellInputToken::display_plain)
+            .collect()
+    }
+
+    fn display_styled(&self) -> String {
+        let mut out = String::new();
+        for token in &self.tokens {
+            match token {
+                ShellInputToken::Text(text) => out.push_str(text),
+                ShellInputToken::MultiLinePaste { placeholder, .. } => {
+                    out.push_str("\x1b[1m");
+                    out.push_str(placeholder);
+                    out.push_str(ANSI_RESET);
+                }
+            }
+        }
+        out
+    }
+
+    fn submit_text(&self) -> String {
+        self.tokens
+            .iter()
+            .map(ShellInputToken::submit_text)
+            .collect()
+    }
+
+    fn display_prefix_before_cursor(&self) -> String {
+        char_prefix(&self.display_plain(), self.cursor)
+    }
+
+    fn replace_visible_range(
+        &mut self,
+        start: usize,
+        end: usize,
+        replacement: Vec<ShellInputToken>,
+    ) {
+        let mut next = Vec::new();
+        let mut inserted = false;
+        let mut pos = 0usize;
+
+        for token in &self.tokens {
+            let token_start = pos;
+            let token_end = token_start + token.display_len();
+            pos = token_end;
+
+            if end <= token_start {
+                if !inserted {
+                    next.extend(replacement.clone());
+                    inserted = true;
+                }
+                next.push(token.clone());
+                continue;
+            }
+            if start >= token_end {
+                next.push(token.clone());
+                continue;
+            }
+
+            let visible = token.display_plain();
+            if start > token_start {
+                next.push(ShellInputToken::Text(char_range(
+                    visible,
+                    0,
+                    start - token_start,
+                )));
+            }
+            if !inserted {
+                next.extend(replacement.clone());
+                inserted = true;
+            }
+            if end < token_end {
+                next.push(ShellInputToken::Text(char_range(
+                    visible,
+                    end - token_start,
+                    token_end - token_start,
+                )));
+            }
+        }
+
+        if !inserted {
+            next.extend(replacement);
+        }
+        self.tokens = merge_text_tokens(next);
+    }
+}
+
+fn merge_text_tokens(tokens: Vec<ShellInputToken>) -> Vec<ShellInputToken> {
+    let mut merged: Vec<ShellInputToken> = Vec::new();
+    for token in tokens {
+        match token {
+            ShellInputToken::Text(text) if text.is_empty() => {}
+            ShellInputToken::Text(text) => match merged.last_mut() {
+                Some(ShellInputToken::Text(previous)) => previous.push_str(&text),
+                _ => merged.push(ShellInputToken::Text(text)),
+            },
+            ShellInputToken::MultiLinePaste {
+                placeholder,
+                content,
+            } => merged.push(ShellInputToken::MultiLinePaste {
+                placeholder,
+                content,
+            }),
+        }
+    }
+    merged
+}
+
+fn pasted_line_count(text: &str) -> usize {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    normalized.split('\n').count()
+}
+
+fn char_prefix(text: &str, end: usize) -> String {
+    text.chars().take(end).collect()
+}
+
+fn char_range(text: &str, start: usize, end: usize) -> String {
+    text.chars().skip(start).take(end - start).collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ShellInputKey {
+    Char(char),
+    Paste(String),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    HistoryPrev,
+    HistoryNext,
+    Enter,
+    Cancel,
+    Eof,
+    Other,
+}
+
+fn read_shell_key(input: &mut impl Read) -> ShellInputKey {
+    let mut buf = [0u8; 1];
+    if input.read_exact(&mut buf).is_err() {
+        return ShellInputKey::Eof;
+    }
+    match buf[0] {
+        b'\r' | b'\n' => ShellInputKey::Enter,
+        3 => ShellInputKey::Cancel,
+        4 => ShellInputKey::Eof,
+        8 | 127 => ShellInputKey::Backspace,
+        27 => read_shell_escape(input),
+        byte if byte.is_ascii_control() => ShellInputKey::Other,
+        first => read_utf8_char(first, input)
+            .map(ShellInputKey::Char)
+            .unwrap_or(ShellInputKey::Other),
+    }
+}
+
+fn read_shell_escape(input: &mut impl Read) -> ShellInputKey {
+    let Some(seq) = read_escape_sequence(input) else {
+        return ShellInputKey::Cancel;
+    };
+    match seq.as_slice() {
+        [b'[', b'D'] => ShellInputKey::Left,
+        [b'[', b'C'] => ShellInputKey::Right,
+        [b'[', b'A'] => ShellInputKey::HistoryPrev,
+        [b'[', b'B'] => ShellInputKey::HistoryNext,
+        [b'[', b'3', b'~'] => ShellInputKey::Delete,
+        [b'[', b'2', b'0', b'0', b'~'] => ShellInputKey::Paste(read_bracketed_paste(input)),
+        _ => ShellInputKey::Other,
+    }
+}
+
+fn read_bracketed_paste(input: &mut impl Read) -> String {
+    let mut bytes = Vec::new();
+    let end = b"\x1b[201~";
+    loop {
+        let mut buf = [0u8; 1];
+        if input.read_exact(&mut buf).is_err() {
+            break;
+        }
+        bytes.push(buf[0]);
+        if bytes.ends_with(end) {
+            let new_len = bytes.len().saturating_sub(end.len());
+            bytes.truncate(new_len);
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn read_utf8_char(first: u8, input: &mut impl Read) -> Option<char> {
+    let width = if first < 0x80 {
+        1
+    } else if first & 0b1110_0000 == 0b1100_0000 {
+        2
+    } else if first & 0b1111_0000 == 0b1110_0000 {
+        3
+    } else if first & 0b1111_1000 == 0b1111_0000 {
+        4
+    } else {
+        return None;
+    };
+    let mut bytes = vec![first];
+    for _ in 1..width {
+        let mut buf = [0u8; 1];
+        input.read_exact(&mut buf).ok()?;
+        bytes.push(buf[0]);
+    }
+    std::str::from_utf8(&bytes).ok()?.chars().next()
+}
+
+fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, rendered_rows: &mut usize) {
+    if *rendered_rows > 1 {
+        print!("\r\x1b[{}F", *rendered_rows - 1);
+    } else {
+        print!("\r");
+    }
+    print!("\x1b[J{}{}", prompt, buffer.display_styled());
+
+    let width = terminal_width().max(1);
+    let prompt_width = display_width(prompt);
+    let plain = buffer.display_plain();
+    let total_width = prompt_width + display_width(&plain);
+    let cursor_width = prompt_width + display_width(&buffer.display_prefix_before_cursor());
+    let total_row = total_width / width;
+    let cursor_row = cursor_width / width;
+    let cursor_col = cursor_width % width;
+    if total_row > 0 {
+        print!("\x1b[{total_row}F");
+    }
+    print!("\r");
+    if cursor_row > 0 {
+        print!("\x1b[{cursor_row}B");
+    }
+    if cursor_col > 0 {
+        print!("\x1b[{cursor_col}C");
+    }
+    *rendered_rows = wrapped_terminal_rows(total_width, width);
+    let _ = io::stdout().flush();
 }
 
 fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
@@ -1199,11 +1713,11 @@ fn time_label() -> String {
 mod static_prompt_tests {
     use super::{
         cancelled_turn_result, consume_turn_cancel_request, display_width, epoch_millis, help_text,
-        random_spinner_tick, read_approval_key, render_approval_choices,
-        render_round_limit_choices, render_round_limit_prompt, render_startup_banner,
-        render_submitted_user_line_rewrite, render_user_approval_prompt, sanitize_user_input,
-        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ANSI_HIGHLIGHT, STATIC_PROMPT,
-        TURN_CANCEL_REQUESTED,
+        pasted_line_count, random_spinner_tick, read_approval_key, read_shell_key,
+        render_approval_choices, render_round_limit_choices, render_round_limit_prompt,
+        render_startup_banner, render_submitted_user_line_rewrite, render_user_approval_prompt,
+        sanitize_user_input, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ShellInputBuffer,
+        ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{ApprovalRequest, BashApprovalMode};
     use std::fs;
@@ -1590,6 +2104,100 @@ mod static_prompt_tests {
         assert_eq!(
             sanitize_user_input(input),
             "把20260623-211820.mp4 的分辨率降低一些"
+        );
+    }
+
+    #[test]
+    fn multiline_paste_displays_bold_placeholder_but_submits_full_text() {
+        let mut buffer = ShellInputBuffer::default();
+        buffer.insert_text("请处理 ");
+        buffer.insert_paste("alpha\nbeta\ngamma");
+        buffer.insert_text(" 谢谢");
+
+        assert_eq!(buffer.display_plain(), "请处理 [ 3 lines ] 谢谢");
+        assert_eq!(
+            buffer.display_styled(),
+            format!("请处理 \x1b[1m[ 3 lines ]{ANSI_RESET} 谢谢")
+        );
+        assert_eq!(buffer.submit_text(), "请处理 alpha\nbeta\ngamma 谢谢");
+    }
+
+    #[test]
+    fn editing_multiline_placeholder_disassociates_backing_content() {
+        let mut buffer = ShellInputBuffer::default();
+        buffer.insert_paste("alpha\nbeta\ngamma");
+        buffer.move_left();
+        buffer.move_left();
+        buffer.delete_before_cursor();
+
+        assert_eq!(buffer.display_plain(), "[ 3 line ]");
+        assert_eq!(buffer.submit_text(), "[ 3 line ]");
+        assert_eq!(buffer.display_styled(), "[ 3 line ]");
+    }
+
+    #[test]
+    fn deleting_next_placeholder_char_disassociates_backing_content() {
+        let mut buffer = ShellInputBuffer::default();
+        buffer.insert_text("x");
+        buffer.insert_paste("a\nb");
+        buffer.insert_text("y");
+        while buffer.display_prefix_before_cursor() != "x" {
+            buffer.move_left();
+        }
+        buffer.delete_at_cursor();
+
+        assert_eq!(buffer.display_plain(), "x 2 lines ]y");
+        assert_eq!(buffer.submit_text(), "x 2 lines ]y");
+    }
+
+    #[test]
+    fn single_line_paste_stays_plain_text() {
+        let mut buffer = ShellInputBuffer::default();
+        buffer.insert_paste("just one line");
+
+        assert_eq!(buffer.display_plain(), "just one line");
+        assert_eq!(buffer.display_styled(), "just one line");
+        assert_eq!(buffer.submit_text(), "just one line");
+    }
+
+    #[test]
+    fn pasted_line_count_handles_common_newline_shapes() {
+        assert_eq!(pasted_line_count("a"), 1);
+        assert_eq!(pasted_line_count("a\nb"), 2);
+        assert_eq!(pasted_line_count("a\r\nb\r\nc"), 3);
+        assert_eq!(pasted_line_count("a\nb\n"), 3);
+    }
+
+    #[test]
+    fn shell_key_reader_converts_bracketed_paste_to_paste_event() {
+        let mut input = Cursor::new(b"\x1b[200~a\nb\nc\x1b[201~".to_vec());
+        assert_eq!(
+            read_shell_key(&mut input),
+            ShellInputKey::Paste("a\nb\nc".to_string())
+        );
+    }
+
+    #[test]
+    fn shell_key_reader_handles_navigation_and_delete_keys() {
+        assert_eq!(
+            read_shell_key(&mut Cursor::new(vec![27, b'[', b'D'])),
+            ShellInputKey::Left
+        );
+        assert_eq!(
+            read_shell_key(&mut Cursor::new(vec![27, b'[', b'C'])),
+            ShellInputKey::Right
+        );
+        assert_eq!(
+            read_shell_key(&mut Cursor::new(vec![27, b'[', b'A'])),
+            ShellInputKey::HistoryPrev
+        );
+        assert_eq!(
+            read_shell_key(&mut Cursor::new(vec![27, b'[', b'B'])),
+            ShellInputKey::HistoryNext
+        );
+        assert_eq!(
+            read_shell_key(&mut Cursor::new(vec![27, b'[', b'3', b'~'])),
+            ShellInputKey::Delete
         );
     }
 
