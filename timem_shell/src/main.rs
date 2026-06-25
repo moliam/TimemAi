@@ -392,7 +392,7 @@ impl ThinkingStatus {
             while thread_running.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(1500));
                 if let Ok(mut snapshot) = thread_state.lock() {
-                    snapshot.status.tick = random_spinner_tick();
+                    snapshot.status.tick = snapshot.status.tick.wrapping_add(4);
                     rerender_thinking(&snapshot, &thread_rendered_lines);
                 }
             }
@@ -495,7 +495,7 @@ impl ThinkingStatus {
             while thread_running.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(1500));
                 if let Ok(mut snapshot) = thread_state.lock() {
-                    snapshot.status.tick = random_spinner_tick();
+                    snapshot.status.tick = snapshot.status.tick.wrapping_add(4);
                     rerender_thinking(&snapshot, &thread_rendered_lines);
                 }
             }

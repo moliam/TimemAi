@@ -5,6 +5,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const ANSI_BOLD: &str = "\x1b[1m";
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BLINK: &str = "\x1b[5m";
+const ANSI_REVERSE: &str = "\x1b[7m";
 const OBSERVATION_LINE_PREFIX: &str = "· ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,9 +163,14 @@ fn transient_label(transient: &TransientObservation) -> String {
 }
 
 pub fn render_observation_panel(panel: &ObservationPanel) -> String {
+    render_observation_panel_at(panel, 0)
+}
+
+pub fn render_observation_panel_at(panel: &ObservationPanel, tick: usize) -> String {
     if panel.is_empty() {
         return String::new();
     }
+    let active_highlight = ((tick / 4) % 2) == 0;
     let content_width = panel.max_width.saturating_sub(4).max(24);
     let title = " Thought / Action ";
     let mut out = String::new();
@@ -188,6 +194,9 @@ pub fn render_observation_panel(panel: &ObservationPanel) -> String {
             ObservationLineStyle::Normal => out.push_str(&padded),
             ObservationLineStyle::ActiveBlink => {
                 out.push_str(ANSI_BLINK);
+                if active_highlight {
+                    out.push_str(ANSI_REVERSE);
+                }
                 out.push_str(&padded);
                 out.push_str(ANSI_RESET);
             }
@@ -324,8 +333,21 @@ mod tests {
         panel.apply(ObservationEvent::Transient("思考中...".to_string()));
         let rendered = render_observation_panel(&panel);
         assert!(rendered.contains("\x1b[1m┏━ Thought / Action"));
-        assert!(rendered.contains("\x1b[5m· 思考中..."));
+        assert!(rendered.contains("\x1b[5m\x1b[7m· 思考中..."));
         assert!(rendered.contains('┗'));
+    }
+
+    #[test]
+    fn active_lines_software_blink_across_ticks() {
+        let mut panel = ObservationPanel::new(8, 48);
+        panel.apply(ObservationEvent::Active("执行 Bash: pwd".to_string()));
+
+        let highlighted = render_observation_panel_at(&panel, 0);
+        let dimmed = render_observation_panel_at(&panel, 4);
+
+        assert!(highlighted.contains("\x1b[5m\x1b[7m· 执行 Bash"));
+        assert!(dimmed.contains("\x1b[5m· 执行 Bash"));
+        assert!(!dimmed.contains("\x1b[7m· 执行 Bash"));
     }
 
     #[test]
@@ -388,11 +410,11 @@ mod tests {
     fn active_line_can_settle_to_normal() {
         let mut panel = ObservationPanel::new(8, 48);
         panel.apply(ObservationEvent::Active("执行 Bash: pwd".to_string()));
-        assert!(render_observation_panel(&panel).contains("\x1b[5m· 执行 Bash"));
+        assert!(render_observation_panel(&panel).contains("\x1b[5m\x1b[7m· 执行 Bash"));
         panel.apply(ObservationEvent::SettleActive);
         let rendered = render_observation_panel(&panel);
         assert!(rendered.contains("· 执行 Bash: pwd"));
-        assert!(!rendered.contains("\x1b[5m· 执行 Bash"));
+        assert!(!rendered.contains("\x1b[5m\x1b[7m· 执行 Bash"));
     }
 
     #[test]
