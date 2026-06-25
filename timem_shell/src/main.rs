@@ -123,7 +123,7 @@ fn main() {
     let mut prompt_status = PromptStatusBar::default();
 
     loop {
-        let prompt = format!("[{}] 你 > ", time_label());
+        let prompt = render_user_input_prompt(&time_label());
         let (input, submitted_display) = match editor.readline(&prompt) {
             ShellReadline::Line { text, display } => (text, display),
             ShellReadline::Interrupted => {
@@ -1524,13 +1524,17 @@ fn rewrite_submitted_user_line(input: &str, status_line_visible: bool) {
     let _ = io::stdout().flush();
 }
 
+fn render_user_input_prompt(time_label: &str) -> String {
+    format!("[{time_label}] \x1b[1mYou\x1b[0m ❯❯ ")
+}
+
 fn render_submitted_user_line_rewrite(
     input: &str,
     status_line_visible: bool,
     terminal_width: usize,
     time_label: &str,
 ) -> String {
-    let prompt_prefix = format!("[{}] 你 > ", time_label);
+    let prompt_prefix = render_user_input_prompt(time_label);
     let prompt_width = display_width(&prompt_prefix);
     let input_rows = wrapped_terminal_rows(prompt_width + display_width(input), terminal_width);
     let rows_to_clear = input_rows + usize::from(status_line_visible);
@@ -1830,9 +1834,10 @@ mod static_prompt_tests {
         pasted_line_count, random_spinner_tick, read_approval_key, read_shell_key,
         render_approval_choices, render_paste_recovery_choices, render_paste_recovery_prompt,
         render_round_limit_choices, render_round_limit_prompt, render_startup_banner,
-        render_submitted_user_line_rewrite, render_user_approval_prompt, sanitize_user_input,
-        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, PasteRecoverySummary, ShellInputBuffer,
-        ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
+        sanitize_user_input, wrapped_terminal_rows, ApprovalChoice, ApprovalKey,
+        PasteRecoverySummary, ShellInputBuffer, ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET,
+        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{ApprovalRequest, BashApprovalMode};
     use std::fs;
@@ -2379,7 +2384,15 @@ mod static_prompt_tests {
     fn submitted_user_line_rewrite_clears_wrapped_input_rows() {
         let rendered = render_submitted_user_line_rewrite("abcdef", false, 10, "12:00:00");
         assert!(rendered.starts_with("\x1b[3F\r\x1b[J"));
-        assert!(rendered.ends_with("[12:00:00] 你 > abcdef\n"));
+        assert!(rendered.ends_with("[12:00:00] \x1b[1mYou\x1b[0m ❯❯ abcdef\n"));
+    }
+
+    #[test]
+    fn user_input_prompt_uses_bold_you_and_double_arrow() {
+        assert_eq!(
+            render_user_input_prompt("12:00:00"),
+            "[12:00:00] \x1b[1mYou\x1b[0m ❯❯ "
+        );
     }
 
     #[test]
@@ -2391,7 +2404,7 @@ mod static_prompt_tests {
     #[test]
     fn wrapped_terminal_rows_counts_cjk_display_width() {
         assert_eq!(
-            wrapped_terminal_rows(display_width("[12:00:00] 你 > 你好"), 10),
+            wrapped_terminal_rows(display_width("[12:00:00] You ❯❯ 你好"), 20),
             2
         );
     }
