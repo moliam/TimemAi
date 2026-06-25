@@ -1031,9 +1031,72 @@ pub fn call_model(
         json!({"type":"llm_response","status":status,"body":redact_value(&raw_json)});
     let _ = append_audit(audit_file, &response_audit);
     if !(200..300).contains(&status) {
-        return Err(format!("provider_http_{}", status));
+        return Err(provider_http_error_message(status, &raw_json));
     }
     parse_llm_response(config, &raw_json)
+}
+
+pub fn provider_http_error_message(status: u16, body: &Value) -> String {
+    let reason = provider_error_reason(body)
+        .map(sanitize_provider_error_reason)
+        .filter(|text| !text.trim().is_empty());
+    match reason {
+        Some(reason) => format!("provider_http_{status}: {reason}"),
+        None => format!("provider_http_{status}"),
+    }
+}
+
+fn provider_error_reason(body: &Value) -> Option<String> {
+    for pointer in [
+        "/error/message",
+        "/error/code",
+        "/error/type",
+        "/message",
+        "/detail",
+        "/code",
+    ] {
+        if let Some(text) = body.pointer(pointer).and_then(Value::as_str) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    if let Some(error) = body.get("error").and_then(Value::as_str) {
+        if !error.trim().is_empty() {
+            return Some(error.to_string());
+        }
+    }
+    if let Some(raw) = body.get("raw_text").and_then(Value::as_str) {
+        if !raw.trim().is_empty() {
+            return Some(raw.to_string());
+        }
+    }
+    None
+}
+
+fn sanitize_provider_error_reason(reason: String) -> String {
+    let single_line = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = redact_secret_like_text(&single_line);
+    compact_status_text(&redacted, 240)
+}
+
+fn redact_secret_like_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|part| {
+            let lower = part.to_lowercase();
+            if lower.starts_with("sk-")
+                || lower.starts_with("bearer")
+                || lower.contains("api_key")
+                || lower.contains("apikey")
+                || lower.contains("authorization")
+            {
+                "***REDACTED***".to_string()
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn split_curl_body_status(stdout: &str) -> Result<(String, u16), String> {
@@ -2067,6 +2130,59 @@ mod tests {
         });
         let response = parse_llm_response(&config, &raw).unwrap();
         assert!(response.truncated);
+    }
+
+    #[test]
+    fn provider_http_error_includes_sanitized_provider_reason() {
+        let openai_like = json!({
+            "error": {
+                "message": "The model `missing-model` does not exist or you do not have access to it.",
+                "type": "invalid_request_error",
+                "code": "model_not_found"
+            }
+        });
+        assert_eq!(
+            provider_http_error_message(400, &openai_like),
+            "provider_http_400: The model `missing-model` does not exist or you do not have access to it."
+        );
+
+        let anthropic_like = json!({
+            "type": "error",
+            "error": {
+                "type": "not_found_error",
+                "message": "model: claude-missing not found"
+            }
+        });
+        assert_eq!(
+            provider_http_error_message(404, &anthropic_like),
+            "provider_http_404: model: claude-missing not found"
+        );
+
+        let raw_text = json!({"raw_text":"invalid Authorization Bearer sk-secret-token"});
+        let rendered = provider_http_error_message(401, &raw_text);
+        assert!(rendered.starts_with("provider_http_401:"));
+        assert!(rendered.contains("***REDACTED***"));
+        assert!(!rendered.contains("sk-secret-token"));
+
+        let long = provider_http_error_message(400, &json!({"error":{"message":"x ".repeat(400)}}));
+        assert!(long.contains('…'));
+        assert!(long.len() < 280);
+    }
+
+    #[test]
+    fn provider_http_error_is_resilient_to_unusual_bodies() {
+        for body in [
+            Value::Null,
+            json!("plain string error"),
+            json!(["array", "error"]),
+            json!({"error":{"message":null,"details":[{"x":1}]}}),
+            json!({"detail":{"nested":"not a string"}}),
+            json!({"raw_text":""}),
+        ] {
+            let rendered = provider_http_error_message(500, &body);
+            assert!(rendered.starts_with("provider_http_500"));
+            assert!(rendered.len() < 280);
+        }
     }
 
     #[test]
