@@ -129,11 +129,18 @@ Runtime shrink review and future shrink actions should use these ids:
 
 - Use `delta_id` when a whole logical delta is stale.
 - Use `slice_id` when only one rendered slice of a large delta is stale.
+- Each delta has a `durable_ctx_score` from 1 to 10. The model may provide it
+  in the top-level response envelope; runtime clamps it to 1..10 and otherwise
+  applies a conservative default. Low scores are better shrink candidates.
 - Runtime injects long-context shrink review when observed provider input
   tokens plus the new prompt delta estimate reaches about one third of
-  `TIMEM_MAX_LLM_CONTEXT`. The default context window is `100K`; new prompt
+  `TIMEM_MAX_LLM_CONTEXT`. After the first review, the next threshold advances
+  by one fifth of the window. The default context window is `100K`; new prompt
   delta text that has not yet gone through the provider is estimated as roughly
   `chars / 4`.
+- At 95% of the configured window, runtime marks shrink as required. The model
+  should use `prompt_shrink` before continuing and preserve only the active
+  work-relevant, higher-score knowledge in compact rewritten form.
 
 ### Prompt Delta
 
@@ -403,6 +410,11 @@ Current shell approval is configured at startup:
 
 The runtime validates structured action shape and command limits. It does not
 infer the user's semantic goal from the natural-language text.
+
+Short commands run in the foreground. Long-running commands should use
+`run_bash` with `background=true` or `mode=background`. Runtime returns a
+`job_id`, output file, and status file; the model then uses `shell_job_status`
+to poll the job instead of repeating the long command.
 
 ### Prompt Shrink Action
 

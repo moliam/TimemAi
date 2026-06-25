@@ -245,6 +245,10 @@ pub fn action_status_hint(content: &str) -> Option<ActionStatusHint> {
             intent: intent.unwrap_or_else(|| "检查本地文件".to_string()),
             memory_marker: String::new(),
         }),
+        "shell_job_status" => Some(ActionStatusHint {
+            intent: intent.unwrap_or_else(|| "检查后台任务".to_string()),
+            memory_marker: String::new(),
+        }),
         _ => None,
     }
 }
@@ -2004,6 +2008,16 @@ mod tests {
     fn action_status_hint_marks_run_bash_without_memory_icon() {
         let hint = action_status_hint(r#"{"next_actions":[{"action":"run_bash","intent":"统计日志行数","input":{"command":"rg --files | wc -l"}}]}"#).unwrap();
         assert_eq!(hint.intent, "统计日志行数");
+        assert_eq!(hint.memory_marker, "");
+    }
+
+    #[test]
+    fn action_status_hint_marks_shell_job_status_without_memory_icon() {
+        let hint = action_status_hint(
+            r#"{"next_actions":[{"action":"shell_job_status","intent":"检查后台测试","input":{"job_id":"job_1"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(hint.intent, "检查后台测试");
         assert_eq!(hint.memory_marker, "");
     }
 

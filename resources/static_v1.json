@@ -14,6 +14,7 @@
         "llm_response": "Runtime-created logical prompt delta from a model response or final answer already shown to the user; it may render as one or more prompt_delta slices.",
         "llm_thought": "Runtime-created logical prompt delta from the model's private reasoning draft, optional and not shown to the user; it may render as one or more prompt_delta slices."
       },
+      "durable_ctx_score": "Each new model response may include top-level durable_ctx_score from 1 to 10, estimating whether the new dynamic delta should stay in long context. 1 means disposable/raw transient detail, 5 means normal conversation context, 10 means highly reusable project/user/task knowledge. Runtime renders this score beside delta_id and may use it during prompt_shrink review.",
       "dynamic_fields": {
         "rounds_remaining": "Number of additional reasoning/action rounds available after the current model response. If 0, do not request new actions; return the best user-facing answer or progress summary.",
         "retrieval": "Runtime does not prefetch by default. Request memory/search actions only when evidence is needed.",
@@ -189,11 +190,13 @@
         }
       },
       "run_bash": {
-        "when": "Shell sessions only: inspect the user's local computer such as OS/system info, current folder, logs, prompt artifacts, line counts, or make bounded local file edits when user asks and memory/chat tools are insufficient.",
+        "when": "Shell sessions only: inspect the user's local computer such as OS/system info, current folder, logs, prompt artifacts, line counts, or make bounded local file edits when user asks and memory/chat tools are insufficient. It may execute normal shell commands, including file edits and git commands, when requested by the user and permitted by the configured approval mode. Do not claim edits, commits, or local changes must be done manually unless an action result says run_bash is unavailable, denied, failed, or timed out.",
         "input": {
           "command?": "string",
           "read_back_command?": "string",
           "timeout_ms?": "integer",
+          "background?": "boolean; true for long-running build/test/video commands that should return a job_id instead of blocking",
+          "mode?": "string; use background as alias for background=true",
           "large_readback_opt_in?": "object"
         },
         "example": {
@@ -202,6 +205,19 @@
           "input": {
             "command": "rg --files | wc -l",
             "timeout_ms": 5000
+          }
+        }
+      },
+      "shell_job_status": {
+        "when": "Check a long-running background shell job previously started by run_bash with background=true or mode=background.",
+        "input": {
+          "job_id": "string returned by the background run_bash result"
+        },
+        "example": {
+          "action": "shell_job_status",
+          "intent": "Check whether the background build finished.",
+          "input": {
+            "job_id": "job_1782200000000_1"
           }
         }
       }
@@ -213,7 +229,7 @@
       "intent_required": "Every next_actions item must include a concise top-level intent string; runtime displays it in UI and rejects missing intent once for repair.",
       "sql_safety": "memory_sql_query is read-only; writes must use memory_update. SQL params must match placeholders exactly.",
       "sql_tables": "memories(id, created_at_ms, content) stores durable facts. chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) stores UI-visible user/assistant chat transcript. Use chat_messages for questions about prior chats, exact wording, dates, last conversation, or recent N-day logs.",
-      "bash_safety": "For run_bash, request the minimal command needed for the task and use only the returned action result as evidence. If the action result says the command did not run, was denied, or is unavailable, do not claim it ran."
+      "bash_safety": "For run_bash, request the minimal command needed for the task and use only the returned action result as evidence. Use background=true or mode=background for long-running tests, builds, package installs, video processing, or other commands likely to exceed the foreground limit; then poll with shell_job_status. If the action result says the command did not run, was denied, or is unavailable, do not claim it ran."
     }
   },
   "Response_rule": {
@@ -241,6 +257,7 @@
         "memory_candidates?": "array; emit only for new/corrected durable facts",
         "diagnostics.intent_inference?": "string; enum one_of: time_constrained|exact_date|created_axis|none. Output only for time-related questions; omit for normal Q&A.",
         "diagnostics.self_audit?": "string; enum one_of: memory_write_worthy|fact_correction|prompt_shrink_recommended|scratch_checkpoint_needed|evidence_insufficient|none. Output the matching enum value when the corresponding situation is triggered; otherwise omit.",
+        "durable_ctx_score?": "integer 1..10; score whether the new delta should stay in long context. Prefer low scores for transient raw tool output or disposable thoughts, high scores for durable user/project/task facts and active work state.",
         "diagnostics.note?": "string"
       },
       "additional_properties": "allowed for forward compatibility; keep them sparse"
@@ -248,6 +265,7 @@
     "examples": {
       "minimal_satisfied": {
         "response_to_user": "好的，我明白了。",
+        "durable_ctx_score": 5,
         "acceptance_check": {
           "is_satisfied": true
         }
@@ -278,6 +296,7 @@
       "search_validity": "If a query returns hits but the results are not relevant, keep searching with sharper queries instead of concluding that no data exists.",
       "lang_retry": "If no relevant result is found, retry with alternate keywords and alternate languages at least twice before concluding that no record was found.",
       "no_result_terminate": "若 query_memory / chat_history_query / memory_sql_query 连续两次（含 lang_retry 换词）仍无相关结果，应停止工具调用，在 response_to_user 中坦诚告知用户未找到记录，并引导用户补充线索（时间、人物、关键词）。不要为了\"再试一次\"消耗 rounds_remaining。",
+      "long_running_shell": "For long-running local work, start run_bash with background=true or mode=background, then use shell_job_status. Do not repeatedly retry the same long command after a foreground timeout.",
       "redundancy_guard": "If planned next_actions are effectively the same as previous-round actions, do not repeat them. Change the search or reasoning strategy first.",
       "rounds_guard": "If rounds_remaining is 3 or lower, the answer is not satisfied, and no active checkpoint exists, write a scratch checkpoint with task, tried steps, blocker, and next step.",
       "perspective_rewrite": "Before final response_to_user, rewrite retrieved evidence into the current speaker perspective. Never answer by blindly copying memory text if pronouns or ownership would become wrong."
@@ -287,7 +306,7 @@
     "questions": [
       "Did the user state or confirm a fact that deserves durable memory_write because the model could not infer it independently?",
       "Did the discussion correct or refine a prior fact, requiring memory_write of the corrected version?",
-      "Is the current prompt carrying stale, irrelevant, or redundant dynamic prompt deltas or rendered slices that should be compacted with prompt_shrink? If the runtime provides delta_id or slice_id references, use delta_id for whole logical deltas and slice_id for specific rendered slices.",
+      "Is the current prompt carrying stale, irrelevant, or redundant dynamic prompt deltas or rendered slices that should be compacted with prompt_shrink? If the runtime provides delta_id, slice_id, or durable_ctx_score references, shrink low-score or stale content first, use delta_id for whole logical deltas and slice_id for specific rendered slices.",
       "Is the task likely to continue across turns and therefore needs a scratch checkpoint before finalizing?",
       "Is the available evidence sufficient for the answer, or should the model request more precise actions instead of guessing?"
     ],

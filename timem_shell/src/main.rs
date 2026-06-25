@@ -22,6 +22,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.json");
 const ANSI_RESET: &str = timem_shell::ANSI_RESET;
 const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
+static TURN_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 struct ConfigRow {
     key: &'static str,
@@ -185,6 +186,12 @@ fn run_turn(
     mut status: Option<&mut ThinkingStatus>,
     interactive_approval: bool,
 ) -> (String, UsageStats, Duration) {
+    TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    let _sigint_guard = if status.is_some() {
+        SigintGuard::install()
+    } else {
+        None
+    };
     let turn_id = format!("turn_{}", epoch_millis());
     let _ = append_audit(
         audit_file,
@@ -203,6 +210,13 @@ fn run_turn(
     let mut rounds = 0u32;
 
     let (text, stats, repair_issue) = loop {
+        if consume_turn_cancel_request() {
+            break (
+                "已取消本轮。".to_string(),
+                UsageStats::zero(),
+                Some("cancelled_by_user".to_string()),
+            );
+        }
         match step {
             CoreStep::NeedModel { prompt, .. } => {
                 rounds += 1;
@@ -211,6 +225,13 @@ fn run_turn(
                 }
                 match call_model(config, &prompt, audit_file) {
                     Ok(response) => {
+                        if consume_turn_cancel_request() {
+                            break (
+                                "已取消本轮。".to_string(),
+                                UsageStats::zero(),
+                                Some("cancelled_by_user".to_string()),
+                            );
+                        }
                         if let Some(status) = status.as_deref_mut() {
                             status.set_usage(response.usage.clone());
                             status.set_model_direction(rounds, ModelDirection::Downstream);
@@ -238,6 +259,10 @@ fn run_turn(
                 } else {
                     false
                 };
+                if consume_turn_cancel_request() {
+                    step = core.resolve_user_approval(&request.approval_id, false);
+                    continue;
+                }
                 let _ = append_audit(
                     audit_file,
                     &json!({
@@ -276,6 +301,10 @@ fn run_turn(
         }),
     );
     (text, stats, elapsed)
+}
+
+fn consume_turn_cancel_request() -> bool {
+    TURN_CANCEL_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
 struct ThinkingStatus {
@@ -542,6 +571,49 @@ fn read_escape_sequence(input: &mut impl Read) -> Option<Vec<u8>> {
         }
     }
     Some(seq)
+}
+
+struct SigintGuard {
+    previous: libc::sigaction,
+    active: bool,
+}
+
+impl SigintGuard {
+    fn install() -> Option<Self> {
+        unsafe extern "C" fn handle_sigint(_: libc::c_int) {
+            TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+        }
+
+        unsafe {
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            let mut next: libc::sigaction = std::mem::zeroed();
+            next.sa_sigaction = handle_sigint as usize;
+            libc::sigemptyset(&mut next.sa_mask);
+            next.sa_flags = 0;
+            if libc::sigaction(libc::SIGINT, &next, &mut previous) != 0 {
+                return None;
+            }
+            Some(Self {
+                previous,
+                active: true,
+            })
+        }
+    }
+
+    fn restore(&mut self) {
+        if self.active {
+            unsafe {
+                let _ = libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut());
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for SigintGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
 }
 
 fn sanitize_user_input(input: &str) -> String {
@@ -855,7 +927,7 @@ fn print_help() {
 }
 
 fn help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-tokens <n>               env TIMEM_MAX_TOKENS; max response tokens, default 2048\n  --max-llm-context <n|100K>     env TIMEM_MAX_LLM_CONTEXT; context window, default 100K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-tokens <n>               env TIMEM_MAX_TOKENS; max response tokens, default 2048\n  --max-llm-context <n|100K>     env TIMEM_MAX_LLM_CONTEXT; context window, default 100K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive keys:\n  Ctrl+C cancels the current input while editing, and cancels the current turn while Timem is thinking.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn format_token_count(value: u32) -> String {
@@ -910,14 +982,16 @@ fn time_label() -> String {
 #[cfg(test)]
 mod static_prompt_tests {
     use super::{
-        display_width, epoch_millis, help_text, random_spinner_tick, read_approval_key,
-        render_approval_choices, render_startup_banner, render_user_approval_prompt,
-        sanitize_user_input, ApprovalChoice, ApprovalKey, ANSI_HIGHLIGHT, STATIC_PROMPT,
+        consume_turn_cancel_request, display_width, epoch_millis, help_text, random_spinner_tick,
+        read_approval_key, render_approval_choices, render_startup_banner,
+        render_user_approval_prompt, sanitize_user_input, ApprovalChoice, ApprovalKey,
+        ANSI_HIGHLIGHT, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{ApprovalRequest, BashApprovalMode};
     use std::fs;
     use std::io::Cursor;
     use std::process::Command;
+    use std::sync::atomic::Ordering;
     use timem_shell::{ApiProtocol, ProviderConfig, SPINNER_ICONS};
 
     #[test]
@@ -948,6 +1022,9 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("\"scratch_query\""));
         assert!(STATIC_PROMPT.contains("\"scratch_delete\""));
         assert!(STATIC_PROMPT.contains("\"run_bash\""));
+        assert!(STATIC_PROMPT.contains("\"shell_job_status\""));
+        assert!(STATIC_PROMPT.contains("file edits and git commands"));
+        assert!(STATIC_PROMPT.contains("\"durable_ctx_score?\""));
         assert!(STATIC_PROMPT.contains("OS/system info"));
         assert!(STATIC_PROMPT.contains("\"intent_required\""));
         assert!(STATIC_PROMPT.contains("use only the returned action result as evidence"));
@@ -955,6 +1032,13 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("no_result_terminate"));
         assert!(STATIC_PROMPT.contains("self_audit"));
         assert!(STATIC_PROMPT.len() > 3_000);
+    }
+
+    #[test]
+    fn turn_cancel_flag_is_consumed_once() {
+        TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+        assert!(consume_turn_cancel_request());
+        assert!(!consume_turn_cancel_request());
     }
 
     #[test]
@@ -1105,6 +1189,8 @@ mod static_prompt_tests {
             "TIMEM_MAX_LLM_CONTEXT",
             "--bash-approval",
             "TIMEM_BASH_APPROVAL",
+            "Ctrl+C cancels the current input",
+            "cancels the current turn",
         ] {
             assert!(help.contains(expected), "missing help item: {expected}");
         }

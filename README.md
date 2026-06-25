@@ -164,7 +164,9 @@ gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 
 `TIMEM_MAX_LLM_CONTEXT` defaults to `100K`. Runtime asks the model to consider
 `prompt_shrink` when the observed provider input tokens plus the new prompt
-delta estimate reaches about one third of this value.
+delta estimate reaches about one third of this value. After that first review,
+the next review threshold advances by one fifth of the window each time. If the
+prompt reaches 95% of the configured window, runtime marks shrink as required.
 
 Override the default URL only when needed:
 
@@ -180,6 +182,7 @@ By default, runtime data is written under the directory where you start
 ```text
 data/<space>/api_audit.jsonl
 data/<space>/memory/
+data/<space>/memory/shell_jobs/
 data/<space>/shell_history.txt
 ```
 
@@ -195,6 +198,29 @@ you can keep the private env file anywhere and load it yourself:
 ```bash
 source /path/to/your/env
 ```
+
+## Local Shell Jobs
+
+`run_bash` runs short commands in the foreground. For long builds, tests,
+package installs, or video commands, the model can request:
+
+```json
+{
+  "action": "run_bash",
+  "intent": "Run a long local task.",
+  "input": {
+    "command": "cargo test",
+    "background": true
+  }
+}
+```
+
+Runtime returns a `job_id`, output file, and status file. The model should poll
+with `shell_job_status` instead of retrying the same command after a foreground
+timeout.
+
+While editing input, `Ctrl+C` cancels the current line. While Timem is thinking,
+`Ctrl+C` cancels the current turn without exiting the shell.
 
 ## Install Details
 

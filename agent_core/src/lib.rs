@@ -108,6 +108,8 @@ pub enum CoreStep {
 pub struct PromptDelta {
     pub delta_id: String,
     pub time_ms: i64,
+    #[serde(default = "default_durable_ctx_score")]
+    pub durable_ctx_score: u8,
     slices: Vec<PromptSlice>,
     #[serde(default)]
     pub hidden_slice_ids: Vec<String>,
@@ -116,6 +118,7 @@ pub struct PromptDelta {
 struct PromptSlice {
     delta_id: String,
     slice_id: String,
+    durable_ctx_score: u8,
     prompt_type: String,
     time_ms: i64,
     text: String,
@@ -143,6 +146,16 @@ pub struct ChatHistoryRecord {
     pub assistant_output: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellJobRecord {
+    pub id: String,
+    pub created_at_ms: i64,
+    pub pid: u32,
+    pub command: String,
+    pub output_file: String,
+    pub status_file: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedAction {
     action: String,
@@ -156,6 +169,8 @@ struct ParsedAction {
     command: String,
     read_back_command: String,
     large_readback_opt_in: bool,
+    background: bool,
+    job_id: String,
     delta_ids: Vec<String>,
     slice_ids: Vec<String>,
     timeout_ms: u64,
@@ -169,6 +184,7 @@ struct ParsedEnvelope {
     thought: String,
     next_actions: Vec<ParsedAction>,
     memory_candidates: Vec<String>,
+    durable_ctx_score: Option<u8>,
     repair_issue: Option<String>,
 }
 
@@ -178,6 +194,7 @@ struct PendingApproval {
     command: String,
     read_back_command: String,
     large_readback_opt_in: bool,
+    background: bool,
     timeout_ms: u64,
     intent: String,
 }
@@ -197,9 +214,10 @@ pub struct AgentCore {
     memory: FileMemoryStore,
     scratch: FileScratchStore,
     chat_history: FileChatHistoryStore,
+    shell_jobs: FileShellJobStore,
     deltas: Vec<PromptDelta>,
     max_llm_context_tokens: u32,
-    last_shrink_review_prompt_tokens: u32,
+    next_shrink_review_prompt_tokens: u32,
     last_observed_prompt_tokens: u32,
     max_rounds: u32,
     current_round: u32,
@@ -221,9 +239,10 @@ impl AgentCore {
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
+            shell_jobs: FileShellJobStore::new(memory_dir),
             deltas: Vec::new(),
             max_llm_context_tokens: 100_000,
-            last_shrink_review_prompt_tokens: 0,
+            next_shrink_review_prompt_tokens: 0,
             last_observed_prompt_tokens: 0,
             max_rounds: 8,
             current_round: 0,
@@ -275,7 +294,7 @@ impl AgentCore {
             let result = self.runtime_memory_precheck(user_input, 5);
             slices.push(("result_of_llm_action".to_string(), result));
         }
-        self.append_delta(slices);
+        self.append_delta(slices, None);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
             rounds_remaining: self.max_rounds,
@@ -299,7 +318,7 @@ impl AgentCore {
             if !self.repair_attempted {
                 self.repair_attempted = true;
                 slices.push(("result_of_llm_action".to_string(), format!("Protocol repair request\nissue: {}\nReturn exactly one valid JSON object with response_to_user. Do not use markdown fences.", issue)));
-                self.append_delta(slices);
+                self.append_delta(slices, parsed.durable_ctx_score);
                 return CoreStep::NeedModel {
                     prompt: self.render_prompt(),
                     rounds_remaining: self.remaining_rounds(),
@@ -315,7 +334,7 @@ impl AgentCore {
                 "llm_response".to_string(),
                 format!("Response shown to user:\n{}", final_text),
             ));
-            self.append_delta(slices);
+            self.append_delta(slices, parsed.durable_ctx_score);
             return CoreStep::Final(TurnFinal {
                 response_to_user: final_text,
                 stats: self.current_stats.clone(),
@@ -335,7 +354,7 @@ impl AgentCore {
                                 result_lines.join("\n\n"),
                             ));
                         }
-                        self.append_delta(slices);
+                        self.append_delta(slices, parsed.durable_ctx_score);
                         let request = pending.request.clone();
                         self.pending_approval = Some(pending);
                         return CoreStep::NeedsUserApproval { request };
@@ -348,7 +367,7 @@ impl AgentCore {
                     result_lines.join("\n\n"),
                 ));
             }
-            self.append_delta(slices);
+            self.append_delta(slices, parsed.durable_ctx_score);
             return CoreStep::NeedModel {
                 prompt: self.render_prompt(),
                 rounds_remaining: self.remaining_rounds(),
@@ -370,7 +389,7 @@ impl AgentCore {
             "llm_response".to_string(),
             format!("Response shown to user:\n{}", final_text),
         ));
-        self.append_delta(slices);
+        self.append_delta(slices, parsed.durable_ctx_score);
         CoreStep::Final(TurnFinal {
             response_to_user: final_text,
             stats: self.current_stats.clone(),
@@ -380,13 +399,16 @@ impl AgentCore {
     }
     pub fn resolve_user_approval(&mut self, approval_id: &str, approved: bool) -> CoreStep {
         let Some(pending) = self.pending_approval.take() else {
-            self.append_delta(vec![(
-                "result_of_llm_action".to_string(),
-                format!(
-                    "Action result: user_approval\napproval_id: {}\nerror: no_pending_approval",
-                    approval_id
-                ),
-            )]);
+            self.append_delta(
+                vec![(
+                    "result_of_llm_action".to_string(),
+                    format!(
+                        "Action result: user_approval\napproval_id: {}\nerror: no_pending_approval",
+                        approval_id
+                    ),
+                )],
+                None,
+            );
             return CoreStep::NeedModel {
                 prompt: self.render_prompt(),
                 rounds_remaining: self.remaining_rounds(),
@@ -402,8 +424,10 @@ impl AgentCore {
                 &pending.command,
                 &pending.read_back_command,
                 pending.large_readback_opt_in,
+                pending.background,
                 pending.timeout_ms,
                 &pending.request,
+                &self.shell_jobs,
             )
         } else {
             format!(
@@ -411,7 +435,7 @@ impl AgentCore {
                 pending.command, pending.request.approval_id, pending.request.reason
             )
         };
-        self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
+        self.append_delta(vec![("result_of_llm_action".to_string(), result)], None);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
             rounds_remaining: self.remaining_rounds(),
@@ -427,8 +451,12 @@ impl AgentCore {
             out.push('\n');
             out.push_str(&format!("[BEGIN SEGMENT {}: prompt_delta]\n", idx + 1));
             out.push_str(&format!(
-                "delta_id: {}\nslice_id: {}\nslice: {}/{}\n",
-                slice.delta_id, slice.slice_id, slice.slice_index, slice.slice_count
+                "delta_id: {}\ndurable_ctx_score: {}\nslice_id: {}\nslice: {}/{}\n",
+                slice.delta_id,
+                slice.durable_ctx_score,
+                slice.slice_id,
+                slice.slice_index,
+                slice.slice_count
             ));
             out.push_str(&format!(
                 "prompt_type: {}\n{}\ntime: {}\n",
@@ -447,7 +475,7 @@ impl AgentCore {
     fn remaining_rounds(&self) -> u32 {
         self.max_rounds.saturating_sub(self.current_round)
     }
-    fn append_delta(&mut self, slice_texts: Vec<(String, String)>) {
+    fn append_delta(&mut self, slice_texts: Vec<(String, String)>, durable_ctx_score: Option<u8>) {
         if slice_texts.is_empty() {
             return;
         }
@@ -464,6 +492,14 @@ impl AgentCore {
             })
             .collect::<Vec<_>>();
         let slice_count = chunks.len();
+        let inferred_score = durable_ctx_score.unwrap_or_else(|| {
+            infer_durable_ctx_score_from_chunks(
+                &chunks
+                    .iter()
+                    .map(|(prompt_type, _, text)| (prompt_type.as_str(), text.as_str()))
+                    .collect::<Vec<_>>(),
+            )
+        });
         let slices = chunks
             .into_iter()
             .enumerate()
@@ -476,6 +512,7 @@ impl AgentCore {
                         delta_id.trim_start_matches("pd_"),
                         slice_index
                     ),
+                    durable_ctx_score: inferred_score,
                     prompt_type,
                     time_ms,
                     text,
@@ -487,39 +524,63 @@ impl AgentCore {
         self.deltas.push(PromptDelta {
             delta_id,
             time_ms: timestamp,
+            durable_ctx_score: inferred_score,
             slices,
             hidden_slice_ids: Vec::new(),
         });
     }
     fn consume_shrink_review_if_needed(&mut self, incoming_prompt_tokens: u32) -> Option<String> {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
-        let threshold = self.max_llm_context_tokens / 3;
+        let first_threshold = self.max_llm_context_tokens / 3;
+        let followup_step = self.max_llm_context_tokens / 5;
+        let force_threshold = self.max_llm_context_tokens.saturating_mul(95) / 100;
+        let threshold = if self.next_shrink_review_prompt_tokens == 0 {
+            first_threshold
+        } else {
+            self.next_shrink_review_prompt_tokens
+        };
         let slices = self.render_prompt_slices();
         if slices.is_empty() {
             return None;
         }
-        if estimated_prompt_tokens < threshold {
-            return None;
-        }
-        if self.last_shrink_review_prompt_tokens > 0
-            && estimated_prompt_tokens
-                < self
-                    .last_shrink_review_prompt_tokens
-                    .saturating_add(threshold)
-        {
+        let force_shrink = estimated_prompt_tokens >= force_threshold;
+        if estimated_prompt_tokens < threshold && !force_shrink {
             return None;
         }
         let current_count = self.deltas.len();
         let slice_count = slices.len();
+        let delta_refs = self
+            .deltas
+            .iter()
+            .filter(|delta| !render_delta_slices(delta).is_empty())
+            .rev()
+            .take(12)
+            .map(|delta| {
+                let token_estimate = render_delta_slices(delta)
+                    .iter()
+                    .map(|slice| estimate_prompt_tokens(&slice.text))
+                    .sum::<u32>();
+                format!(
+                    "- delta_id={} durable_ctx_score={} time_ms={} visible_slices={} estimated_tokens={}",
+                    delta.delta_id,
+                    delta.durable_ctx_score,
+                    delta.time_ms,
+                    render_delta_slices(delta).len(),
+                    token_estimate
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let recent_refs = slices
             .iter()
             .rev()
             .take(8)
             .map(|slice| {
                 format!(
-                    "- slice_id={} delta_id={} slice={}/{} prompt_type={} time_ms={}",
+                    "- slice_id={} delta_id={} durable_ctx_score={} slice={}/{} prompt_type={} time_ms={}",
                     slice.slice_id,
                     slice.delta_id,
+                    slice.durable_ctx_score,
                     slice.slice_index,
                     slice.slice_count,
                     slice.prompt_type,
@@ -528,9 +589,20 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        self.last_shrink_review_prompt_tokens = estimated_prompt_tokens;
+        self.next_shrink_review_prompt_tokens =
+            estimated_prompt_tokens.saturating_add(followup_step);
+        let mode = if force_shrink {
+            "force_shrink_required"
+        } else {
+            "shrink_review"
+        };
+        let instruction = if force_shrink {
+            "Context is above 95% of the configured window. You must use prompt_shrink before continuing: remove low durable_ctx_score or stale dynamic deltas/slices, and rewrite a compact summary for only the current work-relevant and high durable_ctx_score knowledge in response_to_user or scratch/memory actions as appropriate. Do not target prompt_0."
+        } else {
+            "Decide whether stale or irrelevant dynamic prompt deltas or rendered slices should be compacted with prompt_shrink. Prefer shrinking low durable_ctx_score content first. If suggesting shrink, refer to delta_id for whole logical deltas or slice_id for specific rendered slices; if not, continue normally."
+        };
         Some(format!(
-            "estimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_context_tokens={}\nshrink_review_threshold_tokens={threshold}\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_slice_refs:\n{recent_refs}\nDecide whether stale or irrelevant dynamic prompt deltas or rendered slices should be compacted with prompt_shrink. If suggesting shrink, refer to delta_id for whole logical deltas or slice_id for specific rendered slices; if not, continue normally.",
+            "mode={mode}\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_context_tokens={}\nshrink_review_threshold_tokens={threshold}\nfirst_shrink_review_threshold_tokens={first_threshold}\nnext_shrink_review_step_tokens={followup_step}\nforce_shrink_threshold_tokens={force_threshold}\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
             self.max_llm_context_tokens
         ))
     }
@@ -848,15 +920,21 @@ impl AgentCore {
                 self.current_stats.tool_calls += 1;
                 self.apply_prompt_shrink(&action.delta_ids, &action.slice_ids)
             }
+            "shell_job_status" => {
+                self.current_stats.tool_calls += 1;
+                self.shell_jobs.status(&action.job_id)
+            }
             "run_bash" => {
                 self.current_stats.tool_calls += 1;
                 return execute_guarded_bash(
                     &action.command,
                     &action.read_back_command,
                     action.large_readback_opt_in,
+                    action.background,
                     action.timeout_ms,
                     self.bash_approval_mode,
                     &action.intent,
+                    &self.shell_jobs,
                 );
             }
             other => format!("Action result: {}\nunsupported native action", other),
@@ -930,6 +1008,9 @@ impl AgentCore {
             .current_stats
             .shrunk_tokens
             .saturating_add(shrunk_tokens_estimate);
+        if removed_delta_count > 0 || hidden_slice_count > 0 {
+            self.next_shrink_review_prompt_tokens = 0;
+        }
 
         let missing_text = if missing.is_empty() {
             "none".to_string()
@@ -1381,6 +1462,128 @@ impl FileScratchStore {
 }
 
 #[derive(Debug, Clone)]
+struct FileShellJobStore {
+    dir: PathBuf,
+    index_file: PathBuf,
+}
+
+impl FileShellJobStore {
+    fn new(memory_dir: &Path) -> Self {
+        let dir = memory_dir.join("shell_jobs");
+        let _ = fs::create_dir_all(&dir);
+        Self {
+            index_file: dir.join("jobs.jsonl"),
+            dir,
+        }
+    }
+
+    fn spawn(&self, command: &str) -> String {
+        let clean = command.trim();
+        if clean.is_empty() {
+            return "Action result: run_bash\nerror: command_required".to_string();
+        }
+        let _ = fs::create_dir_all(&self.dir);
+        let id = unique_id("job");
+        let output_file = self.dir.join(format!("{id}.out"));
+        let status_file = self.dir.join(format!("{id}.status"));
+        let script = format!(
+            "({}) > {} 2>&1; printf '%s' \"$?\" > {}",
+            clean,
+            shell_quote_path(&output_file),
+            shell_quote_path(&status_file)
+        );
+        let spawn = Command::new("/bin/sh")
+            .arg("-lc")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let child = match spawn {
+            Ok(child) => child,
+            Err(_) => {
+                return format!(
+                    "Action result: run_bash\ncommand: {}\nerror: background_spawn_failed",
+                    clean
+                )
+            }
+        };
+        let record = ShellJobRecord {
+            id: id.clone(),
+            created_at_ms: now_ms(),
+            pid: child.id(),
+            command: clean.to_string(),
+            output_file: output_file.to_string_lossy().to_string(),
+            status_file: status_file.to_string_lossy().to_string(),
+        };
+        let _ = self.append(&record);
+        format!(
+            "Action result: run_bash\ncommand: {}\nstatus: background_started\njob_id: {}\npid: {}\noutput_file: {}\nstatus_file: {}\nnext_action: shell_job_status",
+            clean, record.id, record.pid, record.output_file, record.status_file
+        )
+    }
+
+    fn status(&self, job_id: &str) -> String {
+        let clean_id = job_id.trim();
+        if clean_id.is_empty() {
+            return "Action result: shell_job_status\nerror: job_id_required".to_string();
+        }
+        let Some(record) = self.find(clean_id) else {
+            return format!(
+                "Action result: shell_job_status\njob_id: {}\nerror: job_not_found",
+                clean_id
+            );
+        };
+        let status_text = fs::read_to_string(&record.status_file)
+            .ok()
+            .map(|text| text.trim().to_string());
+        let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+        match status_text {
+            Some(code) if !code.is_empty() => format!(
+                "Action result: shell_job_status\njob_id: {}\nstate: finished\nexit_code: {}\noutput_file: {}\noutput:\n{}",
+                record.id,
+                code,
+                record.output_file,
+                compact_text(&output, 4000)
+            ),
+            _ => format!(
+                "Action result: shell_job_status\njob_id: {}\nstate: running\npid: {}\noutput_file: {}\npartial_output:\n{}",
+                record.id,
+                record.pid,
+                record.output_file,
+                compact_text(&output, 2000)
+            ),
+        }
+    }
+
+    fn append(&self, record: &ShellJobRecord) -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.index_file)?;
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(record).unwrap_or_default()
+        )
+    }
+
+    fn find(&self, job_id: &str) -> Option<ShellJobRecord> {
+        let file = OpenOptions::new().read(true).open(&self.index_file).ok()?;
+        let mut found = None;
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let Ok(record) = serde_json::from_str::<ShellJobRecord>(&line) else {
+                continue;
+            };
+            if record.id == job_id {
+                found = Some(record);
+            }
+        }
+        found
+    }
+}
+
+#[derive(Debug, Clone)]
 struct FileChatHistoryStore {
     audit_file: PathBuf,
 }
@@ -1643,6 +1846,45 @@ fn estimate_prompt_tokens(text: &str) -> u32 {
     text.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
 
+fn default_durable_ctx_score() -> u8 {
+    5
+}
+
+fn clamp_durable_ctx_score(raw: u64) -> u8 {
+    raw.clamp(1, 10) as u8
+}
+
+fn infer_durable_ctx_score_from_chunks(chunks: &[(&str, &str)]) -> u8 {
+    if chunks
+        .iter()
+        .any(|(prompt_type, _)| *prompt_type == "result_of_llm_action")
+    {
+        return 4;
+    }
+    if chunks
+        .iter()
+        .any(|(prompt_type, _)| *prompt_type == "llm_thought")
+    {
+        return 3;
+    }
+    if chunks.iter().any(|(_, text)| {
+        let lowered = text.to_lowercase();
+        lowered.contains("remember")
+            || lowered.contains("记住")
+            || lowered.contains("以后")
+            || lowered.contains("长期")
+            || lowered.contains("生日")
+    }) {
+        return 8;
+    }
+    default_durable_ctx_score()
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    format!("'{}'", raw.replace('\'', "'\\''"))
+}
+
 fn parse_envelope(content: &str) -> ParsedEnvelope {
     let value: Value = match parse_json_value_from_model_text(content) {
         Ok(value) => value,
@@ -1652,6 +1894,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 thought: String::new(),
                 next_actions: vec![],
                 memory_candidates: vec![],
+                durable_ctx_score: None,
                 repair_issue: Some("invalid_json".to_string()),
             }
         }
@@ -1662,6 +1905,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
             thought: String::new(),
             next_actions: vec![],
             memory_candidates: vec![],
+            durable_ctx_score: None,
             repair_issue: Some("root_must_be_json_object".to_string()),
         };
     }
@@ -1680,6 +1924,10 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         .filter(|text| !text.is_empty())
         .map(ToString::to_string)
         .unwrap_or_default();
+    let durable_ctx_score = value
+        .get("durable_ctx_score")
+        .and_then(Value::as_u64)
+        .map(clamp_durable_ctx_score);
     let acceptance_satisfied = value
         .get("acceptance_check")
         .and_then(|check| check.get("is_satisfied"))
@@ -1773,6 +2021,23 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .get("large_readback_opt_in")
                     .or_else(|| action.get("large_readback_opt_in"))
                     .is_some();
+                let background = input
+                    .get("background")
+                    .or_else(|| action.get("background"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || input
+                        .get("mode")
+                        .or_else(|| action.get("mode"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("background"));
+                let job_id = input
+                    .get("job_id")
+                    .or_else(|| action.get("job_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 let delta_ids = input
                     .get("delta_ids")
                     .or_else(|| action.get("delta_ids"))
@@ -1868,6 +2133,13 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                             break;
                         }
                     }
+                    "shell_job_status" => {
+                        if job_id.is_empty() {
+                            repair_issue =
+                                Some(format!("next_actions[{idx}].input.job_id_required"));
+                            break;
+                        }
+                    }
                     "run_bash" => {
                         if command.is_empty() && read_back_command.is_empty() {
                             repair_issue =
@@ -1907,6 +2179,8 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     command,
                     read_back_command,
                     large_readback_opt_in,
+                    background,
+                    job_id,
                     delta_ids,
                     slice_ids,
                     timeout_ms,
@@ -1971,6 +2245,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         thought,
         next_actions,
         memory_candidates,
+        durable_ctx_score,
         repair_issue,
     }
 }
@@ -2268,9 +2543,11 @@ fn execute_guarded_bash(
     command: &str,
     read_back_command: &str,
     large_readback_opt_in: bool,
+    background: bool,
     timeout_ms: u64,
     approval_mode: BashApprovalMode,
     intent: &str,
+    shell_jobs: &FileShellJobStore,
 ) -> ActionExecution {
     let primary_command = command.trim();
     let read_back = read_back_command.trim();
@@ -2285,7 +2562,7 @@ fn execute_guarded_bash(
             command_to_run, reason
         ));
     }
-    if !read_back.is_empty() && read_back != command_to_run {
+    if !background && !read_back.is_empty() && read_back != command_to_run {
         if let Err(reason) = validate_bash_request(read_back) {
             return ActionExecution::Completed(format!(
                 "Action result: run_bash\ncommand: {}\nerror: {}",
@@ -2307,12 +2584,16 @@ fn execute_guarded_bash(
             command: command_to_run.to_string(),
             read_back_command: read_back.to_string(),
             large_readback_opt_in,
+            background,
             timeout_ms,
             intent: intent.to_string(),
         });
     }
+    if background {
+        return ActionExecution::Completed(shell_jobs.spawn(command_to_run));
+    }
     let mut result = execute_one_bash(command_to_run, timeout_ms);
-    if !read_back.is_empty() && read_back != command_to_run {
+    if !background && !read_back.is_empty() && read_back != command_to_run {
         result.push_str("\n\n");
         result.push_str("Read-back result:\n");
         result.push_str(&execute_one_bash(read_back, timeout_ms));
@@ -2329,8 +2610,10 @@ fn execute_approved_bash(
     command: &str,
     read_back_command: &str,
     large_readback_opt_in: bool,
+    background: bool,
     timeout_ms: u64,
     request: &ApprovalRequest,
+    shell_jobs: &FileShellJobStore,
 ) -> String {
     let primary_command = command.trim();
     let read_back = read_back_command.trim();
@@ -2339,7 +2622,11 @@ fn execute_approved_bash(
     } else {
         primary_command
     };
-    let mut result = execute_one_bash(command_to_run, timeout_ms);
+    let mut result = if background {
+        shell_jobs.spawn(command_to_run)
+    } else {
+        execute_one_bash(command_to_run, timeout_ms)
+    };
     if !read_back.is_empty() && read_back != command_to_run {
         result.push_str("\n\n");
         result.push_str("Read-back result:\n");
@@ -2431,7 +2718,7 @@ fn validate_bash_request(command: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("command_required".to_string());
     }
-    if trimmed.len() > 500 {
+    if trimmed.len() > 2000 {
         return Err("command_too_long".to_string());
     }
     Ok(())

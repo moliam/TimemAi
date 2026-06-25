@@ -64,6 +64,19 @@ fn first_field_value(prompt: &str, field: &str) -> String {
         .to_string()
 }
 
+fn action_result_field(prompt: &str, field: &str) -> String {
+    first_field_value(prompt, field)
+}
+
+fn key_value(prompt: &str, key: &str) -> String {
+    let prefix = format!("{key}=");
+    prompt
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or("")
+        .to_string()
+}
+
 fn field_values(prompt: &str, field: &str) -> Vec<String> {
     let prefix = format!("{field}: ");
     prompt
@@ -156,6 +169,25 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(slice_markers[2], "2/2");
     assert!(prompt.contains("prompt_type: llm_thought"));
     assert!(prompt.contains("prompt_type: llm_response"));
+}
+
+#[test]
+fn model_can_score_new_delta_for_long_context_retention() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("durable_ctx_score"),
+    );
+    let _ = core.begin_turn("记住这个项目决策", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"已记录这个项目决策。","durable_ctx_score":9,"acceptance_check":{"is_satisfied":true}}"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("durable_ctx_score: 9"));
 }
 
 #[test]
@@ -284,7 +316,7 @@ fn long_context_injects_shrink_review_at_one_third_context_window() {
         tmp_dir("shrink_threshold"),
     );
     core.set_max_llm_context_tokens(3_000);
-    let _ = core.begin_turn(&"seed ".repeat(2_600), None);
+    let _ = core.begin_turn(&"seed ".repeat(900), None);
     let step = core.apply_model_response(LlmResponse {
         content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
             .to_string(),
@@ -377,6 +409,116 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
     assert!(prompt.contains("Long-context maintenance:"));
     assert!(prompt.contains("max_llm_context_tokens=3000"));
     assert!(prompt.contains("shrink_review_threshold_tokens=1000"));
+}
+
+#[test]
+fn long_context_repeats_review_every_one_fifth_after_first_review() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("shrink_followup_step"),
+    );
+    core.set_max_llm_context_tokens(3_000);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("first review", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Long-context maintenance:"));
+    assert!(prompt.contains("first_shrink_review_threshold_tokens=1000"));
+    assert!(prompt.contains("next_shrink_review_step_tokens=600"));
+    let first_estimate = key_value(&prompt, "estimated_prompt_tokens")
+        .parse::<u32>()
+        .unwrap();
+
+    let step = core.apply_model_response(LlmResponse {
+        content:
+            r#"{"response_to_user":"not shrinking yet","acceptance_check":{"is_satisfied":true}}"#
+                .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(first_estimate + 600),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = match core.begin_turn("second review", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Long-context maintenance:"));
+    assert!(prompt.contains("shrink_review_threshold_tokens="));
+    assert!(prompt.contains("next_shrink_review_step_tokens=600"));
+}
+
+#[test]
+fn long_context_forces_shrink_at_ninety_five_percent_window() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("shrink_force"),
+    );
+    core.set_max_llm_context_tokens(3_000);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(2_850),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("force review", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("mode=force_shrink_required"));
+    assert!(prompt.contains("force_shrink_threshold_tokens=2850"));
+    assert!(prompt.contains("You must use prompt_shrink before continuing"));
+    assert!(prompt.contains("durable_ctx_score="));
+}
+
+#[test]
+fn force_shrink_overrides_deferred_followup_threshold() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("shrink_force_overrides"),
+    );
+    core.set_max_llm_context_tokens(3_000);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(2_500),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = match core.begin_turn("first high review", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Long-context maintenance:"));
+    assert!(!prompt.contains("mode=force_shrink_required"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content:
+            r#"{"response_to_user":"still no shrink","acceptance_check":{"is_satisfied":true}}"#
+                .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(2_850),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = match core.begin_turn("force despite deferred threshold", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("mode=force_shrink_required"));
 }
 
 #[test]
@@ -1712,6 +1854,47 @@ fn run_bash_accepts_old_timeout_sec_field() {
     };
     assert!(prompt.contains("Action result: run_bash"));
     assert!(prompt.contains("status: 0"));
+}
+
+#[test]
+fn run_bash_can_start_and_poll_background_job() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_background"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("run a long task", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","input":{"command":"sleep 0.1; printf background-ok","background":true}}]}"#.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("status: background_started"));
+    let job_id = action_result_field(&prompt, "job_id");
+    assert!(job_id.starts_with("job_"));
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let step = core.apply_model_response(LlmResponse {
+        content: format!(
+            r#"{{"response_to_user":"","next_actions":[{{"action":"shell_job_status","intent":"Poll background task.","input":{{"job_id":"{}"}}}}]}}"#,
+            job_id
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: shell_job_status"));
+    assert!(prompt.contains("state: finished"));
+    assert!(prompt.contains("exit_code: 0"));
+    assert!(prompt.contains("background-ok"));
 }
 
 #[test]
