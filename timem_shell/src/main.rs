@@ -578,6 +578,21 @@ fn render_round_limit_choices(selected: ApprovalChoice) -> String {
     }
 }
 
+fn render_paste_recovery_prompt(summary: &PasteRecoverySummary) -> String {
+    format!(
+        "\n检测到 {count} 个粘贴关联标签可能被误编辑，原始粘贴内容共 {lines} 行。\n是否恢复关联粘贴文本？选择 Yes 会提交原始粘贴内容；选择 No 会把已编辑标签当普通文本提交。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        count = summary.dirty_count,
+        lines = summary.total_lines
+    )
+}
+
+fn render_paste_recovery_choices(selected: ApprovalChoice) -> String {
+    match selected {
+        ApprovalChoice::Allow => "\x1b[7m[ Yes ]\x1b[0m   No".to_string(),
+        ApprovalChoice::Deny => "  Yes   \x1b[7m[ No ]\x1b[0m".to_string(),
+    }
+}
+
 fn choose_user_approval(request: &ApprovalRequest) -> ApprovalChoice {
     print!("{}", render_user_approval_prompt(request));
     choose_with_keyboard(render_approval_choices, ApprovalChoice::Deny)
@@ -588,6 +603,11 @@ fn choose_round_limit_continue(max_rounds: u32) -> ApprovalChoice {
     choose_with_keyboard(render_round_limit_choices, ApprovalChoice::Allow)
 }
 
+fn choose_paste_recovery(summary: &PasteRecoverySummary) -> ApprovalChoice {
+    print!("{}", render_paste_recovery_prompt(summary));
+    choose_with_keyboard(render_paste_recovery_choices, ApprovalChoice::Allow)
+}
+
 fn choose_with_keyboard(
     render_choices: fn(ApprovalChoice) -> String,
     initial: ApprovalChoice,
@@ -596,11 +616,11 @@ fn choose_with_keyboard(
     print!("{}", render_choices(selected));
     let _ = io::stdout().flush();
 
-    let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") else {
+    let Ok(mut input) = ShellInputSource::open() else {
         println!();
         return ApprovalChoice::Deny;
     };
-    let fd = tty.as_raw_fd();
+    let fd = input.as_raw_fd();
     let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
     if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
         println!();
@@ -617,7 +637,7 @@ fn choose_with_keyboard(
     let mut terminal_mode = TerminalModeGuard::new(fd, original);
 
     let result = loop {
-        match read_approval_key(&mut tty) {
+        match read_approval_key(&mut input) {
             ApprovalKey::Toggle => {
                 selected = match selected {
                     ApprovalChoice::Allow => ApprovalChoice::Deny,
@@ -924,9 +944,17 @@ impl ShellLineEditor {
                 ShellInputKey::Enter => {
                     buffer.move_to_end();
                     render_shell_input(prompt, &buffer, &mut rendered_rows);
-                    let text = buffer.submit_text();
                     let display = buffer.display_plain();
                     println!();
+                    print!("\x1b[?2004l");
+                    terminal_mode.restore();
+                    let restore_dirty = buffer
+                        .dirty_paste_summary()
+                        .map(|summary| {
+                            matches!(choose_paste_recovery(&summary), ApprovalChoice::Allow)
+                        })
+                        .unwrap_or(false);
+                    let text = buffer.submit_text(restore_dirty);
                     if !text.trim().is_empty() {
                         self.push_history(&text);
                     }
@@ -973,8 +1001,10 @@ impl ShellLineEditor {
 enum ShellInputToken {
     Text(String),
     MultiLinePaste {
-        placeholder: String,
+        original_placeholder: String,
+        visible_placeholder: String,
         content: String,
+        line_count: usize,
     },
 }
 
@@ -982,20 +1012,50 @@ impl ShellInputToken {
     fn display_plain(&self) -> &str {
         match self {
             ShellInputToken::Text(text) => text,
-            ShellInputToken::MultiLinePaste { placeholder, .. } => placeholder,
+            ShellInputToken::MultiLinePaste {
+                visible_placeholder,
+                ..
+            } => visible_placeholder,
         }
     }
 
-    fn submit_text(&self) -> &str {
+    fn submit_text(&self, restore_dirty: bool) -> &str {
         match self {
             ShellInputToken::Text(text) => text,
-            ShellInputToken::MultiLinePaste { content, .. } => content,
+            ShellInputToken::MultiLinePaste {
+                original_placeholder,
+                visible_placeholder,
+                content,
+                ..
+            } if restore_dirty || visible_placeholder == original_placeholder => content,
+            ShellInputToken::MultiLinePaste {
+                visible_placeholder,
+                ..
+            } => visible_placeholder,
         }
     }
 
     fn display_len(&self) -> usize {
         self.display_plain().chars().count()
     }
+
+    fn dirty_paste_line_count(&self) -> Option<usize> {
+        match self {
+            ShellInputToken::MultiLinePaste {
+                original_placeholder,
+                visible_placeholder,
+                line_count,
+                ..
+            } if visible_placeholder != original_placeholder => Some(*line_count),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PasteRecoverySummary {
+    dirty_count: usize,
+    total_lines: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1031,14 +1091,16 @@ impl ShellInputBuffer {
             self.insert_text(text);
             return;
         }
-        let placeholder = format!("[ {line_count} lines ]");
+        let placeholder = format!("[ pasted {line_count} lines ]");
         let placeholder_len = placeholder.chars().count();
         self.replace_visible_range(
             self.cursor,
             self.cursor,
             vec![ShellInputToken::MultiLinePaste {
-                placeholder,
+                original_placeholder: placeholder.clone(),
+                visible_placeholder: placeholder,
                 content: text.to_string(),
+                line_count,
             }],
         );
         self.cursor += placeholder_len;
@@ -1088,9 +1150,12 @@ impl ShellInputBuffer {
         for token in &self.tokens {
             match token {
                 ShellInputToken::Text(text) => out.push_str(text),
-                ShellInputToken::MultiLinePaste { placeholder, .. } => {
+                ShellInputToken::MultiLinePaste {
+                    visible_placeholder,
+                    ..
+                } => {
                     out.push_str("\x1b[1m");
-                    out.push_str(placeholder);
+                    out.push_str(visible_placeholder);
                     out.push_str(ANSI_RESET);
                 }
             }
@@ -1098,11 +1163,26 @@ impl ShellInputBuffer {
         out
     }
 
-    fn submit_text(&self) -> String {
+    fn submit_text(&self, restore_dirty: bool) -> String {
         self.tokens
             .iter()
-            .map(ShellInputToken::submit_text)
+            .map(|token| token.submit_text(restore_dirty))
             .collect()
+    }
+
+    fn dirty_paste_summary(&self) -> Option<PasteRecoverySummary> {
+        let mut dirty_count = 0usize;
+        let mut total_lines = 0usize;
+        for token in &self.tokens {
+            if let Some(lines) = token.dirty_paste_line_count() {
+                dirty_count += 1;
+                total_lines += lines;
+            }
+        }
+        (dirty_count > 0).then_some(PasteRecoverySummary {
+            dirty_count,
+            total_lines,
+        })
     }
 
     fn display_prefix_before_cursor(&self) -> String {
@@ -1138,6 +1218,36 @@ impl ShellInputBuffer {
             }
 
             let visible = token.display_plain();
+            let replacement_text = replacement
+                .iter()
+                .map(ShellInputToken::display_plain)
+                .collect::<String>();
+            if let ShellInputToken::MultiLinePaste {
+                original_placeholder,
+                content,
+                line_count,
+                ..
+            } = token
+            {
+                let before = if start > token_start {
+                    char_range(visible, 0, start - token_start)
+                } else {
+                    String::new()
+                };
+                let after = if end < token_end {
+                    char_range(visible, end - token_start, token_end - token_start)
+                } else {
+                    String::new()
+                };
+                next.push(ShellInputToken::MultiLinePaste {
+                    original_placeholder: original_placeholder.clone(),
+                    visible_placeholder: format!("{before}{replacement_text}{after}"),
+                    content: content.clone(),
+                    line_count: *line_count,
+                });
+                inserted = true;
+                continue;
+            }
             if start > token_start {
                 next.push(ShellInputToken::Text(char_range(
                     visible,
@@ -1175,11 +1285,15 @@ fn merge_text_tokens(tokens: Vec<ShellInputToken>) -> Vec<ShellInputToken> {
                 _ => merged.push(ShellInputToken::Text(text)),
             },
             ShellInputToken::MultiLinePaste {
-                placeholder,
+                original_placeholder,
+                visible_placeholder,
                 content,
+                line_count,
             } => merged.push(ShellInputToken::MultiLinePaste {
-                placeholder,
+                original_placeholder,
+                visible_placeholder,
                 content,
+                line_count,
             }),
         }
     }
@@ -1714,9 +1828,10 @@ mod static_prompt_tests {
     use super::{
         cancelled_turn_result, consume_turn_cancel_request, display_width, epoch_millis, help_text,
         pasted_line_count, random_spinner_tick, read_approval_key, read_shell_key,
-        render_approval_choices, render_round_limit_choices, render_round_limit_prompt,
-        render_startup_banner, render_submitted_user_line_rewrite, render_user_approval_prompt,
-        sanitize_user_input, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ShellInputBuffer,
+        render_approval_choices, render_paste_recovery_choices, render_paste_recovery_prompt,
+        render_round_limit_choices, render_round_limit_prompt, render_startup_banner,
+        render_submitted_user_line_rewrite, render_user_approval_prompt, sanitize_user_input,
+        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, PasteRecoverySummary, ShellInputBuffer,
         ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{ApprovalRequest, BashApprovalMode};
@@ -2114,29 +2229,41 @@ mod static_prompt_tests {
         buffer.insert_paste("alpha\nbeta\ngamma");
         buffer.insert_text(" 谢谢");
 
-        assert_eq!(buffer.display_plain(), "请处理 [ 3 lines ] 谢谢");
+        assert_eq!(buffer.display_plain(), "请处理 [ pasted 3 lines ] 谢谢");
         assert_eq!(
             buffer.display_styled(),
-            format!("请处理 \x1b[1m[ 3 lines ]{ANSI_RESET} 谢谢")
+            format!("请处理 \x1b[1m[ pasted 3 lines ]{ANSI_RESET} 谢谢")
         );
-        assert_eq!(buffer.submit_text(), "请处理 alpha\nbeta\ngamma 谢谢");
+        assert_eq!(buffer.submit_text(false), "请处理 alpha\nbeta\ngamma 谢谢");
+        assert_eq!(buffer.dirty_paste_summary(), None);
     }
 
     #[test]
-    fn editing_multiline_placeholder_disassociates_backing_content() {
+    fn editing_multiline_placeholder_prompts_and_can_recover_backing_content() {
         let mut buffer = ShellInputBuffer::default();
         buffer.insert_paste("alpha\nbeta\ngamma");
         buffer.move_left();
         buffer.move_left();
         buffer.delete_before_cursor();
 
-        assert_eq!(buffer.display_plain(), "[ 3 line ]");
-        assert_eq!(buffer.submit_text(), "[ 3 line ]");
-        assert_eq!(buffer.display_styled(), "[ 3 line ]");
+        assert_eq!(buffer.display_plain(), "[ pasted 3 line ]");
+        assert_eq!(
+            buffer.dirty_paste_summary(),
+            Some(PasteRecoverySummary {
+                dirty_count: 1,
+                total_lines: 3,
+            })
+        );
+        assert_eq!(buffer.submit_text(false), "[ pasted 3 line ]");
+        assert_eq!(buffer.submit_text(true), "alpha\nbeta\ngamma");
+        assert_eq!(
+            buffer.display_styled(),
+            format!("\x1b[1m[ pasted 3 line ]{ANSI_RESET}")
+        );
     }
 
     #[test]
-    fn deleting_next_placeholder_char_disassociates_backing_content() {
+    fn deleting_next_placeholder_char_prompts_and_can_submit_literal() {
         let mut buffer = ShellInputBuffer::default();
         buffer.insert_text("x");
         buffer.insert_paste("a\nb");
@@ -2146,8 +2273,35 @@ mod static_prompt_tests {
         }
         buffer.delete_at_cursor();
 
-        assert_eq!(buffer.display_plain(), "x 2 lines ]y");
-        assert_eq!(buffer.submit_text(), "x 2 lines ]y");
+        assert_eq!(buffer.display_plain(), "x pasted 2 lines ]y");
+        assert_eq!(
+            buffer.dirty_paste_summary(),
+            Some(PasteRecoverySummary {
+                dirty_count: 1,
+                total_lines: 2,
+            })
+        );
+        assert_eq!(buffer.submit_text(false), "x pasted 2 lines ]y");
+        assert_eq!(buffer.submit_text(true), "xa\nby");
+    }
+
+    #[test]
+    fn editing_text_around_placeholder_keeps_paste_association() {
+        let mut buffer = ShellInputBuffer::default();
+        buffer.insert_text("this is ");
+        buffer.insert_paste("a\nb\nc\nd\ne");
+        buffer.insert_text(" done");
+        while buffer.display_prefix_before_cursor() != "this is " {
+            buffer.move_left();
+        }
+        buffer.delete_before_cursor();
+        buffer.delete_before_cursor();
+        buffer.delete_before_cursor();
+        buffer.insert_text("was ");
+
+        assert_eq!(buffer.display_plain(), "this was [ pasted 5 lines ] done");
+        assert_eq!(buffer.dirty_paste_summary(), None);
+        assert_eq!(buffer.submit_text(false), "this was a\nb\nc\nd\ne done");
     }
 
     #[test]
@@ -2157,7 +2311,27 @@ mod static_prompt_tests {
 
         assert_eq!(buffer.display_plain(), "just one line");
         assert_eq!(buffer.display_styled(), "just one line");
-        assert_eq!(buffer.submit_text(), "just one line");
+        assert_eq!(buffer.submit_text(false), "just one line");
+    }
+
+    #[test]
+    fn paste_recovery_prompt_and_choices_are_keyboard_driven() {
+        let summary = PasteRecoverySummary {
+            dirty_count: 1,
+            total_lines: 5,
+        };
+        let prompt = render_paste_recovery_prompt(&summary);
+        assert!(prompt.contains("粘贴关联标签可能被误编辑"));
+        assert!(prompt.contains("原始粘贴内容共 5 行"));
+        assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
+        assert_eq!(
+            render_paste_recovery_choices(ApprovalChoice::Allow),
+            "\x1b[7m[ Yes ]\x1b[0m   No"
+        );
+        assert_eq!(
+            render_paste_recovery_choices(ApprovalChoice::Deny),
+            "  Yes   \x1b[7m[ No ]\x1b[0m"
+        );
     }
 
     #[test]
