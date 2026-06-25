@@ -406,8 +406,8 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
     pub timeout_secs: u64,
-    pub max_tokens: u32,
-    pub max_llm_context_tokens: u32,
+    pub max_llm_output_tokens: u32,
+    pub max_llm_input_tokens: u32,
     pub api_protocol: ApiProtocol,
 }
 
@@ -455,8 +455,8 @@ pub struct CliOptions {
     pub base_url: Option<String>,
     pub data_dir: Option<String>,
     pub timeout_secs: Option<u64>,
-    pub max_tokens: Option<u32>,
-    pub max_llm_context_tokens: Option<u32>,
+    pub max_llm_output_tokens: Option<u32>,
+    pub max_llm_input_tokens: Option<u32>,
     pub once_json_input: Option<String>,
     pub supporting_context: Option<String>,
     pub bash_approval: Option<String>,
@@ -501,12 +501,12 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
                 options.timeout_secs = v.parse().ok();
                 idx += 2;
             }
-            ("--max-tokens", Some(v)) => {
-                options.max_tokens = v.parse().ok();
+            ("--max-llm-output", Some(v)) => {
+                options.max_llm_output_tokens = parse_token_count(&v);
                 idx += 2;
             }
-            ("--max-llm-context", Some(v)) => {
-                options.max_llm_context_tokens = parse_token_count(&v);
+            ("--max-llm-input", Some(v)) => {
+                options.max_llm_input_tokens = parse_token_count(&v);
                 idx += 2;
             }
             ("--once-json", Some(v)) => {
@@ -580,14 +580,17 @@ pub fn provider_config_from_env(
         .timeout_secs
         .or_else(|| env.get("TIMEM_TIMEOUT").and_then(|v| v.parse().ok()))
         .unwrap_or(120);
-    let max_tokens = options
-        .max_tokens
-        .or_else(|| env.get("TIMEM_MAX_TOKENS").and_then(|v| v.parse().ok()))
-        .unwrap_or(2048);
-    let max_llm_context_tokens = options
-        .max_llm_context_tokens
+    let max_llm_output_tokens = options
+        .max_llm_output_tokens
         .or_else(|| {
-            env.get("TIMEM_MAX_LLM_CONTEXT")
+            env.get("TIMEM_MAX_LLM_OUTPUT")
+                .and_then(|value| parse_token_count(value))
+        })
+        .unwrap_or(10_000);
+    let max_llm_input_tokens = options
+        .max_llm_input_tokens
+        .or_else(|| {
+            env.get("TIMEM_MAX_LLM_INPUT")
                 .and_then(|value| parse_token_count(value))
         })
         .unwrap_or(100_000);
@@ -597,13 +600,13 @@ pub fn provider_config_from_env(
         base_url,
         api_key,
         timeout_secs,
-        max_tokens,
-        max_llm_context_tokens,
+        max_llm_output_tokens,
+        max_llm_input_tokens,
         api_protocol,
     })
 }
 
-fn parse_token_count(value: &str) -> Option<u32> {
+pub fn parse_token_count(value: &str) -> Option<u32> {
     let raw = value.trim().to_lowercase();
     let (number, multiplier) = if let Some(prefix) = raw.strip_suffix('k') {
         (prefix.trim(), 1_000f64)
@@ -658,7 +661,7 @@ pub fn is_default_model_for_provider(provider: &str, model: &str) -> bool {
         "openai" => model.contains("gpt"),
         "anthropic" => model.contains("claude"),
         "aliyun" | "dashscope" => model.contains("qwen"),
-        _ => model == default_model(&provider),
+        _ => true,
     }
 }
 
@@ -673,6 +676,16 @@ fn default_base_url(provider: &str) -> &str {
 
 pub fn default_base_url_for_provider(provider: &str) -> String {
     default_base_url(&provider.to_lowercase()).to_string()
+}
+
+pub fn is_default_base_url_for_provider(provider: &str, base_url: &str) -> bool {
+    let provider = provider.to_lowercase();
+    match provider.as_str() {
+        "openai" | "anthropic" | "aliyun" | "dashscope" => {
+            base_url.trim_end_matches('/') == default_base_url(&provider).trim_end_matches('/')
+        }
+        _ => true,
+    }
 }
 
 fn vendor_api_key(provider: &str, env: &HashMap<String, String>) -> Option<String> {
@@ -744,13 +757,17 @@ fn prompt_cache_plan_audit(blocks: &[PromptBlock]) -> Value {
 }
 
 pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmResponse, String> {
-    let (content, usage) = match config.api_protocol {
+    let (content, usage, truncated) = match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
             let content = raw
                 .pointer("/choices/0/message/content")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let finish_reason = raw
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let usage = raw.get("usage").unwrap_or(&Value::Null);
             let prompt_tokens = usage
                 .get("prompt_tokens")
@@ -780,10 +797,16 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
                     cached_tokens,
                     ..UsageStats::zero()
                 },
+                finish_reason == "length" || finish_reason == "max_tokens",
             )
         }
         ApiProtocol::OpenAiResponses => {
             let content = extract_openai_response_text(raw);
+            let status = raw.get("status").and_then(Value::as_str).unwrap_or("");
+            let incomplete_reason = raw
+                .pointer("/incomplete_details/reason")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let usage = raw.get("usage").unwrap_or(&Value::Null);
             let prompt_tokens = usage
                 .get("input_tokens")
@@ -812,6 +835,7 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
                     cached_tokens,
                     ..UsageStats::zero()
                 },
+                status == "incomplete" && incomplete_reason == "max_output_tokens",
             )
         }
         ApiProtocol::Anthropic => {
@@ -825,6 +849,7 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
                 })
                 .unwrap_or("")
                 .to_string();
+            let stop_reason = raw.get("stop_reason").and_then(Value::as_str).unwrap_or("");
             let usage = raw.get("usage").unwrap_or(&Value::Null);
             let prompt_tokens = usage
                 .get("input_tokens")
@@ -853,6 +878,7 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
                     cached_tokens: cache_read_tokens,
                     ..UsageStats::zero()
                 },
+                stop_reason == "max_tokens",
             )
         }
     };
@@ -863,6 +889,7 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
         content,
         model_name: config.model.clone(),
         usage,
+        truncated,
     })
 }
 
@@ -1107,8 +1134,8 @@ impl LocalLLMKeyFile {
             base_url: default_base_url("aliyun").to_string(),
             api_key: self.api_key.clone(),
             timeout_secs: 120,
-            max_tokens: 512,
-            max_llm_context_tokens: 100_000,
+            max_llm_output_tokens: 512,
+            max_llm_input_tokens: 100_000,
             api_protocol: ApiProtocol::OpenAiCompatible,
         }
     }
@@ -1258,6 +1285,31 @@ mod tests {
     }
 
     #[test]
+    fn custom_gateway_provider_does_not_inherit_aliyun_default_model_or_url_rules() {
+        assert!(is_default_model_for_provider(
+            "custom",
+            "aws-claude-sonnet-4-6"
+        ));
+        assert!(is_default_model_for_provider("private", "any-model-name"));
+        assert!(is_default_base_url_for_provider(
+            "custom",
+            "https://your-private-gateway.example/v1"
+        ));
+        assert!(is_default_base_url_for_provider(
+            "private",
+            "https://your-private-gateway.example/v1"
+        ));
+        assert!(!is_default_base_url_for_provider(
+            "aliyun",
+            "https://example.com/v1"
+        ));
+        assert!(!is_default_model_for_provider(
+            "aliyun",
+            "aws-claude-sonnet-4-6"
+        ));
+    }
+
+    #[test]
     fn empty_generic_api_key_falls_back_to_vendor_key() {
         let config = provider_config_from_env(
             &CliOptions {
@@ -1315,9 +1367,9 @@ mod tests {
             "/tmp/timem-data",
             "--timeout",
             "33",
-            "--max-tokens",
-            "2048",
-            "--max-llm-context",
+            "--max-llm-output",
+            "10K",
+            "--max-llm-input",
             "100K",
             "--once-json",
             "你好",
@@ -1338,8 +1390,8 @@ mod tests {
         assert_eq!(options.base_url.as_deref(), Some("http://local/v1"));
         assert_eq!(options.data_dir.as_deref(), Some("/tmp/timem-data"));
         assert_eq!(options.timeout_secs, Some(33));
-        assert_eq!(options.max_tokens, Some(2048));
-        assert_eq!(options.max_llm_context_tokens, Some(100_000));
+        assert_eq!(options.max_llm_output_tokens, Some(10_000));
+        assert_eq!(options.max_llm_input_tokens, Some(100_000));
         assert_eq!(options.once_json_input.as_deref(), Some("你好"));
         assert_eq!(
             options.supporting_context.as_deref(),
@@ -1362,6 +1414,15 @@ mod tests {
     }
 
     #[test]
+    fn default_token_limits_are_input_100k_and_output_10k() {
+        let config =
+            provider_config_from_env(&CliOptions::default(), &env(&[("TIMEM_API_KEY", "k")]))
+                .unwrap();
+        assert_eq!(config.max_llm_input_tokens, 100_000);
+        assert_eq!(config.max_llm_output_tokens, 10_000);
+    }
+
+    #[test]
     fn cli_options_override_env_config_values() {
         let config = provider_config_from_env(
             &CliOptions {
@@ -1370,8 +1431,8 @@ mod tests {
                 model: Some("cli-model".into()),
                 base_url: Some("https://cli.example/v1".into()),
                 timeout_secs: Some(33),
-                max_tokens: Some(1234),
-                max_llm_context_tokens: Some(64_000),
+                max_llm_output_tokens: Some(1234),
+                max_llm_input_tokens: Some(64_000),
                 api_key: Some("cli-key".into()),
                 ..CliOptions::default()
             },
@@ -1381,8 +1442,8 @@ mod tests {
                 ("TIMEM_MODEL", "env-model"),
                 ("TIMEM_BASE_URL", "https://env.example/v1"),
                 ("TIMEM_TIMEOUT", "99"),
-                ("TIMEM_MAX_TOKENS", "9999"),
-                ("TIMEM_MAX_LLM_CONTEXT", "128K"),
+                ("TIMEM_MAX_LLM_OUTPUT", "9999"),
+                ("TIMEM_MAX_LLM_INPUT", "128K"),
                 ("TIMEM_API_KEY", "env-key"),
             ]),
         )
@@ -1393,8 +1454,8 @@ mod tests {
         assert_eq!(config.model, "cli-model");
         assert_eq!(config.base_url, "https://cli.example/v1");
         assert_eq!(config.timeout_secs, 33);
-        assert_eq!(config.max_tokens, 1234);
-        assert_eq!(config.max_llm_context_tokens, 64_000);
+        assert_eq!(config.max_llm_output_tokens, 1234);
+        assert_eq!(config.max_llm_input_tokens, 64_000);
         assert_eq!(config.api_key, "cli-key");
     }
 
@@ -1405,20 +1466,20 @@ mod tests {
             &env(&[
                 ("TIMEM_API_KEY", "k"),
                 ("TIMEM_GATEWAY_PROVIDER", "custom"),
-                ("TIMEM_MAX_LLM_CONTEXT", "128K"),
+                ("TIMEM_MAX_LLM_INPUT", "128K"),
             ]),
         )
         .unwrap();
         assert_eq!(config.provider, "custom");
-        assert_eq!(config.max_llm_context_tokens, 128_000);
+        assert_eq!(config.max_llm_input_tokens, 128_000);
     }
 
     #[test]
-    fn build_request_uses_max_tokens_for_openai_compatible() {
+    fn build_request_uses_max_llm_output_tokens_for_openai_compatible() {
         let config = provider_config_from_env(
             &CliOptions {
                 provider: Some("aliyun".into()),
-                max_tokens: Some(2048),
+                max_llm_output_tokens: Some(2048),
                 ..CliOptions::default()
             },
             &env(&[("TIMEM_API_KEY", "k")]),
@@ -1570,7 +1631,7 @@ mod tests {
         let config = provider_config_from_env(
             &CliOptions {
                 provider: Some("openai".into()),
-                max_tokens: Some(2048),
+                max_llm_output_tokens: Some(2048),
                 ..CliOptions::default()
             },
             &env(&[("TIMEM_API_KEY", "k")]),
@@ -1589,7 +1650,7 @@ mod tests {
             .contains("STATIC_GLOBAL"));
         assert!(body["input"].as_str().unwrap().contains("[BEGIN SEGMENT 1"));
         assert!(body.get("messages").is_none());
-        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_llm_output_tokens").is_none());
     }
 
     #[test]
@@ -1639,11 +1700,11 @@ mod tests {
     }
 
     #[test]
-    fn build_request_uses_max_tokens_for_anthropic() {
+    fn build_request_uses_max_llm_output_tokens_for_anthropic() {
         let config = provider_config_from_env(
             &CliOptions {
                 provider: Some("anthropic".into()),
-                max_tokens: Some(2048),
+                max_llm_output_tokens: Some(2048),
                 ..CliOptions::default()
             },
             &env(&[("TIMEM_API_KEY", "k")]),
@@ -1668,7 +1729,7 @@ mod tests {
         let config = provider_config_from_env(
             &CliOptions {
                 provider: Some("aliyun".into()),
-                max_tokens: Some(2048),
+                max_llm_output_tokens: Some(2048),
                 ..CliOptions::default()
             },
             &env(&[("TIMEM_API_KEY", "k")]),
@@ -1833,6 +1894,25 @@ mod tests {
         assert_eq!(response.usage.prompt_tokens, 3019);
         assert_eq!(response.usage.completion_tokens, 104);
         assert_eq!(response.usage.cached_tokens, 2048);
+        assert!(!response.truncated);
+    }
+
+    #[test]
+    fn openai_compatible_finish_reason_length_marks_response_truncated() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("aliyun".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        let raw = json!({
+            "choices":[{"finish_reason":"length","message":{"content":"{\"response_to_user\":\"partial\"}"}}],
+            "usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}
+        });
+        let response = parse_llm_response(&config, &raw).unwrap();
+        assert!(response.truncated);
     }
 
     #[test]
@@ -1889,6 +1969,27 @@ mod tests {
         assert_eq!(response.usage.completion_tokens, 398);
         assert_eq!(response.usage.total_tokens, 8836);
         assert_eq!(response.usage.cached_tokens, 4096);
+        assert!(!response.truncated);
+    }
+
+    #[test]
+    fn openai_responses_incomplete_max_output_marks_response_truncated() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("openai".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        let raw = json!({
+            "status":"incomplete",
+            "incomplete_details":{"reason":"max_output_tokens"},
+            "output_text":"{\"response_to_user\":\"partial\"}",
+            "usage":{"input_tokens":10,"output_tokens":10,"total_tokens":20}
+        });
+        let response = parse_llm_response(&config, &raw).unwrap();
+        assert!(response.truncated);
     }
 
     #[test]
@@ -1946,6 +2047,26 @@ mod tests {
         assert_eq!(response.usage.completion_tokens, 318);
         assert_eq!(response.usage.total_tokens, 6476);
         assert_eq!(response.usage.cached_tokens, 0);
+        assert!(!response.truncated);
+    }
+
+    #[test]
+    fn anthropic_stop_reason_max_tokens_marks_response_truncated() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("anthropic".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        let raw = json!({
+            "stop_reason":"max_tokens",
+            "content":[{"type":"text","text":"{\"response_to_user\":\"partial\"}"}],
+            "usage":{"input_tokens":10,"output_tokens":10}
+        });
+        let response = parse_llm_response(&config, &raw).unwrap();
+        assert!(response.truncated);
     }
 
     #[test]

@@ -70,6 +70,7 @@ pub struct LlmResponse {
     pub content: String,
     pub model_name: String,
     pub usage: UsageStats,
+    pub truncated: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnFinal {
@@ -226,7 +227,7 @@ pub struct AgentCore {
     chat_history: FileChatHistoryStore,
     shell_jobs: FileShellJobStore,
     deltas: Vec<PromptDelta>,
-    max_llm_context_tokens: u32,
+    max_llm_input_tokens: u32,
     next_shrink_review_prompt_tokens: u32,
     last_observed_prompt_tokens: u32,
     configured_round_budget: u32,
@@ -252,7 +253,7 @@ impl AgentCore {
             chat_history: FileChatHistoryStore::new(memory_dir),
             shell_jobs: FileShellJobStore::new(memory_dir),
             deltas: Vec::new(),
-            max_llm_context_tokens: 100_000,
+            max_llm_input_tokens: 100_000,
             next_shrink_review_prompt_tokens: 0,
             last_observed_prompt_tokens: 0,
             configured_round_budget: DEFAULT_ROUND_BUDGET,
@@ -267,8 +268,8 @@ impl AgentCore {
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
         self.bash_approval_mode = mode;
     }
-    pub fn set_max_llm_context_tokens(&mut self, max_tokens: u32) {
-        self.max_llm_context_tokens = max_tokens.max(3_000);
+    pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
+        self.max_llm_input_tokens = max_llm_input_tokens.max(3_000);
     }
     pub fn set_max_rounds(&mut self, max_rounds: u32) {
         self.configured_round_budget = max_rounds.max(1);
@@ -326,6 +327,12 @@ impl AgentCore {
         self.last_observed_prompt_tokens = self
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
+        if response.truncated && !self.repair_attempted {
+            return self.request_protocol_repair(
+                "truncated_model_output",
+                "The previous model output was cut off by the max output token limit before a complete JSON object was produced. Return one short valid JSON object only. If the task needs a long report, use run_bash to write the full report to a file and keep response_to_user concise.",
+            );
+        }
         let parsed = parse_envelope(&response.content);
         if parsed.repair_issue.is_none()
             && parsed.delta_scores.is_empty()
@@ -397,6 +404,7 @@ impl AgentCore {
                 ));
             }
             self.append_delta(slices);
+            self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
                 return CoreStep::RoundLimitReached {
                     max_rounds: self.round_budget,
@@ -467,6 +475,7 @@ impl AgentCore {
             )
         };
         self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
+        self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
             return CoreStep::RoundLimitReached {
                 max_rounds: self.round_budget,
@@ -542,6 +551,15 @@ impl AgentCore {
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
             rounds_remaining: self.remaining_rounds(),
+        }
+    }
+
+    fn append_in_turn_shrink_review_if_needed(&mut self) {
+        if let Some(shrink_review) = self.consume_shrink_review_if_needed(0) {
+            self.append_delta(vec![(
+                "result_of_llm_action".to_string(),
+                format!("Long-context maintenance:\n{shrink_review}"),
+            )]);
         }
     }
 
@@ -627,9 +645,9 @@ impl AgentCore {
     }
     fn consume_shrink_review_if_needed(&mut self, incoming_prompt_tokens: u32) -> Option<String> {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
-        let first_threshold = self.max_llm_context_tokens / 3;
-        let followup_step = self.max_llm_context_tokens / 5;
-        let force_threshold = self.max_llm_context_tokens.saturating_mul(95) / 100;
+        let first_threshold = self.max_llm_input_tokens / 3;
+        let followup_step = self.max_llm_input_tokens / 5;
+        let force_threshold = self.max_llm_input_tokens.saturating_mul(95) / 100;
         let threshold = if self.next_shrink_review_prompt_tokens == 0 {
             first_threshold
         } else {
@@ -698,8 +716,8 @@ impl AgentCore {
             "Decide whether stale or irrelevant dynamic prompt deltas or rendered slices should be compacted with prompt_shrink. Prefer shrinking low durable_ctx_score content first. If suggesting shrink, refer to delta_id for whole logical deltas or slice_id for specific rendered slices; if not, continue normally."
         };
         Some(format!(
-            "mode={mode}\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_context_tokens={}\nshrink_review_threshold_tokens={threshold}\nfirst_shrink_review_threshold_tokens={first_threshold}\nnext_shrink_review_step_tokens={followup_step}\nforce_shrink_threshold_tokens={force_threshold}\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
-            self.max_llm_context_tokens
+            "mode={mode}\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nshrink_review_threshold_tokens={threshold}\nfirst_shrink_review_threshold_tokens={first_threshold}\nnext_shrink_review_step_tokens={followup_step}\nforce_shrink_threshold_tokens={force_threshold}\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
+            self.max_llm_input_tokens
         ))
     }
     fn estimate_rendered_prompt_tokens(&self, incoming_prompt_tokens: u32) -> u32 {
@@ -2943,6 +2961,7 @@ pub extern "C" fn timem_core_apply_model_response(
                 .model_name
                 .unwrap_or_else(|| handle.core.profile.model.clone()),
             usage: value.usage.unwrap_or_else(UsageStats::zero),
+            truncated: false,
         },
         Err(err) => return json_string(json_error(&format!("invalid_response_json:{err}"))),
     };

@@ -36,7 +36,7 @@ fn build_openai_compatible_request(
     let mut body = json!({
         "model": config.model,
         "messages": messages,
-        "max_tokens": config.max_tokens
+        "max_tokens": config.max_llm_output_tokens
     });
     apply_structured_output(&mut body, structured_output);
     body
@@ -59,7 +59,7 @@ fn build_openai_responses_request(config: &ProviderConfig, blocks: &[PromptBlock
         "model": config.model,
         "instructions": instructions,
         "input": input,
-        "max_output_tokens": config.max_tokens
+        "max_output_tokens": config.max_llm_output_tokens
     })
 }
 
@@ -84,7 +84,7 @@ fn build_anthropic_request(config: &ProviderConfig, blocks: &[PromptBlock]) -> V
         .collect::<Vec<_>>();
     json!({
         "model": config.model,
-        "max_tokens": config.max_tokens,
+        "max_tokens": config.max_llm_output_tokens,
         "system": system,
         "messages": [{"role":"user", "content": content}]
     })

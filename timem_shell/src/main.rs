@@ -16,22 +16,28 @@ use timem_shell::{
     action_status_hint, append_audit, audit_path, call_model, data_root, local_time_label,
     observation_events_from_model_response, parse_cli_args, provider_config_from_env,
     render_final_response_at, render_prof_report, render_shell_status_bar, render_thinking_view_at,
-    supporting_context, ModelDirection, ObservationEvent, ObservationPanel, RuntimeProfiler,
-    ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, SPINNER_ICONS,
-    TIMEM_LOGO,
+    supporting_context, ApiProtocol, ModelDirection, ObservationEvent, ObservationPanel,
+    RuntimeProfiler, ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone,
+    ThinkingViewSnapshot, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.json");
 const ANSI_RESET: &str = timem_shell::ANSI_RESET;
+const ANSI_BOLD: &str = timem_shell::ANSI_BOLD;
 const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
 static TURN_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 struct ConfigRow {
-    key: &'static str,
+    key: String,
     value: String,
     desc: &'static str,
     highlight: bool,
+}
+
+enum ConfigTableItem {
+    Section(&'static str),
+    Row(ConfigRow),
 }
 
 fn main() {
@@ -45,7 +51,7 @@ fn main() {
         std::env::set_var("TIMEM_DATA_DIR", data_dir);
     }
     let env: HashMap<String, String> = std::env::vars().collect();
-    let config = match provider_config_from_env(&options, &env) {
+    let mut config = match provider_config_from_env(&options, &env) {
         Ok(config) => config,
         Err(err) => {
             eprintln!("[config_error] {err}");
@@ -62,11 +68,11 @@ fn main() {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("memory");
-    let bash_approval_mode = bash_approval_mode_from_options(&options, &env);
+    let mut bash_approval_mode = bash_approval_mode_from_options(&options, &env);
     let mut profiler = RuntimeProfiler::default();
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
     core.set_bash_approval_mode(bash_approval_mode);
-    core.set_max_llm_context_tokens(config.max_llm_context_tokens);
+    core.set_max_llm_input_tokens(config.max_llm_input_tokens);
     let session = session_id();
 
     if let Some(input) = options.once_json_input.as_deref() {
@@ -76,7 +82,7 @@ fn main() {
             input,
             &session,
             &audit_file,
-            &config,
+            &mut config,
             context,
             None,
             false,
@@ -106,7 +112,7 @@ fn main() {
             "base_url":config.base_url,
             "api_protocol":config.api_protocol.label(),
             "model":config.model,
-            "max_llm_context_tokens":config.max_llm_context_tokens,
+            "max_llm_input_tokens":config.max_llm_input_tokens,
             "bash_approval":bash_approval_mode_label(bash_approval_mode)
         }),
     );
@@ -157,6 +163,16 @@ fn main() {
             );
             continue;
         }
+        if input == "/config" {
+            prompt_status.clear_before_exit();
+            if run_config_menu(&mut config, &mut core, &mut bash_approval_mode) {
+                println!(
+                    "{}",
+                    render_startup_banner(&space, &config, &audit_file, bash_approval_mode)
+                );
+            }
+            continue;
+        }
 
         rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
 
@@ -166,7 +182,7 @@ fn main() {
             &input,
             &session,
             &audit_file,
-            &config,
+            &mut config,
             None,
             Some(&mut status),
             true,
@@ -182,7 +198,7 @@ fn run_turn(
     input: &str,
     session: &str,
     audit_file: &std::path::Path,
-    config: &timem_shell::ProviderConfig,
+    config: &mut timem_shell::ProviderConfig,
     additional_context: Option<&str>,
     mut status: Option<&mut ThinkingStatus>,
     interactive_approval: bool,
@@ -217,7 +233,7 @@ fn run_turn(
             break cancelled_turn_result();
         }
         match step {
-            CoreStep::NeedModel { prompt, .. } => {
+            CoreStep::NeedModel { ref prompt, .. } => {
                 rounds += 1;
                 if let Some(status) = status.as_deref_mut() {
                     status.set_model_direction(rounds, ModelDirection::Upstream);
@@ -238,6 +254,33 @@ fn run_turn(
                         }
                         if consume_turn_cancel_request() {
                             break cancelled_turn_result();
+                        }
+                        if response.truncated && interactive_approval {
+                            if let Some(status) = status.as_deref_mut() {
+                                status.clear_transient_observation();
+                            }
+                            if request_expand_output_tokens(config.max_llm_output_tokens) {
+                                config.max_llm_output_tokens =
+                                    config.max_llm_output_tokens.saturating_add(10_000);
+                                let _ = append_audit(
+                                    audit_file,
+                                    &json!({
+                                        "type":"max_llm_output_increased",
+                                        "session":session,
+                                        "turn_id":turn_id,
+                                        "max_llm_output_tokens":config.max_llm_output_tokens
+                                    }),
+                                );
+                                continue;
+                            }
+                            break (
+                                format!(
+                                    "模型输出达到当前上限 {}，已按你的选择停止本轮。可用 /config 调大 TIMEM_MAX_LLM_OUTPUT 后重试。",
+                                    format_token_count(config.max_llm_output_tokens)
+                                ),
+                                response.usage,
+                                Some("truncated_output_stopped_by_user".to_string()),
+                            );
                         }
                         if let Some(status) = status.as_deref_mut() {
                             status.clear_transient_observation();
@@ -536,6 +579,13 @@ fn request_round_limit_continue(max_rounds: u32) -> bool {
     }
 }
 
+fn request_expand_output_tokens(current: u32) -> bool {
+    match choose_expand_output_tokens(current) {
+        ApprovalChoice::Allow => true,
+        ApprovalChoice::Deny => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApprovalChoice {
     Allow,
@@ -578,6 +628,22 @@ fn render_round_limit_choices(selected: ApprovalChoice) -> String {
     }
 }
 
+fn render_expand_output_prompt(current: u32) -> String {
+    format!(
+        "\n模型输出达到当前上限 {}，导致 JSON 被截断。\n是否将 TIMEM_MAX_LLM_OUTPUT 临时增加 10K 并自动重试本轮请求？\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        format_token_count(current)
+    )
+}
+
+fn render_expand_output_choices(selected: ApprovalChoice) -> String {
+    let allow_label = "增加 10K 并重试";
+    let deny_label = "停止";
+    match selected {
+        ApprovalChoice::Allow => format!("\x1b[7m[ {} ]\x1b[0m   {}", allow_label, deny_label),
+        ApprovalChoice::Deny => format!("  {}   \x1b[7m[ {} ]\x1b[0m", allow_label, deny_label),
+    }
+}
+
 fn render_paste_recovery_prompt(summary: &PasteRecoverySummary) -> String {
     format!(
         "\n检测到 {count} 个粘贴关联标签可能被误编辑，原始粘贴内容共 {lines} 行。\n是否恢复关联粘贴文本？选择 Yes 会提交原始粘贴内容；选择 No 会把已编辑标签当普通文本提交。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
@@ -603,9 +669,262 @@ fn choose_round_limit_continue(max_rounds: u32) -> ApprovalChoice {
     choose_with_keyboard(render_round_limit_choices, ApprovalChoice::Allow)
 }
 
+fn choose_expand_output_tokens(current: u32) -> ApprovalChoice {
+    print!("{}", render_expand_output_prompt(current));
+    choose_with_keyboard(render_expand_output_choices, ApprovalChoice::Allow)
+}
+
 fn choose_paste_recovery(summary: &PasteRecoverySummary) -> ApprovalChoice {
     print!("{}", render_paste_recovery_prompt(summary));
     choose_with_keyboard(render_paste_recovery_choices, ApprovalChoice::Allow)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigField {
+    Model,
+    GatewayProvider,
+    ApiProtocol,
+    BaseUrl,
+    MaxInput,
+    MaxOutput,
+    BashApproval,
+}
+
+impl ConfigField {
+    fn label(self) -> &'static str {
+        match self {
+            ConfigField::Model => "TIMEM_MODEL",
+            ConfigField::GatewayProvider => "TIMEM_GATEWAY_PROVIDER",
+            ConfigField::ApiProtocol => "TIMEM_API_PROTOCOL",
+            ConfigField::BaseUrl => "TIMEM_BASE_URL",
+            ConfigField::MaxInput => "TIMEM_MAX_LLM_INPUT",
+            ConfigField::MaxOutput => "TIMEM_MAX_LLM_OUTPUT",
+            ConfigField::BashApproval => "TIMEM_BASH_APPROVAL",
+        }
+    }
+}
+
+const CONFIG_FIELDS: [ConfigField; 7] = [
+    ConfigField::Model,
+    ConfigField::GatewayProvider,
+    ConfigField::ApiProtocol,
+    ConfigField::BaseUrl,
+    ConfigField::MaxInput,
+    ConfigField::MaxOutput,
+    ConfigField::BashApproval,
+];
+
+fn run_config_menu(
+    config: &mut timem_shell::ProviderConfig,
+    core: &mut AgentCore,
+    bash_approval_mode: &mut BashApprovalMode,
+) -> bool {
+    let Some(field) = choose_config_field(config, *bash_approval_mode) else {
+        println!("已取消配置修改。");
+        return false;
+    };
+    let current = config_field_value(config, *bash_approval_mode, field);
+    println!("\n{} 当前值：{}", field.label(), current);
+    print!("请输入新值（留空取消）：");
+    let _ = io::stdout().flush();
+    let Some(raw_value) = read_tty_line() else {
+        println!("读取输入失败，已取消。");
+        return false;
+    };
+    let value = raw_value.trim();
+    if value.is_empty() {
+        println!("已取消配置修改。");
+        return false;
+    }
+    match apply_config_value(config, core, bash_approval_mode, field, value) {
+        Ok(()) => {
+            println!("已更新 {}。", field.label());
+            true
+        }
+        Err(err) => {
+            println!("配置无效：{err}");
+            false
+        }
+    }
+}
+
+fn choose_config_field(
+    config: &timem_shell::ProviderConfig,
+    bash_approval_mode: BashApprovalMode,
+) -> Option<ConfigField> {
+    println!("\n选择要修改的配置，使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 取消。\n");
+    let mut input = ShellInputSource::open().ok()?;
+    let fd = input.as_raw_fd();
+    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+        return None;
+    }
+    let mut raw = original;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 1;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        return None;
+    }
+    let mut terminal_mode = TerminalModeGuard::new(fd, original);
+    let mut selected = 0usize;
+    print!(
+        "{}",
+        render_config_menu(config, bash_approval_mode, selected)
+    );
+    let _ = io::stdout().flush();
+    let result = loop {
+        match read_menu_key(&mut input) {
+            MenuKey::Up => selected = selected.saturating_sub(1),
+            MenuKey::Down => selected = (selected + 1).min(CONFIG_FIELDS.len() - 1),
+            MenuKey::Enter => break Some(CONFIG_FIELDS[selected]),
+            MenuKey::Cancel => break None,
+            MenuKey::Other => {}
+        }
+        print!(
+            "\x1b[{}F{}",
+            CONFIG_FIELDS.len(),
+            render_config_menu(config, bash_approval_mode, selected)
+        );
+        let _ = io::stdout().flush();
+    };
+    terminal_mode.restore();
+    println!();
+    result
+}
+
+fn render_config_menu(
+    config: &timem_shell::ProviderConfig,
+    bash_approval_mode: BashApprovalMode,
+    selected: usize,
+) -> String {
+    CONFIG_FIELDS
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let marker = if idx == selected { "▶" } else { " " };
+            let line = format!(
+                "{marker} {:<22} {}",
+                field.label(),
+                config_field_value(config, bash_approval_mode, *field)
+            );
+            if idx == selected {
+                format!("\x1b[7m{line}\x1b[0m\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuKey {
+    Up,
+    Down,
+    Enter,
+    Cancel,
+    Other,
+}
+
+fn read_menu_key(input: &mut impl Read) -> MenuKey {
+    let mut buf = [0u8; 1];
+    if input.read_exact(&mut buf).is_err() {
+        return MenuKey::Cancel;
+    }
+    match buf[0] {
+        b'\r' | b'\n' => MenuKey::Enter,
+        3 | 4 => MenuKey::Cancel,
+        27 => {
+            let Some(seq) = read_escape_sequence(input) else {
+                return MenuKey::Cancel;
+            };
+            match seq.as_slice() {
+                [b'[', b'A'] => MenuKey::Up,
+                [b'[', b'B'] => MenuKey::Down,
+                _ => MenuKey::Cancel,
+            }
+        }
+        b'k' => MenuKey::Up,
+        b'j' => MenuKey::Down,
+        _ => MenuKey::Other,
+    }
+}
+
+fn config_field_value(
+    config: &timem_shell::ProviderConfig,
+    bash_approval_mode: BashApprovalMode,
+    field: ConfigField,
+) -> String {
+    match field {
+        ConfigField::Model => config.model.clone(),
+        ConfigField::GatewayProvider => config.provider.clone(),
+        ConfigField::ApiProtocol => config.api_protocol.label().to_string(),
+        ConfigField::BaseUrl => config.base_url.clone(),
+        ConfigField::MaxInput => format_token_count(config.max_llm_input_tokens),
+        ConfigField::MaxOutput => format_token_count(config.max_llm_output_tokens),
+        ConfigField::BashApproval => bash_approval_mode_label(bash_approval_mode).to_string(),
+    }
+}
+
+fn apply_config_value(
+    config: &mut timem_shell::ProviderConfig,
+    core: &mut AgentCore,
+    bash_approval_mode: &mut BashApprovalMode,
+    field: ConfigField,
+    value: &str,
+) -> Result<(), String> {
+    match field {
+        ConfigField::Model => config.model = value.to_string(),
+        ConfigField::GatewayProvider => config.provider = value.to_lowercase(),
+        ConfigField::ApiProtocol => {
+            config.api_protocol = parse_api_protocol_for_config(value)?;
+        }
+        ConfigField::BaseUrl => config.base_url = value.to_string(),
+        ConfigField::MaxInput => {
+            let tokens = timem_shell::parse_token_count(value)
+                .ok_or_else(|| "请输入数字，或 100K/1M 这类格式".to_string())?;
+            config.max_llm_input_tokens = tokens.max(3_000);
+            core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+        }
+        ConfigField::MaxOutput => {
+            let tokens = timem_shell::parse_token_count(value)
+                .ok_or_else(|| "请输入数字，或 10K 这类格式".to_string())?;
+            config.max_llm_output_tokens = tokens.max(512);
+        }
+        ConfigField::BashApproval => {
+            let mode = match value.trim().to_lowercase().as_str() {
+                "approve" => BashApprovalMode::Approve,
+                "ask" => BashApprovalMode::Ask,
+                _ => return Err("bash 允许策略只能是 approve 或 ask".to_string()),
+            };
+            *bash_approval_mode = mode;
+            core.set_bash_approval_mode(mode);
+        }
+    }
+    Ok(())
+}
+
+fn parse_api_protocol_for_config(value: &str) -> Result<ApiProtocol, String> {
+    match value.trim().to_lowercase().as_str() {
+        "openai-compatible" | "openai_compatible" | "chat-completions" | "chat_completions" => {
+            Ok(ApiProtocol::OpenAiCompatible)
+        }
+        "openai-responses" | "openai_responses" | "responses" => Ok(ApiProtocol::OpenAiResponses),
+        "anthropic" | "claude" | "messages" => Ok(ApiProtocol::Anthropic),
+        _ => Err("API protocol 只能是 openai-compatible、openai-responses 或 anthropic".into()),
+    }
+}
+
+fn read_tty_line() -> Option<String> {
+    let mut input = String::new();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let mut reader = io::BufReader::new(&mut file);
+    std::io::BufRead::read_line(&mut reader, &mut input).ok()?;
+    Some(input)
 }
 
 fn choose_with_keyboard(
@@ -1402,12 +1721,8 @@ fn read_utf8_char(first: u8, input: &mut impl Read) -> Option<char> {
 }
 
 fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, rendered_rows: &mut usize) {
-    if *rendered_rows > 1 {
-        print!("\r\x1b[{}F", *rendered_rows - 1);
-    } else {
-        print!("\r");
-    }
-    print!("\x1b[J{}{}", prompt, buffer.display_styled());
+    print!("{}", render_shell_input_clear_sequence(*rendered_rows));
+    print!("{}{}", prompt, buffer.display_styled());
 
     let width = terminal_width().max(1);
     let prompt_width = display_width(prompt);
@@ -1429,6 +1744,27 @@ fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, rendered_rows: &m
     }
     *rendered_rows = wrapped_terminal_rows(total_width, width);
     let _ = io::stdout().flush();
+}
+
+fn render_shell_input_clear_sequence(rendered_rows: usize) -> String {
+    let mut out = String::new();
+    if rendered_rows > 1 {
+        out.push_str(&format!("\r\x1b[{}F", rendered_rows - 1));
+    } else {
+        out.push('\r');
+    }
+    for idx in 0..rendered_rows {
+        out.push_str("\x1b[2K");
+        if idx + 1 < rendered_rows {
+            out.push_str("\x1b[1E");
+        }
+    }
+    if rendered_rows > 1 {
+        out.push_str(&format!("\r\x1b[{}F", rendered_rows - 1));
+    } else {
+        out.push('\r');
+    }
+    out
 }
 
 fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
@@ -1595,71 +1931,86 @@ fn render_startup_banner(
     bash_approval_mode: BashApprovalMode,
 ) -> String {
     let default_protocol = timem_shell::default_api_protocol_for_provider(&config.provider);
-    let default_base_url = timem_shell::default_base_url_for_provider(&config.provider);
-    let rows = [
-        ConfigRow {
-            key: "TIMEM_SPACE",
-            value: space.to_string(),
-            desc: "记忆空间",
-            highlight: false,
-        },
-        ConfigRow {
-            key: "TIMEM_GATEWAY_PROVIDER",
-            value: config.provider.clone(),
-            desc: "流量平台，决定默认 base url",
-            highlight: false,
-        },
-        ConfigRow {
-            key: "TIMEM_API_PROTOCOL",
-            value: config.api_protocol.label().to_string(),
-            desc: "API 提交网络包格式",
-            highlight: config.api_protocol != default_protocol,
-        },
-        ConfigRow {
-            key: "TIMEM_BASE_URL",
-            value: config.base_url.clone(),
-            desc: "网关 base url",
-            highlight: config.base_url.trim_end_matches('/')
-                != default_base_url.trim_end_matches('/'),
-        },
-        ConfigRow {
-            key: "TIMEM_MODEL",
+    let items = [
+        ConfigTableItem::Section("MODEL"),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_MODEL".to_string(),
             value: config.model.clone(),
             desc: "模型名称",
             highlight: !timem_shell::is_default_model_for_provider(&config.provider, &config.model),
-        },
-        ConfigRow {
-            key: "TIMEM_MAX_LLM_CONTEXT",
-            value: format_token_count(config.max_llm_context_tokens),
-            desc: "最大上下文窗口",
+        }),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_GATEWAY_PROVIDER".to_string(),
+            value: config.provider.clone(),
+            desc: "流量平台，决定默认 base url",
             highlight: false,
-        },
-        ConfigRow {
-            key: "TIMEM_BASH_APPROVAL",
+        }),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_API_PROTOCOL".to_string(),
+            value: config.api_protocol.label().to_string(),
+            desc: "API 提交网络包格式",
+            highlight: config.api_protocol != default_protocol,
+        }),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_BASE_URL".to_string(),
+            value: config.base_url.clone(),
+            desc: "网关 base url",
+            highlight: !timem_shell::is_default_base_url_for_provider(
+                &config.provider,
+                &config.base_url,
+            ),
+        }),
+        ConfigTableItem::Section("RUNTIME"),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_MAX_LLM_INPUT / TIMEM_MAX_LLM_OUTPUT".to_string(),
+            value: format!(
+                "{}/{}",
+                format_token_count(config.max_llm_input_tokens),
+                format_token_count(config.max_llm_output_tokens)
+            ),
+            desc: "最大输入/输出 token",
+            highlight: false,
+        }),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_BASH_APPROVAL".to_string(),
             value: bash_approval_mode_label(bash_approval_mode).to_string(),
             desc: "bash 允许策略，approve/ask",
             highlight: false,
-        },
-        ConfigRow {
-            key: "TIMEM_DATA_DIR",
+        }),
+        ConfigTableItem::Section("DATA"),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_SPACE".to_string(),
+            value: space.to_string(),
+            desc: "记忆空间",
+            highlight: false,
+        }),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_DATA_DIR".to_string(),
             value: absolute_display_path(&data_root()),
             desc: "运行时记忆、日志存储",
             highlight: false,
-        },
-        ConfigRow {
-            key: "local_audit",
+        }),
+        ConfigTableItem::Row(ConfigRow {
+            key: "local_audit".to_string(),
             value: absolute_display_path(audit_file),
             desc: "原始流量审计存储",
             highlight: false,
-        },
+        }),
     ];
-    boxed_config_table(&rows)
+    boxed_config_table(&items)
 }
 
-fn boxed_config_table(rows: &[ConfigRow]) -> String {
+fn boxed_config_table(items: &[ConfigTableItem]) -> String {
+    let rows: Vec<&ConfigRow> = items
+        .iter()
+        .filter_map(|item| match item {
+            ConfigTableItem::Row(row) => Some(row),
+            ConfigTableItem::Section(_) => None,
+        })
+        .collect();
     let key_width = rows
         .iter()
-        .map(|row| display_width(row.key))
+        .map(|row| display_width(&row.key))
         .max()
         .unwrap_or(0)
         .max("TIMEM_GATEWAY_PROVIDER".len());
@@ -1675,34 +2026,53 @@ fn boxed_config_table(rows: &[ConfigRow]) -> String {
         .max()
         .unwrap_or(0)
         .clamp(8, 32);
-    let inner_width = key_width + value_width + desc_width + 10;
+    let inner_width = key_width + value_width + desc_width + 8;
     let title = format!(" {TIMEM_LOGO} config ");
     let title_width = display_width(&title);
     let left = (inner_width.saturating_sub(title_width)) / 2;
     let right = inner_width.saturating_sub(title_width + left);
-    let border = format!("+{}{}{}+\n", "-".repeat(left), title, "-".repeat(right));
+    let top_border = format!("┌{}{}{}┐\n", "─".repeat(left), title, "─".repeat(right));
+    let bottom_border = format!("└{}┘\n", "─".repeat(inner_width));
     let mut out = String::new();
-    out.push_str(&border);
-    for row in rows {
-        let value = fit_display(&row.value, value_width);
-        let value = if row.highlight {
-            format!("{ANSI_HIGHLIGHT}{value}{ANSI_RESET}")
-        } else {
-            value
-        };
-        out.push_str(&format!(
-            "| {} | {} | {} |\n",
-            fit_display(row.key, key_width),
-            value,
-            fit_display(row.desc, desc_width)
-        ));
+    out.push_str(&top_border);
+    for item in items {
+        match item {
+            ConfigTableItem::Section(label) => {
+                out.push_str(&section_line(label, inner_width));
+            }
+            ConfigTableItem::Row(row) => {
+                let value = fit_display(&row.value, value_width);
+                let value = if row.highlight {
+                    format!("{ANSI_HIGHLIGHT}{value}{ANSI_RESET}")
+                } else {
+                    value
+                };
+                out.push_str(&format!(
+                    "│ {} │ {} │ {} │\n",
+                    fit_display(&row.key, key_width),
+                    value,
+                    fit_display(row.desc, desc_width)
+                ));
+            }
+        }
     }
-    out.push_str(&border);
+    out.push_str(&bottom_border);
     out.push_str(
         "显示的是最终生效值。可先 source /path/to/your/env，或设置左侧 env 变量后启动。\n",
     );
     out.push_str("option 优先于 env，查看：timem --help\n");
     out
+}
+
+fn section_line(label: &str, target_width: usize) -> String {
+    let prefix = format!("──── {ANSI_BOLD}{label}{ANSI_RESET} :");
+    let prefix_width = display_width(&prefix);
+    let content = if target_width <= prefix_width {
+        fit_display(&prefix, target_width)
+    } else {
+        format!("{}{}", prefix, " ".repeat(target_width - prefix_width))
+    };
+    format!("├{content}│\n")
 }
 
 fn display_width(text: &str) -> usize {
@@ -1775,7 +2145,7 @@ fn print_help() {
 }
 
 fn help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-tokens <n>               env TIMEM_MAX_TOKENS; max response tokens, default 2048\n  --max-llm-context <n|100K>     env TIMEM_MAX_LLM_CONTEXT; context window, default 100K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C cancels the current input while editing, and cancels the current turn while Timem is thinking.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>      env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /config                        edit runtime model and token settings\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C cancels the current input while editing, and cancels the current turn while Timem is thinking.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn format_token_count(value: u32) -> String {
@@ -1830,16 +2200,18 @@ fn time_label() -> String {
 #[cfg(test)]
 mod static_prompt_tests {
     use super::{
-        cancelled_turn_result, consume_turn_cancel_request, display_width, epoch_millis, help_text,
-        pasted_line_count, random_spinner_tick, read_approval_key, read_shell_key,
-        render_approval_choices, render_paste_recovery_choices, render_paste_recovery_prompt,
-        render_round_limit_choices, render_round_limit_prompt, render_startup_banner,
+        apply_config_value, cancelled_turn_result, config_field_value, consume_turn_cancel_request,
+        display_width, epoch_millis, help_text, pasted_line_count, random_spinner_tick,
+        read_approval_key, read_menu_key, read_shell_key, render_approval_choices,
+        render_config_menu, render_expand_output_choices, render_expand_output_prompt,
+        render_paste_recovery_choices, render_paste_recovery_prompt, render_round_limit_choices,
+        render_round_limit_prompt, render_shell_input_clear_sequence, render_startup_banner,
         render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
-        sanitize_user_input, wrapped_terminal_rows, ApprovalChoice, ApprovalKey,
-        PasteRecoverySummary, ShellInputBuffer, ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET,
+        sanitize_user_input, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
+        MenuKey, PasteRecoverySummary, ShellInputBuffer, ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET,
         STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
-    use agent_core::{ApprovalRequest, BashApprovalMode};
+    use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use std::fs;
     use std::io::Cursor;
     use std::process::Command;
@@ -1848,20 +2220,17 @@ mod static_prompt_tests {
 
     #[test]
     fn static_prompt_uses_full_shared_v1_resource() {
-        assert!(STATIC_PROMPT.contains("\"static_prefix_id\": \"static_prefix_v2\""));
+        assert!(STATIC_PROMPT.contains("\"static_prefix_id\": \"static_prefix_v3\""));
         assert!(STATIC_PROMPT.contains("\"General_rule\""));
         assert!(STATIC_PROMPT.contains("\"Mem_rule\""));
         assert!(STATIC_PROMPT.contains("\"Tool_capability\""));
         assert!(STATIC_PROMPT.contains("\"Response_rule\""));
-        assert!(STATIC_PROMPT.contains("\"Freq_reflect\""));
+        assert!(STATIC_PROMPT.contains("\"Self_audit\""));
         assert!(STATIC_PROMPT.contains("\"json_schema_summary\""));
         assert!(STATIC_PROMPT.contains("\"acceptance_check.is_satisfied\""));
         assert!(STATIC_PROMPT.contains("\"perspective_policy\""));
         assert!(STATIC_PROMPT.contains("\"tool_claim_policy\""));
-        assert!(STATIC_PROMPT.contains("Never say you already checked/read/looked up memory"));
         assert!(STATIC_PROMPT.contains("\"storage_style_policy\""));
-        assert!(STATIC_PROMPT.contains("personal or family facts"));
-        assert!(STATIC_PROMPT.contains("\"perspective_rewrite\""));
         assert!(STATIC_PROMPT.contains("\"tool_catalog\""));
         assert!(STATIC_PROMPT.contains("\"chat_history_query\""));
         assert!(STATIC_PROMPT.contains("persisted user/assistant chat records"));
@@ -1875,18 +2244,52 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("\"scratch_delete\""));
         assert!(STATIC_PROMPT.contains("\"run_bash\""));
         assert!(STATIC_PROMPT.contains("\"shell_job_status\""));
-        assert!(STATIC_PROMPT.contains("background=true"));
+        assert!(STATIC_PROMPT.contains("foreground|background"));
         assert!(STATIC_PROMPT.contains("read_back_command"));
         assert!(STATIC_PROMPT.contains("Never invent a read-only limitation for run_bash"));
         assert!(STATIC_PROMPT.contains("\"durable_ctx_score\""));
         assert!(STATIC_PROMPT.contains("Every model response must score"));
         assert!(STATIC_PROMPT.contains("local machine"));
         assert!(STATIC_PROMPT.contains("\"intent_required\""));
-        assert!(STATIC_PROMPT.contains("use only the returned action result as evidence"));
+        assert!(STATIC_PROMPT.contains("\"json_protocol\""));
+        assert!(STATIC_PROMPT.contains("\"evidence_guard\""));
+        assert!(STATIC_PROMPT.contains("\"action_result_guard\""));
         assert!(STATIC_PROMPT.contains("\"thought?\""));
-        assert!(STATIC_PROMPT.contains("no_result_terminate"));
         assert!(STATIC_PROMPT.contains("self_audit"));
+        assert!(!STATIC_PROMPT.contains("no_result_terminate"));
+        assert!(!STATIC_PROMPT.contains("long_running_shell"));
+        assert!(!STATIC_PROMPT.contains("lang_retry"));
+        assert!(!STATIC_PROMPT.contains("theme_workflow"));
+        assert!(!STATIC_PROMPT.contains("rounds_guard"));
+        assert!(!STATIC_PROMPT.contains("perspective_rewrite"));
         assert!(STATIC_PROMPT.len() > 3_000);
+    }
+
+    #[test]
+    fn public_repo_sources_do_not_contain_private_gateway_markers() {
+        let source_text = [
+            include_str!("../../README.md"),
+            include_str!("../../env_template"),
+            include_str!("../../resources/static_v1.json"),
+            include_str!("../src/lib.rs"),
+            include_str!("../src/main.rs"),
+        ]
+        .join("\n");
+        let markers = [
+            ["c", "hj"].concat(),
+            ["che", "hejia"].concat(),
+            ["inner.", "c", "hj"].concat(),
+            ["llm-", "gateway", "-proxy"].concat(),
+            ["api-hub.", "inner"].concat(),
+            ["X-", "C", "HJ"].concat(),
+            ["BCS-", "APIHub"].concat(),
+        ];
+        for marker in markers {
+            assert!(
+                !source_text.to_lowercase().contains(&marker.to_lowercase()),
+                "private marker leaked into public source: {marker}"
+            );
+        }
     }
 
     #[test]
@@ -1903,6 +2306,100 @@ mod static_prompt_tests {
         assert!(!text.contains("模型调用失败"));
         assert_eq!(stats.llm_calls, 0);
         assert_eq!(issue.as_deref(), Some("cancelled_by_user"));
+    }
+
+    #[test]
+    fn wrapped_input_rerender_does_not_clear_screen_below_prompt() {
+        let sequence = render_shell_input_clear_sequence(3);
+        assert!(sequence.contains("\x1b[2K"));
+        assert!(sequence.contains("\x1b[1E"));
+        assert!(!sequence.contains("\x1b[J"));
+    }
+
+    #[test]
+    fn expand_output_prompt_is_keyboard_driven_and_mentions_retry() {
+        let prompt = render_expand_output_prompt(10_000);
+        assert!(prompt.contains("10K"));
+        assert!(prompt.contains("TIMEM_MAX_LLM_OUTPUT"));
+        assert!(prompt.contains("自动重试"));
+        assert!(prompt.contains("←/→"));
+        assert!(render_expand_output_choices(ApprovalChoice::Allow).contains("\x1b[7m"));
+    }
+
+    #[test]
+    fn config_menu_renders_effective_values_and_can_apply_updates() {
+        let mut config = ProviderConfig {
+            provider: "aliyun".to_string(),
+            api_protocol: ApiProtocol::OpenAiCompatible,
+            api_key: "secret".to_string(),
+            model: "qwen-plus".to_string(),
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            timeout_secs: 120,
+            max_llm_output_tokens: 10_000,
+            max_llm_input_tokens: 100_000,
+        };
+        let mut core = AgentCore::new(
+            "STATIC",
+            CoreProfile {
+                name: "aliyun".to_string(),
+                provider: "aliyun".to_string(),
+                model: "qwen-plus".to_string(),
+            },
+            std::env::temp_dir().join(format!("timem_config_test_{}", epoch_millis())),
+        );
+        let mut bash = BashApprovalMode::Ask;
+
+        let menu = render_config_menu(&config, bash, 5);
+        assert!(menu.contains("TIMEM_MAX_LLM_OUTPUT"));
+        assert!(menu.contains("10K"));
+        assert!(menu.contains("\x1b[7m"));
+        assert_eq!(
+            config_field_value(&config, bash, ConfigField::MaxInput),
+            "100K"
+        );
+
+        apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            ConfigField::MaxOutput,
+            "20K",
+        )
+        .unwrap();
+        apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            ConfigField::MaxInput,
+            "120K",
+        )
+        .unwrap();
+        apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            ConfigField::BashApproval,
+            "approve",
+        )
+        .unwrap();
+
+        assert_eq!(config.max_llm_output_tokens, 20_000);
+        assert_eq!(config.max_llm_input_tokens, 120_000);
+        assert_eq!(bash, BashApprovalMode::Approve);
+    }
+
+    #[test]
+    fn config_menu_key_reader_accepts_arrows_enter_and_cancel() {
+        assert_eq!(
+            read_menu_key(&mut Cursor::new(vec![27, b'[', b'A'])),
+            MenuKey::Up
+        );
+        assert_eq!(
+            read_menu_key(&mut Cursor::new(vec![27, b'[', b'B'])),
+            MenuKey::Down
+        );
+        assert_eq!(read_menu_key(&mut Cursor::new(vec![b'\n'])), MenuKey::Enter);
+        assert_eq!(read_menu_key(&mut Cursor::new(vec![3])), MenuKey::Cancel);
     }
 
     #[test]
@@ -1923,8 +2420,8 @@ mod static_prompt_tests {
             model: "qwen-plus".to_string(),
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             timeout_secs: 120,
-            max_tokens: 4096,
-            max_llm_context_tokens: 100_000,
+            max_llm_output_tokens: 4096,
+            max_llm_input_tokens: 100_000,
         };
         let banner = render_startup_banner(
             ".xxx_mem",
@@ -1933,11 +2430,20 @@ mod static_prompt_tests {
             BashApprovalMode::Approve,
         );
 
-        assert!(banner.starts_with('+'));
-        assert!(banner.lines().next().unwrap_or("").starts_with("+-"));
+        assert!(banner.starts_with('┌'));
+        assert!(banner.lines().next().unwrap_or("").starts_with("┌─"));
+        assert!(banner.lines().any(|line| line.starts_with("├──── ")
+            && line.contains("MODEL")
+            && line.contains(":")));
+        assert!(banner.lines().any(|line| line.starts_with("├──── ")
+            && line.contains("RUNTIME")
+            && line.contains(":")));
         assert!(banner
             .lines()
-            .any(|line| line.starts_with("+-") && line.ends_with("-+")));
+            .any(|line| line.starts_with("├──── ") && line.contains("DATA") && line.contains(":")));
+        assert!(banner.contains("MODEL"));
+        assert!(banner.contains("RUNTIME"));
+        assert!(banner.contains("DATA"));
         assert!(banner.contains("显示的是最终生效值"));
         assert!(banner.contains("source /path/to/your/env"));
         assert!(banner.contains("option 优先于 env"));
@@ -1947,7 +2453,7 @@ mod static_prompt_tests {
         assert!(!banner.contains("TIMEM_PROFILE"));
         assert!(!banner
             .lines()
-            .any(|line| line.trim_start().starts_with("| TIMEM_SPACE=")));
+            .any(|line| line.trim_start().starts_with("│ TIMEM_SPACE=")));
         assert!(banner.contains("TIMEM_GATEWAY_PROVIDER"));
         assert!(banner.contains("流量平台"));
         assert!(banner.contains("aliyun"));
@@ -1957,7 +2463,7 @@ mod static_prompt_tests {
         assert!(banner.contains("https://dashscope.aliyuncs.com/compatible-mode/v1"));
         assert!(banner.contains("TIMEM_MODEL"));
         assert!(banner.contains("qwen-plus"));
-        assert!(banner.contains("TIMEM_MAX_LLM_CONTEXT"));
+        assert!(banner.contains("TIMEM_MAX_LLM_INPUT"));
         assert!(banner.contains("100K"));
         assert!(banner.contains("TIMEM_BASH_APPROVAL"));
         assert!(banner.contains("approve"));
@@ -1966,12 +2472,23 @@ mod static_prompt_tests {
         assert!(!banner.contains("TIMEM_API_KEY=secret"));
         let table_lines: Vec<&str> = banner
             .lines()
-            .filter(|line| line.starts_with('|'))
+            .filter(|line| line.starts_with('│') || line.starts_with('├'))
             .collect();
         let first_width = display_width(table_lines[0]);
         assert!(table_lines
             .iter()
             .all(|line| display_width(line) == first_width));
+        let model_idx = banner.find("TIMEM_MODEL").unwrap();
+        let provider_idx = banner.find("TIMEM_GATEWAY_PROVIDER").unwrap();
+        let runtime_idx = banner.find("TIMEM_MAX_LLM_INPUT").unwrap();
+        let bash_idx = banner.find("TIMEM_BASH_APPROVAL").unwrap();
+        let space_idx = banner.find("TIMEM_SPACE").unwrap();
+        let data_idx = banner.find("TIMEM_DATA_DIR").unwrap();
+        assert!(model_idx < provider_idx);
+        assert!(provider_idx < runtime_idx);
+        assert!(runtime_idx < bash_idx);
+        assert!(bash_idx < space_idx);
+        assert!(space_idx < data_idx);
     }
 
     #[test]
@@ -1983,8 +2500,8 @@ mod static_prompt_tests {
             model: "qwen-max".to_string(),
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             timeout_secs: 120,
-            max_tokens: 4096,
-            max_llm_context_tokens: 100_000,
+            max_llm_output_tokens: 4096,
+            max_llm_input_tokens: 100_000,
         };
         let default_banner = render_startup_banner(
             ".test_mem",
@@ -2001,8 +2518,8 @@ mod static_prompt_tests {
             model: "aws-claude-sonnet-4-6".to_string(),
             base_url: "https://example.com/v1".to_string(),
             timeout_secs: 120,
-            max_tokens: 4096,
-            max_llm_context_tokens: 100_000,
+            max_llm_output_tokens: 4096,
+            max_llm_input_tokens: 100_000,
         };
         let override_banner = render_startup_banner(
             ".test_mem",
@@ -2015,12 +2532,37 @@ mod static_prompt_tests {
         assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}aws-claude-sonnet-4-6")));
         let table_lines: Vec<&str> = override_banner
             .lines()
-            .filter(|line| line.starts_with('|'))
+            .filter(|line| line.starts_with('│') || line.starts_with('├'))
             .collect();
         let first_width = display_width(table_lines[0]);
         assert!(table_lines
             .iter()
             .all(|line| display_width(line) == first_width));
+    }
+
+    #[test]
+    fn startup_banner_does_not_highlight_custom_provider_model_or_base_url() {
+        let config = ProviderConfig {
+            provider: "private".to_string(),
+            api_protocol: ApiProtocol::Anthropic,
+            api_key: "secret".to_string(),
+            model: "aws-claude-sonnet-4-6".to_string(),
+            base_url: "https://your-private-gateway.example/v1".to_string(),
+            timeout_secs: 120,
+            max_llm_output_tokens: 4096,
+            max_llm_input_tokens: 100_000,
+        };
+        let banner = render_startup_banner(
+            ".test_mem",
+            &config,
+            std::path::Path::new(".test_mem/shell_audit.jsonl"),
+            BashApprovalMode::Ask,
+        );
+
+        assert!(!banner.contains(&format!(
+            "{ANSI_HIGHLIGHT}https://your-private-gateway.example/v1"
+        )));
+        assert!(!banner.contains(&format!("{ANSI_HIGHLIGHT}aws-claude-sonnet-4-6")));
     }
 
     #[test]
@@ -2047,10 +2589,10 @@ mod static_prompt_tests {
             "TIMEM_DATA_DIR",
             "--timeout",
             "TIMEM_TIMEOUT",
-            "--max-tokens",
-            "TIMEM_MAX_TOKENS",
-            "--max-llm-context",
-            "TIMEM_MAX_LLM_CONTEXT",
+            "--max-llm-output",
+            "TIMEM_MAX_LLM_OUTPUT",
+            "--max-llm-input",
+            "TIMEM_MAX_LLM_INPUT",
             "--bash-approval",
             "TIMEM_BASH_APPROVAL",
             "Interactive commands:",
@@ -2076,8 +2618,8 @@ mod static_prompt_tests {
             "TIMEM_SPACE",
             "TIMEM_DATA_DIR",
             "TIMEM_TIMEOUT",
-            "TIMEM_MAX_TOKENS",
-            "TIMEM_MAX_LLM_CONTEXT",
+            "TIMEM_MAX_LLM_OUTPUT",
+            "TIMEM_MAX_LLM_INPUT",
             "TIMEM_BASH_APPROVAL",
             "DASHSCOPE_API_KEY",
             "OPENAI_API_KEY",

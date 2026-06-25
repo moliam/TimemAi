@@ -94,7 +94,7 @@ timem \
   --gateway-provider aliyun \
   --api-protocol openai-compatible \
   --model qwen-plus \
-  --max-llm-context 100K \
+  --max-llm-input 100K \
   --bash-approval ask
 ```
 
@@ -128,7 +128,8 @@ Common examples:
 export TIMEM_GATEWAY_PROVIDER=aliyun
 export TIMEM_API_KEY=...
 export TIMEM_API_PROTOCOL=openai-compatible
-export TIMEM_MAX_LLM_CONTEXT=100K
+export TIMEM_MAX_LLM_INPUT=100K
+export TIMEM_MAX_LLM_OUTPUT=10K
 ```
 
 ```bash
@@ -162,11 +163,20 @@ OpenAI Responses, `TIMEM_GATEWAY_PROVIDER=anthropic` uses Anthropic protocol,
 and other providers use OpenAI-compatible chat completions. For a custom
 gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 
-`TIMEM_MAX_LLM_CONTEXT` defaults to `100K`. Runtime asks the model to consider
-`prompt_shrink` when the observed provider input tokens plus the new prompt
-delta estimate reaches about one third of this value. After that first review,
-the next review threshold advances by one fifth of the window each time. If the
-prompt reaches 95% of the configured window, runtime marks shrink as required.
+`TIMEM_MAX_LLM_INPUT` defaults to `100K`; `TIMEM_MAX_LLM_OUTPUT` defaults to
+`10K`. Runtime asks the model to consider `prompt_shrink` when the observed
+provider input tokens plus the new prompt delta estimate reaches about one
+third of the input window. After that first review, the next review threshold
+advances by one fifth of the window each time. If the prompt reaches 95% of the
+configured input window, runtime marks shrink as required.
+
+If a provider reports that output was cut off by the output-token limit, Timem
+asks whether to temporarily increase `TIMEM_MAX_LLM_OUTPUT` by `10K` and retry
+the same turn. The increase only affects the current running shell process.
+
+Inside the interactive shell, use `/config` to change runtime settings such as
+model, gateway provider, API protocol, base URL, max input/output tokens, and
+bash approval mode. The menu uses arrow keys and Enter, then returns to chat.
 
 Override the default URL only when needed:
 

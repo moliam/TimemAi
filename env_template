@@ -41,10 +41,10 @@
 # export TIMEM_TIMEOUT=120
 
 # Maximum response tokens.
-# export TIMEM_MAX_TOKENS=2048
+# export TIMEM_MAX_LLM_OUTPUT=10K
 
-# Maximum LLM context window. Accepts plain numbers or K suffix, such as 100K.
-# export TIMEM_MAX_LLM_CONTEXT=100K
+# Maximum LLM input context window. Accepts plain numbers or K suffix, such as 100K.
+# export TIMEM_MAX_LLM_INPUT=100K
 
 # Bash approval policy.
 # ask: prompt before bash execution.

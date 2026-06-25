@@ -132,6 +132,7 @@ fn prompt_is_append_only_and_segmented() {
         content: scored(r#"{"response_to_user":"你好","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::Final(_) => core.render_prompt(),
         other => panic!("unexpected step: {other:?}"),
@@ -173,6 +174,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Need evidence.","input":{"query":"x","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let CoreStep::RoundLimitReached { max_rounds } = step else {
         panic!("unexpected step: {step:?}");
@@ -199,6 +201,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Need evidence after continuation.","input":{"query":"x","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let CoreStep::NeedModel {
         prompt,
@@ -245,6 +248,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
         content: scored(r#"{"thought":"先分析","response_to_user":"结论","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
@@ -281,6 +285,7 @@ fn model_scores_previously_submitted_delta_not_its_own_response_delta() {
         content: scored(r#"{"response_to_user":"已记录这个项目决策。","durable_ctx_score":9,"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
@@ -311,6 +316,7 @@ fn missing_durable_score_for_visible_unscored_delta_requests_repair() {
             .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -340,6 +346,7 @@ fn model_can_score_delta_by_explicit_delta_id() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
@@ -365,6 +372,7 @@ fn shorthand_score_targets_latest_unscored_delta_when_older_unscored_exists() {
         content: scored(r#"{"response_to_user":"first answer without score","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt_after_first_reply = core.render_prompt();
@@ -386,6 +394,7 @@ fn shorthand_score_targets_latest_unscored_delta_when_older_unscored_exists() {
         content: scored(r#"{"response_to_user":"score latest only","durable_ctx_score":2,"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
@@ -436,6 +445,7 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -453,6 +463,7 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
         content: scored(r#"{"response_to_user":"done","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let CoreStep::Final(final_turn) = final_step else {
         panic!("unexpected step: {final_step:?}");
@@ -483,6 +494,7 @@ fn prompt_shrink_can_hide_specific_slice_by_slice_id() {
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -501,6 +513,7 @@ fn prompt_shrink_can_hide_specific_slice_by_slice_id() {
         content: scored(r#"{"response_to_user":"done","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let CoreStep::Final(final_turn) = final_step else {
         panic!("unexpected step: {final_step:?}");
@@ -538,7 +551,7 @@ fn long_context_injects_shrink_review_at_one_third_context_window() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_threshold"),
     );
-    core.set_max_llm_context_tokens(3_000);
+    core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn(&"seed ".repeat(900), None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -546,6 +559,7 @@ fn long_context_injects_shrink_review_at_one_third_context_window() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
 
@@ -555,7 +569,7 @@ fn long_context_injects_shrink_review_at_one_third_context_window() {
     };
     assert!(prompt.contains("Long-context maintenance:"));
     assert!(prompt.contains("estimated_prompt_tokens="));
-    assert!(prompt.contains("max_llm_context_tokens=3000"));
+    assert!(prompt.contains("max_llm_input_tokens=3000"));
     assert!(prompt.contains("shrink_review_threshold_tokens=1000"));
     assert!(prompt.contains("prompt_delta_count="));
     assert!(prompt.contains("prompt_slice_count="));
@@ -568,6 +582,7 @@ fn long_context_injects_shrink_review_at_one_third_context_window() {
         content: scored(r#"{"response_to_user":"ok","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let next_prompt = match core.begin_turn("small followup", None) {
@@ -587,7 +602,7 @@ fn long_context_does_not_inject_shrink_review_below_one_third_context_window() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_below_threshold"),
     );
-    core.set_max_llm_context_tokens(30_000);
+    core.set_max_llm_input_tokens(30_000);
     for index in 0..3 {
         let _ = core.begin_turn(&format!("short q {}", index), None);
         let step = core.apply_model_response(LlmResponse {
@@ -597,6 +612,7 @@ fn long_context_does_not_inject_shrink_review_below_one_third_context_window() {
             )),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
+            truncated: false,
         });
         assert!(matches!(step, CoreStep::Final(_)));
     }
@@ -615,7 +631,7 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_observed_tokens"),
     );
-    core.set_max_llm_context_tokens(3_000);
+    core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -623,6 +639,7 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(950),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
 
@@ -631,7 +648,7 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Long-context maintenance:"));
-    assert!(prompt.contains("max_llm_context_tokens=3000"));
+    assert!(prompt.contains("max_llm_input_tokens=3000"));
     assert!(prompt.contains("shrink_review_threshold_tokens=1000"));
 }
 
@@ -642,7 +659,7 @@ fn long_context_repeats_review_every_one_fifth_after_first_review() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_followup_step"),
     );
-    core.set_max_llm_context_tokens(3_000);
+    core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -650,6 +667,7 @@ fn long_context_repeats_review_every_one_fifth_after_first_review() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
 
@@ -670,6 +688,7 @@ fn long_context_repeats_review_every_one_fifth_after_first_review() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(first_estimate + 600),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = match core.begin_turn("second review", None) {
@@ -688,7 +707,7 @@ fn long_context_forces_shrink_at_ninety_five_percent_window() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_force"),
     );
-    core.set_max_llm_context_tokens(3_000);
+    core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -696,6 +715,7 @@ fn long_context_forces_shrink_at_ninety_five_percent_window() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_850),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
 
@@ -716,7 +736,7 @@ fn force_shrink_overrides_deferred_followup_threshold() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_force_overrides"),
     );
-    core.set_max_llm_context_tokens(3_000);
+    core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -724,6 +744,7 @@ fn force_shrink_overrides_deferred_followup_threshold() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_500),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = match core.begin_turn("first high review", None) {
@@ -739,6 +760,7 @@ fn force_shrink_overrides_deferred_followup_threshold() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_850),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = match core.begin_turn("force despite deferred threshold", None) {
@@ -757,6 +779,7 @@ fn memory_candidates_are_persisted() {
         content: scored(r#"{"response_to_user":"记住了","memory_candidates":[{"content":"用户叫默默"}],"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match final_step {
         CoreStep::Final(turn) => turn,
@@ -782,6 +805,7 @@ fn query_memory_action_returns_action_result_delta() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{"query":"儿子 生日","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -799,6 +823,7 @@ fn malformed_response_gets_one_repair_then_fallback() {
         content: "not json".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -810,6 +835,7 @@ fn malformed_response_gets_one_repair_then_fallback() {
         content: "still not json".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
@@ -820,6 +846,29 @@ fn malformed_response_gets_one_repair_then_fallback() {
         "模型的回复不符合本地协议，已拦截原始报文展示。请重试或换一个更具体的问题。"
     );
     assert_eq!(final_turn.repair_issue.as_deref(), Some("invalid_json"));
+}
+
+#[test]
+fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("truncated_repair"),
+    );
+    let _ = core.begin_turn("写一个很长的报告", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: "{\"response_to_user\":\"partial".to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: true,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("truncated_model_output"));
+    assert!(prompt.contains("max output token limit"));
 }
 
 #[test]
@@ -852,6 +901,7 @@ ok
 }"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
@@ -886,6 +936,7 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
@@ -918,6 +969,7 @@ fn response_text_with_unescaped_inner_quotes_is_repaired() {
 }"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
@@ -948,6 +1000,7 @@ fn response_text_preserves_valid_complex_symbols_and_quotes() {
         content: payload.to_string(),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
@@ -969,6 +1022,7 @@ fn response_text_decodes_common_json_escape_sequences() {
         content: scored(r#"{"response_to_user":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
@@ -993,6 +1047,7 @@ fn action_input_decodes_common_json_escape_sequences() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_write","intent":"Store escaped text exactly after JSON decoding.","input":{"content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1035,6 +1090,7 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1057,6 +1113,7 @@ fn malformed_complex_protocol_is_blocked_without_raw_leak() {
             .to_string(),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1068,6 +1125,7 @@ fn malformed_complex_protocol_is_blocked_without_raw_leak() {
         content: "still ``` not { valid \\ json".to_string(),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
@@ -1098,6 +1156,7 @@ fn invalid_action_shape_requests_protocol_repair() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1119,6 +1178,7 @@ fn next_action_requires_intent_for_ui_status() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","input":{"query":"名字","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1141,6 +1201,7 @@ fn unsupported_action_is_not_executed_silently() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"delete_file","intent":"test action","input":{"path":"/tmp/x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1161,6 +1222,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create a task checkpoint.","input":{"content":"continue this task later"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1184,6 +1246,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"Find task checkpoint.","input":{"query":"continue","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1196,6 +1259,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         content: scored(format!(r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_delete","intent":"Remove completed checkpoint.","input":{{"id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1228,6 +1292,7 @@ fn scratch_query_empty_query_lists_recent_notes_with_limit() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"List recent checkpoints.","input":{"query":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1252,6 +1317,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create empty checkpoint.","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1266,6 +1332,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_delete","intent":"Delete checkpoint.","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1294,6 +1361,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_delete","intent":"Delete missing checkpoint.","input":{"id":"scratch_missing"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1318,6 +1386,7 @@ fn memory_write_action_requires_content_or_query() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_write","intent":"test action","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1341,6 +1410,7 @@ fn query_memory_does_not_expand_semantic_aliases() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{"query":"user's name","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1409,6 +1479,7 @@ fn sql_read_action_returns_rows() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%名字%"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1435,6 +1506,7 @@ fn sql_read_allows_with_cte_reads() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%名字%"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1460,6 +1532,7 @@ fn sql_read_rejects_write_statement() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1485,6 +1558,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1507,6 +1581,7 @@ fn sql_read_rejects_other_tables() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"SELECT name FROM sqlite_master LIMIT 5"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1527,6 +1602,7 @@ fn memory_schema_action_returns_native_schema_contract() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_schema","intent":"查看记忆结构"}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1549,6 +1625,7 @@ fn memory_sql_query_allows_pragma_table_info() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(memories)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1571,6 +1648,7 @@ fn memory_sql_query_allows_chat_messages_table_info() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(chat_messages)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1594,6 +1672,7 @@ fn memory_sql_query_rejects_non_memories_pragma() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(sqlite_master)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1614,6 +1693,7 @@ fn sql_read_action_requires_sql_for_repair() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1638,6 +1718,7 @@ fn memory_sql_query_requires_params_for_placeholders() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1663,6 +1744,7 @@ fn memory_sql_query_rejects_extra_params_for_placeholders() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%my name is%","%I am%"],"limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1692,6 +1774,7 @@ fn chat_history_query_reads_persisted_chat_records() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"查询聊天记录","input":{"query":"蓝色雨伞","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1717,12 +1800,14 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
         content: scored(r#"{"response_to_user":"收到"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let _ = core.begin_turn("我刚才说了什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"查询聊天记录","input":{"query":"蓝色雨伞","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1755,6 +1840,7 @@ fn chat_history_query_empty_query_lists_recent_records() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"列出最近聊天记录","input":{"query":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1786,6 +1872,7 @@ fn memory_sql_query_reads_chat_messages_with_time_window() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"按时间窗口查询聊天记录","input":{"sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1854,6 +1941,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
             content,
             model_name: "aws-claude-sonnet-4-6".to_string(),
             usage: usage(),
+            truncated: false,
         });
         let prompt = match step {
             CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1890,6 +1978,7 @@ fn memory_sql_query_rejects_raw_update_sql() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"UPDATE memories SET content='bad'","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1919,6 +2008,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Attempt to delete chat history through SQL.","input":{"sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1950,6 +2040,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"chat_history_delete","intent":"Delete matching chat record.","input":{"query":"删除目标","limit":10}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1972,6 +2063,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"upsert","id":"user_name","content":"用户的名字是默默"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -1988,6 +2080,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"update","id":"user_name","content":"用户的名字是默默2"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2003,6 +2096,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"delete","id":"user_name"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2027,6 +2121,7 @@ fn memory_update_requires_protocol_fields() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"update","content":"x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2049,6 +2144,7 @@ fn run_bash_allows_readonly_count_command() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"count output lines","input":{"command":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2072,6 +2168,7 @@ fn run_bash_accepts_old_timeout_sec_field() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"count output lines","input":{"command":"pwd | wc -l","timeout_sec":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2094,6 +2191,7 @@ fn run_bash_can_start_and_poll_background_job() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","input":{"command":"sleep 0.1; printf background-ok","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2111,6 +2209,7 @@ fn run_bash_can_start_and_poll_background_job() {
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2134,6 +2233,7 @@ fn shell_job_status_requires_model_chosen_timeout() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"shell_job_status","intent":"Poll background task.","input":{"job_id":"job_1"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2155,6 +2255,7 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","input":{"command":"sleep 0.4; printf waited-ok","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2170,6 +2271,7 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2194,6 +2296,7 @@ fn run_bash_accepts_old_read_back_protocol() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"read back count","input":{"command":"pwd","read_back_command":"pwd | wc -l","large_readback_opt_in":{"protocol":"unbounded_v1","reason":"verify line count"},"timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2219,6 +2322,7 @@ fn run_bash_accepts_read_back_without_primary_command() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2241,6 +2345,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let request = match step {
         CoreStep::NeedsUserApproval { request } => request,
@@ -2272,6 +2377,7 @@ fn run_bash_allows_compound_local_write_commands() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2296,6 +2402,7 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"pwd && rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let request = match step {
         CoreStep::NeedsUserApproval { request } => request,
@@ -2318,6 +2425,7 @@ fn run_bash_requires_approval_for_mutating_read_back_command() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"pwd","read_back_command":"rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let request = match step {
         CoreStep::NeedsUserApproval { request } => request,
@@ -2342,6 +2450,7 @@ fn run_bash_does_not_execute_primary_command_before_read_back_approval() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Write local marker then run broader readback.","input":{"command":"touch target/timem_test_approval_preflight_marker.txt","read_back_command":"cat /etc/passwd","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let request = match step {
         CoreStep::NeedsUserApproval { request } => request,
@@ -2374,6 +2483,7 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Run shell syntax after approval.","input":{"command":"x=ok; printf \"$x\" | tr o O","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let request = match step {
         CoreStep::NeedsUserApproval { request } => request,
@@ -2403,6 +2513,7 @@ fn run_bash_requires_command_for_repair() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2424,6 +2535,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"cat /etc/passwd"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let request = match step {
         CoreStep::NeedsUserApproval { request } => request,
@@ -2447,6 +2559,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Read system identity.","input":{"command":"uname -s","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2476,6 +2589,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         content: scored(r#"{"response_to_user":"已记录。","memory_candidates":[{"content":"用户的儿子生日是6月12日"}],"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
@@ -2487,6 +2601,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Find durable birthday memory before answering.","input":{"query":"儿子 生日 6月12日","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -2497,6 +2612,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         content: scored(r#"{"response_to_user":"6月12日是你儿子的生日。","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
@@ -2509,6 +2625,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"Delete the user-requested birthday memory.","input":{"operation":"delete","id":"mem_0"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["delete result"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -2520,6 +2637,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Find exact memory id before deleting.","input":{"sql":"SELECT id, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%儿子生日%"],"limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory id"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -2542,6 +2660,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         content: scored(format!(r#"{{"response_to_user":"","next_actions":[{{"action":"memory_update","intent":"Delete exact durable birthday memory.","input":{{"operation":"delete","id":"{}"}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["delete confirmation"]}}}}"#, memory_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -2557,6 +2676,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
@@ -2569,6 +2689,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Count files in current project folder.","input":{"command":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["file count"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -2582,13 +2703,14 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","input":{"command":"cat /etc/passwd","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["file content"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     }) {
         CoreStep::NeedsUserApproval { request } => request,
         other => panic!("unexpected step: {other:?}"),
     };
     assert_eq!(security_request.reason, "run_bash_requires_user_approval");
 
-    core.set_max_llm_context_tokens(3_000);
+    core.set_max_llm_input_tokens(3_000);
     for index in 0..3 {
         let _ = core.begin_turn(
             &format!("无关闲聊 {} {}", index, "长上下文 ".repeat(600)),
@@ -2601,6 +2723,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
             )),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
+            truncated: false,
         });
         assert!(matches!(step, CoreStep::Final(_)));
     }
@@ -2626,6 +2749,7 @@ fn thought_field_is_persisted_as_llm_thought_slice() {
         content: scored(r#"{"thought":"推导一下","response_to_user":"好的","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
@@ -2645,6 +2769,7 @@ fn thought_field_optional_does_not_trigger_repair() {
         content: scored(r#"{"response_to_user":"好的","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
+        truncated: false,
     });
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
@@ -2656,7 +2781,14 @@ fn thought_field_optional_does_not_trigger_repair() {
 }
 
 #[test]
-fn no_result_terminate_contract_is_documented_in_static() {
+fn static_prompt_keeps_contracts_concise() {
     let static_prompt = include_str!("../../resources/static_v1.json");
-    assert!(static_prompt.contains("no_result_terminate"));
+    assert!(static_prompt.contains("\"json_protocol\""));
+    assert!(static_prompt.contains("\"evidence_guard\""));
+    assert!(static_prompt.contains("\"action_result_guard\""));
+    assert!(!static_prompt.contains("no_result_terminate"));
+    assert!(!static_prompt.contains("long_running_shell"));
+    assert!(!static_prompt.contains("lang_retry"));
+    assert!(!static_prompt.contains("theme_workflow"));
+    assert!(!static_prompt.contains("rounds_guard"));
 }
