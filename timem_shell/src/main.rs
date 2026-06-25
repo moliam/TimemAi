@@ -2073,32 +2073,13 @@ fn render_startup_banner(
 }
 
 fn boxed_config_table(items: &[ConfigTableItem]) -> String {
-    let rows: Vec<&ConfigRow> = items
-        .iter()
-        .filter_map(|item| match item {
-            ConfigTableItem::Row(row) => Some(row),
-            ConfigTableItem::Section(_) => None,
-        })
-        .collect();
-    let key_width = rows
-        .iter()
-        .map(|row| display_width(&row.key))
-        .max()
-        .unwrap_or(0)
-        .max("TIMEM_GATEWAY_PROVIDER".len());
-    let value_width = rows
-        .iter()
-        .map(|row| display_width(&row.value))
-        .max()
-        .unwrap_or(0)
-        .clamp(12, 72);
-    let desc_width = rows
-        .iter()
-        .map(|row| display_width(row.desc))
-        .max()
-        .unwrap_or(0)
-        .clamp(8, 32);
-    let inner_width = key_width + value_width + desc_width + 8;
+    boxed_config_table_at_width(items, terminal_width().saturating_sub(1))
+}
+
+fn boxed_config_table_at_width(items: &[ConfigTableItem], terminal_width: usize) -> String {
+    let table_width = terminal_width.max(50);
+    let inner_width = table_width.saturating_sub(2);
+    let (key_width, value_width, desc_width) = config_column_widths(inner_width);
     let title = format!(" {TIMEM_LOGO} config ");
     let title_width = display_width(&title);
     let left = (inner_width.saturating_sub(title_width)) / 2;
@@ -2113,18 +2094,31 @@ fn boxed_config_table(items: &[ConfigTableItem]) -> String {
                 out.push_str(&section_line(label, inner_width));
             }
             ConfigTableItem::Row(row) => {
-                let value = fit_display(&row.value, value_width);
-                let value = if row.highlight {
-                    format!("{ANSI_HIGHLIGHT}{value}{ANSI_RESET}")
-                } else {
-                    value
-                };
-                out.push_str(&format!(
-                    "│ {} │ {} │ {} │\n",
-                    fit_display(&row.key, key_width),
-                    value,
-                    fit_display(row.desc, desc_width)
-                ));
+                let key_lines = wrap_display(&row.key, key_width);
+                let value_lines = wrap_display(&row.value, value_width);
+                let desc_lines = wrap_display(row.desc, desc_width);
+                let row_height = key_lines
+                    .len()
+                    .max(value_lines.len())
+                    .max(desc_lines.len())
+                    .max(1);
+                for idx in 0..row_height {
+                    let key = key_lines.get(idx).map(String::as_str).unwrap_or("");
+                    let value = value_lines.get(idx).map(String::as_str).unwrap_or("");
+                    let desc = desc_lines.get(idx).map(String::as_str).unwrap_or("");
+                    let value = fit_display(value, value_width);
+                    let value = if row.highlight && !value.trim().is_empty() {
+                        format!("{ANSI_HIGHLIGHT}{value}{ANSI_RESET}")
+                    } else {
+                        value
+                    };
+                    out.push_str(&format!(
+                        "│ {} │ {} │ {} │\n",
+                        fit_display(key, key_width),
+                        value,
+                        fit_display(desc, desc_width)
+                    ));
+                }
             }
         }
     }
@@ -2134,6 +2128,16 @@ fn boxed_config_table(items: &[ConfigTableItem]) -> String {
     );
     out.push_str("option 优先于 env，查看：timem --help\n");
     out
+}
+
+fn config_column_widths(inner_width: usize) -> (usize, usize, usize) {
+    let content_width = inner_width.saturating_sub(8).max(30);
+    let key_floor = 22.min(content_width.saturating_sub(20).max(6));
+    let key_width = (content_width * 2 / 10).max(key_floor);
+    let remaining = content_width.saturating_sub(key_width);
+    let value_width = (remaining * 5 / 8).max(12).min(remaining.saturating_sub(8));
+    let desc_width = remaining.saturating_sub(value_width).max(8);
+    (key_width, value_width, desc_width)
 }
 
 fn section_line(label: &str, target_width: usize) -> String {
@@ -2196,6 +2200,50 @@ fn fit_display(text: &str, target_width: usize) -> String {
             format!("{}{}", fitted, " ".repeat(target_width - fitted_width))
         } else {
             fitted
+        }
+    }
+}
+
+fn wrap_display(text: &str, target_width: usize) -> Vec<String> {
+    if target_width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    for raw_line in text.lines().default_if_empty() {
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for ch in raw_line.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width > 0 && current_width + ch_width > target_width {
+                lines.push(fit_display(&current, target_width));
+                current.clear();
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += ch_width;
+        }
+        lines.push(fit_display(&current, target_width));
+    }
+    if lines.is_empty() {
+        lines.push(" ".repeat(target_width));
+    }
+    lines
+}
+
+trait DefaultIfEmpty<'a> {
+    fn default_if_empty(self) -> Vec<&'a str>;
+}
+
+impl<'a, I> DefaultIfEmpty<'a> for I
+where
+    I: Iterator<Item = &'a str>,
+{
+    fn default_if_empty(self) -> Vec<&'a str> {
+        let lines = self.collect::<Vec<_>>();
+        if lines.is_empty() {
+            vec![""]
+        } else {
+            lines
         }
     }
 }
@@ -2272,18 +2320,18 @@ fn time_label() -> String {
 #[cfg(test)]
 mod static_prompt_tests {
     use super::{
-        apply_config_value, cancelled_turn_result, config_field_value, consume_turn_cancel_request,
-        display_width, epoch_millis, help_text, pasted_line_count, random_spinner_tick,
-        read_approval_key, read_menu_key, read_shell_key, render_approval_choices,
-        render_config_menu, render_expand_output_choices, render_expand_output_prompt,
-        render_paste_recovery_choices, render_paste_recovery_prompt, render_round_limit_choices,
-        render_round_limit_prompt, render_shell_input_clear_sequence, render_stale_context_choices,
-        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
-        render_user_approval_prompt, render_user_input_prompt, sanitize_user_input,
-        stale_context_prompt_needed, wrapped_terminal_rows, ApprovalChoice, ApprovalKey,
-        ConfigField, MenuKey, PasteRecoverySummary, ShellInputBuffer, ShellInputKey,
-        ANSI_HIGHLIGHT, ANSI_RESET, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
-        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        apply_config_value, boxed_config_table_at_width, cancelled_turn_result, config_field_value,
+        consume_turn_cancel_request, display_width, epoch_millis, help_text, pasted_line_count,
+        random_spinner_tick, read_approval_key, read_menu_key, read_shell_key,
+        render_approval_choices, render_config_menu, render_expand_output_choices,
+        render_expand_output_prompt, render_paste_recovery_choices, render_paste_recovery_prompt,
+        render_round_limit_choices, render_round_limit_prompt, render_shell_input_clear_sequence,
+        render_stale_context_choices, render_stale_context_prompt, render_startup_banner,
+        render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
+        sanitize_user_input, stale_context_prompt_needed, wrapped_terminal_rows, ApprovalChoice,
+        ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecoverySummary,
+        ShellInputBuffer, ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET, STALE_CONTEXT_IDLE,
+        STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use std::fs;
@@ -2565,7 +2613,8 @@ mod static_prompt_tests {
         assert!(banner.contains("TIMEM_API_PROTOCOL"));
         assert!(banner.contains("openai-compatible"));
         assert!(banner.contains("TIMEM_BASE_URL"));
-        assert!(banner.contains("https://dashscope.aliyuncs.com/compatible-mode/v1"));
+        assert!(banner.contains("dashscope.aliyuncs"));
+        assert!(banner.contains("compatible-mode/v1"));
         assert!(banner.contains("TIMEM_MODEL"));
         assert!(banner.contains("qwen-plus"));
         assert!(banner.contains("TIMEM_MAX_LLM_INPUT"));
@@ -2596,6 +2645,49 @@ mod static_prompt_tests {
         assert!(runtime_idx < bash_idx);
         assert!(bash_idx < space_idx);
         assert!(space_idx < data_idx);
+    }
+
+    #[test]
+    fn config_table_uses_window_width_ratio_and_wraps_long_values() {
+        let items = [
+            ConfigTableItem::Section("MODEL"),
+            ConfigTableItem::Row(ConfigRow {
+                key: "TIMEM_GATEWAY_PROVIDER".to_string(),
+                value: "aliyun".to_string(),
+                desc: "流量平台，决定默认 base url",
+                highlight: false,
+            }),
+            ConfigTableItem::Row(ConfigRow {
+                key: "TIMEM_BASE_URL".to_string(),
+                value: "https://very-long-provider.example.com/compatible-mode/v1/with/a/path/that/wraps".to_string(),
+                desc: "网关 base url",
+                highlight: false,
+            }),
+        ];
+        let banner = boxed_config_table_at_width(&items, 80);
+        let table_lines = banner
+            .lines()
+            .filter(|line| line.starts_with('│') || line.starts_with('├'))
+            .collect::<Vec<_>>();
+        assert!(!table_lines.is_empty());
+        assert!(table_lines.iter().all(|line| display_width(line) == 80));
+        assert!(banner
+            .lines()
+            .next()
+            .is_some_and(|line| display_width(line) == 80));
+        assert!(banner.contains("very-long-provider"));
+        let data_rows = banner
+            .lines()
+            .filter(|line| line.starts_with('│'))
+            .collect::<Vec<_>>();
+        assert!(
+            data_rows.len() > 2,
+            "long value should wrap into extra table rows:\n{banner}"
+        );
+        assert_eq!(
+            data_rows[1].matches('│').count(),
+            data_rows[2].matches('│').count()
+        );
     }
 
     #[test]
