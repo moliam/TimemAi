@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod profiler;
 mod prompt_cache;
 mod protocol_adapter;
 mod structured_output;
 
+pub use profiler::{collect_storage_profile, render_prof_report, RuntimeProfiler, StorageProfile};
 pub use prompt_cache::{
     plan_incremental_cache, plan_prompt_cache, prompt_parts_from_rendered_prompt,
     split_old_and_new_delta, split_prompt, stable_text_fingerprint, CacheControl, PromptBlock,

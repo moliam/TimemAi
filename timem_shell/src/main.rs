@@ -13,9 +13,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
     action_status_hint, append_audit, audit_path, call_model, data_root, local_time_label,
-    parse_cli_args, provider_config_from_env, render_final_response_at, render_shell_status_bar,
-    render_thinking_block_at, supporting_context, ModelDirection, ShellStatusMessage,
-    ShellStatusSnapshot, ShellStatusTone, SPINNER_ICONS, TIMEM_LOGO,
+    parse_cli_args, provider_config_from_env, render_final_response_at, render_prof_report,
+    render_shell_status_bar, render_thinking_block_at, supporting_context, ModelDirection,
+    RuntimeProfiler, ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone, SPINNER_ICONS,
+    TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -60,6 +61,7 @@ fn main() {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("memory");
     let bash_approval_mode = bash_approval_mode_from_options(&options, &env);
+    let mut profiler = RuntimeProfiler::default();
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
     core.set_bash_approval_mode(bash_approval_mode);
     core.set_max_llm_context_tokens(config.max_llm_context_tokens);
@@ -76,6 +78,7 @@ fn main() {
             context,
             None,
             false,
+            Some(&mut profiler),
         );
         println!(
             "{}",
@@ -111,7 +114,7 @@ fn main() {
         "{}",
         render_startup_banner(&space, &config, &audit_file, bash_approval_mode)
     );
-    println!("输入 /exit 退出；Ctrl+C 取消当前输入。\n");
+    println!("输入 /prof 查看运行 profiling；输入 /exit 退出；Ctrl+C 取消当前输入。\n");
 
     let history_file = audit_file.with_file_name("shell_history.txt");
     let mut editor = match DefaultEditor::new() {
@@ -157,6 +160,14 @@ fn main() {
             println!("Bye.");
             break;
         }
+        if input == "/prof" {
+            prompt_status.clear_before_exit();
+            println!(
+                "{}",
+                render_prof_report(&profiler, &memory_dir, &audit_file)
+            );
+            continue;
+        }
 
         rewrite_submitted_user_line(&input, prompt_status.take_visible());
 
@@ -170,6 +181,7 @@ fn main() {
             None,
             Some(&mut status),
             true,
+            Some(&mut profiler),
         );
         status.finish();
         print_final_response(&text, &stats, &config.provider, &config.model, elapsed);
@@ -185,6 +197,7 @@ fn run_turn(
     additional_context: Option<&str>,
     mut status: Option<&mut ThinkingStatus>,
     interactive_approval: bool,
+    mut profiler: Option<&mut RuntimeProfiler>,
 ) -> (String, UsageStats, Duration) {
     TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
     let _sigint_guard = if status.is_some() {
@@ -208,6 +221,7 @@ fn run_turn(
     }
     let mut step = core.begin_turn(input, Some(&context));
     let mut rounds = 0u32;
+    let mut model_wait_this_turn = Duration::ZERO;
 
     let (text, stats, repair_issue) = loop {
         if consume_turn_cancel_request() {
@@ -219,8 +233,19 @@ fn run_turn(
                 if let Some(status) = status.as_deref_mut() {
                     status.set_model_direction(rounds, ModelDirection::Upstream);
                 }
+                let model_wait_start = Instant::now();
                 match call_model(config, &prompt, audit_file) {
                     Ok(response) => {
+                        let model_wait = model_wait_start.elapsed();
+                        model_wait_this_turn = model_wait_this_turn.saturating_add(model_wait);
+                        if let Some(profiler) = profiler.as_deref_mut() {
+                            profiler.record_model_wait(
+                                &config.provider,
+                                &response.model_name,
+                                &response.usage,
+                                model_wait,
+                            );
+                        }
                         if consume_turn_cancel_request() {
                             break cancelled_turn_result();
                         }
@@ -234,6 +259,16 @@ fn run_turn(
                         step = core.apply_model_response(response);
                     }
                     Err(err) => {
+                        let model_wait = model_wait_start.elapsed();
+                        model_wait_this_turn = model_wait_this_turn.saturating_add(model_wait);
+                        if let Some(profiler) = profiler.as_deref_mut() {
+                            profiler.record_model_wait(
+                                &config.provider,
+                                &config.model,
+                                &UsageStats::zero(),
+                                model_wait,
+                            );
+                        }
                         if consume_turn_cancel_request() {
                             break cancelled_turn_result();
                         }
@@ -283,6 +318,9 @@ fn run_turn(
         }
     };
     let elapsed = start.elapsed();
+    if let Some(profiler) = profiler.as_deref_mut() {
+        profiler.record_turn(elapsed, model_wait_this_turn);
+    }
     let _ = append_audit(
         audit_file,
         &json!({
@@ -930,7 +968,7 @@ fn print_help() {
 }
 
 fn help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-tokens <n>               env TIMEM_MAX_TOKENS; max response tokens, default 2048\n  --max-llm-context <n|100K>     env TIMEM_MAX_LLM_CONTEXT; context window, default 100K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive keys:\n  Ctrl+C cancels the current input while editing, and cancels the current turn while Timem is thinking.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-tokens <n>               env TIMEM_MAX_TOKENS; max response tokens, default 2048\n  --max-llm-context <n|100K>     env TIMEM_MAX_LLM_CONTEXT; context window, default 100K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C cancels the current input while editing, and cancels the current turn while Timem is thinking.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn format_token_count(value: u32) -> String {
@@ -1202,6 +1240,8 @@ mod static_prompt_tests {
             "TIMEM_MAX_LLM_CONTEXT",
             "--bash-approval",
             "TIMEM_BASH_APPROVAL",
+            "Interactive commands:",
+            "/prof",
             "Ctrl+C cancels the current input",
             "cancels the current turn",
         ] {
