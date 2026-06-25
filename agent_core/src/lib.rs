@@ -492,14 +492,7 @@ impl AgentCore {
             })
             .collect::<Vec<_>>();
         let slice_count = chunks.len();
-        let inferred_score = durable_ctx_score.unwrap_or_else(|| {
-            infer_durable_ctx_score_from_chunks(
-                &chunks
-                    .iter()
-                    .map(|(prompt_type, _, text)| (prompt_type.as_str(), text.as_str()))
-                    .collect::<Vec<_>>(),
-            )
-        });
+        let inferred_score = durable_ctx_score.unwrap_or_else(default_durable_ctx_score);
         let slices = chunks
             .into_iter()
             .enumerate()
@@ -1852,32 +1845,6 @@ fn default_durable_ctx_score() -> u8 {
 
 fn clamp_durable_ctx_score(raw: u64) -> u8 {
     raw.clamp(1, 10) as u8
-}
-
-fn infer_durable_ctx_score_from_chunks(chunks: &[(&str, &str)]) -> u8 {
-    if chunks
-        .iter()
-        .any(|(prompt_type, _)| *prompt_type == "result_of_llm_action")
-    {
-        return 4;
-    }
-    if chunks
-        .iter()
-        .any(|(prompt_type, _)| *prompt_type == "llm_thought")
-    {
-        return 3;
-    }
-    if chunks.iter().any(|(_, text)| {
-        let lowered = text.to_lowercase();
-        lowered.contains("remember")
-            || lowered.contains("记住")
-            || lowered.contains("以后")
-            || lowered.contains("长期")
-            || lowered.contains("生日")
-    }) {
-        return 8;
-    }
-    default_durable_ctx_score()
 }
 
 fn shell_quote_path(path: &Path) -> String {

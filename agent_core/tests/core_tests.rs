@@ -191,6 +191,22 @@ fn model_can_score_new_delta_for_long_context_retention() {
 }
 
 #[test]
+fn runtime_does_not_infer_durable_score_from_user_text_semantics() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("durable_ctx_no_semantic_infer"),
+    );
+    let prompt = match core.begin_turn("不要记住：生日这个词只是测试", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("User question:\n不要记住：生日这个词只是测试"));
+    assert!(prompt.contains("durable_ctx_score: 5"));
+    assert!(!prompt.contains("durable_ctx_score: 8"));
+}
+
+#[test]
 fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
     let mut core = AgentCore::new(
         "STATIC",

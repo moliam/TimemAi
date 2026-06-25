@@ -131,7 +131,10 @@ Runtime shrink review and future shrink actions should use these ids:
 - Use `slice_id` when only one rendered slice of a large delta is stale.
 - Each delta has a `durable_ctx_score` from 1 to 10. The model may provide it
   in the top-level response envelope; runtime clamps it to 1..10 and otherwise
-  applies a conservative default. Low scores are better shrink candidates.
+  applies a fixed default of 5. Runtime must not infer this score from natural
+  language keywords such as "remember", "birthday", "不要记住", or similar
+  content; semantic value belongs to the model, not the runtime. Low scores are
+  better shrink candidates.
 - Runtime injects long-context shrink review when observed provider input
   tokens plus the new prompt delta estimate reaches about one third of
   `TIMEM_MAX_LLM_CONTEXT`. After the first review, the next threshold advances
