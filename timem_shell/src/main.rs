@@ -13,9 +13,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
     action_status_hint, append_audit, audit_path, call_model, data_root, local_time_label,
-    parse_cli_args, provider_config_from_env, render_final_response_at, render_prof_report,
-    render_shell_status_bar, render_thinking_block_at, supporting_context, ModelDirection,
-    RuntimeProfiler, ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone, SPINNER_ICONS,
+    observation_events_from_model_response, parse_cli_args, provider_config_from_env,
+    render_final_response_at, render_prof_report, render_shell_status_bar, render_thinking_view_at,
+    supporting_context, ModelDirection, ObservationEvent, ObservationPanel, RuntimeProfiler,
+    ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, SPINNER_ICONS,
     TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -232,6 +233,7 @@ fn run_turn(
                 rounds += 1;
                 if let Some(status) = status.as_deref_mut() {
                     status.set_model_direction(rounds, ModelDirection::Upstream);
+                    status.set_transient_observation("思考中...");
                 }
                 let model_wait_start = Instant::now();
                 match call_model(config, &prompt, audit_file) {
@@ -250,13 +252,20 @@ fn run_turn(
                             break cancelled_turn_result();
                         }
                         if let Some(status) = status.as_deref_mut() {
+                            status.clear_transient_observation();
                             status.set_usage(response.usage.clone());
                             status.set_model_direction(rounds, ModelDirection::Downstream);
                             if let Some(hint) = action_status_hint(&response.content) {
                                 status.set_intent(&hint.intent, &hint.memory_marker);
                             }
+                            status.apply_observation_events(
+                                observation_events_from_model_response(&response.content),
+                            );
                         }
                         step = core.apply_model_response(response);
+                        if let Some(status) = status.as_deref_mut() {
+                            status.settle_active_observations();
+                        }
                     }
                     Err(err) => {
                         let model_wait = model_wait_start.elapsed();
@@ -271,6 +280,9 @@ fn run_turn(
                         }
                         if consume_turn_cancel_request() {
                             break cancelled_turn_result();
+                        }
+                        if let Some(status) = status.as_deref_mut() {
+                            status.clear_transient_observation();
                         }
                         let _ = append_audit(
                             audit_file,
@@ -349,66 +361,110 @@ fn cancelled_turn_result() -> (String, UsageStats, Option<String>) {
 }
 
 struct ThinkingStatus {
-    state: Arc<Mutex<ShellStatusSnapshot>>,
+    state: Arc<Mutex<ThinkingViewSnapshot>>,
     running: Arc<AtomicBool>,
+    rendered_lines: Arc<Mutex<usize>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl ThinkingStatus {
     fn start(provider: &str, model: &str) -> Self {
-        let state = Arc::new(Mutex::new(ShellStatusSnapshot {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            intent: "思考中".to_string(),
-            memory_marker: String::new(),
-            model_round: 1,
-            direction: ModelDirection::Upstream,
-            usage: UsageStats::zero(),
-            tick: random_spinner_tick(),
+        let state = Arc::new(Mutex::new(ThinkingViewSnapshot {
+            status: ShellStatusSnapshot {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                intent: "思考中".to_string(),
+                memory_marker: String::new(),
+                model_round: 1,
+                direction: ModelDirection::Upstream,
+                usage: UsageStats::zero(),
+                tick: random_spinner_tick(),
+            },
+            observations: {
+                let mut panel = ObservationPanel::default();
+                panel.apply(ObservationEvent::Transient("思考中...".to_string()));
+                panel
+            },
         }));
         let running = Arc::new(AtomicBool::new(true));
-        render_thinking(&state.lock().unwrap());
+        let rendered_lines = Arc::new(Mutex::new(0));
+        render_thinking(&state.lock().unwrap(), &rendered_lines);
         let thread_state = Arc::clone(&state);
         let thread_running = Arc::clone(&running);
+        let thread_rendered_lines = Arc::clone(&rendered_lines);
         let handle = thread::spawn(move || {
             while thread_running.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(1500));
                 if let Ok(mut snapshot) = thread_state.lock() {
-                    snapshot.tick = random_spinner_tick();
-                    rerender_thinking(&snapshot);
+                    snapshot.status.tick = random_spinner_tick();
+                    rerender_thinking(&snapshot, &thread_rendered_lines);
                 }
             }
         });
         Self {
             state,
             running,
+            rendered_lines,
             handle: Some(handle),
         }
     }
 
     fn set_model_direction(&mut self, round: u32, direction: ModelDirection) {
         if let Ok(mut state) = self.state.lock() {
-            state.model_round = round;
-            state.direction = direction;
-            rerender_thinking(&state);
+            state.status.model_round = round;
+            state.status.direction = direction;
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
     fn set_usage(&mut self, usage: UsageStats) {
         if let Ok(mut state) = self.state.lock() {
-            state.usage = usage;
-            rerender_thinking(&state);
+            state.status.usage = usage;
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
     fn set_intent(&mut self, intent: &str, memory_marker: &str) {
         if let Ok(mut state) = self.state.lock() {
-            state.intent = intent
+            state.status.intent = intent
                 .trim_end_matches('…')
                 .trim_end_matches("...")
                 .to_string();
-            state.memory_marker = memory_marker.to_string();
-            rerender_thinking(&state);
+            state.status.memory_marker = memory_marker.to_string();
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn set_transient_observation(&mut self, text: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            state
+                .observations
+                .apply(ObservationEvent::Transient(text.to_string()));
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn clear_transient_observation(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.observations.apply(ObservationEvent::ClearTransient);
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn apply_observation_events(&mut self, events: Vec<ObservationEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.observations.apply_all(events);
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn settle_active_observations(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.observations.apply(ObservationEvent::SettleActive);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -417,7 +473,7 @@ impl ThinkingStatus {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        clear_thinking_block();
+        clear_thinking_block(&self.rendered_lines);
     }
 
     fn pause_for_user_approval(&mut self) {
@@ -425,7 +481,7 @@ impl ThinkingStatus {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        clear_thinking_block();
+        clear_thinking_block(&self.rendered_lines);
     }
 
     fn resume_after_user_approval(&mut self) {
@@ -433,15 +489,16 @@ impl ThinkingStatus {
             return;
         }
         self.running.store(true, Ordering::Relaxed);
-        render_thinking(&self.state.lock().unwrap());
+        render_thinking(&self.state.lock().unwrap(), &self.rendered_lines);
         let thread_state = Arc::clone(&self.state);
         let thread_running = Arc::clone(&self.running);
+        let thread_rendered_lines = Arc::clone(&self.rendered_lines);
         self.handle = Some(thread::spawn(move || {
             while thread_running.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(1500));
                 if let Ok(mut snapshot) = thread_state.lock() {
-                    snapshot.tick = random_spinner_tick();
-                    rerender_thinking(&snapshot);
+                    snapshot.status.tick = random_spinner_tick();
+                    rerender_thinking(&snapshot, &thread_rendered_lines);
                 }
             }
         }));
@@ -683,19 +740,29 @@ fn strip_csi_sequences(input: &str) -> String {
     out
 }
 
-fn render_thinking(snapshot: &ShellStatusSnapshot) {
-    print!("{}", render_thinking_block_at(snapshot, &time_label()));
+fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
+    let rendered = render_thinking_view_at(snapshot, &time_label());
+    let line_count = rendered.lines().count();
+    print!("{rendered}");
+    if let Ok(mut previous) = rendered_lines.lock() {
+        *previous = line_count;
+    }
     let _ = io::stdout().flush();
 }
 
-fn rerender_thinking(snapshot: &ShellStatusSnapshot) {
-    print!("\x1b[2F\x1b[J");
-    print!("{}", render_thinking_block_at(snapshot, &time_label()));
-    let _ = io::stdout().flush();
+fn rerender_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
+    clear_thinking_block(rendered_lines);
+    render_thinking(snapshot, rendered_lines);
 }
 
-fn clear_thinking_block() {
-    print!("\x1b[2F\x1b[J");
+fn clear_thinking_block(rendered_lines: &Arc<Mutex<usize>>) {
+    let previous = rendered_lines.lock().map(|lines| *lines).unwrap_or(0);
+    if previous > 0 {
+        print!("\x1b[{}F\x1b[J", previous);
+    }
+    if let Ok(mut lines) = rendered_lines.lock() {
+        *lines = 0;
+    }
     let _ = io::stdout().flush();
 }
 

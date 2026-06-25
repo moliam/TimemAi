@@ -7,11 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod observation;
 mod profiler;
 mod prompt_cache;
 mod protocol_adapter;
 mod structured_output;
 
+pub use observation::{
+    observation_events_from_model_response, render_observation_panel, ObservationEvent,
+    ObservationLine, ObservationLineStyle, ObservationPanel,
+};
 pub use profiler::{collect_storage_profile, render_prof_report, RuntimeProfiler, StorageProfile};
 pub use prompt_cache::{
     plan_incremental_cache, plan_prompt_cache, prompt_parts_from_rendered_prompt,
@@ -46,6 +51,12 @@ pub struct ShellStatusSnapshot {
     pub direction: ModelDirection,
     pub usage: UsageStats,
     pub tick: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThinkingViewSnapshot {
+    pub status: ShellStatusSnapshot,
+    pub observations: ObservationPanel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +109,32 @@ pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str
         "{} {intent_line}\n{status_line}\n",
         timem_prefix(time_label)
     )
+}
+
+pub fn render_thinking_view_at(snapshot: &ThinkingViewSnapshot, time_label: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{} \n", timem_prefix(time_label)));
+    out.push_str(&render_observation_panel(&snapshot.observations));
+    out.push_str(&render_thinking_status_line(&snapshot.status));
+    out.push('\n');
+    out
+}
+
+fn render_thinking_status_line(snapshot: &ShellStatusSnapshot) -> String {
+    let direction = match snapshot.direction {
+        ModelDirection::Upstream => "▲",
+        ModelDirection::Downstream => "▼",
+    };
+    let mut status_parts = Vec::new();
+    if !snapshot.memory_marker.trim().is_empty() {
+        status_parts.push(snapshot.memory_marker.clone());
+    }
+    status_parts.push(format!(
+        "{}:{}: {}{}",
+        snapshot.provider, snapshot.model, direction, snapshot.model_round
+    ));
+    status_parts.push(token_status(&snapshot.usage));
+    dim_line(&format!("  {}", status_parts.join(" ║ ")))
 }
 
 pub fn compact_status_text(text: &str, max_chars: usize) -> String {
@@ -2098,6 +2135,44 @@ mod tests {
         assert!(block.contains("Check local system"));
         assert!(block.contains('…'));
         assert!(!block.contains("observance"));
+    }
+
+    #[test]
+    fn thinking_view_renders_observation_panel_and_status_line() {
+        let mut observations = ObservationPanel::new(8, 60);
+        observations.apply(ObservationEvent::Persistent("正在分析用户请求".into()));
+        observations.apply(ObservationEvent::Active(
+            "执行 Bash: rg --files | wc -l".into(),
+        ));
+        let view = render_thinking_view_at(
+            &ThinkingViewSnapshot {
+                status: ShellStatusSnapshot {
+                    provider: "aliyun".into(),
+                    model: "qwen-plus".into(),
+                    intent: "ignored in panel mode".into(),
+                    memory_marker: String::new(),
+                    model_round: 2,
+                    direction: ModelDirection::Downstream,
+                    usage: UsageStats {
+                        prompt_tokens: 1200,
+                        completion_tokens: 20,
+                        cached_tokens: 300,
+                        ..UsageStats::zero()
+                    },
+                    tick: 0,
+                },
+                observations,
+            },
+            "12:00:00",
+        );
+
+        assert!(view.contains("[12:00:00] 𝓣𝓲𝓶𝓮𝓶 >"));
+        assert!(view.contains("Thought / Action"));
+        assert!(view.contains("正在分析用户请求"));
+        assert!(view.contains("\x1b[5m执行 Bash: rg --files | wc -l"));
+        assert!(view.contains("aliyun:qwen-plus: ▼2"));
+        assert!(view.contains("Token: ▲1.2K(⌁300) ▼20"));
+        assert!(!view.contains("ignored in panel mode"));
     }
 
     #[test]
