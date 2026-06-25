@@ -178,6 +178,12 @@ Inside the interactive shell, use `/config` to change runtime settings such as
 model, gateway provider, API protocol, base URL, max input/output tokens, and
 bash approval mode. The menu uses arrow keys and Enter, then returns to chat.
 
+If the shell has been idle for at least 3 hours and the existing dynamic task
+context is over about 10K tokens, Timem asks whether to continue the previous
+task context. Choose `YES` to keep it, or `NO` to clear only the old dynamic
+prompt context and start the new question cleanly. Durable memory, chat history,
+scratch notes, and runtime data are not deleted by this choice.
+
 Override the default URL only when needed:
 
 ```bash

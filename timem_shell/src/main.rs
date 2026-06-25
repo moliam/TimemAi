@@ -27,6 +27,8 @@ const ANSI_RESET: &str = timem_shell::ANSI_RESET;
 const ANSI_BOLD: &str = timem_shell::ANSI_BOLD;
 const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
 static TURN_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+const STALE_CONTEXT_IDLE: Duration = Duration::from_secs(3 * 60 * 60);
+const STALE_CONTEXT_TOKEN_THRESHOLD: u32 = 10_000;
 
 struct ConfigRow {
     key: String,
@@ -127,6 +129,7 @@ fn main() {
     let history_file = audit_file.with_file_name("shell_history.txt");
     let mut editor = ShellLineEditor::new(history_file);
     let mut prompt_status = PromptStatusBar::default();
+    let mut last_dialog_activity = Instant::now();
 
     loop {
         let prompt = render_user_input_prompt(&time_label());
@@ -176,6 +179,25 @@ fn main() {
 
         rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
 
+        let idle = last_dialog_activity.elapsed();
+        let dynamic_context_tokens = core.dynamic_context_estimated_tokens();
+        if stale_context_prompt_needed(idle, dynamic_context_tokens) {
+            let continue_old_context = request_stale_context_continue(idle, dynamic_context_tokens);
+            let _ = append_audit(
+                &audit_file,
+                &json!({
+                    "type":"stale_context_choice",
+                    "session":session,
+                    "idle_secs":idle.as_secs(),
+                    "dynamic_context_tokens":dynamic_context_tokens,
+                    "continue_old_context":continue_old_context
+                }),
+            );
+            if !continue_old_context {
+                core.clear_dynamic_context();
+            }
+        }
+
         let mut status = ThinkingStatus::start(&config.provider, &config.model);
         let (text, stats, elapsed) = run_turn(
             &mut core,
@@ -190,6 +212,7 @@ fn main() {
         );
         status.finish();
         print_final_response(&text, &stats, &config.provider, &config.model, elapsed);
+        last_dialog_activity = Instant::now();
     }
 }
 
@@ -586,6 +609,17 @@ fn request_expand_output_tokens(current: u32) -> bool {
     }
 }
 
+fn request_stale_context_continue(idle: Duration, dynamic_context_tokens: u32) -> bool {
+    match choose_stale_context_continue(idle, dynamic_context_tokens) {
+        ApprovalChoice::Allow => true,
+        ApprovalChoice::Deny => false,
+    }
+}
+
+fn stale_context_prompt_needed(idle: Duration, dynamic_context_tokens: u32) -> bool {
+    idle >= STALE_CONTEXT_IDLE && dynamic_context_tokens > STALE_CONTEXT_TOKEN_THRESHOLD
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApprovalChoice {
     Allow,
@@ -644,6 +678,34 @@ fn render_expand_output_choices(selected: ApprovalChoice) -> String {
     }
 }
 
+fn render_stale_context_prompt(idle: Duration, dynamic_context_tokens: u32) -> String {
+    format!(
+        "\n距离上次对话已经过去 {}，当前旧任务上下文约 {} tokens。\n是否继续使用上次对话任务上下文？选择 NO 会清空旧动态上下文，从当前问题重新开始。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        format_idle_duration(idle),
+        timem_shell::compact_count(dynamic_context_tokens)
+    )
+}
+
+fn render_stale_context_choices(selected: ApprovalChoice) -> String {
+    match selected {
+        ApprovalChoice::Allow => "\x1b[7m[ YES ]\x1b[0m   NO".to_string(),
+        ApprovalChoice::Deny => "  YES   \x1b[7m[ NO ]\x1b[0m".to_string(),
+    }
+}
+
+fn format_idle_duration(duration: Duration) -> String {
+    let total_minutes = duration.as_secs() / 60;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    if hours > 0 && minutes > 0 {
+        format!("{hours} 小时 {minutes} 分钟")
+    } else if hours > 0 {
+        format!("{hours} 小时")
+    } else {
+        format!("{minutes} 分钟")
+    }
+}
+
 fn render_paste_recovery_prompt(summary: &PasteRecoverySummary) -> String {
     format!(
         "\n检测到 {count} 个粘贴关联标签可能被误编辑，原始粘贴内容共 {lines} 行。\n是否恢复关联粘贴文本？选择 Yes 会提交原始粘贴内容；选择 No 会把已编辑标签当普通文本提交。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
@@ -672,6 +734,14 @@ fn choose_round_limit_continue(max_rounds: u32) -> ApprovalChoice {
 fn choose_expand_output_tokens(current: u32) -> ApprovalChoice {
     print!("{}", render_expand_output_prompt(current));
     choose_with_keyboard(render_expand_output_choices, ApprovalChoice::Allow)
+}
+
+fn choose_stale_context_continue(idle: Duration, dynamic_context_tokens: u32) -> ApprovalChoice {
+    print!(
+        "{}",
+        render_stale_context_prompt(idle, dynamic_context_tokens)
+    );
+    choose_with_keyboard(render_stale_context_choices, ApprovalChoice::Allow)
 }
 
 fn choose_paste_recovery(summary: &PasteRecoverySummary) -> ApprovalChoice {
@@ -2205,10 +2275,12 @@ mod static_prompt_tests {
         read_approval_key, read_menu_key, read_shell_key, render_approval_choices,
         render_config_menu, render_expand_output_choices, render_expand_output_prompt,
         render_paste_recovery_choices, render_paste_recovery_prompt, render_round_limit_choices,
-        render_round_limit_prompt, render_shell_input_clear_sequence, render_startup_banner,
-        render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
-        sanitize_user_input, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
-        MenuKey, PasteRecoverySummary, ShellInputBuffer, ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET,
+        render_round_limit_prompt, render_shell_input_clear_sequence, render_stale_context_choices,
+        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
+        render_user_approval_prompt, render_user_input_prompt, sanitize_user_input,
+        stale_context_prompt_needed, wrapped_terminal_rows, ApprovalChoice, ApprovalKey,
+        ConfigField, MenuKey, PasteRecoverySummary, ShellInputBuffer, ShellInputKey,
+        ANSI_HIGHLIGHT, ANSI_RESET, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
         STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
@@ -2216,6 +2288,7 @@ mod static_prompt_tests {
     use std::io::Cursor;
     use std::process::Command;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
     use timem_shell::{ApiProtocol, ProviderConfig, SPINNER_ICONS};
 
     #[test]
@@ -2324,6 +2397,36 @@ mod static_prompt_tests {
         assert!(prompt.contains("自动重试"));
         assert!(prompt.contains("←/→"));
         assert!(render_expand_output_choices(ApprovalChoice::Allow).contains("\x1b[7m"));
+    }
+
+    #[test]
+    fn stale_context_prompt_requires_three_hours_and_large_dynamic_context() {
+        assert!(!stale_context_prompt_needed(
+            STALE_CONTEXT_IDLE - Duration::from_secs(1),
+            STALE_CONTEXT_TOKEN_THRESHOLD + 1
+        ));
+        assert!(!stale_context_prompt_needed(
+            STALE_CONTEXT_IDLE,
+            STALE_CONTEXT_TOKEN_THRESHOLD
+        ));
+        assert!(stale_context_prompt_needed(
+            STALE_CONTEXT_IDLE,
+            STALE_CONTEXT_TOKEN_THRESHOLD + 1
+        ));
+
+        let prompt = render_stale_context_prompt(Duration::from_secs(3 * 60 * 60 + 5 * 60), 12_300);
+        assert!(prompt.contains("3 小时 5 分钟"));
+        assert!(prompt.contains("12.3K"));
+        assert!(prompt.contains("是否继续使用上次对话任务上下文"));
+        assert!(prompt.contains("选择 NO 会清空旧动态上下文"));
+        assert_eq!(
+            render_stale_context_choices(ApprovalChoice::Allow),
+            "\x1b[7m[ YES ]\x1b[0m   NO"
+        );
+        assert_eq!(
+            render_stale_context_choices(ApprovalChoice::Deny),
+            "  YES   \x1b[7m[ NO ]\x1b[0m"
+        );
     }
 
     #[test]

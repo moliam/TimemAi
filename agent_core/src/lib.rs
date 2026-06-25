@@ -287,6 +287,21 @@ impl AgentCore {
     pub fn current_stats(&self) -> &UsageStats {
         &self.current_stats
     }
+    pub fn dynamic_context_estimated_tokens(&self) -> u32 {
+        self.render_prompt_slices()
+            .iter()
+            .map(|slice| estimate_prompt_tokens(&slice.text))
+            .sum()
+    }
+    pub fn clear_dynamic_context(&mut self) {
+        self.deltas.clear();
+        self.next_shrink_review_prompt_tokens = 0;
+        self.last_observed_prompt_tokens = 0;
+        self.current_round = 0;
+        self.current_stats = UsageStats::zero();
+        self.repair_attempted = false;
+        self.pending_approval = None;
+    }
     pub fn memory_git_commit_count(&self) -> usize {
         self.memory.git_commit_count()
     }

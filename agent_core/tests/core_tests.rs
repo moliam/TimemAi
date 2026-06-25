@@ -545,6 +545,29 @@ fn prompt0_is_static_global_only() {
 }
 
 #[test]
+fn dynamic_context_can_be_estimated_and_cleared_without_touching_static_prompt() {
+    let mut core = AgentCore::new(
+        "STATIC_GLOBAL",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("clear_dynamic_context"),
+    );
+    assert_eq!(core.dynamic_context_estimated_tokens(), 0);
+    let _ = core.begin_turn(&"old task context ".repeat(400), None);
+    assert!(core.dynamic_context_estimated_tokens() > 1_000);
+    assert!(core.render_prompt().contains("old task context"));
+
+    core.clear_dynamic_context();
+
+    assert_eq!(core.dynamic_context_estimated_tokens(), 0);
+    let prompt = core.render_prompt();
+    assert!(
+        prompt.contains("[BEGIN SEGMENT 0: prompt_0]\nSTATIC_GLOBAL\n[END SEGMENT 0: prompt_0]")
+    );
+    assert!(!prompt.contains("old task context"));
+    assert!(!prompt.contains("[BEGIN SEGMENT 1: prompt_delta]"));
+}
+
+#[test]
 fn long_context_injects_shrink_review_at_one_third_context_window() {
     let mut core = AgentCore::new(
         "STATIC",
