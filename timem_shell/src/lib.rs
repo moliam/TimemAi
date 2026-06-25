@@ -72,7 +72,7 @@ pub struct ShellStatusMessage {
 }
 
 fn timem_prefix(time_label: &str) -> String {
-    format!("{ANSI_BRIGHT_TIMEM}[{time_label}] {TIMEM_LOGO} >{ANSI_RESET}")
+    format!("{ANSI_BRIGHT_TIMEM}[{time_label}] {TIMEM_LOGO}  ⬇{ANSI_RESET}")
 }
 
 fn dim_line(text: &str) -> String {
@@ -106,14 +106,14 @@ pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str
     let intent_line = dim_line(&format!("{icon} {intent}..."));
     let status_line = dim_line(&format!("  {}", status_parts.join(" ║ ")));
     format!(
-        "{} {intent_line}\n{status_line}\n",
+        "{}\n{intent_line}\n{status_line}\n",
         timem_prefix(time_label)
     )
 }
 
 pub fn render_thinking_view_at(snapshot: &ThinkingViewSnapshot, time_label: &str) -> String {
     let mut out = String::new();
-    out.push_str(&format!("{} \n", timem_prefix(time_label)));
+    out.push_str(&format!("{}\n", timem_prefix(time_label)));
     out.push_str(&render_observation_panel_at(
         &snapshot.observations,
         snapshot.status.tick,
@@ -173,7 +173,7 @@ pub fn render_final_response_at(
         status_parts.join(" ║ ")
     ));
     let body = render_terminal_markdown(text);
-    format!("{} {body}\n{status_line}\n\n", timem_prefix(time_label))
+    format!("{}\n{body}\n{status_line}\n\n", timem_prefix(time_label))
 }
 
 pub fn render_terminal_markdown(text: &str) -> String {
@@ -2109,12 +2109,12 @@ mod tests {
             },
             "08:56:33",
         );
-        assert!(block.contains("[08:56:33] 𝓣𝓲𝓶𝓮𝓶 >"));
+        assert!(block.contains("[08:56:33] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
         assert!(block.contains("🦩 查询记忆..."));
         assert!(block.contains("◂⛃ ║ aliyun:qwen-plus: ▼2"));
         assert!(block.contains("Token: ▲210 ▼21"));
         assert!(!block.contains("⚡cache"));
-        assert_eq!(block.lines().count(), 2);
+        assert_eq!(block.lines().count(), 3);
         assert!(!block.contains("thinking..."));
     }
 
@@ -2134,7 +2134,7 @@ mod tests {
             "23:33:05",
         );
 
-        assert_eq!(block.lines().count(), 2);
+        assert_eq!(block.lines().count(), 3);
         assert!(block.contains("Check local system"));
         assert!(block.contains('…'));
         assert!(!block.contains("observance"));
@@ -2169,7 +2169,7 @@ mod tests {
             "12:00:00",
         );
 
-        assert!(view.contains("[12:00:00] 𝓣𝓲𝓶𝓮𝓶 >"));
+        assert!(view.contains("[12:00:00] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
         assert!(view.contains("Thought / Action"));
         assert!(view.contains("· 正在分析用户请求"));
         assert!(view.contains("\x1b[38;5;245m· 执行 Bash: rg --files | wc -l"));
@@ -2196,9 +2196,13 @@ mod tests {
             2,
             "08:56:46",
         );
-        assert!(rendered.contains("[08:56:46] 𝓣𝓲𝓶𝓮𝓶 >"));
+        assert!(rendered.contains("[08:56:46] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
         assert!(rendered.contains("\x1b[92;1m"));
-        assert!(rendered.contains("𝓣𝓲𝓶𝓮𝓶 >"));
+        assert!(rendered.contains("𝓣𝓲𝓶𝓮𝓶  ⬇"));
+        assert!(rendered
+            .lines()
+            .nth(1)
+            .is_some_and(|line| line == "你叫默默。"));
         assert!(rendered.contains("你叫默默。"));
         assert!(rendered.contains("◂▸⛃ ║ aliyun:qwen-plus: 2"));
         assert!(rendered.contains("Token: ▲812(⌁384) ▼52"));
@@ -2240,7 +2244,7 @@ mod tests {
             1,
             "10:00:00",
         );
-        let status_line = rendered.lines().nth(1).unwrap();
+        let status_line = rendered.lines().nth(2).unwrap();
         assert!(status_line.starts_with(&format!("{ANSI_RESET}{ANSI_DIM}")));
         assert!(status_line.ends_with(ANSI_RESET));
         assert!(status_line.contains("↳ 1s"));
