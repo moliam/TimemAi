@@ -313,6 +313,17 @@ impl AgentCore {
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
         let parsed = parse_envelope(&response.content);
+        if parsed.repair_issue.is_none()
+            && parsed.delta_scores.is_empty()
+            && self.has_unscored_prompt_delta()
+        {
+            if !self.repair_attempted {
+                return self.request_protocol_repair(
+                    "durable_ctx_score_required_for_unscored_delta",
+                    "Return exactly one valid JSON object and include durable_ctx_score for the most recent unscored prompt_delta, or delta_scores with explicit delta_id values.",
+                );
+            }
+        }
         self.apply_delta_scores(&parsed.delta_scores);
         let mut slices = Vec::new();
         if !parsed.thought.is_empty() {
@@ -323,13 +334,10 @@ impl AgentCore {
         }
         if let Some(issue) = parsed.repair_issue.clone() {
             if !self.repair_attempted {
-                self.repair_attempted = true;
-                slices.push(("result_of_llm_action".to_string(), format!("Protocol repair request\nissue: {}\nReturn exactly one valid JSON object with response_to_user. Do not use markdown fences.", issue)));
-                self.append_delta(slices);
-                return CoreStep::NeedModel {
-                    prompt: self.render_prompt(),
-                    rounds_remaining: self.remaining_rounds(),
-                };
+                return self.request_protocol_repair(
+                    &issue,
+                    "Return exactly one valid JSON object with response_to_user. Do not use markdown fences.",
+                );
             }
             let final_text = if parsed.response_to_user.trim().is_empty() {
                 "模型的回复不符合本地协议，已拦截原始报文展示。请重试或换一个更具体的问题。"
@@ -478,6 +486,24 @@ impl AgentCore {
     }
     fn remaining_rounds(&self) -> u32 {
         self.max_rounds.saturating_sub(self.current_round)
+    }
+
+    fn has_unscored_prompt_delta(&self) -> bool {
+        self.deltas
+            .iter()
+            .any(|delta| delta.durable_ctx_score.is_none())
+    }
+
+    fn request_protocol_repair(&mut self, issue: &str, instruction: &str) -> CoreStep {
+        self.repair_attempted = true;
+        self.append_delta(vec![(
+            "result_of_llm_action".to_string(),
+            format!("Protocol repair request\nissue: {}\n{}", issue, instruction),
+        )]);
+        CoreStep::NeedModel {
+            prompt: self.render_prompt(),
+            rounds_remaining: self.remaining_rounds(),
+        }
     }
 
     fn apply_delta_scores(&mut self, delta_scores: &[DeltaScore]) {

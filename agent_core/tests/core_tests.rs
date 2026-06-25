@@ -55,6 +55,24 @@ fn usage_with_prompt_tokens(prompt_tokens: u32) -> UsageStats {
     }
 }
 
+fn scored(content: impl Into<String>) -> String {
+    let content = content.into();
+    if content.contains("\"durable_ctx_score\"") || content.contains("\"delta_scores\"") {
+        return content;
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return content;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return content;
+    };
+    object.insert(
+        "durable_ctx_score".to_string(),
+        serde_json::Value::Number(5.into()),
+    );
+    serde_json::to_string(&value).unwrap()
+}
+
 fn first_field_value(prompt: &str, field: &str) -> String {
     let prefix = format!("{field}: ");
     prompt
@@ -105,15 +123,15 @@ fn prompt_is_append_only_and_segmented() {
     assert!(!first.contains("{\"segment_type\""));
 
     let second = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"你好","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"你好","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
         CoreStep::Final(_) => core.render_prompt(),
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(second.starts_with(&first));
+    assert!(second.contains("[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]"));
+    assert!(second.contains("User question:\n你好"));
     assert!(second.contains("prompt_type: llm_response"));
 }
 
@@ -148,8 +166,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     );
     let _ = core.begin_turn("需要推理一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"thought":"先分析","response_to_user":"结论","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"thought":"先分析","response_to_user":"结论","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -185,8 +202,7 @@ fn model_scores_previously_submitted_delta_not_its_own_response_delta() {
     let submitted_delta_id = first_field_value(&first_prompt, "delta_id");
     assert!(first_prompt.contains("durable_ctx_score: unscored"));
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"已记录这个项目决策。","durable_ctx_score":9,"acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"已记录这个项目决策。","durable_ctx_score":9,"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -199,6 +215,34 @@ fn model_scores_previously_submitted_delta_not_its_own_response_delta() {
     assert!(prompt.contains("durable_ctx_score: 9"));
     assert!(prompt.contains("prompt_type: llm_response"));
     assert!(prompt.contains("durable_ctx_score: unscored"));
+}
+
+#[test]
+fn missing_durable_score_for_visible_unscored_delta_requests_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("durable_ctx_score_required"),
+    );
+    let first_prompt = match core.begin_turn("simple question", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(first_prompt.contains("durable_ctx_score: unscored"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"{"response_to_user":"simple answer","acceptance_check":{"is_satisfied":true}}"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("durable_ctx_score_required_for_unscored_delta"));
+    assert!(prompt.contains("include durable_ctx_score"));
 }
 
 #[test]
@@ -240,14 +284,19 @@ fn shorthand_score_targets_latest_unscored_delta_when_older_unscored_exists() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let first_delta_id = first_field_value(&first_prompt, "delta_id");
+    let first_user_delta_id = first_field_value(&first_prompt, "delta_id");
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"first answer without score","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"first answer without score","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
     assert!(matches!(step, CoreStep::Final(_)));
+    let prompt_after_first_reply = core.render_prompt();
+    let first_reply_delta_id = field_values(&prompt_after_first_reply, "delta_id")
+        .last()
+        .cloned()
+        .unwrap();
+    assert_ne!(first_user_delta_id, first_reply_delta_id);
 
     let second_prompt = match core.begin_turn("second unscored", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -255,11 +304,10 @@ fn shorthand_score_targets_latest_unscored_delta_when_older_unscored_exists() {
     };
     let delta_ids = field_values(&second_prompt, "delta_id");
     let latest_delta_id = delta_ids.last().cloned().unwrap();
-    assert_ne!(first_delta_id, latest_delta_id);
+    assert_ne!(first_reply_delta_id, latest_delta_id);
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"score latest only","durable_ctx_score":2,"acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"score latest only","durable_ctx_score":2,"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -271,7 +319,7 @@ fn shorthand_score_targets_latest_unscored_delta_when_older_unscored_exists() {
     )));
     assert!(prompt.contains(&format!(
         "delta_id: {}\ndurable_ctx_score: unscored",
-        first_delta_id
+        first_reply_delta_id
     )));
 }
 
@@ -306,10 +354,10 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
     assert!(!delta_id.is_empty());
 
     let step = core.apply_model_response(LlmResponse {
-        content: format!(
+        content: scored(format!(
             r#"{{"response_to_user":"","next_actions":[{{"action":"prompt_shrink","intent":"Remove stale user question delta.","input":{{"delta_ids":["{}"]}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
             delta_id
-        ),
+        )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -326,8 +374,7 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
     assert!(!prompt.contains("REMOVE_THIS_DELTA"));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"done","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"done","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -354,10 +401,10 @@ fn prompt_shrink_can_hide_specific_slice_by_slice_id() {
     assert!(prompt.contains("SLICE_ONE_ONLY"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: format!(
+        content: scored(format!(
             r#"{{"response_to_user":"","next_actions":[{{"action":"prompt_shrink","intent":"Hide one rendered prompt slice.","input":{{"slice_ids":["{}"]}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
             slice_id
-        ),
+        )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -375,8 +422,7 @@ fn prompt_shrink_can_hide_specific_slice_by_slice_id() {
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"done","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"done","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -419,8 +465,9 @@ fn long_context_injects_shrink_review_at_one_third_context_window() {
     core.set_max_llm_context_tokens(3_000);
     let _ = core.begin_turn(&"seed ".repeat(900), None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(
+            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -442,8 +489,7 @@ fn long_context_injects_shrink_review_at_one_third_context_window() {
     assert_eq!(first_review_count, 1);
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"ok","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"ok","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -469,10 +515,10 @@ fn long_context_does_not_inject_shrink_review_below_one_third_context_window() {
     for index in 0..3 {
         let _ = core.begin_turn(&format!("short q {}", index), None);
         let step = core.apply_model_response(LlmResponse {
-            content: format!(
+            content: scored(format!(
                 r#"{{"response_to_user":"a{}","acceptance_check":{{"is_satisfied":true}}}}"#,
                 index
-            ),
+            )),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
         });
@@ -496,8 +542,9 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
     core.set_max_llm_context_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(
+            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(950),
     });
@@ -522,8 +569,9 @@ fn long_context_repeats_review_every_one_fifth_after_first_review() {
     core.set_max_llm_context_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(
+            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(1_000),
     });
@@ -541,9 +589,9 @@ fn long_context_repeats_review_every_one_fifth_after_first_review() {
         .unwrap();
 
     let step = core.apply_model_response(LlmResponse {
-        content:
-            r#"{"response_to_user":"not shrinking yet","acceptance_check":{"is_satisfied":true}}"#
-                .to_string(),
+        content: scored(
+            r#"{"response_to_user":"not shrinking yet","acceptance_check":{"is_satisfied":true}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(first_estimate + 600),
     });
@@ -567,8 +615,9 @@ fn long_context_forces_shrink_at_ninety_five_percent_window() {
     core.set_max_llm_context_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(
+            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_850),
     });
@@ -594,8 +643,9 @@ fn force_shrink_overrides_deferred_followup_threshold() {
     core.set_max_llm_context_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(
+            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_500),
     });
@@ -608,9 +658,9 @@ fn force_shrink_overrides_deferred_followup_threshold() {
     assert!(!prompt.contains("mode=force_shrink_required"));
 
     let step = core.apply_model_response(LlmResponse {
-        content:
-            r#"{"response_to_user":"still no shrink","acceptance_check":{"is_satisfied":true}}"#
-                .to_string(),
+        content: scored(
+            r#"{"response_to_user":"still no shrink","acceptance_check":{"is_satisfied":true}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_850),
     });
@@ -628,8 +678,7 @@ fn memory_candidates_are_persisted() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我叫默默", None);
     let final_step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"记住了","memory_candidates":[{"content":"用户叫默默"}],"acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"记住了","memory_candidates":[{"content":"用户叫默默"}],"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -654,7 +703,7 @@ fn query_memory_action_returns_action_result_delta() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我儿子的生日是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{"query":"儿子 生日","limit":5}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{"query":"儿子 生日","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -706,7 +755,7 @@ fn mixed_protocol_transcript_extracts_final_json_without_leaking_raw_segments() 
     );
     let _ = core.begin_turn("展示一个耗尽 8 步交互的操作", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"thought":"Round 7","response_to_user":"","next_actions":[{"action":"run_bash","intent":"old action","input":{"command":"uptime"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["final"]}}
+        content: scored(r#"{"thought":"Round 7","response_to_user":"","next_actions":[{"action":"run_bash","intent":"old action","input":{"command":"uptime"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["final"]}}
 
 [BEGIN SEGMENT 18: prompt_delta]
 prompt_type: result_of_llm_action
@@ -719,12 +768,12 @@ ok
 
 {
   "thought": "Final summary",
+  "durable_ctx_score": 5,
   "response_to_user": "只展示最终摘要。",
   "acceptance_check": {
     "is_satisfied": true
   }
-}"#
-        .to_string(),
+}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -746,17 +795,19 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
     );
     let _ = core.begin_turn("把下载目录视频做 3 倍加速", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"转码已在后台顺利运行，进度正常。
+        content: scored(
+            r#"转码已在后台顺利运行，进度正常。
 
 ```json
 {
+  "durable_ctx_score": 5,
   "response_to_user": "转码已在后台顺利运行，输出文件：`~/Videos/example_3x.mp4`。",
   "acceptance_check": {
     "is_satisfied": true
   }
 }
-```"#
-            .to_string(),
+```"#,
+        ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
     });
@@ -781,14 +832,14 @@ fn response_text_with_unescaped_inner_quotes_is_repaired() {
         None,
     );
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{
+        content: scored(r#"{
   "thought": "The answer is available from chat history.",
+  "durable_ctx_score": 5,
   "response_to_user": "根据聊天记录，你问"当前目录的代码量，rust 代码有多少行？"这个问题的时间是今天（2026-06-23）17:46:36 左右。",
   "acceptance_check": {
     "is_satisfied": true
   }
-}"#
-        .to_string(),
+}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
     });
@@ -813,6 +864,7 @@ fn response_text_preserves_valid_complex_symbols_and_quotes() {
 第二行。"#;
     let payload = serde_json::json!({
         "thought": "Symbols should remain normal text.",
+        "durable_ctx_score": 5,
         "response_to_user": text,
         "acceptance_check": {"is_satisfied": true}
     });
@@ -838,8 +890,7 @@ fn response_text_decodes_common_json_escape_sequences() {
     );
     let _ = core.begin_turn("展示 escape 符号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
     });
@@ -863,8 +914,7 @@ fn action_input_decodes_common_json_escape_sequences() {
     );
     let _ = core.begin_turn("记住一段 escape 文本", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_write","intent":"Store escaped text exactly after JSON decoding.","input":{"content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_write","intent":"Store escaped text exactly after JSON decoding.","input":{"content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
     });
@@ -887,7 +937,9 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
     );
     let _ = core.begin_turn("查刚才那句话", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{
+        content: scored(
+            r#"{
+  "durable_ctx_score": 5,
   "response_to_user": "",
   "next_actions": [
     {
@@ -903,8 +955,8 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
     "is_satisfied": false,
     "missing_info": ["chat history evidence"]
   }
-}"#
-        .to_string(),
+}"#,
+        ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
     });
@@ -967,8 +1019,7 @@ fn invalid_action_shape_requests_protocol_repair() {
     );
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{}}]}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -989,8 +1040,7 @@ fn next_action_requires_intent_for_ui_status() {
     );
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"query_memory","input":{"query":"名字","limit":5}}]}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","input":{"query":"名字","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1012,7 +1062,7 @@ fn unsupported_action_is_not_executed_silently() {
     );
     let _ = core.begin_turn("打开文件", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"delete_file","intent":"test action","input":{"path":"/tmp/x"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"delete_file","intent":"test action","input":{"path":"/tmp/x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1032,7 +1082,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
     );
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create a task checkpoint.","input":{"content":"continue this task later"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create a task checkpoint.","input":{"content":"continue this task later"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1055,7 +1105,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         .expect("scratch id should exist");
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"Find task checkpoint.","input":{"query":"continue","limit":5}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"Find task checkpoint.","input":{"query":"continue","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1067,7 +1117,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
     assert!(prompt.contains("continue this task later"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: format!(r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_delete","intent":"Remove completed checkpoint.","input":{{"id":"{}"}}}}]}}"#, scratch_id),
+        content: scored(format!(r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_delete","intent":"Remove completed checkpoint.","input":{{"id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1099,7 +1149,7 @@ fn scratch_query_empty_query_lists_recent_notes_with_limit() {
 
     let _ = core.begin_turn("列出最近一条草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"List recent checkpoints.","input":{"query":"","limit":1}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"List recent checkpoints.","input":{"query":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1123,7 +1173,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 
     let _ = core.begin_turn("写一条空草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create empty checkpoint.","input":{}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create empty checkpoint.","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1137,7 +1187,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 
     let _ = core.begin_turn("删除一条没有 id 的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_delete","intent":"Delete checkpoint.","input":{}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_delete","intent":"Delete checkpoint.","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1165,7 +1215,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 
     let _ = core.begin_turn("删除不存在的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"scratch_delete","intent":"Delete missing checkpoint.","input":{"id":"scratch_missing"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_delete","intent":"Delete missing checkpoint.","input":{"id":"scratch_missing"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1189,8 +1239,7 @@ fn memory_write_action_requires_content_or_query() {
     );
     let _ = core.begin_turn("记住", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_write","intent":"test action","input":{}}]}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_write","intent":"test action","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1213,7 +1262,7 @@ fn query_memory_does_not_expand_semantic_aliases() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我叫什么名字", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{"query":"user's name","limit":5}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"test action","input":{"query":"user's name","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1281,7 +1330,7 @@ fn sql_read_action_returns_rows() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我最早什么时候告诉你名字的", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%名字%"]}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%名字%"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1307,7 +1356,7 @@ fn sql_read_allows_with_cte_reads() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("按时间查名字", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%名字%"]}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%名字%"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1332,7 +1381,7 @@ fn sql_read_rejects_write_statement() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("改记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1357,7 +1406,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1379,7 +1428,7 @@ fn sql_read_rejects_other_tables() {
     );
     let _ = core.begin_turn("列出表", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"SELECT name FROM sqlite_master LIMIT 5"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{"sql":"SELECT name FROM sqlite_master LIMIT 5"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1399,7 +1448,7 @@ fn memory_schema_action_returns_native_schema_contract() {
     );
     let _ = core.begin_turn("有哪些记忆表", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_schema","intent":"查看记忆结构"}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_schema","intent":"查看记忆结构"}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1421,7 +1470,7 @@ fn memory_sql_query_allows_pragma_table_info() {
     );
     let _ = core.begin_turn("查看 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(memories)","limit":20}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(memories)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1443,7 +1492,7 @@ fn memory_sql_query_allows_chat_messages_table_info() {
     );
     let _ = core.begin_turn("查看聊天 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(chat_messages)","limit":20}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(chat_messages)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1466,7 +1515,7 @@ fn memory_sql_query_rejects_non_memories_pragma() {
     );
     let _ = core.begin_turn("查看 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(sqlite_master)","limit":20}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"PRAGMA table_info(sqlite_master)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1486,8 +1535,7 @@ fn sql_read_action_requires_sql_for_repair() {
     );
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{}}]}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"sql_read","intent":"test action","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1511,7 +1559,7 @@ fn memory_sql_query_requires_params_for_placeholders() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我叫什么名字", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1536,7 +1584,7 @@ fn memory_sql_query_rejects_extra_params_for_placeholders() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我叫什么名字", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%my name is%","%I am%"],"limit":20}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%my name is%","%I am%"],"limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1565,7 +1613,7 @@ fn chat_history_query_reads_persisted_chat_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"查询聊天记录","input":{"query":"蓝色雨伞","limit":5}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"查询聊天记录","input":{"query":"蓝色雨伞","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1590,13 +1638,13 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
     );
     let _ = core.begin_turn("第一轮我说了蓝色雨伞", None);
     let _ = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"收到"}"#.to_string(),
+        content: scored(r#"{"response_to_user":"收到"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
     let _ = core.begin_turn("我刚才说了什么物品", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"查询聊天记录","input":{"query":"蓝色雨伞","limit":5}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"查询聊天记录","input":{"query":"蓝色雨伞","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1628,7 +1676,7 @@ fn chat_history_query_empty_query_lists_recent_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"列出最近聊天记录","input":{"query":"","limit":1}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"chat_history_query","intent":"列出最近聊天记录","input":{"query":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1659,7 +1707,7 @@ fn memory_sql_query_reads_chat_messages_with_time_window() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查最近窗口聊天", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"按时间窗口查询聊天记录","input":{"sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"按时间窗口查询聊天记录","input":{"sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1722,10 +1770,10 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
         .unwrap();
         let mut core = AgentCore::new("STATIC", profile("custom", "aws-claude-sonnet-4-6"), &dir);
         let _ = core.begin_turn("我今天和你聊过什么？", None);
-        let content = format!(
+        let content = scored(format!(
             r#"{{"response_to_user":"","next_actions":[{{"action":"memory_sql_query","intent":"查询今天的聊天记录",{}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["今天的聊天记录内容"]}}}}"#,
             action_fields
-        );
+        ));
         let step = core.apply_model_response(LlmResponse {
             content,
             model_name: "aws-claude-sonnet-4-6".to_string(),
@@ -1763,7 +1811,7 @@ fn memory_sql_query_rejects_raw_update_sql() {
     );
     let _ = core.begin_turn("更新记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"UPDATE memories SET content='bad'","limit":5}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"test action","input":{"sql":"UPDATE memories SET content='bad'","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1792,7 +1840,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("删除聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Attempt to delete chat history through SQL.","input":{"sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Attempt to delete chat history through SQL.","input":{"sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1823,7 +1871,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("删除包含目标的聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"chat_history_delete","intent":"Delete matching chat record.","input":{"query":"删除目标","limit":10}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"chat_history_delete","intent":"Delete matching chat record.","input":{"query":"删除目标","limit":10}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1845,7 +1893,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("记住我的名字", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"upsert","id":"user_name","content":"用户的名字是默默"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"upsert","id":"user_name","content":"用户的名字是默默"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1861,7 +1909,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         .contains("用户的名字是默默"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"update","id":"user_name","content":"用户的名字是默默2"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"update","id":"user_name","content":"用户的名字是默默2"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1876,7 +1924,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     assert!(core.memory_git_commit_count() >= 2);
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"delete","id":"user_name"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"delete","id":"user_name"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1900,7 +1948,7 @@ fn memory_update_requires_protocol_fields() {
     );
     let _ = core.begin_turn("更新记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"update","content":"x"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"update","content":"x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1922,7 +1970,7 @@ fn run_bash_allows_readonly_count_command() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"count output lines","input":{"command":"pwd | wc -l","timeout_ms":5000}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"count output lines","input":{"command":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1945,7 +1993,7 @@ fn run_bash_accepts_old_timeout_sec_field() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"count output lines","input":{"command":"pwd | wc -l","timeout_sec":1}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"count output lines","input":{"command":"pwd | wc -l","timeout_sec":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1967,7 +2015,7 @@ fn run_bash_can_start_and_poll_background_job() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("run a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","input":{"command":"sleep 0.1; printf background-ok","background":true}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","input":{"command":"sleep 0.1; printf background-ok","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -1981,10 +2029,10 @@ fn run_bash_can_start_and_poll_background_job() {
 
     std::thread::sleep(std::time::Duration::from_millis(250));
     let step = core.apply_model_response(LlmResponse {
-        content: format!(
+        content: scored(format!(
             r#"{{"response_to_user":"","next_actions":[{{"action":"shell_job_status","intent":"Poll background task.","input":{{"job_id":"{}"}}}}]}}"#,
             job_id
-        ),
+        )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2008,7 +2056,7 @@ fn run_bash_accepts_old_read_back_protocol() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"read back count","input":{"command":"pwd","read_back_command":"pwd | wc -l","large_readback_opt_in":{"protocol":"unbounded_v1","reason":"verify line count"},"timeout_ms":5000}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"read back count","input":{"command":"pwd","read_back_command":"pwd | wc -l","large_readback_opt_in":{"protocol":"unbounded_v1","reason":"verify line count"},"timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2033,7 +2081,7 @@ fn run_bash_accepts_read_back_without_primary_command() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2055,7 +2103,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
     );
     let _ = core.begin_turn("delete something", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"rm not_allowed"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2086,7 +2134,7 @@ fn run_bash_allows_compound_local_write_commands() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("write local file", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2110,7 +2158,7 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
     );
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"pwd && rm not_allowed"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"pwd && rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2132,7 +2180,7 @@ fn run_bash_requires_approval_for_mutating_read_back_command() {
     );
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"pwd","read_back_command":"rm not_allowed"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"pwd","read_back_command":"rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2156,7 +2204,7 @@ fn run_bash_does_not_execute_primary_command_before_read_back_approval() {
     );
     let _ = core.begin_turn("write then inspect broader environment", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Write local marker then run broader readback.","input":{"command":"touch target/timem_test_approval_preflight_marker.txt","read_back_command":"cat /etc/passwd","timeout_ms":5000}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Write local marker then run broader readback.","input":{"command":"touch target/timem_test_approval_preflight_marker.txt","read_back_command":"cat /etc/passwd","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2188,7 +2236,7 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
     );
     let _ = core.begin_turn("test shell syntax", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Run shell syntax after approval.","input":{"command":"x=ok; printf \"$x\" | tr o O","timeout_ms":5000}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Run shell syntax after approval.","input":{"command":"x=ok; printf \"$x\" | tr o O","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2217,8 +2265,7 @@ fn run_bash_requires_command_for_repair() {
     );
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{}}]}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2239,7 +2286,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
     );
     let _ = core.begin_turn("read passwd", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"cat /etc/passwd"}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"cat /etc/passwd"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2262,7 +2309,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("inspect system identity", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Read system identity.","input":{"command":"uname -s","timeout_ms":5000}}]}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Read system identity.","input":{"command":"uname -s","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2291,7 +2338,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(first_prompt.contains("User question:\n我儿子的生日是6月12日"));
     assert!(first_prompt.contains("Supporting context:\nruntime_time:"));
     let write_final = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"已记录。","memory_candidates":[{"content":"用户的儿子生日是6月12日"}],"acceptance_check":{"is_satisfied":true}}"#.to_string(),
+        content: scored(r#"{"response_to_user":"已记录。","memory_candidates":[{"content":"用户的儿子生日是6月12日"}],"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2302,7 +2349,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 
     let _ = core.begin_turn("june 12th 是谁的生日", None);
     let recall_prompt = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Find durable birthday memory before answering.","input":{"query":"儿子 生日 6月12日","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Find durable birthday memory before answering.","input":{"query":"儿子 生日 6月12日","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2312,7 +2359,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(recall_prompt.contains("Action result: query_memory"));
     assert!(recall_prompt.contains("用户的儿子生日是6月12日"));
     let recall_final = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"6月12日是你儿子的生日。","acceptance_check":{"is_satisfied":true}}"#.to_string(),
+        content: scored(r#"{"response_to_user":"6月12日是你儿子的生日。","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2324,7 +2371,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 
     let _ = core.begin_turn("删除我儿子生日这条记忆", None);
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"Delete the user-requested birthday memory.","input":{"operation":"delete","id":"mem_0"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["delete result"]}}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"Delete the user-requested birthday memory.","input":{"operation":"delete","id":"mem_0"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["delete result"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2335,7 +2382,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(delete_prompt.contains("error: id_not_found"));
 
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Find exact memory id before deleting.","input":{"sql":"SELECT id, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%儿子生日%"],"limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory id"]}}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Find exact memory id before deleting.","input":{"sql":"SELECT id, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%儿子生日%"],"limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory id"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2357,7 +2404,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         })
         .expect("memory id should exist");
     let delete_final_prompt = match core.apply_model_response(LlmResponse {
-        content: format!(r#"{{"response_to_user":"","next_actions":[{{"action":"memory_update","intent":"Delete exact durable birthday memory.","input":{{"operation":"delete","id":"{}"}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["delete confirmation"]}}}}"#, memory_id),
+        content: scored(format!(r#"{{"response_to_user":"","next_actions":[{{"action":"memory_update","intent":"Delete exact durable birthday memory.","input":{{"operation":"delete","id":"{}"}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["delete confirmation"]}}}}"#, memory_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2370,8 +2417,9 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         .contains("儿子生日"));
 
     let delete_final = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"已删除。","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(
+            r#"{"response_to_user":"已删除。","acceptance_check":{"is_satisfied":true}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2383,7 +2431,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("请统计当前目录文件数量", None);
     let shell_prompt = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Count files in current project folder.","input":{"command":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["file count"]}}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Count files in current project folder.","input":{"command":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["file count"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2396,7 +2444,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("把 /etc/passwd 读出来", None);
     let security_request = match core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","input":{"command":"cat /etc/passwd","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["file content"]}}"#.to_string(),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","input":{"command":"cat /etc/passwd","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["file content"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     }) {
@@ -2412,10 +2460,10 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
             None,
         );
         let step = core.apply_model_response(LlmResponse {
-            content: format!(
+            content: scored(format!(
                 r#"{{"response_to_user":"ok {}","acceptance_check":{{"is_satisfied":true}}}}"#,
                 index
-            ),
+            )),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
         });
@@ -2440,8 +2488,7 @@ fn thought_field_is_persisted_as_llm_thought_slice() {
     );
     let _ = core.begin_turn("需要推理一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"thought":"推导一下","response_to_user":"好的","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"thought":"推导一下","response_to_user":"好的","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });
@@ -2460,8 +2507,7 @@ fn thought_field_optional_does_not_trigger_repair() {
     );
     let _ = core.begin_turn("简单问答", None);
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"好的","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: scored(r#"{"response_to_user":"好的","acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
     });

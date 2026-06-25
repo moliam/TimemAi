@@ -1027,7 +1027,8 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("\"run_bash\""));
         assert!(STATIC_PROMPT.contains("\"shell_job_status\""));
         assert!(STATIC_PROMPT.contains("file edits and git commands"));
-        assert!(STATIC_PROMPT.contains("\"durable_ctx_score?\""));
+        assert!(STATIC_PROMPT.contains("\"durable_ctx_score\""));
+        assert!(STATIC_PROMPT.contains("Every model response must score"));
         assert!(STATIC_PROMPT.contains("OS/system info"));
         assert!(STATIC_PROMPT.contains("\"intent_required\""));
         assert!(STATIC_PROMPT.contains("use only the returned action result as evidence"));
