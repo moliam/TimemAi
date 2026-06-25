@@ -11,6 +11,7 @@ pub enum ObservationEvent {
     Persistent(String),
     Active(String),
     Transient(String),
+    FinishTransient(String),
     ClearTransient,
     SettleActive,
 }
@@ -30,9 +31,15 @@ pub struct ObservationLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationPanel {
     lines: VecDeque<ObservationLine>,
-    transient: Option<ObservationLine>,
+    transients: Vec<TransientObservation>,
     max_lines: usize,
     max_width: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransientObservation {
+    text: String,
+    count: usize,
 }
 
 impl Default for ObservationPanel {
@@ -45,7 +52,7 @@ impl ObservationPanel {
     pub fn new(max_lines: usize, max_width: usize) -> Self {
         Self {
             lines: VecDeque::new(),
-            transient: None,
+            transients: Vec::new(),
             max_lines: max_lines.max(1),
             max_width: max_width.max(32),
         }
@@ -59,13 +66,9 @@ impl ObservationPanel {
             ObservationEvent::Active(text) => {
                 self.push_line(text, ObservationLineStyle::ActiveBlink)
             }
-            ObservationEvent::Transient(text) => {
-                self.transient = Some(ObservationLine {
-                    text,
-                    style: ObservationLineStyle::ActiveBlink,
-                });
-            }
-            ObservationEvent::ClearTransient => self.transient = None,
+            ObservationEvent::Transient(text) => self.increment_transient(text),
+            ObservationEvent::FinishTransient(text) => self.decrement_transient(&text),
+            ObservationEvent::ClearTransient => self.transients.clear(),
             ObservationEvent::SettleActive => {
                 for line in &mut self.lines {
                     if line.style == ObservationLineStyle::ActiveBlink {
@@ -83,7 +86,7 @@ impl ObservationPanel {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.lines.is_empty() && self.transient.is_none()
+        self.lines.is_empty() && self.transients.is_empty()
     }
 
     fn push_line(&mut self, text: String, style: ObservationLineStyle) {
@@ -98,13 +101,62 @@ impl ObservationPanel {
 
     fn visible_lines(&self) -> Vec<ObservationLine> {
         let mut lines: Vec<ObservationLine> = self.lines.iter().cloned().collect();
-        if let Some(transient) = self.transient.clone() {
-            lines.push(transient);
+        for transient in &self.transients {
+            lines.push(ObservationLine {
+                text: transient_label(transient),
+                style: ObservationLineStyle::ActiveBlink,
+            });
         }
         while lines.len() > self.max_lines {
             lines.remove(0);
         }
         lines
+    }
+
+    fn increment_transient(&mut self, text: String) {
+        let normalized = text.trim();
+        if normalized.is_empty() {
+            return;
+        }
+        if let Some(transient) = self
+            .transients
+            .iter_mut()
+            .find(|transient| transient.text == normalized)
+        {
+            transient.count = transient.count.saturating_add(1);
+            return;
+        }
+        self.transients.push(TransientObservation {
+            text: normalized.to_string(),
+            count: 1,
+        });
+    }
+
+    fn decrement_transient(&mut self, text: &str) {
+        let normalized = text.trim();
+        if normalized.is_empty() {
+            return;
+        }
+        let Some(index) = self
+            .transients
+            .iter()
+            .position(|transient| transient.text == normalized)
+        else {
+            return;
+        };
+        if self.transients[index].count <= 1 {
+            self.transients.remove(index);
+        } else {
+            self.transients[index].count -= 1;
+        }
+    }
+}
+
+fn transient_label(transient: &TransientObservation) -> String {
+    if transient.count <= 1 {
+        transient.text.clone()
+    } else {
+        format!("{} x{}", transient.text, transient.count)
     }
 }
 
@@ -294,6 +346,38 @@ mod tests {
         let rendered = render_observation_panel(&panel);
         assert!(rendered.contains(" a "));
         assert!(!rendered.contains("思考中"));
+    }
+
+    #[test]
+    fn persistent_update_keeps_unfinished_transient_at_bottom() {
+        let mut panel = ObservationPanel::new(8, 48);
+        panel.apply(ObservationEvent::Transient("思考中...".to_string()));
+        panel.apply(ObservationEvent::Persistent("后台 Bash 已完成".to_string()));
+
+        let rendered = render_observation_panel(&panel);
+        let persistent_pos = rendered.find("后台 Bash 已完成").unwrap();
+        let transient_pos = rendered.find("思考中...").unwrap();
+        assert!(persistent_pos < transient_pos);
+    }
+
+    #[test]
+    fn repeated_transient_merges_with_count_until_all_finish() {
+        let mut panel = ObservationPanel::new(8, 48);
+        panel.apply(ObservationEvent::Transient("思考中...".to_string()));
+        panel.apply(ObservationEvent::Transient("思考中...".to_string()));
+
+        let rendered = render_observation_panel(&panel);
+        assert_eq!(rendered.matches("思考中...").count(), 1);
+        assert!(rendered.contains("思考中... x2"));
+
+        panel.apply(ObservationEvent::FinishTransient("思考中...".to_string()));
+        let rendered = render_observation_panel(&panel);
+        assert!(rendered.contains("思考中..."));
+        assert!(!rendered.contains("x2"));
+
+        panel.apply(ObservationEvent::FinishTransient("思考中...".to_string()));
+        let rendered = render_observation_panel(&panel);
+        assert!(!rendered.contains("思考中..."));
     }
 
     #[test]

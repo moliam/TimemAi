@@ -380,11 +380,7 @@ impl ThinkingStatus {
                 usage: UsageStats::zero(),
                 tick: random_spinner_tick(),
             },
-            observations: {
-                let mut panel = ObservationPanel::default();
-                panel.apply(ObservationEvent::Transient("思考中...".to_string()));
-                panel
-            },
+            observations: ObservationPanel::default(),
         }));
         let running = Arc::new(AtomicBool::new(true));
         let rendered_lines = Arc::new(Mutex::new(0));
@@ -446,7 +442,9 @@ impl ThinkingStatus {
 
     fn clear_transient_observation(&mut self) {
         if let Ok(mut state) = self.state.lock() {
-            state.observations.apply(ObservationEvent::ClearTransient);
+            state
+                .observations
+                .apply(ObservationEvent::FinishTransient("思考中...".to_string()));
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
