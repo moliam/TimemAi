@@ -2168,8 +2168,8 @@ mod tests {
 
         assert!(view.contains("[12:00:00] 𝓣𝓲𝓶𝓮𝓶 >"));
         assert!(view.contains("Thought / Action"));
-        assert!(view.contains("正在分析用户请求"));
-        assert!(view.contains("\x1b[5m执行 Bash: rg --files | wc -l"));
+        assert!(view.contains("· 正在分析用户请求"));
+        assert!(view.contains("\x1b[5m· 执行 Bash: rg --files | wc -l"));
         assert!(view.contains("aliyun:qwen-plus: ▼2"));
         assert!(view.contains("Token: ▲1.2K(⌁300) ▼20"));
         assert!(!view.contains("ignored in panel mode"));

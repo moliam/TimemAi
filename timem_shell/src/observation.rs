@@ -5,6 +5,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const ANSI_BOLD: &str = "\x1b[1m";
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BLINK: &str = "\x1b[5m";
+const OBSERVATION_LINE_PREFIX: &str = "· ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationEvent {
@@ -176,8 +177,11 @@ pub fn render_observation_panel(panel: &ObservationPanel) -> String {
     out.push_str(ANSI_RESET);
     out.push('\n');
     for line in panel.visible_lines() {
-        let fitted = fit_display_width(&line.text, content_width.saturating_sub(2));
-        let padded = pad_display_width(&fitted, content_width.saturating_sub(2));
+        let line_width = content_width.saturating_sub(2);
+        let text_width = line_width.saturating_sub(display_width(OBSERVATION_LINE_PREFIX));
+        let fitted = fit_display_width(&line.text, text_width);
+        let content = format!("{OBSERVATION_LINE_PREFIX}{fitted}");
+        let padded = pad_display_width(&content, line_width);
         out.push('┃');
         out.push(' ');
         match line.style {
@@ -320,7 +324,7 @@ mod tests {
         panel.apply(ObservationEvent::Transient("思考中...".to_string()));
         let rendered = render_observation_panel(&panel);
         assert!(rendered.contains("\x1b[1m┏━ Thought / Action"));
-        assert!(rendered.contains("\x1b[5m思考中..."));
+        assert!(rendered.contains("\x1b[5m· 思考中..."));
         assert!(rendered.contains('┗'));
     }
 
@@ -331,10 +335,10 @@ mod tests {
             panel.apply(ObservationEvent::Persistent(line.to_string()));
         }
         let rendered = render_observation_panel(&panel);
-        assert!(!rendered.contains(" a "));
-        assert!(rendered.contains(" b "));
-        assert!(rendered.contains(" c "));
-        assert!(rendered.contains(" d "));
+        assert!(!rendered.contains("· a "));
+        assert!(rendered.contains("· b "));
+        assert!(rendered.contains("· c "));
+        assert!(rendered.contains("· d "));
     }
 
     #[test]
@@ -344,7 +348,7 @@ mod tests {
         panel.apply(ObservationEvent::Transient("思考中...".to_string()));
         panel.apply(ObservationEvent::ClearTransient);
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains(" a "));
+        assert!(rendered.contains("· a "));
         assert!(!rendered.contains("思考中"));
     }
 
@@ -384,11 +388,11 @@ mod tests {
     fn active_line_can_settle_to_normal() {
         let mut panel = ObservationPanel::new(8, 48);
         panel.apply(ObservationEvent::Active("执行 Bash: pwd".to_string()));
-        assert!(render_observation_panel(&panel).contains("\x1b[5m执行 Bash"));
+        assert!(render_observation_panel(&panel).contains("\x1b[5m· 执行 Bash"));
         panel.apply(ObservationEvent::SettleActive);
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains("执行 Bash: pwd"));
-        assert!(!rendered.contains("\x1b[5m执行 Bash"));
+        assert!(rendered.contains("· 执行 Bash: pwd"));
+        assert!(!rendered.contains("\x1b[5m· 执行 Bash"));
     }
 
     #[test]
@@ -412,7 +416,7 @@ mod tests {
             r#"{"next_actions":[{"action":"run_bash","intent":"统计","input":{"command":"rg --files | wc -l"}}]}"#,
         ));
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains("执行 Bash"));
+        assert!(rendered.contains("· 执行 Bash"));
         assert!(!rendered.contains("run_bash"));
     }
 
