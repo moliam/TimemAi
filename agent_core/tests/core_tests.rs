@@ -172,13 +172,18 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
 }
 
 #[test]
-fn model_can_score_new_delta_for_long_context_retention() {
+fn model_scores_previously_submitted_delta_not_its_own_response_delta() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("durable_ctx_score"),
     );
-    let _ = core.begin_turn("记住这个项目决策", None);
+    let first_prompt = match core.begin_turn("记住这个项目决策", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let submitted_delta_id = first_field_value(&first_prompt, "delta_id");
+    assert!(first_prompt.contains("durable_ctx_score: unscored"));
     let step = core.apply_model_response(LlmResponse {
         content: r#"{"response_to_user":"已记录这个项目决策。","durable_ctx_score":9,"acceptance_check":{"is_satisfied":true}}"#
             .to_string(),
@@ -187,7 +192,41 @@ fn model_can_score_new_delta_for_long_context_retention() {
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
+    assert!(prompt.contains(&format!(
+        "delta_id: {}\ndurable_ctx_score: 9",
+        submitted_delta_id
+    )));
     assert!(prompt.contains("durable_ctx_score: 9"));
+    assert!(prompt.contains("prompt_type: llm_response"));
+    assert!(prompt.contains("durable_ctx_score: unscored"));
+}
+
+#[test]
+fn model_can_score_delta_by_explicit_delta_id() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("durable_ctx_explicit_id"),
+    );
+    let first_prompt = match core.begin_turn("first delta", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let first_delta_id = first_field_value(&first_prompt, "delta_id");
+    let step = core.apply_model_response(LlmResponse {
+        content: format!(
+            r#"{{"response_to_user":"done","delta_scores":[{{"delta_id":"{}","durable_ctx_score":3}}],"acceptance_check":{{"is_satisfied":true}}}}"#,
+            first_delta_id
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = core.render_prompt();
+    assert!(prompt.contains(&format!(
+        "delta_id: {}\ndurable_ctx_score: 3",
+        first_delta_id
+    )));
 }
 
 #[test]
@@ -202,7 +241,7 @@ fn runtime_does_not_infer_durable_score_from_user_text_semantics() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("User question:\n不要记住：生日这个词只是测试"));
-    assert!(prompt.contains("durable_ctx_score: 5"));
+    assert!(prompt.contains("durable_ctx_score: unscored"));
     assert!(!prompt.contains("durable_ctx_score: 8"));
 }
 

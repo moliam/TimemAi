@@ -108,8 +108,8 @@ pub enum CoreStep {
 pub struct PromptDelta {
     pub delta_id: String,
     pub time_ms: i64,
-    #[serde(default = "default_durable_ctx_score")]
-    pub durable_ctx_score: u8,
+    #[serde(default)]
+    pub durable_ctx_score: Option<u8>,
     slices: Vec<PromptSlice>,
     #[serde(default)]
     pub hidden_slice_ids: Vec<String>,
@@ -118,7 +118,7 @@ pub struct PromptDelta {
 struct PromptSlice {
     delta_id: String,
     slice_id: String,
-    durable_ctx_score: u8,
+    durable_ctx_score: Option<u8>,
     prompt_type: String,
     time_ms: i64,
     text: String,
@@ -184,8 +184,14 @@ struct ParsedEnvelope {
     thought: String,
     next_actions: Vec<ParsedAction>,
     memory_candidates: Vec<String>,
-    durable_ctx_score: Option<u8>,
+    delta_scores: Vec<DeltaScore>,
     repair_issue: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeltaScore {
+    delta_id: Option<String>,
+    durable_ctx_score: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,7 +300,7 @@ impl AgentCore {
             let result = self.runtime_memory_precheck(user_input, 5);
             slices.push(("result_of_llm_action".to_string(), result));
         }
-        self.append_delta(slices, None);
+        self.append_delta(slices);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
             rounds_remaining: self.max_rounds,
@@ -307,6 +313,7 @@ impl AgentCore {
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
         let parsed = parse_envelope(&response.content);
+        self.apply_delta_scores(&parsed.delta_scores);
         let mut slices = Vec::new();
         if !parsed.thought.is_empty() {
             slices.push((
@@ -318,7 +325,7 @@ impl AgentCore {
             if !self.repair_attempted {
                 self.repair_attempted = true;
                 slices.push(("result_of_llm_action".to_string(), format!("Protocol repair request\nissue: {}\nReturn exactly one valid JSON object with response_to_user. Do not use markdown fences.", issue)));
-                self.append_delta(slices, parsed.durable_ctx_score);
+                self.append_delta(slices);
                 return CoreStep::NeedModel {
                     prompt: self.render_prompt(),
                     rounds_remaining: self.remaining_rounds(),
@@ -334,7 +341,7 @@ impl AgentCore {
                 "llm_response".to_string(),
                 format!("Response shown to user:\n{}", final_text),
             ));
-            self.append_delta(slices, parsed.durable_ctx_score);
+            self.append_delta(slices);
             return CoreStep::Final(TurnFinal {
                 response_to_user: final_text,
                 stats: self.current_stats.clone(),
@@ -354,7 +361,7 @@ impl AgentCore {
                                 result_lines.join("\n\n"),
                             ));
                         }
-                        self.append_delta(slices, parsed.durable_ctx_score);
+                        self.append_delta(slices);
                         let request = pending.request.clone();
                         self.pending_approval = Some(pending);
                         return CoreStep::NeedsUserApproval { request };
@@ -367,7 +374,7 @@ impl AgentCore {
                     result_lines.join("\n\n"),
                 ));
             }
-            self.append_delta(slices, parsed.durable_ctx_score);
+            self.append_delta(slices);
             return CoreStep::NeedModel {
                 prompt: self.render_prompt(),
                 rounds_remaining: self.remaining_rounds(),
@@ -389,7 +396,7 @@ impl AgentCore {
             "llm_response".to_string(),
             format!("Response shown to user:\n{}", final_text),
         ));
-        self.append_delta(slices, parsed.durable_ctx_score);
+        self.append_delta(slices);
         CoreStep::Final(TurnFinal {
             response_to_user: final_text,
             stats: self.current_stats.clone(),
@@ -399,16 +406,13 @@ impl AgentCore {
     }
     pub fn resolve_user_approval(&mut self, approval_id: &str, approved: bool) -> CoreStep {
         let Some(pending) = self.pending_approval.take() else {
-            self.append_delta(
-                vec![(
-                    "result_of_llm_action".to_string(),
-                    format!(
-                        "Action result: user_approval\napproval_id: {}\nerror: no_pending_approval",
-                        approval_id
-                    ),
-                )],
-                None,
-            );
+            self.append_delta(vec![(
+                "result_of_llm_action".to_string(),
+                format!(
+                    "Action result: user_approval\napproval_id: {}\nerror: no_pending_approval",
+                    approval_id
+                ),
+            )]);
             return CoreStep::NeedModel {
                 prompt: self.render_prompt(),
                 rounds_remaining: self.remaining_rounds(),
@@ -435,7 +439,7 @@ impl AgentCore {
                 pending.command, pending.request.approval_id, pending.request.reason
             )
         };
-        self.append_delta(vec![("result_of_llm_action".to_string(), result)], None);
+        self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
             rounds_remaining: self.remaining_rounds(),
@@ -453,7 +457,7 @@ impl AgentCore {
             out.push_str(&format!(
                 "delta_id: {}\ndurable_ctx_score: {}\nslice_id: {}\nslice: {}/{}\n",
                 slice.delta_id,
-                slice.durable_ctx_score,
+                durable_score_label(slice.durable_ctx_score),
                 slice.slice_id,
                 slice.slice_index,
                 slice.slice_count
@@ -475,7 +479,42 @@ impl AgentCore {
     fn remaining_rounds(&self) -> u32 {
         self.max_rounds.saturating_sub(self.current_round)
     }
-    fn append_delta(&mut self, slice_texts: Vec<(String, String)>, durable_ctx_score: Option<u8>) {
+
+    fn apply_delta_scores(&mut self, delta_scores: &[DeltaScore]) {
+        for score in delta_scores {
+            if let Some(delta_id) = score
+                .delta_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                if let Some(delta) = self
+                    .deltas
+                    .iter_mut()
+                    .find(|delta| delta.delta_id == delta_id)
+                {
+                    delta.durable_ctx_score = Some(score.durable_ctx_score);
+                    for slice in &mut delta.slices {
+                        slice.durable_ctx_score = Some(score.durable_ctx_score);
+                    }
+                }
+                continue;
+            }
+            if let Some(delta) = self
+                .deltas
+                .iter_mut()
+                .rev()
+                .find(|delta| delta.durable_ctx_score.is_none())
+            {
+                delta.durable_ctx_score = Some(score.durable_ctx_score);
+                for slice in &mut delta.slices {
+                    slice.durable_ctx_score = Some(score.durable_ctx_score);
+                }
+            }
+        }
+    }
+
+    fn append_delta(&mut self, slice_texts: Vec<(String, String)>) {
         if slice_texts.is_empty() {
             return;
         }
@@ -492,7 +531,6 @@ impl AgentCore {
             })
             .collect::<Vec<_>>();
         let slice_count = chunks.len();
-        let inferred_score = durable_ctx_score.unwrap_or_else(default_durable_ctx_score);
         let slices = chunks
             .into_iter()
             .enumerate()
@@ -505,7 +543,7 @@ impl AgentCore {
                         delta_id.trim_start_matches("pd_"),
                         slice_index
                     ),
-                    durable_ctx_score: inferred_score,
+                    durable_ctx_score: None,
                     prompt_type,
                     time_ms,
                     text,
@@ -517,7 +555,7 @@ impl AgentCore {
         self.deltas.push(PromptDelta {
             delta_id,
             time_ms: timestamp,
-            durable_ctx_score: inferred_score,
+            durable_ctx_score: None,
             slices,
             hidden_slice_ids: Vec::new(),
         });
@@ -556,7 +594,7 @@ impl AgentCore {
                 format!(
                     "- delta_id={} durable_ctx_score={} time_ms={} visible_slices={} estimated_tokens={}",
                     delta.delta_id,
-                    delta.durable_ctx_score,
+                    durable_score_label(delta.durable_ctx_score),
                     delta.time_ms,
                     render_delta_slices(delta).len(),
                     token_estimate
@@ -573,7 +611,7 @@ impl AgentCore {
                     "- slice_id={} delta_id={} durable_ctx_score={} slice={}/{} prompt_type={} time_ms={}",
                     slice.slice_id,
                     slice.delta_id,
-                    slice.durable_ctx_score,
+                    durable_score_label(slice.durable_ctx_score),
                     slice.slice_index,
                     slice.slice_count,
                     slice.prompt_type,
@@ -1839,12 +1877,14 @@ fn estimate_prompt_tokens(text: &str) -> u32 {
     text.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
 
-fn default_durable_ctx_score() -> u8 {
-    5
-}
-
 fn clamp_durable_ctx_score(raw: u64) -> u8 {
     raw.clamp(1, 10) as u8
+}
+
+fn durable_score_label(score: Option<u8>) -> String {
+    score
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unscored".to_string())
 }
 
 fn shell_quote_path(path: &Path) -> String {
@@ -1861,7 +1901,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 thought: String::new(),
                 next_actions: vec![],
                 memory_candidates: vec![],
-                durable_ctx_score: None,
+                delta_scores: Vec::new(),
                 repair_issue: Some("invalid_json".to_string()),
             }
         }
@@ -1872,7 +1912,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
             thought: String::new(),
             next_actions: vec![],
             memory_candidates: vec![],
-            durable_ctx_score: None,
+            delta_scores: Vec::new(),
             repair_issue: Some("root_must_be_json_object".to_string()),
         };
     }
@@ -1891,10 +1931,22 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         .filter(|text| !text.is_empty())
         .map(ToString::to_string)
         .unwrap_or_default();
-    let durable_ctx_score = value
+    let mut delta_scores = parse_delta_scores(value.get("delta_scores"));
+    if let Some(score) = value
         .get("durable_ctx_score")
         .and_then(Value::as_u64)
-        .map(clamp_durable_ctx_score);
+        .map(clamp_durable_ctx_score)
+    {
+        delta_scores.push(DeltaScore {
+            delta_id: value
+                .get("scored_delta_id")
+                .or_else(|| value.get("delta_id"))
+                .and_then(Value::as_str)
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty()),
+            durable_ctx_score: score,
+        });
+    }
     let acceptance_satisfied = value
         .get("acceptance_check")
         .and_then(|check| check.get("is_satisfied"))
@@ -2212,9 +2264,36 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         thought,
         next_actions,
         memory_candidates,
-        durable_ctx_score,
+        delta_scores,
         repair_issue,
     }
+}
+
+fn parse_delta_scores(value: Option<&Value>) -> Vec<DeltaScore> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let score = item
+                .get("durable_ctx_score")
+                .or_else(|| item.get("score"))
+                .and_then(Value::as_u64)
+                .map(clamp_durable_ctx_score)?;
+            Some(DeltaScore {
+                delta_id: item
+                    .get("delta_id")
+                    .and_then(Value::as_str)
+                    .map(|id| id.trim().to_string())
+                    .filter(|id| !id.is_empty()),
+                durable_ctx_score: score,
+            })
+        })
+        .collect()
 }
 
 fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::Error> {
