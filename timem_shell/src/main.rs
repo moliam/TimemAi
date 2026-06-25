@@ -2032,13 +2032,15 @@ fn render_startup_banner(
         }),
         ConfigTableItem::Section("RUNTIME"),
         ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_MAX_LLM_INPUT / TIMEM_MAX_LLM_OUTPUT".to_string(),
-            value: format!(
-                "{}/{}",
-                format_token_count(config.max_llm_input_tokens),
-                format_token_count(config.max_llm_output_tokens)
-            ),
-            desc: "最大输入/输出 token",
+            key: "TIMEM_MAX_LLM_INPUT".to_string(),
+            value: format_token_count(config.max_llm_input_tokens),
+            desc: "最大输入 token",
+            highlight: false,
+        }),
+        ConfigTableItem::Row(ConfigRow {
+            key: "TIMEM_MAX_LLM_OUTPUT".to_string(),
+            value: format_token_count(config.max_llm_output_tokens),
+            desc: "最大输出 token",
             highlight: false,
         }),
         ConfigTableItem::Row(ConfigRow {
@@ -2567,6 +2569,8 @@ mod static_prompt_tests {
         assert!(banner.contains("TIMEM_MODEL"));
         assert!(banner.contains("qwen-plus"));
         assert!(banner.contains("TIMEM_MAX_LLM_INPUT"));
+        assert!(banner.contains("TIMEM_MAX_LLM_OUTPUT"));
+        assert!(!banner.contains("TIMEM_MAX_LLM_INPUT / TIMEM_MAX_LLM_OUTPUT"));
         assert!(banner.contains("100K"));
         assert!(banner.contains("TIMEM_BASH_APPROVAL"));
         assert!(banner.contains("approve"));
