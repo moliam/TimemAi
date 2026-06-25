@@ -101,27 +101,20 @@ pub fn render_prof_report(
         out.push_str("  暂无模型调用。\n");
     } else {
         for (model, profile) in profiler.models() {
-            out.push_str(&format!("  ┌─ {ANSI_BOLD}{}{ANSI_RESET}\n", model));
+            out.push_str(&format!("  {}\n", model));
             out.push_str(&format!(
-                "  │ calls {:>4}   input {:>8}   output {:>8}   cached {:>8}\n",
+                "    │─ calls: {:<5} || kvc hit rate(⌁): {:>6}\n",
                 profile.llm_calls,
-                format_count(profile.input_tokens),
-                format_count(profile.output_tokens),
-                format_count(profile.cached_tokens)
+                format_percent(profile.cached_tokens, profile.input_tokens)
             ));
             out.push_str(&format!(
-                "  └─ cache hit {:>6}   avg wait / 1K output {:>8}\n",
-                format_percent(profile.cached_tokens, profile.input_tokens),
+                "    └─ ▲{:<8} (⌁{:<8})  ▼{:<8} |  sec/▼1K: {}\n",
+                format_count(profile.input_tokens),
+                format_count(profile.cached_tokens),
+                format_count(profile.output_tokens),
                 format_wait_per_1k_output(profile.wait, profile.output_tokens)
             ));
         }
-        out.push_str(&format!(
-            "  total input {}   output {}   cached {}   cache hit {}\n",
-            format_count(total_input_tokens(profiler)),
-            format_count(total_output_tokens(profiler)),
-            format_count(total_cached_tokens(profiler)),
-            format_percent(total_cached_tokens(profiler), total_input_tokens(profiler))
-        ));
     }
     out.push('\n');
     out.push_str(&section_title("底层性能"));
@@ -155,30 +148,6 @@ pub fn render_prof_report(
 
 fn section_title(title: &str) -> String {
     format!("{ANSI_BOLD}▸ {title}{ANSI_RESET}\n")
-}
-
-fn total_input_tokens(profiler: &RuntimeProfiler) -> u64 {
-    profiler
-        .models()
-        .values()
-        .map(|profile| profile.input_tokens)
-        .sum()
-}
-
-fn total_output_tokens(profiler: &RuntimeProfiler) -> u64 {
-    profiler
-        .models()
-        .values()
-        .map(|profile| profile.output_tokens)
-        .sum()
-}
-
-fn total_cached_tokens(profiler: &RuntimeProfiler) -> u64 {
-    profiler
-        .models()
-        .values()
-        .map(|profile| profile.cached_tokens)
-        .sum()
 }
 
 fn count_jsonl_entries(path: &Path) -> usize {
@@ -292,11 +261,11 @@ mod tests {
             std::path::Path::new("/missing/audit.jsonl"),
         );
         assert!(report.contains("\x1b[1m▸ Token 监控（per model）\x1b[0m"));
-        assert!(report.contains("┌─ \x1b[1maliyun:qwen-plus\x1b[0m"));
-        assert!(report.contains("calls    2   input     1.5K   output      500   cached      800"));
+        assert!(report.contains("  aliyun:qwen-plus"));
+        assert!(report.contains("│─ calls: 2     || kvc hit rate(⌁):  53.3%"));
+        assert!(report.contains("└─ ▲1.5K     (⌁800     )  ▼500      |  sec/▼1K: 3 s"));
         assert!(report.contains("53.3%"));
-        assert!(report.contains("avg wait / 1K output"));
-        assert!(report.contains("total input 1.5K   output 500   cached 800"));
+        assert!(!report.contains("total input"));
     }
 
     #[test]
@@ -327,5 +296,60 @@ mod tests {
         assert_eq!(profile.audit_bytes, 6);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn profiler_token_cards_keep_stable_alignment_across_models() {
+        let mut profiler = RuntimeProfiler::default();
+        profiler.record_model_wait(
+            "a",
+            "short",
+            &UsageStats {
+                llm_calls: 12,
+                prompt_tokens: 99,
+                completion_tokens: 7,
+                cached_tokens: 1,
+                ..UsageStats::zero()
+            },
+            Duration::from_millis(100),
+        );
+        profiler.record_model_wait(
+            "aliyun",
+            "very-long-model-name",
+            &UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 123_456,
+                completion_tokens: 4567,
+                cached_tokens: 12_345,
+                ..UsageStats::zero()
+            },
+            Duration::from_millis(2000),
+        );
+
+        let report = render_prof_report(
+            &profiler,
+            std::path::Path::new("/missing/memory"),
+            std::path::Path::new("/missing/audit.jsonl"),
+        );
+        let call_lines: Vec<&str> = report
+            .lines()
+            .filter(|line| line.contains("│─ calls:"))
+            .collect();
+        let token_lines: Vec<&str> = report
+            .lines()
+            .filter(|line| line.contains("└─ ▲"))
+            .collect();
+        assert_eq!(call_lines.len(), 2);
+        assert_eq!(token_lines.len(), 2);
+        assert!(
+            call_lines
+                .iter()
+                .all(|line| line.find("|| kvc hit rate").unwrap()
+                    == call_lines[0].find("||").unwrap())
+        );
+        assert!(token_lines
+            .iter()
+            .all(|line| line.find("|  sec/▼1K").unwrap()
+                == token_lines[0].find("|  sec/▼1K").unwrap()));
     }
 }
