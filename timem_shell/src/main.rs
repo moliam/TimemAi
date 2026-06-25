@@ -884,12 +884,57 @@ impl PromptStatusBar {
 }
 
 fn rewrite_submitted_user_line(input: &str, status_line_visible: bool) {
-    if status_line_visible {
-        print!("\x1b[2A\r\x1b[J[{}] 你 > {}\n", time_label(), input);
-    } else {
-        print!("\x1b[1A\r\x1b[2K[{}] 你 > {}\n", time_label(), input);
-    }
+    print!(
+        "{}",
+        render_submitted_user_line_rewrite(
+            input,
+            status_line_visible,
+            terminal_width(),
+            &time_label()
+        )
+    );
     let _ = io::stdout().flush();
+}
+
+fn render_submitted_user_line_rewrite(
+    input: &str,
+    status_line_visible: bool,
+    terminal_width: usize,
+    time_label: &str,
+) -> String {
+    let prompt_prefix = format!("[{}] 你 > ", time_label);
+    let prompt_width = display_width(&prompt_prefix);
+    let input_rows = wrapped_terminal_rows(prompt_width + display_width(input), terminal_width);
+    let rows_to_clear = input_rows + usize::from(status_line_visible);
+    format!(
+        "\x1b[{}F\r\x1b[J{}{}\n",
+        rows_to_clear, prompt_prefix, input
+    )
+}
+
+fn wrapped_terminal_rows(display_width: usize, terminal_width: usize) -> usize {
+    let width = terminal_width.max(1);
+    display_width.max(1).div_ceil(width)
+}
+
+fn terminal_width() -> usize {
+    terminal_width_from_fd(io::stdout().as_raw_fd()).unwrap_or(80)
+}
+
+#[cfg(unix)]
+fn terminal_width_from_fd(fd: i32) -> Option<usize> {
+    let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
+    let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) };
+    if rc == 0 && size.ws_col > 0 {
+        Some(size.ws_col as usize)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn terminal_width_from_fd(_fd: i32) -> Option<usize> {
+    None
 }
 
 fn print_final_response(
@@ -1156,8 +1201,9 @@ mod static_prompt_tests {
         cancelled_turn_result, consume_turn_cancel_request, display_width, epoch_millis, help_text,
         random_spinner_tick, read_approval_key, render_approval_choices,
         render_round_limit_choices, render_round_limit_prompt, render_startup_banner,
-        render_user_approval_prompt, sanitize_user_input, ApprovalChoice, ApprovalKey,
-        ANSI_HIGHLIGHT, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        render_submitted_user_line_rewrite, render_user_approval_prompt, sanitize_user_input,
+        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ANSI_HIGHLIGHT, STATIC_PROMPT,
+        TURN_CANCEL_REQUESTED,
     };
     use agent_core::{ApprovalRequest, BashApprovalMode};
     use std::fs;
@@ -1544,6 +1590,27 @@ mod static_prompt_tests {
         assert_eq!(
             sanitize_user_input(input),
             "把20260623-211820.mp4 的分辨率降低一些"
+        );
+    }
+
+    #[test]
+    fn submitted_user_line_rewrite_clears_wrapped_input_rows() {
+        let rendered = render_submitted_user_line_rewrite("abcdef", false, 10, "12:00:00");
+        assert!(rendered.starts_with("\x1b[3F\r\x1b[J"));
+        assert!(rendered.ends_with("[12:00:00] 你 > abcdef\n"));
+    }
+
+    #[test]
+    fn submitted_user_line_rewrite_clears_status_and_wrapped_rows() {
+        let rendered = render_submitted_user_line_rewrite("abcdef", true, 10, "12:00:00");
+        assert!(rendered.starts_with("\x1b[4F\r\x1b[J"));
+    }
+
+    #[test]
+    fn wrapped_terminal_rows_counts_cjk_display_width() {
+        assert_eq!(
+            wrapped_terminal_rows(display_width("[12:00:00] 你 > 你好"), 10),
+            2
         );
     }
 }
