@@ -103,12 +103,12 @@ pub fn render_prof_report(
         for (model, profile) in profiler.models() {
             out.push_str(&format!("  {}\n", model));
             out.push_str(&format!(
-                "    │─ calls: {:<5} || kvc hit rate(⌁): {:>6}\n",
+                "    │─ calls: {}  ||  kvc hit rate(⌁): {}\n",
                 profile.llm_calls,
                 format_percent(profile.cached_tokens, profile.input_tokens)
             ));
             out.push_str(&format!(
-                "    └─ ▲{:<8} (⌁{:<8})  ▼{:<8} |  sec/▼1K: {}\n",
+                "    └─ ▲{} (⌁{})  ▼{}  |  sec/▼1K: {}\n",
                 format_count(profile.input_tokens),
                 format_count(profile.cached_tokens),
                 format_count(profile.output_tokens),
@@ -262,8 +262,8 @@ mod tests {
         );
         assert!(report.contains("\x1b[1m▸ Token 监控（per model）\x1b[0m"));
         assert!(report.contains("  aliyun:qwen-plus"));
-        assert!(report.contains("│─ calls: 2     || kvc hit rate(⌁):  53.3%"));
-        assert!(report.contains("└─ ▲1.5K     (⌁800     )  ▼500      |  sec/▼1K: 3 s"));
+        assert!(report.contains("│─ calls: 2  ||  kvc hit rate(⌁): 53.3%"));
+        assert!(report.contains("└─ ▲1.5K (⌁800)  ▼500  |  sec/▼1K: 3 s"));
         assert!(report.contains("53.3%"));
         assert!(!report.contains("total input"));
     }
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn profiler_token_cards_keep_stable_alignment_across_models() {
+    fn profiler_token_cards_keep_compact_structure_across_models() {
         let mut profiler = RuntimeProfiler::default();
         profiler.record_model_wait(
             "a",
@@ -341,15 +341,13 @@ mod tests {
             .collect();
         assert_eq!(call_lines.len(), 2);
         assert_eq!(token_lines.len(), 2);
-        assert!(
-            call_lines
-                .iter()
-                .all(|line| line.find("|| kvc hit rate").unwrap()
-                    == call_lines[0].find("||").unwrap())
-        );
+        assert!(call_lines
+            .iter()
+            .all(|line| line.contains("  ||  kvc hit rate(⌁): ")));
         assert!(token_lines
             .iter()
-            .all(|line| line.find("|  sec/▼1K").unwrap()
-                == token_lines[0].find("|  sec/▼1K").unwrap()));
+            .all(|line| line.contains("  |  sec/▼1K: ")));
+        assert!(!report.contains("(⌁0       )"));
+        assert!(!report.contains("(⌁1       )"));
     }
 }
