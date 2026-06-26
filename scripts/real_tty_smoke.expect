@@ -318,6 +318,70 @@ proc run_config_value_cancel_smoke {} {
     exit_timem
 }
 
+proc run_config_menu_cancel_smoke {} {
+    spawn_timem
+    send "/config\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "选择要修改的配置" {}
+        timeout {
+            error "timeout waiting for /config menu before menu cancel"
+        }
+        eof {
+            error "unexpected EOF waiting for /config menu before menu cancel"
+        }
+    }
+    send "\003"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "已取消配置修改" {}
+        timeout {
+            error "timeout waiting for Ctrl+C config menu cancellation"
+        }
+        eof {
+            error "Ctrl+C exited Timem while selecting config field"
+        }
+    }
+    wait_prompt
+
+    send "/config\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "选择要修改的配置" {}
+        timeout {
+            error "timeout waiting for second /config menu before menu cancel"
+        }
+        eof {
+            error "unexpected EOF waiting for second /config menu before menu cancel"
+        }
+    }
+    send "\033"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "已取消配置修改" {}
+        timeout {
+            error "timeout waiting for Esc config menu cancellation"
+        }
+        eof {
+            error "Esc exited Timem while selecting config field"
+        }
+    }
+    wait_prompt
+    exit_timem
+}
+
 proc run_config_base_url_update_after_idle_smoke {} {
     spawn_timem
     send "/config\r"
@@ -420,6 +484,7 @@ run_multiline_paste_cancel_smoke
 run_shift_enter_cancel_smoke
 run_wrapped_edit_cancel_smoke
 run_config_value_cancel_smoke
+run_config_menu_cancel_smoke
 run_config_base_url_update_after_idle_smoke
 run_workspace_add_cancel_smoke
 

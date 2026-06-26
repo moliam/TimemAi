@@ -961,8 +961,6 @@ enum WorkspaceSelection {
 }
 
 fn choose_workspace_item(dirs: &[String]) -> Option<WorkspaceSelection> {
-    println!("\nWorkspace 目录用于提示模型参考资料位置，不限制模型只能在这些目录工作。");
-    println!("使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 返回。\n");
     let mut input = ShellInputSource::open().ok()?;
     let fd = input.as_raw_fd();
     let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
@@ -977,6 +975,9 @@ fn choose_workspace_item(dirs: &[String]) -> Option<WorkspaceSelection> {
         return None;
     }
     let mut terminal_mode = TerminalModeGuard::new(fd, original);
+    let mut nonblocking_mode = NonblockingGuard::new(fd).ok()?;
+    println!("\nWorkspace 目录用于提示模型参考资料位置，不限制模型只能在这些目录工作。");
+    println!("使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 返回。\n");
     let mut selected = 0usize;
     print!("{}", render_workspace_menu(dirs, selected));
     let _ = io::stdout().flush();
@@ -1003,6 +1004,7 @@ fn choose_workspace_item(dirs: &[String]) -> Option<WorkspaceSelection> {
         );
         let _ = io::stdout().flush();
     };
+    nonblocking_mode.restore();
     terminal_mode.restore();
     println!();
     result
@@ -1081,7 +1083,6 @@ fn choose_config_field(
     config: &timem_shell::ProviderConfig,
     bash_approval_mode: BashApprovalMode,
 ) -> Option<ConfigField> {
-    println!("\n选择要修改的配置，使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 取消。\n");
     let mut input = ShellInputSource::open().ok()?;
     let fd = input.as_raw_fd();
     let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
@@ -1096,6 +1097,8 @@ fn choose_config_field(
         return None;
     }
     let mut terminal_mode = TerminalModeGuard::new(fd, original);
+    let mut nonblocking_mode = NonblockingGuard::new(fd).ok()?;
+    println!("\n选择要修改的配置，使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 取消。\n");
     let mut selected = 0usize;
     print!(
         "{}",
@@ -1117,6 +1120,7 @@ fn choose_config_field(
         );
         let _ = io::stdout().flush();
     };
+    nonblocking_mode.restore();
     terminal_mode.restore();
     println!();
     result
@@ -1156,11 +1160,10 @@ enum MenuKey {
 }
 
 fn read_menu_key(input: &mut impl Read) -> MenuKey {
-    let mut buf = [0u8; 1];
-    if input.read_exact(&mut buf).is_err() {
+    let Some(byte) = read_key_byte_wait(input) else {
         return MenuKey::Cancel;
-    }
-    match buf[0] {
+    };
+    match byte {
         b'\r' | b'\n' => MenuKey::Enter,
         3 | 4 => MenuKey::Cancel,
         27 => {
@@ -1353,8 +1356,6 @@ fn choose_with_keyboard(
     initial: ApprovalChoice,
 ) -> ApprovalChoice {
     let mut selected = initial;
-    print!("{}", render_choices(selected));
-    let _ = io::stdout().flush();
 
     let Ok(mut input) = ShellInputSource::open() else {
         println!();
@@ -1375,6 +1376,16 @@ fn choose_with_keyboard(
         return ApprovalChoice::Deny;
     }
     let mut terminal_mode = TerminalModeGuard::new(fd, original);
+    let mut nonblocking_mode = match NonblockingGuard::new(fd) {
+        Ok(guard) => guard,
+        Err(_) => {
+            terminal_mode.restore();
+            println!();
+            return ApprovalChoice::Deny;
+        }
+    };
+    print!("{}", render_choices(selected));
+    let _ = io::stdout().flush();
 
     let result = loop {
         match read_approval_key(&mut input) {
@@ -1396,6 +1407,7 @@ fn choose_with_keyboard(
             ApprovalKey::Other => {}
         }
     };
+    nonblocking_mode.restore();
     terminal_mode.restore();
     println!();
     result
@@ -1476,14 +1488,13 @@ enum ApprovalKey {
 }
 
 fn read_approval_key(input: &mut impl Read) -> ApprovalKey {
-    let mut buf = [0u8; 1];
-    if input.read_exact(&mut buf).is_err() {
+    let Some(byte) = read_key_byte_wait(input) else {
         return ApprovalKey::Cancel;
-    }
-    match buf[0] {
+    };
+    match byte {
         b'\r' | b'\n' => ApprovalKey::Enter,
         3 | 4 | 27 => {
-            if buf[0] != 27 {
+            if byte != 27 {
                 return ApprovalKey::Cancel;
             }
             let Some(seq) = read_escape_sequence(input) else {
@@ -1505,17 +1516,64 @@ fn read_approval_key(input: &mut impl Read) -> ApprovalKey {
 
 fn read_escape_sequence(input: &mut impl Read) -> Option<Vec<u8>> {
     let mut seq = Vec::with_capacity(8);
+    let deadline = Instant::now() + Duration::from_millis(80);
     for _ in 0..16 {
-        let mut buf = [0u8; 1];
-        if input.read_exact(&mut buf).is_err() {
-            return None;
-        }
-        seq.push(buf[0]);
-        if matches!(buf[0], b'A'..=b'Z' | b'a'..=b'z' | b'~') {
+        let Some(byte) = read_key_byte_until(input, deadline) else {
+            return if seq.is_empty() { None } else { Some(seq) };
+        };
+        seq.push(byte);
+        if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'~') {
             break;
         }
     }
     Some(seq)
+}
+
+fn read_key_byte_wait(input: &mut impl Read) -> Option<u8> {
+    loop {
+        match read_key_byte_once(input) {
+            KeyByteRead::Byte(byte) => return Some(byte),
+            KeyByteRead::Pending => thread::sleep(Duration::from_millis(20)),
+            KeyByteRead::Closed => return None,
+        }
+    }
+}
+
+fn read_key_byte_until(input: &mut impl Read, deadline: Instant) -> Option<u8> {
+    loop {
+        match read_key_byte_once(input) {
+            KeyByteRead::Byte(byte) => return Some(byte),
+            KeyByteRead::Closed => return None,
+            KeyByteRead::Pending => {}
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+enum KeyByteRead {
+    Byte(u8),
+    Pending,
+    Closed,
+}
+
+fn read_key_byte_once(input: &mut impl Read) -> KeyByteRead {
+    let mut buf = [0u8; 1];
+    match input.read(&mut buf) {
+        Ok(1) => KeyByteRead::Byte(buf[0]),
+        Ok(_) => KeyByteRead::Closed,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            KeyByteRead::Pending
+        }
+        Err(_) => KeyByteRead::Closed,
+    }
 }
 
 struct SigintGuard {
