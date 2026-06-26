@@ -26,7 +26,7 @@
   "Mem_rule": {
     "schema": {
       "chat_history": "persisted user/assistant chat records shown in the conversation UI; SQL table chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id); use memory_sql_query for precise SQL/time-window reads or chat_history_query for a simple lexical/recent wrapper; normal app restarts and build updates should preserve it, while reinstall/reset/cleared app data may remove it; not durable memory",
-      "memories": "durable local memory; SQL table memories(id, created_at_ms, content); query through query_memory or memory_sql_query",
+      "memories": "durable local memory; SQL table memories(id, created_at_ms, updated_at_ms, version, content); query through query_memory or memory_sql_query; update/delete existing rows with memory_update.expected_version to avoid multi-CLI conflicts",
       "scratch_notes": "temporary task checkpoints when work should continue across turns"
     },
     "evidence_policy": "Use chat_history for prior conversations and exact wording; use durable memory for long-lived user facts; use created_at_ms when time of storage or conversation matters.",
@@ -117,7 +117,8 @@
         "input": {
           "operation": "insert|update|upsert|delete",
           "id?": "string required for update/delete/upsert identity when known",
-          "content?": "string required except delete"
+          "content?": "string required except delete",
+          "expected_version?": "integer from query_memory or memory_sql_query; required by runtime when modifying/deleting an existing id"
         },
         "example": {
           "action": "memory_update",
@@ -230,7 +231,7 @@
       "canonical_names": "Use canonical action names from tool_catalog. Do not invent tool names. query_memory is the canonical lexical durable memory search action.",
       "intent_required": "Every next_actions item must include a concise top-level intent string; runtime displays it in UI and rejects missing intent once for repair.",
       "sql_safety": "memory_sql_query is read-only; writes must use memory_update. SQL params must match placeholders exactly.",
-      "sql_tables": "memories(id, created_at_ms, content) stores durable facts. chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) stores UI-visible user/assistant chat transcript. Use chat_messages for questions about prior chats, exact wording, dates, last conversation, or recent N-day logs.",
+      "sql_tables": "memories(id, created_at_ms, updated_at_ms, version, content) stores durable facts. chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) stores UI-visible user/assistant chat transcript. Use chat_messages for questions about prior chats, exact wording, dates, last conversation, or recent N-day logs. Use memories.version as expected_version when updating/deleting existing durable rows.",
       "bash_safety": "Use only returned shell results as evidence. Write-capable shell commands are allowed when the user asks for local project changes; approval behavior is runtime config. Never invent a read-only limitation for run_bash."
     }
   },

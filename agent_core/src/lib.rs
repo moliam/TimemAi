@@ -133,6 +133,10 @@ struct PromptSlice {
 pub struct MemoryRecord {
     pub id: String,
     pub created_at_ms: i64,
+    #[serde(default)]
+    pub updated_at_ms: i64,
+    #[serde(default)]
+    pub version: u64,
     pub content: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +173,7 @@ struct ParsedAction {
     sql: String,
     params: Vec<String>,
     operation: String,
+    expected_version: Option<u64>,
     id: String,
     command: String,
     read_back_command: String,
@@ -204,6 +209,7 @@ impl ParsedAction {
             "memory_update" => json!({
                 "operation": self.operation,
                 "id": self.id,
+                "expected_version": self.expected_version,
                 "content": self.content,
             }),
             "memory_write" | "write_memory" | "scratch_write" => json!({
@@ -1222,7 +1228,12 @@ impl AgentCore {
                 } else {
                     let lines = rows
                         .into_iter()
-                        .map(|r| format!("- {} @ {}", r.content, r.created_at_ms))
+                        .map(|r| {
+                            format!(
+                                "- id={} version={} created_at_ms={} updated_at_ms={} content={}",
+                                r.id, r.version, r.created_at_ms, r.updated_at_ms, r.content
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
                     format!(
@@ -1293,10 +1304,12 @@ impl AgentCore {
             }
             "memory_update" => {
                 self.current_stats.tool_calls += 1;
-                match self
-                    .memory
-                    .update(&action.operation, &action.id, &action.content)
-                {
+                match self.memory.update(
+                    &action.operation,
+                    &action.id,
+                    &action.content,
+                    action.expected_version,
+                ) {
                     Ok(result) => {
                         self.current_stats.mem_writes += 1;
                         result
@@ -1568,9 +1581,12 @@ impl FileMemoryStore {
     }
 
     fn write_clean_unlocked(&self, clean: &str) -> std::io::Result<()> {
+        let time_ms = now_ms();
         let record = MemoryRecord {
             id: unique_id("mem"),
-            created_at_ms: now_ms(),
+            created_at_ms: time_ms,
+            updated_at_ms: time_ms,
+            version: 1,
             content: clean.to_string(),
         };
         let mut file = OpenOptions::new()
@@ -1605,6 +1621,7 @@ impl FileMemoryStore {
         let mut rows = Vec::new();
         for line in BufReader::new(file).lines().map_while(Result::ok) {
             if let Ok(record) = serde_json::from_str::<MemoryRecord>(&line) {
+                let record = normalize_memory_record(record);
                 let normalized = record.content.to_lowercase();
                 if terms.iter().any(|term| normalized.contains(term)) {
                     rows.push(record);
@@ -1626,13 +1643,25 @@ impl FileMemoryStore {
             .map_err(std::io::Error::other)?
     }
 
-    fn update(&self, operation: &str, id: &str, content: &str) -> Result<String, String> {
+    fn update(
+        &self,
+        operation: &str,
+        id: &str,
+        content: &str,
+        expected_version: Option<u64>,
+    ) -> Result<String, String> {
         self.guard
-            .with_write(|| self.update_unlocked(operation, id, content))
+            .with_write(|| self.update_unlocked(operation, id, content, expected_version))
             .map_err(|err| err.to_string())?
     }
 
-    fn update_unlocked(&self, operation: &str, id: &str, content: &str) -> Result<String, String> {
+    fn update_unlocked(
+        &self,
+        operation: &str,
+        id: &str,
+        content: &str,
+        expected_version: Option<u64>,
+    ) -> Result<String, String> {
         let op = operation.trim().to_lowercase();
         match op.as_str() {
             "insert" | "upsert" if id.trim().is_empty() => {
@@ -1662,24 +1691,52 @@ impl FileMemoryStore {
                 let mut found = false;
                 for row in &mut rows {
                     if row.id == clean_id {
+                        if let Some(expected) = expected_version {
+                            if row.version != expected {
+                                return Err(memory_conflict_result(
+                                    clean_id,
+                                    expected,
+                                    row.version,
+                                    &row.content,
+                                ));
+                            }
+                        } else {
+                            return Err(memory_missing_expected_version_result(
+                                clean_id,
+                                row.version,
+                                &row.content,
+                            ));
+                        }
                         row.content = clean.to_string();
+                        row.updated_at_ms = now_ms();
+                        row.version = row.version.saturating_add(1).max(1);
                         found = true;
                         break;
                     }
                 }
                 if !found {
+                    if expected_version.is_some() && op == "update" {
+                        return Err("id_not_found".to_string());
+                    }
+                    let time_ms = now_ms();
                     rows.push(MemoryRecord {
                         id: clean_id.to_string(),
-                        created_at_ms: now_ms(),
+                        created_at_ms: time_ms,
+                        updated_at_ms: time_ms,
+                        version: 1,
                         content: clean.to_string(),
                     });
                 }
                 self.write_all_unlocked(&rows)
                     .map_err(|_| "write_failed".to_string())?;
                 Ok(format!(
-                    "Action result: memory_update\noperation: {}\nid: {}\nstored: {}",
+                    "Action result: memory_update\noperation: {}\nid: {}\nversion: {}\nstored: {}",
                     if found { "update" } else { "insert" },
                     clean_id,
+                    rows.iter()
+                        .find(|row| row.id == clean_id)
+                        .map(|row| row.version)
+                        .unwrap_or(1),
                     clean
                 ))
             }
@@ -1692,6 +1749,24 @@ impl FileMemoryStore {
                     .read_all_unlocked()
                     .map_err(|_| "memory_read_failed".to_string())?;
                 let before = rows.len();
+                if let Some(row) = rows.iter().find(|row| row.id == clean_id) {
+                    if let Some(expected) = expected_version {
+                        if row.version != expected {
+                            return Err(memory_conflict_result(
+                                clean_id,
+                                expected,
+                                row.version,
+                                &row.content,
+                            ));
+                        }
+                    } else {
+                        return Err(memory_missing_expected_version_result(
+                            clean_id,
+                            row.version,
+                            &row.content,
+                        ));
+                    }
+                }
                 rows.retain(|row| row.id != clean_id);
                 if rows.len() == before {
                     return Err("id_not_found".to_string());
@@ -1780,7 +1855,7 @@ impl FileMemoryStore {
         let mut rows = Vec::new();
         for line in BufReader::new(file).lines().map_while(Result::ok) {
             if let Ok(record) = serde_json::from_str::<MemoryRecord>(&line) {
-                rows.push(record);
+                rows.push(normalize_memory_record(record));
             }
         }
         Ok(rows)
@@ -1806,7 +1881,7 @@ impl FileMemoryStore {
 
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, content TEXT)\nsafe_interfaces: memory_schema, memory_sql_query, memory_update, memory_write, chat_history_query, chat_history_delete, scratch_write, scratch_query, scratch_delete\nrules: memory_sql_query accepts SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memory_update for durable memory insert/update/delete; use chat_history_delete for explicit chat transcript deletion; use scratch_* for temporary task checkpoints. Empty chat_history_query.query lists recent chat records. loaded_chat_records={}.",
+            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, content TEXT)\nsafe_interfaces: memory_schema, memory_sql_query, memory_update, memory_write, chat_history_query, chat_history_delete, scratch_write, scratch_query, scratch_delete\nrules: memory_sql_query accepts SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memory_update for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use chat_history_delete for explicit chat transcript deletion; use scratch_* for temporary task checkpoints. Empty chat_history_query.query lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -1832,7 +1907,7 @@ impl FileMemoryStore {
         validate_memory_sql(sql)?;
         let conn = Connection::open_in_memory().map_err(|_| "sqlite_open_failed".to_string())?;
         conn.execute(
-            "CREATE TABLE memories(id TEXT NOT NULL, created_at_ms INTEGER NOT NULL, content TEXT NOT NULL)",
+            "CREATE TABLE memories(id TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL)",
             [],
         )
         .map_err(|_| "sqlite_schema_failed".to_string())?;
@@ -1846,8 +1921,14 @@ impl FileMemoryStore {
             .map_err(|_| "memory_read_failed".to_string())?
         {
             conn.execute(
-                "INSERT INTO memories(id, created_at_ms, content) VALUES (?1, ?2, ?3)",
-                (&record.id, record.created_at_ms, &record.content),
+                "INSERT INTO memories(id, created_at_ms, updated_at_ms, version, content) VALUES (?1, ?2, ?3, ?4, ?5)",
+                (
+                    &record.id,
+                    record.created_at_ms,
+                    record.updated_at_ms,
+                    record.version,
+                    &record.content,
+                ),
             )
             .map_err(|_| "sqlite_load_failed".to_string())?;
         }
@@ -2622,6 +2703,12 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .unwrap_or("")
                     .trim()
                     .to_string();
+                let expected_version = input
+                    .get("expected_version")
+                    .or_else(|| input.get("version"))
+                    .or_else(|| action.get("expected_version"))
+                    .or_else(|| action.get("version"))
+                    .and_then(json_u64);
                 let id = input
                     .get("id")
                     .or_else(|| action.get("id"))
@@ -2810,6 +2897,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     sql,
                     params,
                     operation,
+                    expected_version,
                     id,
                     command,
                     read_back_command,
@@ -3161,10 +3249,55 @@ fn time_in_window(time_ms: i64, after_ms: Option<i64>, before_ms: Option<i64>) -
     after_ms.is_none_or(|after| time_ms >= after) && before_ms.is_none_or(|before| time_ms < before)
 }
 
+fn normalize_memory_record(mut record: MemoryRecord) -> MemoryRecord {
+    if record.version == 0 {
+        record.version = 1;
+    }
+    if record.updated_at_ms == 0 {
+        record.updated_at_ms = record.created_at_ms;
+    }
+    record
+}
+
+fn memory_conflict_result(
+    id: &str,
+    expected_version: u64,
+    current_version: u64,
+    current_content: &str,
+) -> String {
+    format!(
+        "memory_conflict id={} expected_version={} current_version={} current_content={}",
+        id,
+        expected_version,
+        current_version,
+        compact_text(current_content, 240)
+    )
+}
+
+fn memory_missing_expected_version_result(
+    id: &str,
+    current_version: u64,
+    current_content: &str,
+) -> String {
+    format!(
+        "missing_expected_version id={} current_version={} current_content={} hint=query memory_sql_query/query_memory first, then retry memory_update with expected_version=current_version",
+        id,
+        current_version,
+        compact_text(current_content, 240)
+    )
+}
+
 fn json_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|raw| i64::try_from(raw).ok()))
+}
+
+fn json_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|raw| u64::try_from(raw).ok()))
+        .or_else(|| value.as_str().and_then(|raw| raw.trim().parse().ok()))
 }
 
 fn json_string_array(items: &[Value]) -> Vec<String> {

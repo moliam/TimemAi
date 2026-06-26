@@ -175,6 +175,16 @@ In the future, `MemGuard` can become an actor or a local IPC daemon without
 changing agent action semantics. The invariant should remain the same: one mem
 space has one authoritative memory writer.
 
+The guard has two responsibilities:
+
+- Physical consistency: serialize file reads and read-modify-write blocks so
+  JSONL/audit files are not truncated or interleaved by multiple CLI processes.
+- Semantic conflict detection: durable memory rows carry `version` and
+  `updated_at_ms`. Updating or deleting an existing row requires
+  `memory_update.expected_version`, obtained from `query_memory` or
+  `memory_sql_query`. If another CLI changes the row first, runtime returns a
+  `memory_conflict` action result and leaves the current row untouched.
+
 Guarded operations include:
 
 - durable memory append/update/delete and git snapshot
@@ -490,7 +500,8 @@ Current implemented surface:
 - Chat history deletion: `chat_history_delete`. The SQL surface remains
   read-only and cannot delete `chat_messages`.
 - Durable memory search: `query_memory` and `memory_sql_query` over `memories`.
-- Durable memory insert/update/delete: `memory_update`.
+- Durable memory insert/update/delete: `memory_update`. Existing-row
+  update/delete requires `expected_version` to avoid stale multi-CLI writes.
 - Durable memory versioning: `memory_update` snapshots `memory.jsonl` in a local
   git repository under the selected memory directory when git is available.
 - Scratch notes/checkpoints: `scratch_write`, `scratch_query`, and
@@ -500,7 +511,7 @@ Current implemented surface:
 
 `memory_sql_query` reads a restricted SQLite surface:
 
-- `memories(id, created_at_ms, content)`
+- `memories(id, created_at_ms, updated_at_ms, version, content)`
 - `chat_messages(id, session_id, turn_id, role, content, created_at_ms, source,
   profile_name, model_name, source_message_id)`
 

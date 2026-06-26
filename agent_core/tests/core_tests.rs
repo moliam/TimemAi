@@ -3,6 +3,7 @@ use agent_core::{
 };
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -1484,6 +1485,33 @@ fn query_memory_does_not_expand_semantic_aliases() {
 }
 
 #[test]
+fn query_memory_exposes_version_for_conflict_safe_updates() {
+    let dir = tmp_dir("query_memory_version");
+    fs::write(
+        dir.join("memory.jsonl"),
+        r#"{"id":"m1","created_at_ms":11,"content":"用户的名字是默默"}
+"#,
+    )
+    .unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("查名字记忆版本", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Find versioned durable memory before update.","input":{"query":"名字","limit":5}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("id=m1"));
+    assert!(prompt.contains("version=1"));
+    assert!(prompt.contains("created_at_ms=11"));
+    assert!(prompt.contains("updated_at_ms=11"));
+}
+
+#[test]
 fn memory_lookup_context_triggers_runtime_precheck_before_model_reply() {
     let dir = tmp_dir("runtime_memory_precheck");
     fs::write(
@@ -1550,6 +1578,32 @@ fn sql_read_action_returns_rows() {
     assert!(prompt.contains("Action result: sql_read"));
     assert!(prompt.contains("content=用户的名字是默默"));
     assert!(prompt.contains("created_at_ms=11"));
+}
+
+#[test]
+fn memory_sql_query_reads_memory_versions_and_normalizes_legacy_rows() {
+    let dir = tmp_dir("sql_memory_versions");
+    fs::write(
+        dir.join("memory.jsonl"),
+        r#"{"id":"m1","created_at_ms":11,"content":"用户的名字是默默"}
+{"id":"m2","created_at_ms":22,"updated_at_ms":33,"version":4,"content":"用户喜欢 Rust"}
+"#,
+    )
+    .unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("查记忆版本", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Read durable memory versions for safe update.","input":{"sql":"SELECT id, version, updated_at_ms, content FROM memories ORDER BY created_at_ms ASC","limit":5}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("id=m1, version=1, updated_at_ms=11"));
+    assert!(prompt.contains("id=m2, version=4, updated_at_ms=33"));
 }
 
 #[test]
@@ -1671,7 +1725,10 @@ fn memory_schema_action_returns_native_schema_contract() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: memory_schema"));
-    assert!(prompt.contains("memories(id TEXT, created_at_ms INTEGER, content TEXT)"));
+    assert!(prompt.contains(
+        "memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)"
+    ));
+    assert!(prompt.contains("expected_version"));
     assert!(prompt.contains("memory_sql_query"));
 }
 
@@ -2148,14 +2205,30 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
+    assert!(prompt.contains("missing_expected_version"));
+    assert!(fs::read_to_string(core.memory_file())
+        .unwrap()
+        .contains("用户的名字是默默\""));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"update","id":"user_name","expected_version":1,"content":"用户的名字是默默2"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
     assert!(prompt.contains("operation: update"));
+    assert!(prompt.contains("version: 2"));
     let stored = fs::read_to_string(core.memory_file()).unwrap();
     assert!(stored.contains("用户的名字是默默2"));
     assert!(!stored.contains("用户的名字是默默\""));
     assert!(core.memory_git_commit_count() >= 2);
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"delete","id":"user_name"}}]}"#),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"test action","input":{"operation":"delete","id":"user_name","expected_version":2}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2169,6 +2242,54 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         .unwrap()
         .contains("user_name"));
     assert!(core.memory_git_commit_count() >= 3);
+}
+
+#[test]
+fn memory_update_detects_stale_version_conflict_without_overwrite() {
+    let dir = tmp_dir("memory_update_conflict");
+    let mut core_a = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core_b = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+
+    let _ = core_a.begin_turn("创建共享记忆", None);
+    let step = core_a.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"Insert shared row.","input":{"operation":"upsert","id":"shared_fact","content":"版本1"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let _ = core_a.begin_turn("A 更新", None);
+    let step = core_a.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"Update shared row from A.","input":{"operation":"update","id":"shared_fact","expected_version":1,"content":"版本2 from A"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("version: 2"));
+
+    let _ = core_b.begin_turn("B 用旧版本更新", None);
+    let step = core_b.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"Update shared row from B with stale version.","input":{"operation":"update","id":"shared_fact","expected_version":1,"content":"版本2 from B"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("memory_conflict"));
+    assert!(prompt.contains("expected_version=1"));
+    assert!(prompt.contains("current_version=2"));
+
+    let stored = fs::read_to_string(core_a.memory_file()).unwrap();
+    assert!(stored.contains("版本2 from A"));
+    assert!(!stored.contains("版本2 from B"));
 }
 
 #[test]
@@ -2198,6 +2319,60 @@ fn mem_guard_blocks_second_writer_until_first_writer_releases_lock() {
         .unwrap();
     handle.join().unwrap();
     assert_eq!(fs::read_to_string(&marker).unwrap(), "done");
+}
+
+#[test]
+fn mem_guard_child_process_holds_lock_helper() {
+    let Ok(dir) = std::env::var("TIMEM_MEM_GUARD_CHILD_DIR") else {
+        return;
+    };
+    let marker = PathBuf::from(std::env::var("TIMEM_MEM_GUARD_CHILD_MARKER").unwrap());
+    let guard = MemGuard::for_memory_dir(dir);
+    guard
+        .with_write(|| {
+            fs::write(&marker, "locked").unwrap();
+            thread::sleep(Duration::from_millis(350));
+        })
+        .unwrap();
+}
+
+#[test]
+fn mem_guard_serializes_writes_across_processes() {
+    if std::env::var("TIMEM_MEM_GUARD_CHILD_DIR").is_ok() {
+        return;
+    }
+    let dir = tmp_dir("mem_guard_process").join("memory");
+    fs::create_dir_all(&dir).unwrap();
+    let child_marker = dir.join("child_locked.txt");
+    let parent_marker = dir.join("parent_after_child.txt");
+    let current_exe = std::env::current_exe().unwrap();
+    let mut child = Command::new(current_exe)
+        .arg("--exact")
+        .arg("mem_guard_child_process_holds_lock_helper")
+        .arg("--nocapture")
+        .env("TIMEM_MEM_GUARD_CHILD_DIR", &dir)
+        .env("TIMEM_MEM_GUARD_CHILD_MARKER", &child_marker)
+        .spawn()
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    while !child_marker.exists() {
+        assert!(started.elapsed() < Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let waited = std::time::Instant::now();
+    MemGuard::for_memory_dir(&dir)
+        .with_write(|| fs::write(&parent_marker, "done"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        waited.elapsed() >= Duration::from_millis(250),
+        "parent should wait for child process guard"
+    );
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    assert_eq!(fs::read_to_string(parent_marker).unwrap(), "done");
 }
 
 #[test]
@@ -2826,7 +3001,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(delete_prompt.contains("error: id_not_found"));
 
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Find exact memory id before deleting.","input":{"sql":"SELECT id, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%儿子生日%"],"limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory id"]}}"#),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_sql_query","intent":"Find exact memory id before deleting.","input":{"sql":"SELECT id, version, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%儿子生日%"],"limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory id"]}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2836,6 +3011,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     };
     assert!(delete_prompt.contains("Action result: memory_sql_query"));
     assert!(delete_prompt.contains("content=用户的儿子生日是6月12日"));
+    assert!(delete_prompt.contains("version=1"));
 
     let stored = fs::read_to_string(core.memory_file()).unwrap();
     let memory_id = stored
@@ -2849,7 +3025,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         })
         .expect("memory id should exist");
     let delete_final_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"response_to_user":"","next_actions":[{{"action":"memory_update","intent":"Delete exact durable birthday memory.","input":{{"operation":"delete","id":"{}"}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["delete confirmation"]}}}}"#, memory_id)),
+        content: scored(format!(r#"{{"response_to_user":"","next_actions":[{{"action":"memory_update","intent":"Delete exact durable birthday memory.","input":{{"operation":"delete","id":"{}","expected_version":1}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["delete confirmation"]}}}}"#, memory_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
