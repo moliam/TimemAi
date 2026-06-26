@@ -318,6 +318,55 @@ proc run_config_value_cancel_smoke {} {
     exit_timem
 }
 
+proc run_config_base_url_update_after_idle_smoke {} {
+    spawn_timem
+    send "/config\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "选择要修改的配置" {}
+        timeout {
+            error "timeout waiting for /config menu before base-url update"
+        }
+        eof {
+            error "unexpected EOF waiting for /config menu before base-url update"
+        }
+    }
+    send "\033\[B\033\[B\033\[B\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "TIMEM_BASE_URL 当前值" {}
+        timeout {
+            error "timeout waiting for TIMEM_BASE_URL value prompt"
+        }
+        eof {
+            error "unexpected EOF waiting for TIMEM_BASE_URL value prompt"
+        }
+    }
+    after 1000
+    send "https://example.com/v1\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "已更新 TIMEM_BASE_URL" {}
+        timeout {
+            error "timeout waiting for TIMEM_BASE_URL update after idle"
+        }
+        eof {
+            error "unexpected EOF during TIMEM_BASE_URL update after idle"
+        }
+    }
+    wait_prompt
+    exit_timem
+}
+
 proc run_workspace_add_cancel_smoke {} {
     spawn_timem
     send "/workspace\r"
@@ -371,6 +420,7 @@ run_multiline_paste_cancel_smoke
 run_shift_enter_cancel_smoke
 run_wrapped_edit_cancel_smoke
 run_config_value_cancel_smoke
+run_config_base_url_update_after_idle_smoke
 run_workspace_add_cancel_smoke
 
 puts "real_tty_smoke: ok"

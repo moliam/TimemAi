@@ -1261,12 +1261,13 @@ fn read_tty_line_cancelable() -> Option<String> {
         return None;
     }
     let mut terminal_mode = TerminalModeGuard::new(fd, original);
+    let mut nonblocking_mode = NonblockingGuard::new(fd).ok()?;
     let mut out = String::new();
     let result = loop {
         if TURN_CANCEL_REQUESTED.load(Ordering::SeqCst) {
             break None;
         }
-        let Some(byte) = read_cancelable_byte(&mut input, fd) else {
+        let Some(byte) = read_cancelable_byte(&mut input) else {
             break None;
         };
         match byte {
@@ -1288,7 +1289,7 @@ fn read_tty_line_cancelable() -> Option<String> {
                 if first >= 0x80 {
                     let expected_len = utf8_expected_len(first);
                     while bytes.len() < expected_len {
-                        let Some(next) = read_cancelable_byte(&mut input, fd) else {
+                        let Some(next) = read_cancelable_byte(&mut input) else {
                             break;
                         };
                         bytes.push(next);
@@ -1302,39 +1303,25 @@ fn read_tty_line_cancelable() -> Option<String> {
             }
         }
     };
+    nonblocking_mode.restore();
     terminal_mode.restore();
     let _ = consume_turn_cancel_request();
     result
 }
 
-fn read_cancelable_byte(input: &mut impl Read, fd: i32) -> Option<u8> {
+fn read_cancelable_byte(input: &mut impl Read) -> Option<u8> {
     loop {
         if TURN_CANCEL_REQUESTED.load(Ordering::SeqCst) {
             return None;
-        }
-        let mut poll_fd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let poll_result = unsafe { libc::poll(&mut poll_fd, 1, 100) };
-        if poll_result == 0 {
-            continue;
-        }
-        if poll_result < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return None;
-        }
-        if poll_fd.revents & libc::POLLIN == 0 {
-            continue;
         }
         let mut buf = [0u8; 1];
         match input.read(&mut buf) {
             Ok(1) => return Some(buf[0]),
             Ok(_) => return None,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return None,
         }
@@ -1438,6 +1425,42 @@ impl TerminalModeGuard {
 }
 
 impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+struct NonblockingGuard {
+    fd: i32,
+    original_flags: i32,
+    active: bool,
+}
+
+impl NonblockingGuard {
+    fn new(fd: i32) -> io::Result<Self> {
+        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if original_flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            fd,
+            original_flags,
+            active: true,
+        })
+    }
+
+    fn restore(&mut self) {
+        if self.active {
+            let _ = unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.original_flags) };
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for NonblockingGuard {
     fn drop(&mut self) {
         self.restore();
     }
