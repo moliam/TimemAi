@@ -1,4 +1,4 @@
-use agent_core::{CoreProfile, LlmResponse, UsageStats};
+use agent_core::{CoreProfile, LlmResponse, MemGuard, UsageStats};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -969,11 +969,15 @@ pub fn redact_value(value: &Value) -> Value {
 }
 
 pub fn append_audit(path: &Path, event: &Value) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "{}", serde_json::to_string(event).unwrap_or_default())
+    MemGuard::for_audit_file(path)
+        .with_write(|| {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            writeln!(file, "{}", serde_json::to_string(event).unwrap_or_default())
+        })
+        .map_err(std::io::Error::other)?
 }
 
 pub fn audit_path(space: &str) -> PathBuf {

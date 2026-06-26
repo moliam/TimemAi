@@ -263,6 +263,112 @@ struct PendingApproval {
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
 const DEFAULT_ROUND_BUDGET: u32 = 20;
+const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
+const MEM_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
+const MEM_GUARD_STALE_AFTER: Duration = Duration::from_secs(60 * 60 * 6);
+
+#[derive(Debug, Clone)]
+pub struct MemGuard {
+    lock_dir: PathBuf,
+}
+
+impl MemGuard {
+    pub fn for_memory_dir(memory_dir: impl AsRef<Path>) -> Self {
+        let space_dir = space_dir_for_memory_dir(memory_dir.as_ref()).to_path_buf();
+        Self::for_space_dir(space_dir)
+    }
+
+    pub fn for_space_dir(space_dir: impl AsRef<Path>) -> Self {
+        let space_dir = fs::canonicalize(space_dir.as_ref())
+            .unwrap_or_else(|_| space_dir.as_ref().to_path_buf());
+        Self {
+            lock_dir: space_dir.join(".guard").join("mem.lock.d"),
+        }
+    }
+
+    pub fn for_audit_file(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        let space_dir = path
+            .parent()
+            .and_then(|parent| {
+                if parent.file_name().and_then(|name| name.to_str()) == Some("audit") {
+                    parent.parent()
+                } else {
+                    Some(parent)
+                }
+            })
+            .unwrap_or_else(|| Path::new("."));
+        Self::for_space_dir(space_dir)
+    }
+
+    pub fn with_read<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
+        self.with_lock(f)
+    }
+
+    pub fn with_write<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
+        self.with_lock(f)
+    }
+
+    fn with_lock<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
+        let _lock = self.acquire()?;
+        Ok(f())
+    }
+
+    fn acquire(&self) -> Result<MemGuardLock, String> {
+        if let Some(parent) = self.lock_dir.parent() {
+            fs::create_dir_all(parent).map_err(|_| "mem_guard_create_failed".to_string())?;
+        }
+        let started = Instant::now();
+        loop {
+            match fs::create_dir(&self.lock_dir) {
+                Ok(()) => {
+                    let owner = json!({
+                        "pid": std::process::id(),
+                        "created_at_ms": now_ms(),
+                    });
+                    let _ = fs::write(
+                        self.lock_dir.join("owner.json"),
+                        serde_json::to_string_pretty(&owner).unwrap_or_default(),
+                    );
+                    return Ok(MemGuardLock {
+                        lock_dir: self.lock_dir.clone(),
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if self.is_stale_lock() {
+                        let _ = fs::remove_dir_all(&self.lock_dir);
+                        continue;
+                    }
+                    if started.elapsed() >= MEM_GUARD_TIMEOUT {
+                        return Err("mem_guard_timeout".to_string());
+                    }
+                    thread::sleep(MEM_GUARD_WAIT_STEP);
+                }
+                Err(_) => return Err("mem_guard_lock_failed".to_string()),
+            }
+        }
+    }
+
+    fn is_stale_lock(&self) -> bool {
+        fs::metadata(&self.lock_dir)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .map(|age| age >= MEM_GUARD_STALE_AFTER)
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug)]
+struct MemGuardLock {
+    lock_dir: PathBuf,
+}
+
+impl Drop for MemGuardLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.lock_dir);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ActionExecution {
@@ -305,69 +411,77 @@ struct ActionAuditEntry {
 #[derive(Debug, Clone)]
 struct FileActionAuditStore {
     file: PathBuf,
+    guard: MemGuard,
 }
 
 impl FileActionAuditStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
         let file = space_dir.join("audit").join("action_audit.json");
-        Self { file }
+        Self {
+            file,
+            guard: MemGuard::for_memory_dir(memory_dir),
+        }
     }
 
     fn begin_turn(&self, turn_id: &str, started_at_ms: i64, user_question: &str) {
-        let mut doc = self.read_doc();
-        if doc.turns.iter().any(|turn| turn.turn_id == turn_id) {
-            return;
-        }
-        doc.turns.push(ActionAuditTurn {
-            turn_id: turn_id.to_string(),
-            started_at_ms,
-            user_question: user_question.to_string(),
-            interactions: Vec::new(),
+        let _ = self.guard.with_write(|| {
+            let mut doc = self.read_doc_unlocked();
+            if doc.turns.iter().any(|turn| turn.turn_id == turn_id) {
+                return;
+            }
+            doc.turns.push(ActionAuditTurn {
+                turn_id: turn_id.to_string(),
+                started_at_ms,
+                user_question: user_question.to_string(),
+                interactions: Vec::new(),
+            });
+            self.write_doc_unlocked(&doc);
         });
-        self.write_doc(&doc);
     }
 
     fn record_action(&self, entry: ActionAuditEntry, turn_id: &str, user_question: &str) {
-        let mut doc = self.read_doc();
-        let turn_index =
-            if let Some(index) = doc.turns.iter().position(|turn| turn.turn_id == turn_id) {
+        let _ = self.guard.with_write(|| {
+            let mut doc = self.read_doc_unlocked();
+            let turn_index =
+                if let Some(index) = doc.turns.iter().position(|turn| turn.turn_id == turn_id) {
+                    index
+                } else {
+                    doc.turns.push(ActionAuditTurn {
+                        turn_id: turn_id.to_string(),
+                        started_at_ms: now_ms(),
+                        user_question: user_question.to_string(),
+                        interactions: Vec::new(),
+                    });
+                    doc.turns.len().saturating_sub(1)
+                };
+            let turn = &mut doc.turns[turn_index];
+            let interaction_index = if let Some(index) = turn
+                .interactions
+                .iter()
+                .position(|interaction| interaction.round == entry.round)
+            {
                 index
             } else {
-                doc.turns.push(ActionAuditTurn {
-                    turn_id: turn_id.to_string(),
-                    started_at_ms: now_ms(),
-                    user_question: user_question.to_string(),
-                    interactions: Vec::new(),
+                turn.interactions.push(ActionAuditInteraction {
+                    round: entry.round,
+                    actions: Vec::new(),
                 });
-                doc.turns.len().saturating_sub(1)
+                turn.interactions.len().saturating_sub(1)
             };
-        let turn = &mut doc.turns[turn_index];
-        let interaction_index = if let Some(index) = turn
-            .interactions
-            .iter()
-            .position(|interaction| interaction.round == entry.round)
-        {
-            index
-        } else {
-            turn.interactions.push(ActionAuditInteraction {
-                round: entry.round,
-                actions: Vec::new(),
-            });
-            turn.interactions.len().saturating_sub(1)
-        };
-        turn.interactions[interaction_index].actions.push(entry);
-        self.write_doc(&doc);
+            turn.interactions[interaction_index].actions.push(entry);
+            self.write_doc_unlocked(&doc);
+        });
     }
 
-    fn read_doc(&self) -> ActionAuditDocument {
+    fn read_doc_unlocked(&self) -> ActionAuditDocument {
         let Ok(text) = fs::read_to_string(&self.file) else {
             return Self::empty_doc();
         };
         serde_json::from_str(&text).unwrap_or_else(|_| Self::empty_doc())
     }
 
-    fn write_doc(&self, doc: &ActionAuditDocument) {
+    fn write_doc_unlocked(&self, doc: &ActionAuditDocument) {
         if let Some(parent) = self.file.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -1432,6 +1546,7 @@ impl AgentCore {
 struct FileMemoryStore {
     dir: PathBuf,
     file: PathBuf,
+    guard: MemGuard,
 }
 impl FileMemoryStore {
     fn new(dir: &Path) -> Self {
@@ -1439,6 +1554,7 @@ impl FileMemoryStore {
         Self {
             dir: dir.to_path_buf(),
             file: dir.join("memory.jsonl"),
+            guard: MemGuard::for_memory_dir(dir),
         }
     }
     fn write(&self, content: &str) -> std::io::Result<()> {
@@ -1446,6 +1562,12 @@ impl FileMemoryStore {
         if clean.is_empty() {
             return Ok(());
         }
+        self.guard
+            .with_write(|| self.write_clean_unlocked(clean))
+            .map_err(std::io::Error::other)?
+    }
+
+    fn write_clean_unlocked(&self, clean: &str) -> std::io::Result<()> {
         let record = MemoryRecord {
             id: unique_id("mem"),
             created_at_ms: now_ms(),
@@ -1463,7 +1585,14 @@ impl FileMemoryStore {
         self.snapshot_with_git("memory write");
         Ok(())
     }
+
     fn query(&self, query: &str, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
+        self.guard
+            .with_read(|| self.query_unlocked(query, limit))
+            .map_err(std::io::Error::other)?
+    }
+
+    fn query_unlocked(&self, query: &str, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
         let terms = search_terms(query);
         if terms.is_empty() {
             return Ok(Vec::new());
@@ -1487,13 +1616,23 @@ impl FileMemoryStore {
         Ok(rows)
     }
     fn recent(&self, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
-        let mut rows = self.read_all()?;
-        rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
-        rows.truncate(limit.max(1).min(50));
-        Ok(rows)
+        self.guard
+            .with_read(|| {
+                let mut rows = self.read_all_unlocked()?;
+                rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+                rows.truncate(limit.max(1).min(50));
+                Ok(rows)
+            })
+            .map_err(std::io::Error::other)?
     }
 
     fn update(&self, operation: &str, id: &str, content: &str) -> Result<String, String> {
+        self.guard
+            .with_write(|| self.update_unlocked(operation, id, content))
+            .map_err(|err| err.to_string())?
+    }
+
+    fn update_unlocked(&self, operation: &str, id: &str, content: &str) -> Result<String, String> {
         let op = operation.trim().to_lowercase();
         match op.as_str() {
             "insert" | "upsert" if id.trim().is_empty() => {
@@ -1501,7 +1640,8 @@ impl FileMemoryStore {
                 if clean.is_empty() {
                     return Err("content_required".to_string());
                 }
-                self.write(clean).map_err(|_| "write_failed".to_string())?;
+                self.write_clean_unlocked(clean)
+                    .map_err(|_| "write_failed".to_string())?;
                 Ok(format!(
                     "Action result: memory_update\noperation: insert\nstored: {}",
                     clean
@@ -1517,7 +1657,7 @@ impl FileMemoryStore {
                     return Err("content_required".to_string());
                 }
                 let mut rows = self
-                    .read_all()
+                    .read_all_unlocked()
                     .map_err(|_| "memory_read_failed".to_string())?;
                 let mut found = false;
                 for row in &mut rows {
@@ -1534,7 +1674,7 @@ impl FileMemoryStore {
                         content: clean.to_string(),
                     });
                 }
-                self.write_all(&rows)
+                self.write_all_unlocked(&rows)
                     .map_err(|_| "write_failed".to_string())?;
                 Ok(format!(
                     "Action result: memory_update\noperation: {}\nid: {}\nstored: {}",
@@ -1549,14 +1689,14 @@ impl FileMemoryStore {
                     return Err("id_required".to_string());
                 }
                 let mut rows = self
-                    .read_all()
+                    .read_all_unlocked()
                     .map_err(|_| "memory_read_failed".to_string())?;
                 let before = rows.len();
                 rows.retain(|row| row.id != clean_id);
                 if rows.len() == before {
                     return Err("id_not_found".to_string());
                 }
-                self.write_all(&rows)
+                self.write_all_unlocked(&rows)
                     .map_err(|_| "write_failed".to_string())?;
                 Ok(format!(
                     "Action result: memory_update\noperation: delete\nid: {}\ndeleted: true",
@@ -1567,7 +1707,7 @@ impl FileMemoryStore {
         }
     }
 
-    fn write_all(&self, rows: &[MemoryRecord]) -> std::io::Result<()> {
+    fn write_all_unlocked(&self, rows: &[MemoryRecord]) -> std::io::Result<()> {
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -1631,7 +1771,7 @@ impl FileMemoryStore {
             .status();
     }
 
-    fn read_all(&self) -> std::io::Result<Vec<MemoryRecord>> {
+    fn read_all_unlocked(&self) -> std::io::Result<Vec<MemoryRecord>> {
         let file = match OpenOptions::new().read(true).open(&self.file) {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1678,6 +1818,17 @@ impl FileMemoryStore {
         params: &[String],
         limit: usize,
     ) -> Result<Vec<Vec<(String, String)>>, String> {
+        self.guard
+            .with_read(|| self.sql_read_unlocked(chat_history, sql, params, limit))?
+    }
+
+    fn sql_read_unlocked(
+        &self,
+        chat_history: &FileChatHistoryStore,
+        sql: &str,
+        params: &[String],
+        limit: usize,
+    ) -> Result<Vec<Vec<(String, String)>>, String> {
         validate_memory_sql(sql)?;
         let conn = Connection::open_in_memory().map_err(|_| "sqlite_open_failed".to_string())?;
         conn.execute(
@@ -1691,7 +1842,7 @@ impl FileMemoryStore {
         )
         .map_err(|_| "sqlite_schema_failed".to_string())?;
         for record in self
-            .read_all()
+            .read_all_unlocked()
             .map_err(|_| "memory_read_failed".to_string())?
         {
             conn.execute(
@@ -1701,7 +1852,7 @@ impl FileMemoryStore {
             .map_err(|_| "sqlite_load_failed".to_string())?;
         }
         for record in chat_history
-            .read_all()
+            .read_all_unlocked()
             .map_err(|_| "chat_history_read_failed".to_string())?
         {
             if !record.user_input.trim().is_empty() {
@@ -1772,6 +1923,7 @@ impl FileMemoryStore {
 #[derive(Debug, Clone)]
 struct FileScratchStore {
     file: PathBuf,
+    guard: MemGuard,
 }
 
 impl FileScratchStore {
@@ -1779,6 +1931,7 @@ impl FileScratchStore {
         let _ = fs::create_dir_all(dir);
         Self {
             file: dir.join("scratch_notes.jsonl"),
+            guard: MemGuard::for_memory_dir(dir),
         }
     }
 
@@ -1787,6 +1940,10 @@ impl FileScratchStore {
         if clean.is_empty() {
             return Err("content_required".to_string());
         }
+        self.guard.with_write(|| self.write_clean_unlocked(clean))?
+    }
+
+    fn write_clean_unlocked(&self, clean: &str) -> Result<ScratchNoteRecord, String> {
         let record = ScratchNoteRecord {
             id: unique_id("scratch"),
             created_at_ms: now_ms(),
@@ -1807,8 +1964,12 @@ impl FileScratchStore {
     }
 
     fn query(&self, query: &str, limit: usize) -> Result<Vec<ScratchNoteRecord>, String> {
+        self.guard.with_read(|| self.query_unlocked(query, limit))?
+    }
+
+    fn query_unlocked(&self, query: &str, limit: usize) -> Result<Vec<ScratchNoteRecord>, String> {
         let terms = search_terms(query);
-        let mut rows = self.read_all()?;
+        let mut rows = self.read_all_unlocked()?;
         if !terms.is_empty() {
             rows.retain(|record| {
                 let normalized = record.content.to_lowercase();
@@ -1825,17 +1986,19 @@ impl FileScratchStore {
         if clean_id.is_empty() {
             return Err("id_required".to_string());
         }
-        let mut rows = self.read_all()?;
-        let before = rows.len();
-        rows.retain(|record| record.id != clean_id);
-        if rows.len() == before {
-            return Ok(false);
-        }
-        self.write_all(&rows)?;
-        Ok(true)
+        self.guard.with_write(|| {
+            let mut rows = self.read_all_unlocked()?;
+            let before = rows.len();
+            rows.retain(|record| record.id != clean_id);
+            if rows.len() == before {
+                return Ok(false);
+            }
+            self.write_all_unlocked(&rows)?;
+            Ok(true)
+        })?
     }
 
-    fn read_all(&self) -> Result<Vec<ScratchNoteRecord>, String> {
+    fn read_all_unlocked(&self) -> Result<Vec<ScratchNoteRecord>, String> {
         let file = match OpenOptions::new().read(true).open(&self.file) {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1850,7 +2013,7 @@ impl FileScratchStore {
         Ok(rows)
     }
 
-    fn write_all(&self, rows: &[ScratchNoteRecord]) -> Result<(), String> {
+    fn write_all_unlocked(&self, rows: &[ScratchNoteRecord]) -> Result<(), String> {
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -1869,6 +2032,7 @@ impl FileScratchStore {
 struct FileShellJobStore {
     dir: PathBuf,
     index_file: PathBuf,
+    guard: MemGuard,
 }
 
 impl FileShellJobStore {
@@ -1878,6 +2042,7 @@ impl FileShellJobStore {
         Self {
             index_file: dir.join("jobs.jsonl"),
             dir,
+            guard: MemGuard::for_memory_dir(memory_dir),
         }
     }
 
@@ -1972,6 +2137,12 @@ impl FileShellJobStore {
     }
 
     fn append(&self, record: &ShellJobRecord) -> std::io::Result<()> {
+        self.guard
+            .with_write(|| self.append_unlocked(record))
+            .map_err(std::io::Error::other)?
+    }
+
+    fn append_unlocked(&self, record: &ShellJobRecord) -> std::io::Result<()> {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -1984,6 +2155,10 @@ impl FileShellJobStore {
     }
 
     fn find(&self, job_id: &str) -> Option<ShellJobRecord> {
+        self.guard.with_read(|| self.find_unlocked(job_id)).ok()?
+    }
+
+    fn find_unlocked(&self, job_id: &str) -> Option<ShellJobRecord> {
         let file = OpenOptions::new().read(true).open(&self.index_file).ok()?;
         let mut found = None;
         for line in BufReader::new(file).lines().map_while(Result::ok) {
@@ -2002,6 +2177,7 @@ impl FileShellJobStore {
 struct FileChatHistoryStore {
     audit_file: PathBuf,
     legacy_audit_file: PathBuf,
+    guard: MemGuard,
 }
 impl FileChatHistoryStore {
     fn new(memory_dir: &Path) -> Self {
@@ -2011,6 +2187,7 @@ impl FileChatHistoryStore {
         Self {
             audit_file,
             legacy_audit_file,
+            guard: MemGuard::for_memory_dir(memory_dir),
         }
     }
 
@@ -2029,8 +2206,20 @@ impl FileChatHistoryStore {
         after_ms: Option<i64>,
         before_ms: Option<i64>,
     ) -> std::io::Result<Vec<ChatHistoryRecord>> {
+        self.guard
+            .with_read(|| self.query_unlocked(query, limit, after_ms, before_ms))
+            .map_err(std::io::Error::other)?
+    }
+
+    fn query_unlocked(
+        &self,
+        query: &str,
+        limit: usize,
+        after_ms: Option<i64>,
+        before_ms: Option<i64>,
+    ) -> std::io::Result<Vec<ChatHistoryRecord>> {
         let terms = search_terms(query);
-        let mut rows = self.read_all()?;
+        let mut rows = self.read_all_unlocked()?;
         rows.retain(|record| time_in_window(record.started_at_ms, after_ms, before_ms));
         if !terms.is_empty() {
             rows.retain(|record| chat_record_matches(record, &terms));
@@ -2049,58 +2238,67 @@ impl FileChatHistoryStore {
         before_ms: Option<i64>,
     ) -> Result<usize, String> {
         let clean_id = id.trim();
-        let targets = if clean_id.is_empty() {
-            self.query(query, limit, after_ms, before_ms)
-                .map_err(|_| "chat_history_read_failed".to_string())?
-                .into_iter()
-                .map(|record| record.turn_id)
-                .collect::<HashSet<_>>()
-        } else {
-            let mut ids = HashSet::new();
-            ids.insert(clean_id.to_string());
-            ids
-        };
-        if targets.is_empty() {
-            return Ok(0);
-        }
-        let mut deleted_turn_ids = HashSet::new();
-        for audit_file in self.audit_files() {
-            let file = match OpenOptions::new().read(true).open(&audit_file) {
-                Ok(file) => file,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return Err("chat_history_read_failed".to_string()),
+        self.guard.with_write(|| {
+            let targets = if clean_id.is_empty() {
+                self.query_unlocked(query, limit, after_ms, before_ms)
+                    .map_err(|_| "chat_history_read_failed".to_string())?
+                    .into_iter()
+                    .map(|record| record.turn_id)
+                    .collect::<HashSet<_>>()
+            } else {
+                let mut ids = HashSet::new();
+                ids.insert(clean_id.to_string());
+                ids
             };
-            let mut retained = Vec::new();
-            for line in BufReader::new(file).lines().map_while(Result::ok) {
-                let turn_id = serde_json::from_str::<Value>(&line)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("turn_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_default();
-                if !turn_id.is_empty() && targets.contains(&turn_id) {
-                    deleted_turn_ids.insert(turn_id);
-                    continue;
+            if targets.is_empty() {
+                return Ok(0);
+            }
+            let mut deleted_turn_ids = HashSet::new();
+            for audit_file in self.audit_files() {
+                let file = match OpenOptions::new().read(true).open(&audit_file) {
+                    Ok(file) => file,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => return Err("chat_history_read_failed".to_string()),
+                };
+                let mut retained = Vec::new();
+                for line in BufReader::new(file).lines().map_while(Result::ok) {
+                    let turn_id = serde_json::from_str::<Value>(&line)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("turn_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default();
+                    if !turn_id.is_empty() && targets.contains(&turn_id) {
+                        deleted_turn_ids.insert(turn_id);
+                        continue;
+                    }
+                    retained.push(line);
                 }
-                retained.push(line);
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&audit_file)
+                    .map_err(|_| "chat_history_write_failed".to_string())?;
+                for line in retained {
+                    writeln!(file, "{}", line)
+                        .map_err(|_| "chat_history_write_failed".to_string())?;
+                }
             }
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&audit_file)
-                .map_err(|_| "chat_history_write_failed".to_string())?;
-            for line in retained {
-                writeln!(file, "{}", line).map_err(|_| "chat_history_write_failed".to_string())?;
-            }
-        }
-        Ok(deleted_turn_ids.len())
+            Ok(deleted_turn_ids.len())
+        })?
     }
 
     fn read_all(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
+        self.guard
+            .with_read(|| self.read_all_unlocked())
+            .map_err(std::io::Error::other)?
+    }
+
+    fn read_all_unlocked(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
         let mut rows = Vec::<ChatHistoryRecord>::new();
         for audit_file in self.audit_files() {
             let file = match OpenOptions::new().read(true).open(&audit_file) {

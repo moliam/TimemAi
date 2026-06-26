@@ -24,9 +24,11 @@ flowchart LR
     Runtime --> Provider["Provider adapter\nOpenAI-compatible / Anthropic"]
     Provider --> LLM["LLM provider"]
     Runtime --> Core["agent_core\nagent state machine"]
-    Core --> Store["Local data\nmemory + chat history"]
+    Core --> Guard["MemGuard\nper data root + space"]
+    Runtime --> Guard
+    Guard --> Store["Local data\nmemory + chat history + audit"]
     Core --> Bash["run_bash\nbounded local shell"]
-    Runtime --> Audit["audit/api_audit.jsonl\naudit/action_audit.json"]
+    Guard --> Audit["audit/api_audit.jsonl\naudit/action_audit.json"]
 ```
 
 ### `agent_core/`
@@ -37,6 +39,8 @@ flowchart LR
 - Parses and repairs model response envelopes.
 - Executes structured actions: memory reads/writes, chat-history reads,
   read-only SQL, and bounded `run_bash`.
+- Routes memory-space file access through `MemGuard` so multiple CLI processes
+  using the same data root and space do not corrupt or lose writes.
 - Tracks per-turn stats: model calls, token usage, memory reads/writes, tool
   calls, and prompt shrink counters.
 - Exposes a JSON-in/JSON-out C ABI for host integrations.
@@ -127,6 +131,66 @@ The UI adapter must not own the agent loop. Its responsibilities are limited to:
 Non-interactive callers should use `NoopTurnUi`, whose defaults deny approvals,
 do not continue round limits, do not request output expansion, and do not
 require terminal state.
+
+## Memory Space Guard
+
+A Timem memory space is the unit of shared memory state:
+
+```text
+identity = realpath(TIMEM_DATA_DIR) + TIMEM_SPACE
+```
+
+Within one identity, durable memory, scratch notes, chat history, SQL snapshots,
+memory git snapshots, shell job indexes, and audit files are different layers of
+the same mem space. They must not be split into per-session stores merely
+because the UI has multiple sessions.
+
+Current CLI implementation uses an in-process `MemGuard` object plus a
+cross-process lock directory under the selected space:
+
+```text
+data/
+└─ .test_mem/
+   ├─ .guard/mem.lock.d/
+   ├─ memory/memory.jsonl
+   ├─ memory/scratch_notes.jsonl
+   ├─ memory/shell_jobs/jobs.jsonl
+   └─ audit/
+      ├─ api_audit.jsonl
+      └─ action_audit.json
+```
+
+The lock directory is created atomically, so two `timem` CLI processes pointed
+at the same space serialize read-modify-write operations. This first version is
+intentionally simple and dependency-free for macOS/Linux. It also matches the
+future Web shape:
+
+```text
+CLI session ─┐
+Web session ─┼─ MemClient ─ MemGuard ─ Storage
+Worker task ─┘
+```
+
+In the future, `MemGuard` can become an actor or a local IPC daemon without
+changing agent action semantics. The invariant should remain the same: one mem
+space has one authoritative memory writer.
+
+Guarded operations include:
+
+- durable memory append/update/delete and git snapshot
+- scratch write/query/delete
+- chat history query/delete over audit-backed records
+- read-only SQL snapshots over durable memory and chat history
+- `api_audit.jsonl` append
+- `action_audit.json` grouped action audit updates
+- shell job index append/query
+
+Session-local state stays outside shared memory ownership:
+
+- current prompt working context
+- current observation UI state
+- current turn rounds remaining
+- transient cancellation and approval state
 
 ## Prompt Concepts
 

@@ -1,7 +1,12 @@
-use agent_core::{AgentCore, BashApprovalMode, CoreProfile, CoreStep, LlmResponse, UsageStats};
+use agent_core::{
+    AgentCore, BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard, UsageStats,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2164,6 +2169,79 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         .unwrap()
         .contains("user_name"));
     assert!(core.memory_git_commit_count() >= 3);
+}
+
+#[test]
+fn mem_guard_blocks_second_writer_until_first_writer_releases_lock() {
+    let dir = tmp_dir("mem_guard_blocks").join("memory");
+    fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("guard_marker.txt");
+    let guard = MemGuard::for_memory_dir(&dir);
+    let guard_for_thread = guard.clone();
+    let marker_for_thread = marker.clone();
+
+    let handle = guard
+        .with_write(|| {
+            let handle = thread::spawn(move || {
+                guard_for_thread
+                    .with_write(|| fs::write(&marker_for_thread, "done"))
+                    .unwrap()
+                    .unwrap();
+            });
+            thread::sleep(Duration::from_millis(120));
+            assert!(
+                !marker.exists(),
+                "second writer should wait for the first lock holder"
+            );
+            handle
+        })
+        .unwrap();
+    handle.join().unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "done");
+}
+
+#[test]
+fn mem_guard_keeps_concurrent_memory_updates_from_losing_records() {
+    let dir = tmp_dir("mem_guard_concurrent_updates");
+    let writers = 12;
+    let barrier = Arc::new(Barrier::new(writers));
+    let mut handles = Vec::new();
+    for idx in 0..writers {
+        let dir = dir.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+            let _ = core.begin_turn(&format!("并发写入 {idx}"), None);
+            barrier.wait();
+            let step = core.apply_model_response(LlmResponse {
+                content: scored(format!(
+                    r#"{{"response_to_user":"","next_actions":[{{"action":"memory_update","intent":"Concurrent durable write.","input":{{"operation":"upsert","id":"guard_id_{idx}","content":"guard content {idx}"}}}}]}}"#
+                )),
+                model_name: "qwen-plus".to_string(),
+                usage: usage(),
+                truncated: false,
+            });
+            assert!(matches!(step, CoreStep::NeedModel { .. }));
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let stored = fs::read_to_string(dir.join("memory.jsonl")).unwrap();
+    let rows = stored
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), writers);
+    for idx in 0..writers {
+        assert!(
+            rows.iter()
+                .any(|row| row.get("id").and_then(|id| id.as_str())
+                    == Some(format!("guard_id_{idx}").as_str())),
+            "missing concurrent memory id {idx}"
+        );
+    }
 }
 
 #[test]
