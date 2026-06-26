@@ -140,7 +140,7 @@ Runtime shrink review and future shrink actions should use these ids:
   model, not the runtime. Low scores are better shrink candidates.
 - Runtime injects long-context shrink review when observed provider input
   tokens plus the new prompt delta estimate reaches about one third of
-  `TIMEM_MAX_LLM_CONTEXT`. After the first review, the next threshold advances
+  `TIMEM_MAX_LLM_INPUT`. After the first review, the next threshold advances
   by one fifth of the window. The default context window is `100K`; new prompt
   delta text that has not yet gone through the provider is estimated as roughly
   `chars / 4`.
@@ -452,12 +452,15 @@ Provider label and API protocol are deliberately separate:
 
 - `TIMEM_GATEWAY_PROVIDER` selects the traffic platform and default URL.
 - `TIMEM_API_PROTOCOL` selects the wire format.
-- `TIMEM_MAX_LLM_CONTEXT` selects the assumed maximum model input context
+- `TIMEM_MAX_LLM_INPUT` selects the assumed maximum model input context
   window; default is `100K`.
+- `TIMEM_MAX_LLM_OUTPUT` selects the maximum model output token budget; default
+  is `10K`.
 
 Supported protocols:
 
 - `openai-compatible`
+- `openai-responses`
 - `anthropic`
 
 Examples:
