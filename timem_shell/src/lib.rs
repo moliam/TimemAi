@@ -975,6 +975,38 @@ pub fn data_root() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("data"))
 }
 
+pub fn workspace_config_path() -> PathBuf {
+    data_root().join("workspace.json")
+}
+
+pub fn load_workspace_dirs() -> Vec<String> {
+    let path = workspace_config_path();
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
+    val["dirs"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn save_workspace_dirs(dirs: &[String]) -> Result<(), String> {
+    let path = workspace_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let content = serde_json::to_string_pretty(&serde_json::json!({"dirs": dirs}))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
 pub fn call_model(
     config: &ProviderConfig,
     prompt: &str,
@@ -1086,6 +1118,15 @@ pub fn provider_http_error_message(status: u16, body: &Value) -> String {
     let reason = provider_error_reason(body)
         .map(sanitize_provider_error_reason)
         .filter(|text| !text.trim().is_empty());
+    if status == 0 {
+        return match reason {
+            Some(reason) if reason.to_lowercase().contains("timed out") => {
+                format!("provider_timeout: {reason}")
+            }
+            Some(reason) => format!("provider_network_error: {reason}"),
+            None => "provider_network_error".to_string(),
+        };
+    }
     match reason {
         Some(reason) => format!("provider_http_{status}: {reason}"),
         None => format!("provider_http_{status}"),
@@ -1115,6 +1156,11 @@ fn provider_error_reason(body: &Value) -> Option<String> {
     if let Some(raw) = body.get("raw_text").and_then(Value::as_str) {
         if !raw.trim().is_empty() {
             return Some(raw.to_string());
+        }
+    }
+    if let Some(stderr) = body.get("stderr").and_then(Value::as_str) {
+        if !stderr.trim().is_empty() {
+            return Some(stderr.to_string());
         }
     }
     None
@@ -2231,6 +2277,13 @@ mod tests {
         let long = provider_http_error_message(400, &json!({"error":{"message":"x ".repeat(400)}}));
         assert!(long.contains('…'));
         assert!(long.len() < 280);
+
+        let timeout = provider_http_error_message(
+            0,
+            &json!({"raw_text":"","stderr":"curl: (28) Operation timed out after 120006 milliseconds with 0 bytes received"}),
+        );
+        assert!(timeout.starts_with("provider_timeout:"));
+        assert!(timeout.contains("Operation timed out"));
     }
 
     #[test]

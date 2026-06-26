@@ -13,18 +13,19 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
     action_audit_path, action_status_hint, append_audit, audit_path, call_model_with_cancel,
-    data_root, local_time_label, memory_path, observation_events_from_model_response,
-    parse_cli_args, provider_config_from_env, render_final_response_at, render_prof_report,
-    render_shell_status_bar, render_thinking_view_at, supporting_context, ApiProtocol,
-    ModelDirection, ObservationEvent, ObservationPanel, RuntimeProfiler, ShellStatusMessage,
-    ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, SPINNER_ICONS, TIMEM_LOGO,
+    data_root, load_workspace_dirs, local_time_label, memory_path,
+    observation_events_from_model_response, parse_cli_args, provider_config_from_env,
+    render_final_response_at, render_prof_report, render_shell_status_bar, render_thinking_view_at,
+    save_workspace_dirs, supporting_context, ApiProtocol, ModelDirection, ObservationEvent,
+    ObservationPanel, RuntimeProfiler, ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone,
+    ThinkingViewSnapshot, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -82,6 +83,7 @@ fn main() {
     core.set_bash_approval_mode(bash_approval_mode);
     core.set_max_llm_input_tokens(config.max_llm_input_tokens);
     let session = session_id();
+    let mut workspace_pending = !load_workspace_dirs().is_empty();
 
     if let Some(input) = options.once_json_input.as_deref() {
         let context = options.supporting_context.as_deref();
@@ -136,7 +138,7 @@ fn main() {
             bash_approval_mode,
         )
     );
-    println!("输入 /prof 查看运行 profiling；输入 /exit 退出；Ctrl+C 取消当前输入。\n");
+    println!("输入 /prof 查看运行 profiling；输入 /workspace 管理工作区；输入 /exit 退出；Ctrl+C 取消当前输入。\n");
 
     let history_file = audit_file.with_file_name("shell_history.txt");
     let mut editor = ShellLineEditor::new(history_file);
@@ -195,6 +197,15 @@ fn main() {
             continue;
         }
 
+        if input == "/workspace" {
+            prompt_status.clear_before_exit();
+            if run_workspace_menu() {
+                workspace_pending = true;
+                println!("工作区已更新。");
+            }
+            continue;
+        }
+
         rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
 
         let idle = last_dialog_activity.elapsed();
@@ -216,6 +227,21 @@ fn main() {
             }
         }
 
+        let workspace_ctx: Option<String> = if workspace_pending {
+            workspace_pending = false;
+            let dirs = load_workspace_dirs();
+            if dirs.is_empty() {
+                None
+            } else {
+                let lines: Vec<String> = dirs.iter().map(|d| format!("- {d}")).collect();
+                Some(format!(
+                    "workspace_dirs (model reference; not a shell restriction):\n{}",
+                    lines.join("\n")
+                ))
+            }
+        } else {
+            None
+        };
         let mut status = ThinkingStatus::start(&config.provider, &config.model);
         let (text, stats, elapsed) = run_turn(
             &mut core,
@@ -223,7 +249,7 @@ fn main() {
             &session,
             &audit_file,
             &mut config,
-            None,
+            workspace_ctx.as_deref(),
             Some(&mut status),
             true,
             Some(&mut profiler),
@@ -257,6 +283,7 @@ fn run_turn(
         &json!({"type":"turn_start","session":session,"turn_id":turn_id,"user_input":input}),
     );
     let start = Instant::now();
+    let mut user_wait_this_turn = Duration::ZERO;
     let mut context = supporting_context(&config.provider, &config.model, input);
     if let Some(extra) = additional_context
         .map(str::trim)
@@ -370,11 +397,13 @@ fn run_turn(
                 if let Some(status) = status.as_deref_mut() {
                     status.pause_for_user_approval();
                 }
+                let user_wait_start = Instant::now();
                 let approved = if interactive_approval {
                     request_user_approval(&request)
                 } else {
                     false
                 };
+                user_wait_this_turn = user_wait_this_turn.saturating_add(user_wait_start.elapsed());
                 if consume_turn_cancel_request() {
                     step = core.resolve_user_approval(&request.approval_id, false);
                     continue;
@@ -402,8 +431,10 @@ fn run_turn(
                 if let Some(status) = status.as_deref_mut() {
                     status.pause_for_user_approval();
                 }
+                let user_wait_start = Instant::now();
                 let should_continue =
                     interactive_approval && request_round_limit_continue(max_rounds);
+                user_wait_this_turn = user_wait_this_turn.saturating_add(user_wait_start.elapsed());
                 let _ = append_audit(
                     audit_file,
                     &json!({
@@ -434,7 +465,7 @@ fn run_turn(
             }
         }
     };
-    let elapsed = start.elapsed();
+    let elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
     if let Some(profiler) = profiler.as_deref_mut() {
         profiler.record_turn(elapsed, model_wait_this_turn);
     }
@@ -836,6 +867,181 @@ fn run_config_menu(
             false
         }
     }
+}
+
+fn run_workspace_menu() -> bool {
+    loop {
+        let mut dirs = load_workspace_dirs();
+        let Some(selection) = choose_workspace_item(&dirs) else {
+            println!("已退出 workspace 配置。");
+            return false;
+        };
+        match selection {
+            WorkspaceSelection::Add => {
+                print!("\n请输入要加入 workspace 的目录（留空取消）：");
+                let _ = io::stdout().flush();
+                let Some(raw_value) = read_tty_line() else {
+                    println!("读取输入失败，已取消。");
+                    return false;
+                };
+                let value = raw_value.trim();
+                if value.is_empty() {
+                    continue;
+                }
+                let normalized = normalize_workspace_dir(value);
+                if dirs.iter().any(|dir| dir == &normalized) {
+                    println!("目录已存在：{normalized}");
+                    continue;
+                }
+                dirs.push(normalized.clone());
+                dirs.sort();
+                if let Err(err) = save_workspace_dirs(&dirs) {
+                    println!("保存 workspace 失败：{err}");
+                    return false;
+                }
+                println!("已加入 workspace：{normalized}");
+                return true;
+            }
+            WorkspaceSelection::Dir(index) => {
+                if index >= dirs.len() {
+                    continue;
+                }
+                let dir = dirs[index].clone();
+                if confirm_workspace_delete(&dir) {
+                    dirs.remove(index);
+                    if let Err(err) = save_workspace_dirs(&dirs) {
+                        println!("保存 workspace 失败：{err}");
+                        return false;
+                    }
+                    println!("已从 workspace 移除：{dir}");
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceSelection {
+    Dir(usize),
+    Add,
+}
+
+fn choose_workspace_item(dirs: &[String]) -> Option<WorkspaceSelection> {
+    println!("\nWorkspace 目录用于提示模型参考资料位置，不限制模型只能在这些目录工作。");
+    println!("使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 返回。\n");
+    let mut input = ShellInputSource::open().ok()?;
+    let fd = input.as_raw_fd();
+    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+        return None;
+    }
+    let mut raw = original;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 1;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        return None;
+    }
+    let mut terminal_mode = TerminalModeGuard::new(fd, original);
+    let mut selected = 0usize;
+    print!("{}", render_workspace_menu(dirs, selected));
+    let _ = io::stdout().flush();
+    let item_count = dirs.len() + 1;
+    let rendered_line_count = workspace_menu_line_count(dirs);
+    let result = loop {
+        match read_menu_key(&mut input) {
+            MenuKey::Up => selected = selected.saturating_sub(1),
+            MenuKey::Down => selected = (selected + 1).min(item_count.saturating_sub(1)),
+            MenuKey::Enter => {
+                break if selected < dirs.len() {
+                    Some(WorkspaceSelection::Dir(selected))
+                } else {
+                    Some(WorkspaceSelection::Add)
+                };
+            }
+            MenuKey::Cancel => break None,
+            MenuKey::Other => {}
+        }
+        print!(
+            "\x1b[{}F{}",
+            rendered_line_count,
+            render_workspace_menu(dirs, selected)
+        );
+        let _ = io::stdout().flush();
+    };
+    terminal_mode.restore();
+    println!();
+    result
+}
+
+fn workspace_menu_line_count(dirs: &[String]) -> usize {
+    dirs.len().max(1) + 1
+}
+
+fn render_workspace_menu(dirs: &[String], selected: usize) -> String {
+    let mut lines = Vec::new();
+    if dirs.is_empty() {
+        lines.push("  （暂无 workspace 目录）".to_string());
+    } else {
+        for (idx, dir) in dirs.iter().enumerate() {
+            let marker = if idx == selected { "▶" } else { " " };
+            let line = format!("{marker} {dir}");
+            if idx == selected {
+                lines.push(format!("\x1b[7m{line}\x1b[0m"));
+            } else {
+                lines.push(line);
+            }
+        }
+    }
+    let add_idx = dirs.len();
+    let add_line = if add_idx == selected {
+        "\x1b[7m▶ Add...\x1b[0m".to_string()
+    } else {
+        "  Add...".to_string()
+    };
+    lines.push(add_line);
+    lines.join("\n") + "\n"
+}
+
+fn confirm_workspace_delete(dir: &str) -> bool {
+    println!("\n已选择：{dir}");
+    println!("是否从 workspace 列表中移除？");
+    match choose_with_keyboard(render_workspace_delete_choices, ApprovalChoice::Deny) {
+        ApprovalChoice::Allow => true,
+        ApprovalChoice::Deny => false,
+    }
+}
+
+fn render_workspace_delete_choices(selected: ApprovalChoice) -> String {
+    match selected {
+        ApprovalChoice::Allow => "\x1b[7m[ 删除 ]\x1b[0m   保留".to_string(),
+        ApprovalChoice::Deny => "  删除   \x1b[7m[ 保留 ]\x1b[0m".to_string(),
+    }
+}
+
+fn normalize_workspace_dir(value: &str) -> String {
+    let expanded = expand_tilde(value.trim());
+    std::fs::canonicalize(&expanded)
+        .unwrap_or(expanded)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn expand_tilde(value: &str) -> PathBuf {
+    if value == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        return home_dir().join(rest);
+    }
+    Path::new(value).to_path_buf()
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn choose_config_field(
@@ -2095,7 +2301,7 @@ fn print_help() {
 }
 
 fn help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /config                        edit runtime model and token settings\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C cancels the current input while editing, and cancels the current turn while Timem is thinking.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C cancels the current input while editing, and cancels the current turn while Timem is thinking.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn format_token_count(value: u32) -> String {
@@ -2152,7 +2358,7 @@ mod static_prompt_tests {
     use super::{
         apply_config_value, boxed_config_table_at_width, cancelled_turn_result, config_field_value,
         consume_turn_cancel_request, display_width, epoch_millis, help_text, merge_queued_input,
-        normalize_newlines, paste_marker_ranges, paste_marker_segments,
+        normalize_newlines, normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
         paste_recovery_summary_from_markers, pasted_line_count, queued_input_drain_from_bytes,
         random_spinner_tick, read_approval_key, read_menu_key,
         reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
@@ -2160,13 +2366,14 @@ mod static_prompt_tests {
         render_expand_output_prompt, render_paste_recovery_choices, render_paste_recovery_prompt,
         render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
         render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
-        render_user_approval_prompt, render_user_input_prompt, resolve_paste_markers,
-        sanitize_user_input, stale_context_prompt_needed, strip_paste_markers,
-        timem_reedline_keybindings, wrapped_terminal_rows, ApprovalChoice, ApprovalKey,
-        ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary,
-        QueuedInputDrain, TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt,
-        ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE,
-        STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        render_user_approval_prompt, render_user_input_prompt, render_workspace_delete_choices,
+        render_workspace_menu, resolve_paste_markers, sanitize_user_input,
+        stale_context_prompt_needed, strip_paste_markers, timem_reedline_keybindings,
+        workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
+        ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary, QueuedInputDrain,
+        TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
+        PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
+        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use crossterm::event::Event;
@@ -2311,6 +2518,56 @@ mod static_prompt_tests {
             render_stale_context_choices(ApprovalChoice::Deny),
             "  YES   \x1b[7m[ NO ]\x1b[0m"
         );
+    }
+
+    #[test]
+    fn workspace_menu_renders_dirs_placeholder_and_delete_choices() {
+        let empty = render_workspace_menu(&[], 0);
+        assert!(empty.contains("（暂无 workspace 目录）"));
+        assert!(empty.contains("\x1b[7m▶ Add...\x1b[0m"));
+        assert_eq!(workspace_menu_line_count(&[]), 2);
+
+        let dirs = vec![
+            "/Users/limo3/my_code/timem_shell".to_string(),
+            "/tmp/other".to_string(),
+        ];
+        let selected_dir = render_workspace_menu(&dirs, 1);
+        assert!(selected_dir.contains("/Users/limo3/my_code/timem_shell"));
+        assert!(selected_dir.contains("\x1b[7m▶ /tmp/other\x1b[0m"));
+        assert!(selected_dir.contains("  Add..."));
+        assert_eq!(workspace_menu_line_count(&dirs), 3);
+
+        let selected_add = render_workspace_menu(&dirs, 2);
+        assert!(selected_add.contains("\x1b[7m▶ Add...\x1b[0m"));
+        assert_eq!(
+            render_workspace_delete_choices(ApprovalChoice::Allow),
+            "\x1b[7m[ 删除 ]\x1b[0m   保留"
+        );
+        assert_eq!(
+            render_workspace_delete_choices(ApprovalChoice::Deny),
+            "  删除   \x1b[7m[ 保留 ]\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn workspace_path_normalization_canonicalizes_existing_paths() {
+        let dir = std::env::temp_dir().join(format!("timem_workspace_{}", epoch_millis()));
+        fs::create_dir_all(&dir).unwrap();
+        let nested = dir.join(".").join("child").join("..");
+        fs::create_dir_all(dir.join("child")).unwrap();
+
+        let normalized = normalize_workspace_dir(nested.to_str().unwrap());
+        assert_eq!(
+            normalized,
+            dir.canonicalize().unwrap().to_string_lossy().to_string()
+        );
+
+        let missing = dir.join("missing").join("path");
+        assert_eq!(
+            normalize_workspace_dir(missing.to_str().unwrap()),
+            missing.to_string_lossy().to_string()
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2638,6 +2895,7 @@ mod static_prompt_tests {
             "--bash-approval",
             "TIMEM_BASH_APPROVAL",
             "Interactive commands:",
+            "/workspace",
             "/prof",
             "Ctrl+C cancels the current input",
             "cancels the current turn",
