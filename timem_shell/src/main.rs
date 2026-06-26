@@ -501,10 +501,15 @@ struct ThinkingStatus {
     running: Arc<AtomicBool>,
     rendered_lines: Arc<Mutex<usize>>,
     handle: Option<JoinHandle<()>>,
+    started_at: Instant,
+    paused_total: Arc<Mutex<Duration>>,
+    paused_since: Option<Instant>,
 }
 
 impl ThinkingStatus {
     fn start(provider: &str, model: &str) -> Self {
+        let started_at = Instant::now();
+        let paused_total = Arc::new(Mutex::new(Duration::ZERO));
         let state = Arc::new(Mutex::new(ThinkingViewSnapshot {
             status: ShellStatusSnapshot {
                 provider: provider.to_string(),
@@ -515,6 +520,7 @@ impl ThinkingStatus {
                 direction: ModelDirection::Upstream,
                 usage: UsageStats::zero(),
                 tick: random_spinner_tick(),
+                elapsed_secs: 0,
             },
             observations: ObservationPanel::default(),
         }));
@@ -524,11 +530,14 @@ impl ThinkingStatus {
         let thread_state = Arc::clone(&state);
         let thread_running = Arc::clone(&running);
         let thread_rendered_lines = Arc::clone(&rendered_lines);
+        let thread_paused_total = Arc::clone(&paused_total);
         let handle = thread::spawn(move || {
             while thread_running.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(1000));
                 if let Ok(mut snapshot) = thread_state.lock() {
                     snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
+                    snapshot.status.elapsed_secs =
+                        active_elapsed_secs(started_at, &thread_paused_total);
                     rerender_thinking(&snapshot, &thread_rendered_lines);
                 }
             }
@@ -538,6 +547,9 @@ impl ThinkingStatus {
             running,
             rendered_lines,
             handle: Some(handle),
+            started_at,
+            paused_total,
+            paused_since: None,
         }
     }
 
@@ -615,6 +627,7 @@ impl ThinkingStatus {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        self.paused_since = Some(Instant::now());
         clear_thinking_block(&self.rendered_lines);
     }
 
@@ -622,21 +635,41 @@ impl ThinkingStatus {
         if self.handle.is_some() {
             return;
         }
+        if let Some(paused_since) = self.paused_since.take() {
+            if let Ok(mut paused_total) = self.paused_total.lock() {
+                *paused_total = paused_total.saturating_add(paused_since.elapsed());
+            }
+        }
         self.running.store(true, Ordering::Relaxed);
-        render_thinking(&self.state.lock().unwrap(), &self.rendered_lines);
+        if let Ok(mut state) = self.state.lock() {
+            state.status.elapsed_secs = active_elapsed_secs(self.started_at, &self.paused_total);
+            render_thinking(&state, &self.rendered_lines);
+        }
         let thread_state = Arc::clone(&self.state);
         let thread_running = Arc::clone(&self.running);
         let thread_rendered_lines = Arc::clone(&self.rendered_lines);
+        let thread_paused_total = Arc::clone(&self.paused_total);
+        let started_at = self.started_at;
         self.handle = Some(thread::spawn(move || {
             while thread_running.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(1000));
                 if let Ok(mut snapshot) = thread_state.lock() {
                     snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
+                    snapshot.status.elapsed_secs =
+                        active_elapsed_secs(started_at, &thread_paused_total);
                     rerender_thinking(&snapshot, &thread_rendered_lines);
                 }
             }
         }));
     }
+}
+
+fn active_elapsed_secs(started_at: Instant, paused_total: &Arc<Mutex<Duration>>) -> u64 {
+    let paused = paused_total
+        .lock()
+        .map(|duration| *duration)
+        .unwrap_or(Duration::ZERO);
+    started_at.elapsed().saturating_sub(paused).as_secs()
 }
 
 fn request_user_approval(request: &ApprovalRequest) -> bool {
@@ -2356,24 +2389,24 @@ fn time_label() -> String {
 #[cfg(test)]
 mod static_prompt_tests {
     use super::{
-        apply_config_value, boxed_config_table_at_width, cancelled_turn_result, config_field_value,
-        consume_turn_cancel_request, display_width, epoch_millis, help_text, merge_queued_input,
-        normalize_newlines, normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
-        paste_recovery_summary_from_markers, pasted_line_count, queued_input_drain_from_bytes,
-        random_spinner_tick, read_approval_key, read_menu_key,
-        reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
-        render_approval_choices, render_config_menu, render_expand_output_choices,
-        render_expand_output_prompt, render_paste_recovery_choices, render_paste_recovery_prompt,
-        render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
-        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
-        render_user_approval_prompt, render_user_input_prompt, render_workspace_delete_choices,
-        render_workspace_menu, resolve_paste_markers, sanitize_user_input,
-        stale_context_prompt_needed, strip_paste_markers, timem_reedline_keybindings,
-        workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
-        ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary, QueuedInputDrain,
-        TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
-        PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
-        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        active_elapsed_secs, apply_config_value, boxed_config_table_at_width,
+        cancelled_turn_result, config_field_value, consume_turn_cancel_request, display_width,
+        epoch_millis, help_text, merge_queued_input, normalize_newlines, normalize_workspace_dir,
+        paste_marker_ranges, paste_marker_segments, paste_recovery_summary_from_markers,
+        pasted_line_count, queued_input_drain_from_bytes, random_spinner_tick, read_approval_key,
+        read_menu_key, reedline_keyboard_protocol_enter_sequence,
+        reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_menu,
+        render_expand_output_choices, render_expand_output_prompt, render_paste_recovery_choices,
+        render_paste_recovery_prompt, render_round_limit_choices, render_round_limit_prompt,
+        render_stale_context_choices, render_stale_context_prompt, render_startup_banner,
+        render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
+        render_workspace_delete_choices, render_workspace_menu, resolve_paste_markers,
+        sanitize_user_input, stale_context_prompt_needed, strip_paste_markers,
+        timem_reedline_keybindings, workspace_menu_line_count, wrapped_terminal_rows,
+        ApprovalChoice, ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecord,
+        PasteRecoverySummary, QueuedInputDrain, TimemEditMode, TimemPasteHighlighter,
+        TimemReedlinePrompt, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
+        STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use crossterm::event::Event;
@@ -2387,7 +2420,7 @@ mod static_prompt_tests {
     use std::process::Command;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use timem_shell::{ApiProtocol, ProviderConfig, SPINNER_ICONS};
 
     #[test]
@@ -2469,6 +2502,13 @@ mod static_prompt_tests {
         TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
         assert!(consume_turn_cancel_request());
         assert!(!consume_turn_cancel_request());
+    }
+
+    #[test]
+    fn active_elapsed_excludes_user_pause_duration() {
+        let paused_total = Arc::new(Mutex::new(Duration::from_secs(3)));
+        let elapsed = active_elapsed_secs(Instant::now() - Duration::from_secs(10), &paused_total);
+        assert!((7..=8).contains(&elapsed), "elapsed={elapsed}");
     }
 
     #[test]

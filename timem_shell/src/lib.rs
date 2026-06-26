@@ -52,6 +52,7 @@ pub struct ShellStatusSnapshot {
     pub direction: ModelDirection,
     pub usage: UsageStats,
     pub tick: usize,
+    pub elapsed_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +103,7 @@ pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str
         "{}:{}: {}{}",
         snapshot.provider, snapshot.model, direction, snapshot.model_round
     ));
+    status_parts.push(format!("已用 {}", format_elapsed(snapshot.elapsed_secs)));
     status_parts.push(token_status(&snapshot.usage));
     let intent = compact_status_text(&snapshot.intent, 36);
     let intent_line = dim_line(&format!("{icon} {intent}..."));
@@ -137,8 +139,19 @@ fn render_thinking_status_line(snapshot: &ShellStatusSnapshot) -> String {
         "{}:{}: {}{}",
         snapshot.provider, snapshot.model, direction, snapshot.model_round
     ));
+    status_parts.push(format!("已用 {}", format_elapsed(snapshot.elapsed_secs)));
     status_parts.push(token_status(&snapshot.usage));
     dim_line(&format!("  {}", status_parts.join(" ║ ")))
+}
+
+fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        let mins = secs / 60;
+        let rem = secs % 60;
+        format!("{mins}m{rem:02}s")
+    }
 }
 
 pub fn compact_status_text(text: &str, max_chars: usize) -> String {
@@ -2478,12 +2491,14 @@ mod tests {
                     ..UsageStats::zero()
                 },
                 tick: 0,
+                elapsed_secs: 7,
             },
             "08:56:33",
         );
         assert!(block.contains("[08:56:33] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
         assert!(block.contains("🦩 查询记忆..."));
         assert!(block.contains("◂⛃ ║ aliyun:qwen-plus: ▼2"));
+        assert!(block.contains("已用 7s"));
         assert!(block.contains("Token: ▲210 ▼21"));
         assert!(!block.contains("⚡cache"));
         assert_eq!(block.lines().count(), 3);
@@ -2502,12 +2517,14 @@ mod tests {
                 direction: ModelDirection::Upstream,
                 usage: UsageStats::zero(),
                 tick: 8,
+                elapsed_secs: 65,
             },
             "23:33:05",
         );
 
         assert_eq!(block.lines().count(), 3);
         assert!(block.contains("Check local system"));
+        assert!(block.contains("已用 1m05s"));
         assert!(block.contains('…'));
         assert!(!block.contains("observance"));
     }
@@ -2535,6 +2552,7 @@ mod tests {
                         ..UsageStats::zero()
                     },
                     tick: 0,
+                    elapsed_secs: 12,
                 },
                 observations,
             },
@@ -2546,6 +2564,7 @@ mod tests {
         assert!(view.contains("· 正在分析用户请求"));
         assert!(view.contains("\x1b[38;5;245m· 执行 Bash: rg --files | wc -l"));
         assert!(view.contains("aliyun:qwen-plus: ▼2"));
+        assert!(view.contains("已用 12s"));
         assert!(view.contains("Token: ▲1.2K(⌁300) ▼20"));
         assert!(!view.contains("ignored in panel mode"));
     }
