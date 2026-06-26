@@ -10,6 +10,7 @@ set timeout 10
 
 set repo_root [file normalize [file join [file dirname [info script]] ".."]]
 set binary [file join $repo_root "target" "release" "timem-native-rs"]
+set data_dir [file join "/private/tmp" "timem_tty_smoke_[pid]"]
 
 if {![file executable $binary]} {
     puts stderr "missing executable: $binary"
@@ -55,11 +56,12 @@ proc wait_exit {} {
 }
 
 proc spawn_timem {} {
-    global binary spawn_id
+    global binary data_dir spawn_id
     spawn env \
         TIMEM_API_KEY=dummy \
         TIMEM_GATEWAY_PROVIDER=aliyun \
         TIMEM_MODEL=qwen-plus \
+        TIMEM_DATA_DIR=$data_dir \
         $binary --space .tty_smoke_mem
     wait_prompt
 }
@@ -316,10 +318,59 @@ proc run_config_value_cancel_smoke {} {
     exit_timem
 }
 
+proc run_workspace_add_cancel_smoke {} {
+    spawn_timem
+    send "/workspace\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "Workspace 目录" {}
+        timeout {
+            error "timeout waiting for /workspace menu"
+        }
+        eof {
+            error "unexpected EOF waiting for /workspace menu"
+        }
+    }
+    send "\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "请输入要加入 workspace 的目录" {}
+        timeout {
+            error "timeout waiting for workspace add prompt"
+        }
+        eof {
+            error "unexpected EOF waiting for workspace add prompt"
+        }
+    }
+    send "\003"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "已取消 workspace 修改" {}
+        timeout {
+            error "timeout waiting for Ctrl+C workspace cancellation"
+        }
+        eof {
+            error "Ctrl+C exited Timem while editing workspace value"
+        }
+    }
+    wait_prompt
+    exit_timem
+}
+
 run_prof_smoke
 run_multiline_paste_cancel_smoke
 run_shift_enter_cancel_smoke
 run_wrapped_edit_cancel_smoke
 run_config_value_cancel_smoke
+run_workspace_add_cancel_smoke
 
 puts "real_tty_smoke: ok"

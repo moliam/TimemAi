@@ -237,8 +237,10 @@ Runtime returns a `job_id`, output file, and status file. The model should poll
 with `shell_job_status` instead of retrying the same command after a foreground
 timeout.
 
-While editing input, `Ctrl+C` cancels the current line. While Timem is thinking,
-`Ctrl+C` cancels the current turn without exiting the shell.
+`Ctrl+C` is always a cancellation key, not an exit key: while editing input it
+cancels the current line, inside menus it cancels the current selection, and
+while Timem is thinking it cancels the current turn. Use `Ctrl+D` or `/exit` to
+leave the shell intentionally.
 
 ## Install Details
 
