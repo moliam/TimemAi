@@ -29,7 +29,8 @@ pub struct StorageProfile {
     pub durable_bytes: u64,
     pub scratch_entries: usize,
     pub scratch_bytes: u64,
-    pub audit_bytes: u64,
+    pub api_audit_bytes: u64,
+    pub action_audit_bytes: u64,
 }
 
 impl RuntimeProfiler {
@@ -74,7 +75,11 @@ impl RuntimeProfiler {
     }
 }
 
-pub fn collect_storage_profile(memory_dir: &Path, audit_file: &Path) -> StorageProfile {
+pub fn collect_storage_profile(
+    memory_dir: &Path,
+    api_audit_file: &Path,
+    action_audit_file: &Path,
+) -> StorageProfile {
     let durable_file = memory_dir.join("memory.jsonl");
     let scratch_file = memory_dir.join("scratch_notes.jsonl");
     StorageProfile {
@@ -82,16 +87,18 @@ pub fn collect_storage_profile(memory_dir: &Path, audit_file: &Path) -> StorageP
         durable_bytes: file_size(&durable_file),
         scratch_entries: count_jsonl_entries(&scratch_file),
         scratch_bytes: file_size(&scratch_file),
-        audit_bytes: file_size(audit_file),
+        api_audit_bytes: file_size(api_audit_file),
+        action_audit_bytes: file_size(action_audit_file),
     }
 }
 
 pub fn render_prof_report(
     profiler: &RuntimeProfiler,
     memory_dir: &Path,
-    audit_file: &Path,
+    api_audit_file: &Path,
+    action_audit_file: &Path,
 ) -> String {
-    let storage = collect_storage_profile(memory_dir, audit_file);
+    let storage = collect_storage_profile(memory_dir, api_audit_file, action_audit_file);
     let mut out = String::new();
     out.push_str(&format!(
         "{ANSI_BOLD}Timem runtime profiling{ANSI_RESET}\n\n"
@@ -141,7 +148,11 @@ pub fn render_prof_report(
     ));
     out.push_str(&format!(
         "  api_audit: {}\n",
-        format_bytes(storage.audit_bytes)
+        format_bytes(storage.api_audit_bytes)
+    ));
+    out.push_str(&format!(
+        "  action_audit: {}\n",
+        format_bytes(storage.action_audit_bytes)
     ));
     out
 }
@@ -259,6 +270,7 @@ mod tests {
             &profiler,
             std::path::Path::new("/missing/memory"),
             std::path::Path::new("/missing/audit.jsonl"),
+            std::path::Path::new("/missing/action_audit.json"),
         );
         assert!(report.contains("\x1b[1m▸ Token 监控（per model）\x1b[0m"));
         assert!(report.contains("  aliyun:qwen-plus"));
@@ -284,16 +296,19 @@ mod tests {
         fs::create_dir_all(&memory_dir).unwrap();
         let memory = memory_dir.join("memory.jsonl");
         let scratch = memory_dir.join("scratch_notes.jsonl");
-        let audit = dir.join("api_audit.jsonl");
+        let api_audit = dir.join("api_audit.jsonl");
+        let action_audit = dir.join("action_audit.json");
         fs::write(&memory, "{}\n\n{}\n").unwrap();
         fs::write(&scratch, "{}\n").unwrap();
-        fs::write(&audit, "audit\n").unwrap();
+        fs::write(&api_audit, "audit\n").unwrap();
+        fs::write(&action_audit, "{\n  \"turns\": []\n}\n").unwrap();
 
-        let profile = collect_storage_profile(&memory_dir, &audit);
+        let profile = collect_storage_profile(&memory_dir, &api_audit, &action_audit);
         assert_eq!(profile.durable_entries, 2);
         assert_eq!(profile.scratch_entries, 1);
         assert!(profile.durable_bytes > 0);
-        assert_eq!(profile.audit_bytes, 6);
+        assert_eq!(profile.api_audit_bytes, 6);
+        assert!(profile.action_audit_bytes > 0);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -330,6 +345,7 @@ mod tests {
             &profiler,
             std::path::Path::new("/missing/memory"),
             std::path::Path::new("/missing/audit.jsonl"),
+            std::path::Path::new("/missing/action_audit.json"),
         );
         let call_lines: Vec<&str> = report
             .lines()

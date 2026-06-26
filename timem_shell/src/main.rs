@@ -166,7 +166,7 @@ fn main() {
             prompt_status.clear_before_exit();
             println!(
                 "{}",
-                render_prof_report(&profiler, &memory_dir, &audit_file)
+                render_prof_report(&profiler, &memory_dir, &audit_file, &action_audit_file)
             );
             continue;
         }

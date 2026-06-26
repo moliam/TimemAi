@@ -2439,11 +2439,8 @@ fn run_bash_accepts_read_back_without_primary_command() {
 
 #[test]
 fn run_bash_requires_approval_for_mutating_commands() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_reject"),
-    );
+    let dir = tmp_dir("bash_reject");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("delete something", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"response_to_user":"","next_actions":[{"action":"run_bash","intent":"test action","input":{"command":"rm not_allowed"}}]}"#),
@@ -2466,6 +2463,19 @@ fn run_bash_requires_approval_for_mutating_commands() {
     };
     assert!(prompt.contains("status: denied_by_user"));
     assert!(prompt.contains(&request.approval_id));
+
+    let audit_text = fs::read_to_string(dir.join("audit").join("action_audit.json")).unwrap();
+    let audit: serde_json::Value = serde_json::from_str(&audit_text).unwrap();
+    let actions = audit["turns"][0]["interactions"][0]["actions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0]["action"], "run_bash");
+    assert_eq!(actions[0]["intent"], "test action");
+    assert_eq!(actions[0]["status"], "needs_user_approval");
+    assert_eq!(actions[0]["input"]["command"], "rm not_allowed");
+    assert_eq!(actions[1]["status"], "denied_by_user");
+    assert_eq!(actions[1]["input"]["approval_id"], request.approval_id);
 }
 
 #[test]

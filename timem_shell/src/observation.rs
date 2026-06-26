@@ -442,6 +442,14 @@ mod tests {
     }
 
     #[test]
+    fn malformed_model_response_does_not_create_observation_events() {
+        let events = observation_events_from_model_response(
+            r#"{"thought":"partial","next_actions":[{"action":"run_bash""#,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn panel_truncates_long_command_to_width() {
         let mut panel = ObservationPanel::new(8, 44);
         panel.apply(ObservationEvent::Active(format!(
