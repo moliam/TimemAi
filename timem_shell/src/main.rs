@@ -881,8 +881,8 @@ fn run_config_menu(
     println!("\n{} 当前值：{}", field.label(), current);
     print!("请输入新值（留空取消）：");
     let _ = io::stdout().flush();
-    let Some(raw_value) = read_tty_line() else {
-        println!("读取输入失败，已取消。");
+    let Some(raw_value) = read_tty_line_cancelable() else {
+        println!("\n已取消配置修改。");
         return false;
     };
     let value = raw_value.trim();
@@ -913,8 +913,8 @@ fn run_workspace_menu() -> bool {
             WorkspaceSelection::Add => {
                 print!("\n请输入要加入 workspace 的目录（留空取消）：");
                 let _ = io::stdout().flush();
-                let Some(raw_value) = read_tty_line() else {
-                    println!("读取输入失败，已取消。");
+                let Some(raw_value) = read_tty_line_cancelable() else {
+                    println!("\n已取消 workspace 修改。");
                     return false;
                 };
                 let value = raw_value.trim();
@@ -1244,16 +1244,121 @@ fn parse_api_protocol_for_config(value: &str) -> Result<ApiProtocol, String> {
     }
 }
 
-fn read_tty_line() -> Option<String> {
-    let mut input = String::new();
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .ok()?;
-    let mut reader = io::BufReader::new(&mut file);
-    std::io::BufRead::read_line(&mut reader, &mut input).ok()?;
-    Some(input)
+fn read_tty_line_cancelable() -> Option<String> {
+    TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    let _sigint_guard = SigintGuard::install();
+    let mut input = ShellInputSource::open().ok()?;
+    let fd = input.as_raw_fd();
+    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+        return None;
+    }
+    let mut raw = original;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 1;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        return None;
+    }
+    let mut terminal_mode = TerminalModeGuard::new(fd, original);
+    let mut out = String::new();
+    let result = loop {
+        if TURN_CANCEL_REQUESTED.load(Ordering::SeqCst) {
+            break None;
+        }
+        let Some(byte) = read_cancelable_byte(&mut input, fd) else {
+            break None;
+        };
+        match byte {
+            b'\r' | b'\n' => {
+                println!();
+                break Some(out);
+            }
+            3 | 4 | 27 => {
+                break None;
+            }
+            8 | 127 => {
+                if let Some(ch) = out.pop() {
+                    erase_rendered_char(ch);
+                }
+            }
+            byte if byte.is_ascii_control() => {}
+            first => {
+                let mut bytes = vec![first];
+                if first >= 0x80 {
+                    let expected_len = utf8_expected_len(first);
+                    while bytes.len() < expected_len {
+                        let Some(next) = read_cancelable_byte(&mut input, fd) else {
+                            break;
+                        };
+                        bytes.push(next);
+                    }
+                }
+                if let Ok(text) = std::str::from_utf8(&bytes) {
+                    out.push_str(text);
+                    print!("{text}");
+                    let _ = io::stdout().flush();
+                }
+            }
+        }
+    };
+    terminal_mode.restore();
+    let _ = consume_turn_cancel_request();
+    result
+}
+
+fn read_cancelable_byte(input: &mut impl Read, fd: i32) -> Option<u8> {
+    loop {
+        if TURN_CANCEL_REQUESTED.load(Ordering::SeqCst) {
+            return None;
+        }
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let poll_result = unsafe { libc::poll(&mut poll_fd, 1, 100) };
+        if poll_result == 0 {
+            continue;
+        }
+        if poll_result < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        if poll_fd.revents & libc::POLLIN == 0 {
+            continue;
+        }
+        let mut buf = [0u8; 1];
+        match input.read(&mut buf) {
+            Ok(1) => return Some(buf[0]),
+            Ok(_) => return None,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+}
+
+fn utf8_expected_len(first: u8) -> usize {
+    if first & 0b1111_1000 == 0b1111_0000 {
+        4
+    } else if first & 0b1111_0000 == 0b1110_0000 {
+        3
+    } else if first & 0b1110_0000 == 0b1100_0000 {
+        2
+    } else {
+        1
+    }
+}
+
+fn erase_rendered_char(ch: char) {
+    let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+    for _ in 0..width {
+        print!("\x08 \x08");
+    }
+    let _ = io::stdout().flush();
 }
 
 fn choose_with_keyboard(
@@ -2402,11 +2507,12 @@ mod static_prompt_tests {
         render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
         render_workspace_delete_choices, render_workspace_menu, resolve_paste_markers,
         sanitize_user_input, stale_context_prompt_needed, strip_paste_markers,
-        timem_reedline_keybindings, workspace_menu_line_count, wrapped_terminal_rows,
-        ApprovalChoice, ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecord,
-        PasteRecoverySummary, QueuedInputDrain, TimemEditMode, TimemPasteHighlighter,
-        TimemReedlinePrompt, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
-        STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        timem_reedline_keybindings, utf8_expected_len, workspace_menu_line_count,
+        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField, ConfigRow,
+        ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary, QueuedInputDrain,
+        TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
+        PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
+        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use crossterm::event::Event;
@@ -2422,6 +2528,7 @@ mod static_prompt_tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use timem_shell::{ApiProtocol, ProviderConfig, SPINNER_ICONS};
+    use unicode_width::UnicodeWidthChar;
 
     #[test]
     fn static_prompt_uses_full_shared_v1_resource() {
@@ -2509,6 +2616,15 @@ mod static_prompt_tests {
         let paused_total = Arc::new(Mutex::new(Duration::from_secs(3)));
         let elapsed = active_elapsed_secs(Instant::now() - Duration::from_secs(10), &paused_total);
         assert!((7..=8).contains(&elapsed), "elapsed={elapsed}");
+    }
+
+    #[test]
+    fn cancelable_tty_line_reader_understands_utf8_widths() {
+        assert_eq!(utf8_expected_len(b'a'), 1);
+        assert_eq!(utf8_expected_len("é".as_bytes()[0]), 2);
+        assert_eq!(utf8_expected_len("中".as_bytes()[0]), 3);
+        assert_eq!(utf8_expected_len("😀".as_bytes()[0]), 4);
+        assert_eq!(UnicodeWidthChar::width('中'), Some(2));
     }
 
     #[test]
