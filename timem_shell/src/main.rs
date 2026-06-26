@@ -1295,9 +1295,9 @@ impl ShellLineEditor {
         print!("\x1b[?2004h");
 
         let mut buffer = ShellInputBuffer::default();
-        let mut rendered_rows = 0usize;
+        let mut render_state = ShellInputRenderState::default();
         let mut history_cursor: Option<usize> = None;
-        render_shell_input(prompt, &buffer, &mut rendered_rows);
+        render_shell_input(prompt, &buffer, &mut render_state);
 
         let result = loop {
             match read_shell_key(&mut input) {
@@ -1342,7 +1342,7 @@ impl ShellLineEditor {
                 }
                 ShellInputKey::Enter => {
                     buffer.move_to_end();
-                    render_shell_input(prompt, &buffer, &mut rendered_rows);
+                    render_shell_input(prompt, &buffer, &mut render_state);
                     let display = buffer.display_plain();
                     println!();
                     print!("\x1b[?2004l");
@@ -1369,7 +1369,7 @@ impl ShellLineEditor {
                 }
                 ShellInputKey::Other => {}
             }
-            render_shell_input(prompt, &buffer, &mut rendered_rows);
+            render_shell_input(prompt, &buffer, &mut render_state);
         };
 
         print!("\x1b[?2004l");
@@ -1800,8 +1800,14 @@ fn read_utf8_char(first: u8, input: &mut impl Read) -> Option<char> {
     std::str::from_utf8(&bytes).ok()?.chars().next()
 }
 
-fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, rendered_rows: &mut usize) {
-    print!("{}", render_shell_input_clear_sequence(*rendered_rows));
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ShellInputRenderState {
+    rows: usize,
+    cursor_row: usize,
+}
+
+fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, state: &mut ShellInputRenderState) {
+    print!("{}", render_shell_input_clear_sequence(*state));
     print!("{}{}", prompt, buffer.display_styled());
 
     let width = terminal_width().max(1);
@@ -1822,25 +1828,31 @@ fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, rendered_rows: &m
     if cursor_col > 0 {
         print!("\x1b[{cursor_col}C");
     }
-    *rendered_rows = wrapped_terminal_rows(total_width, width);
+    *state = ShellInputRenderState {
+        rows: wrapped_terminal_rows(total_width, width),
+        cursor_row,
+    };
     let _ = io::stdout().flush();
 }
 
-fn render_shell_input_clear_sequence(rendered_rows: usize) -> String {
+fn render_shell_input_clear_sequence(state: ShellInputRenderState) -> String {
     let mut out = String::new();
-    if rendered_rows > 1 {
-        out.push_str(&format!("\r\x1b[{}F", rendered_rows - 1));
+    if state.rows == 0 {
+        return out;
+    }
+    if state.cursor_row > 0 {
+        out.push_str(&format!("\r\x1b[{}F", state.cursor_row));
     } else {
         out.push('\r');
     }
-    for idx in 0..rendered_rows {
+    for idx in 0..state.rows {
         out.push_str("\x1b[2K");
-        if idx + 1 < rendered_rows {
+        if idx + 1 < state.rows {
             out.push_str("\x1b[1E");
         }
     }
-    if rendered_rows > 1 {
-        out.push_str(&format!("\r\x1b[{}F", rendered_rows - 1));
+    if state.rows > 1 {
+        out.push_str(&format!("\r\x1b[{}F", state.rows - 1));
     } else {
         out.push('\r');
     }
@@ -2347,8 +2359,8 @@ mod static_prompt_tests {
         render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
         sanitize_user_input, stale_context_prompt_needed, wrapped_terminal_rows, ApprovalChoice,
         ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecoverySummary,
-        ShellInputBuffer, ShellInputKey, ANSI_HIGHLIGHT, ANSI_RESET, STALE_CONTEXT_IDLE,
-        STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        ShellInputBuffer, ShellInputKey, ShellInputRenderState, ANSI_HIGHLIGHT, ANSI_RESET,
+        STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use std::fs;
@@ -2450,9 +2462,24 @@ mod static_prompt_tests {
 
     #[test]
     fn wrapped_input_rerender_does_not_clear_screen_below_prompt() {
-        let sequence = render_shell_input_clear_sequence(3);
+        let sequence = render_shell_input_clear_sequence(ShellInputRenderState {
+            rows: 3,
+            cursor_row: 2,
+        });
         assert!(sequence.contains("\x1b[2K"));
         assert!(sequence.contains("\x1b[1E"));
+        assert!(!sequence.contains("\x1b[J"));
+    }
+
+    #[test]
+    fn wrapped_input_rerender_clears_from_previous_cursor_row() {
+        let sequence = render_shell_input_clear_sequence(ShellInputRenderState {
+            rows: 20,
+            cursor_row: 7,
+        });
+        assert!(sequence.starts_with("\r\x1b[7F"));
+        assert!(sequence.ends_with("\r\x1b[19F"));
+        assert_eq!(sequence.matches("\x1b[2K").count(), 20);
         assert!(!sequence.contains("\x1b[J"));
     }
 
