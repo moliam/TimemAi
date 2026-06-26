@@ -2293,6 +2293,71 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 }
 
 #[test]
+fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
+    let dir = tmp_dir("memory_update_parallel_conflict");
+    let mut seed_core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = seed_core.begin_turn("创建共享记忆", None);
+    let step = seed_core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memory_update","intent":"Insert shared conflict row.","input":{"operation":"upsert","id":"shared_conflict","content":"初始值"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let contenders = 8;
+    let barrier = Arc::new(Barrier::new(contenders));
+    let mut handles = Vec::new();
+    for idx in 0..contenders {
+        let dir = dir.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+            let _ = core.begin_turn(&format!("并发冲突更新 {idx}"), None);
+            barrier.wait();
+            let step = core.apply_model_response(LlmResponse {
+                content: scored(format!(
+                    r#"{{"response_to_user":"","next_actions":[{{"action":"memory_update","intent":"Concurrent same-version update.","input":{{"operation":"update","id":"shared_conflict","expected_version":1,"content":"winner candidate {idx}"}}}}]}}"#
+                )),
+                model_name: "qwen-plus".to_string(),
+                usage: usage(),
+                truncated: false,
+            });
+            match step {
+                CoreStep::NeedModel { prompt, .. } => prompt,
+                other => panic!("unexpected step: {other:?}"),
+            }
+        }));
+    }
+
+    let prompts = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    let success_count = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("operation: update") && prompt.contains("version: 2"))
+        .count();
+    let conflict_count = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("memory_conflict"))
+        .count();
+    assert_eq!(success_count, 1);
+    assert_eq!(conflict_count, contenders - 1);
+
+    let stored = fs::read_to_string(dir.join("memory.jsonl")).unwrap();
+    let rows = stored
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "shared_conflict");
+    assert_eq!(rows[0]["version"], 2);
+    let content = rows[0]["content"].as_str().unwrap();
+    assert!(content.starts_with("winner candidate "));
+}
+
+#[test]
 fn mem_guard_blocks_second_writer_until_first_writer_releases_lock() {
     let dir = tmp_dir("mem_guard_blocks").join("memory");
     fs::create_dir_all(&dir).unwrap();
@@ -3154,6 +3219,8 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(static_prompt.contains("\"json_protocol\""));
     assert!(static_prompt.contains("\"evidence_guard\""));
     assert!(static_prompt.contains("\"action_result_guard\""));
+    assert!(static_prompt.contains("memory_conflict"));
+    assert!(static_prompt.contains("row version changed"));
     assert!(!static_prompt.contains("no_result_terminate"));
     assert!(!static_prompt.contains("long_running_shell"));
     assert!(!static_prompt.contains("lang_retry"));
