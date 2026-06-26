@@ -309,11 +309,7 @@ struct FileActionAuditStore {
 
 impl FileActionAuditStore {
     fn new(memory_dir: &Path) -> Self {
-        let space_dir = if memory_dir.file_name().and_then(|name| name.to_str()) == Some("memory") {
-            memory_dir.parent().unwrap_or(memory_dir)
-        } else {
-            memory_dir
-        };
+        let space_dir = space_dir_for_memory_dir(memory_dir);
         let file = space_dir.join("audit").join("action_audit.json");
         Self { file }
     }
@@ -386,6 +382,14 @@ impl FileActionAuditStore {
             version: 1,
             turns: Vec::new(),
         }
+    }
+}
+
+fn space_dir_for_memory_dir(memory_dir: &Path) -> &Path {
+    if memory_dir.file_name().and_then(|name| name.to_str()) == Some("memory") {
+        memory_dir.parent().unwrap_or(memory_dir)
+    } else {
+        memory_dir
     }
 }
 
@@ -1997,14 +2001,25 @@ impl FileShellJobStore {
 #[derive(Debug, Clone)]
 struct FileChatHistoryStore {
     audit_file: PathBuf,
+    legacy_audit_file: PathBuf,
 }
 impl FileChatHistoryStore {
     fn new(memory_dir: &Path) -> Self {
-        let audit_file = memory_dir
-            .parent()
-            .unwrap_or(memory_dir)
-            .join("api_audit.jsonl");
-        Self { audit_file }
+        let space_dir = space_dir_for_memory_dir(memory_dir);
+        let audit_file = space_dir.join("audit").join("api_audit.jsonl");
+        let legacy_audit_file = space_dir.join("api_audit.jsonl");
+        Self {
+            audit_file,
+            legacy_audit_file,
+        }
+    }
+
+    fn audit_files(&self) -> Vec<PathBuf> {
+        let mut files = vec![self.audit_file.clone()];
+        if self.legacy_audit_file != self.audit_file {
+            files.push(self.legacy_audit_file.clone());
+        }
+        files
     }
 
     fn query(
@@ -2048,98 +2063,74 @@ impl FileChatHistoryStore {
         if targets.is_empty() {
             return Ok(0);
         }
-        let file = match OpenOptions::new().read(true).open(&self.audit_file) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(_) => return Err("chat_history_read_failed".to_string()),
-        };
-        let mut retained = Vec::new();
         let mut deleted_turn_ids = HashSet::new();
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let turn_id = serde_json::from_str::<Value>(&line)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("turn_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or_default();
-            if !turn_id.is_empty() && targets.contains(&turn_id) {
-                deleted_turn_ids.insert(turn_id);
-                continue;
+        for audit_file in self.audit_files() {
+            let file = match OpenOptions::new().read(true).open(&audit_file) {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err("chat_history_read_failed".to_string()),
+            };
+            let mut retained = Vec::new();
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
+                let turn_id = serde_json::from_str::<Value>(&line)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("turn_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_default();
+                if !turn_id.is_empty() && targets.contains(&turn_id) {
+                    deleted_turn_ids.insert(turn_id);
+                    continue;
+                }
+                retained.push(line);
             }
-            retained.push(line);
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.audit_file)
-            .map_err(|_| "chat_history_write_failed".to_string())?;
-        for line in retained {
-            writeln!(file, "{}", line).map_err(|_| "chat_history_write_failed".to_string())?;
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&audit_file)
+                .map_err(|_| "chat_history_write_failed".to_string())?;
+            for line in retained {
+                writeln!(file, "{}", line).map_err(|_| "chat_history_write_failed".to_string())?;
+            }
         }
         Ok(deleted_turn_ids.len())
     }
 
     fn read_all(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
-        let file = match OpenOptions::new().read(true).open(&self.audit_file) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => return Err(err),
-        };
         let mut rows = Vec::<ChatHistoryRecord>::new();
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
+        for audit_file in self.audit_files() {
+            let file = match OpenOptions::new().read(true).open(&audit_file) {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
             };
-            let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
-            let turn_id = value
-                .get("turn_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if turn_id.is_empty() {
-                continue;
-            }
-            match event_type {
-                "turn_start" => {
-                    let user_input = value
-                        .get("user_input")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .trim();
-                    if user_input.is_empty() {
-                        continue;
-                    }
-                    rows.push(ChatHistoryRecord {
-                        session: value
-                            .get("session")
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
+                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+                let turn_id = value
+                    .get("turn_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if turn_id.is_empty() {
+                    continue;
+                }
+                match event_type {
+                    "turn_start" => {
+                        let user_input = value
+                            .get("user_input")
                             .and_then(Value::as_str)
                             .unwrap_or("")
-                            .to_string(),
-                        turn_id: turn_id.to_string(),
-                        started_at_ms: turn_id_millis(turn_id)
-                            .or_else(|| value.get("created_at").and_then(Value::as_i64))
-                            .unwrap_or_default(),
-                        user_input: user_input.to_string(),
-                        assistant_output: String::new(),
-                    });
-                }
-                "turn_final" => {
-                    let assistant_output = value
-                        .get("assistant_output")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .trim();
-                    if assistant_output.is_empty() {
-                        continue;
-                    }
-                    if let Some(existing) = rows.iter_mut().rev().find(|row| row.turn_id == turn_id)
-                    {
-                        existing.assistant_output = assistant_output.to_string();
-                    } else {
+                            .trim();
+                        if user_input.is_empty() {
+                            continue;
+                        }
                         rows.push(ChatHistoryRecord {
                             session: value
                                 .get("session")
@@ -2150,12 +2141,41 @@ impl FileChatHistoryStore {
                             started_at_ms: turn_id_millis(turn_id)
                                 .or_else(|| value.get("created_at").and_then(Value::as_i64))
                                 .unwrap_or_default(),
-                            user_input: String::new(),
-                            assistant_output: assistant_output.to_string(),
+                            user_input: user_input.to_string(),
+                            assistant_output: String::new(),
                         });
                     }
+                    "turn_final" => {
+                        let assistant_output = value
+                            .get("assistant_output")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim();
+                        if assistant_output.is_empty() {
+                            continue;
+                        }
+                        if let Some(existing) =
+                            rows.iter_mut().rev().find(|row| row.turn_id == turn_id)
+                        {
+                            existing.assistant_output = assistant_output.to_string();
+                        } else {
+                            rows.push(ChatHistoryRecord {
+                                session: value
+                                    .get("session")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                turn_id: turn_id.to_string(),
+                                started_at_ms: turn_id_millis(turn_id)
+                                    .or_else(|| value.get("created_at").and_then(Value::as_i64))
+                                    .unwrap_or_default(),
+                                user_input: String::new(),
+                                assistant_output: assistant_output.to_string(),
+                            });
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         Ok(rows

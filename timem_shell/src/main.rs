@@ -14,7 +14,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
     action_audit_path, action_status_hint, append_audit, audit_path, call_model, data_root,
-    local_time_label, observation_events_from_model_response, parse_cli_args,
+    local_time_label, memory_path, observation_events_from_model_response, parse_cli_args,
     provider_config_from_env, render_final_response_at, render_prof_report,
     render_shell_status_bar, render_thinking_view_at, supporting_context, ApiProtocol,
     ModelDirection, ObservationEvent, ObservationPanel, RuntimeProfiler, ShellStatusMessage,
@@ -67,10 +67,7 @@ fn main() {
         .unwrap_or_else(|| ".test_mem".to_string());
     let audit_file = audit_path(&space);
     let action_audit_file = action_audit_path(&space);
-    let memory_dir = audit_file
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("memory");
+    let memory_dir = memory_path(&space);
     let mut bash_approval_mode = bash_approval_mode_from_options(&options, &env);
     let mut profiler = RuntimeProfiler::default();
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);

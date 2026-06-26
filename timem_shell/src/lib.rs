@@ -964,6 +964,10 @@ pub fn action_audit_path(space: &str) -> PathBuf {
         .join("action_audit.json")
 }
 
+pub fn memory_path(space: &str) -> PathBuf {
+    data_root().join(space).join("memory")
+}
+
 pub fn data_root() -> PathBuf {
     std::env::var("TIMEM_DATA_DIR")
         .map(PathBuf::from)
@@ -2274,6 +2278,10 @@ mod tests {
             action_audit_path(".test_mem"),
             std::path::PathBuf::from("data/.test_mem/audit/action_audit.json")
         );
+        assert_eq!(
+            memory_path(".test_mem"),
+            std::path::PathBuf::from("data/.test_mem/memory")
+        );
 
         std::env::set_var("TIMEM_DATA_DIR", "/tmp/timem-shell-data-test");
         assert_eq!(
@@ -2285,6 +2293,10 @@ mod tests {
             std::path::PathBuf::from(
                 "/tmp/timem-shell-data-test/.test_mem/audit/action_audit.json"
             )
+        );
+        assert_eq!(
+            memory_path(".test_mem"),
+            std::path::PathBuf::from("/tmp/timem-shell-data-test/.test_mem/memory")
         );
         std::env::remove_var("TIMEM_DATA_DIR");
     }
