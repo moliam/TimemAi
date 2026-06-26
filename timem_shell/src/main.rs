@@ -1317,6 +1317,10 @@ impl ShellLineEditor {
                     buffer.delete_at_cursor();
                     history_cursor = None;
                 }
+                ShellInputKey::Newline => {
+                    buffer.insert_text("\n");
+                    history_cursor = None;
+                }
                 ShellInputKey::Left => buffer.move_left(),
                 ShellInputKey::Right => buffer.move_right(),
                 ShellInputKey::HistoryPrev => {
@@ -1722,6 +1726,7 @@ enum ShellInputKey {
     Right,
     HistoryPrev,
     HistoryNext,
+    Newline,
     Enter,
     Cancel,
     Eof,
@@ -1756,6 +1761,9 @@ fn read_shell_escape(input: &mut impl Read) -> ShellInputKey {
         [b'[', b'A'] => ShellInputKey::HistoryPrev,
         [b'[', b'B'] => ShellInputKey::HistoryNext,
         [b'[', b'3', b'~'] => ShellInputKey::Delete,
+        [b'[', b'1', b'3', b';', b'2', b'u']
+        | [b'[', b'1', b'3', b';', b'2', b'~']
+        | [b'[', b'2', b'7', b';', b'2', b';', b'1', b'3', b'~'] => ShellInputKey::Newline,
         [b'[', b'2', b'0', b'0', b'~'] => ShellInputKey::Paste(read_bracketed_paste(input)),
         _ => ShellInputKey::Other,
     }
@@ -1806,6 +1814,13 @@ struct ShellInputRenderState {
     cursor_row: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ShellInputLayout {
+    rows: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
 fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, state: &mut ShellInputRenderState) {
     print!("{}", render_shell_input_clear_sequence(*state));
     print!("{}{}", prompt, buffer.display_styled());
@@ -1813,26 +1828,79 @@ fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, state: &mut Shell
     let width = terminal_width().max(1);
     let prompt_width = display_width(prompt);
     let plain = buffer.display_plain();
-    let total_width = prompt_width + display_width(&plain);
-    let cursor_width = prompt_width + display_width(&buffer.display_prefix_before_cursor());
-    let total_row = total_width / width;
-    let cursor_row = cursor_width / width;
-    let cursor_col = cursor_width % width;
+    let layout = shell_input_layout(
+        prompt_width,
+        &plain,
+        &buffer.display_prefix_before_cursor(),
+        width,
+    );
+    let total_row = layout.rows.saturating_sub(1);
     if total_row > 0 {
         print!("\x1b[{total_row}F");
     }
     print!("\r");
-    if cursor_row > 0 {
-        print!("\x1b[{cursor_row}B");
+    if layout.cursor_row > 0 {
+        print!("\x1b[{}B", layout.cursor_row);
     }
-    if cursor_col > 0 {
-        print!("\x1b[{cursor_col}C");
+    if layout.cursor_col > 0 {
+        print!("\x1b[{}C", layout.cursor_col);
     }
     *state = ShellInputRenderState {
-        rows: wrapped_terminal_rows(total_width, width),
-        cursor_row,
+        rows: layout.rows,
+        cursor_row: layout.cursor_row,
     };
     let _ = io::stdout().flush();
+}
+
+fn shell_input_layout(
+    prompt_width: usize,
+    plain: &str,
+    cursor_prefix: &str,
+    terminal_width: usize,
+) -> ShellInputLayout {
+    let width = terminal_width.max(1);
+    let cursor = advance_terminal_position(
+        prompt_width / width,
+        prompt_width % width,
+        cursor_prefix,
+        width,
+    );
+    let end = advance_terminal_position(prompt_width / width, prompt_width % width, plain, width);
+    ShellInputLayout {
+        rows: end.0 + 1,
+        cursor_row: cursor.0,
+        cursor_col: cursor.1,
+    }
+}
+
+fn advance_terminal_position(
+    mut row: usize,
+    mut col: usize,
+    text: &str,
+    terminal_width: usize,
+) -> (usize, usize) {
+    let width = terminal_width.max(1);
+    for ch in text.chars() {
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+            continue;
+        }
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if ch_width == 0 {
+            continue;
+        }
+        if col > 0 && col + ch_width > width {
+            row += 1;
+            col = 0;
+        }
+        col += ch_width;
+        while col >= width {
+            row += 1;
+            col -= width;
+        }
+    }
+    (row, col)
 }
 
 fn render_shell_input_clear_sequence(state: ShellInputRenderState) -> String {
@@ -2357,10 +2425,11 @@ mod static_prompt_tests {
         render_round_limit_choices, render_round_limit_prompt, render_shell_input_clear_sequence,
         render_stale_context_choices, render_stale_context_prompt, render_startup_banner,
         render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
-        sanitize_user_input, stale_context_prompt_needed, wrapped_terminal_rows, ApprovalChoice,
-        ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecoverySummary,
-        ShellInputBuffer, ShellInputKey, ShellInputRenderState, ANSI_HIGHLIGHT, ANSI_RESET,
-        STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        sanitize_user_input, shell_input_layout, stale_context_prompt_needed,
+        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField, ConfigRow,
+        ConfigTableItem, MenuKey, PasteRecoverySummary, ShellInputBuffer, ShellInputKey,
+        ShellInputRenderState, ANSI_HIGHLIGHT, ANSI_RESET, STALE_CONTEXT_IDLE,
+        STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use std::fs;
@@ -3178,6 +3247,35 @@ mod static_prompt_tests {
             read_shell_key(&mut Cursor::new(vec![27, b'[', b'3', b'~'])),
             ShellInputKey::Delete
         );
+    }
+
+    #[test]
+    fn shell_key_reader_maps_common_shift_enter_sequences_to_newline() {
+        for sequence in [
+            vec![27, b'[', b'1', b'3', b';', b'2', b'u'],
+            vec![27, b'[', b'1', b'3', b';', b'2', b'~'],
+            vec![27, b'[', b'2', b'7', b';', b'2', b';', b'1', b'3', b'~'],
+        ] {
+            assert_eq!(
+                read_shell_key(&mut Cursor::new(sequence)),
+                ShellInputKey::Newline
+            );
+        }
+        assert_eq!(
+            read_shell_key(&mut Cursor::new(vec![b'\n'])),
+            ShellInputKey::Enter
+        );
+    }
+
+    #[test]
+    fn shell_input_layout_accounts_for_explicit_newlines_and_cjk_width() {
+        let prompt_width = display_width("[10:34:27] You ❯❯ ");
+        let plain = "阿萨德 abc\n假啊；收到了减肥";
+        let cursor_prefix = "阿萨德 abc\n假啊";
+        let layout = shell_input_layout(prompt_width, plain, cursor_prefix, 20);
+        assert!(layout.rows >= 3);
+        assert!(layout.cursor_row > 0);
+        assert_eq!(layout.cursor_col % 2, 0);
     }
 
     #[test]
