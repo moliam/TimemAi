@@ -23,7 +23,7 @@ flowchart LR
     Shell --> Core["agent_core\nagent state machine"]
     Core --> Store["Local data\nmemory + chat history"]
     Core --> Bash["run_bash\nbounded local shell"]
-    Shell --> Audit["api_audit.jsonl\nredacted request/response audit"]
+    Shell --> Audit["audit/api_audit.jsonl\naudit/action_audit.json"]
 ```
 
 ### `agent_core/`
@@ -43,11 +43,22 @@ flowchart LR
 `timem_shell` owns the terminal runtime.
 
 - Reads CLI flags and environment config.
-- Renders the shell banner, prompt, thinking block, final answer, and status
-  line.
+- Renders the shell banner, Reedline-backed input prompt, observation panel,
+  final answer, profiling output, and status line.
 - Sends HTTP requests to providers.
-- Writes local API audit logs with secret redaction.
+- Writes local API/action audit logs with secret redaction.
 - Loads shell history and runtime data from the selected data root.
+
+Key shell-side modules:
+
+- `main.rs`: CLI, interactive loop, Reedline input adapter, config menu, paste
+  placeholder recovery, cancellation handling, and startup banner rendering.
+- `protocol_adapter.rs`: provider-specific request/response packing.
+- `prompt_cache.rs`: provider cache-control planning over static prompt and
+  retained dynamic deltas.
+- `structured_output.rs`: protocol-specific structured-output options.
+- `observation.rs`: modular Thought / Action observation events and rendering.
+- `profiler.rs`: `/prof` token, latency, and storage reporting.
 
 ### `resources/static_v1.json`
 
@@ -480,15 +491,19 @@ environment/config and are redacted from audit logs.
 By default, data is scoped to the directory where `timem-shell` starts:
 
 ```text
-data/<space>/api_audit.jsonl
+data/<space>/audit/api_audit.jsonl
+data/<space>/audit/action_audit.json
 data/<space>/memory/
+data/<space>/memory/shell_jobs/
 data/<space>/shell_history.txt
 ```
 
 Use `TIMEM_DATA_DIR=/path/to/data` for a fixed data root.
 
-The audit log records provider requests/responses and final turn summaries. It
-is a debugging artifact, not a user-facing transcript. Secrets are redacted.
+The API audit log records provider requests/responses and final turn summaries.
+The action audit log groups model-requested actions by user turn and model
+interaction. These are debugging artifacts, not user-facing transcripts.
+Secrets are redacted.
 
 ## Runtime Boundary
 

@@ -70,8 +70,55 @@ proc exit_timem {} {
 }
 
 proc assert_no_model_call {scenario output} {
-    if {[regexp {思考中|qwen-plus: ▲1|chj:qwen-plus|aliyun:qwen-plus} $output]} {
+    if {[regexp {思考中|qwen-plus: ▲1|aliyun:qwen-plus|模型调用失败} $output]} {
         error "$scenario unexpectedly triggered a model call"
+    }
+}
+
+proc assert_contains {scenario output needle} {
+    if {[string first $needle $output] < 0} {
+        error "$scenario expected output to contain: $needle"
+    }
+}
+
+proc assert_cancelled {scenario output} {
+    assert_contains $scenario $output "已取消当前输入"
+}
+
+proc wait_cancelled {scenario} {
+    set output ""
+    expect {
+        -re "\033\\\[6n" {
+            append output $expect_out(buffer)
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "已取消当前输入" {
+            append output $expect_out(buffer)
+        }
+        timeout {
+            error "timeout waiting for cancellation in $scenario"
+        }
+        eof {
+            error "unexpected EOF waiting for cancellation in $scenario"
+        }
+    }
+    return $output
+}
+
+proc assert_not_repeated_too_much {scenario output needle limit} {
+    set count 0
+    set start 0
+    while {1} {
+        set index [string first $needle $output $start]
+        if {$index < 0} {
+            break
+        }
+        incr count
+        set start [expr {$index + [string length $needle]}]
+    }
+    if {$count > $limit} {
+        error "$scenario repeated '$needle' $count times, expected <= $limit"
     }
 }
 
@@ -99,27 +146,24 @@ proc run_multiline_paste_cancel_smoke {} {
     spawn_timem
     after 200
     send "\033\[200~第一行中文；abc\n第二行 English；123\n第三行 │ TIMEM_MODEL │ qwen-plus │\033\[201~"
-    after 300
-    send "\003"
-
-    set output ""
     expect {
         -re "\033\\\[6n" {
-            append output $expect_out(buffer)
             send "\033\[24;1R"
             exp_continue
         }
-        -re "❯❯" {
-            append output $expect_out(buffer)
-        }
+        -re "pasted 3 lines" {}
         timeout {
-            error "timeout waiting after multiline paste cancel"
+            error "timeout waiting for multiline paste placeholder"
         }
         eof {
-            error "unexpected EOF after multiline paste cancel"
+            error "unexpected EOF waiting for multiline paste placeholder"
         }
     }
+    after 300
+    send "\003"
+    set output [wait_cancelled "multiline paste cancel"]
     assert_no_model_call "multiline paste cancel" $output
+    assert_cancelled "multiline paste cancel" $output
     exit_timem
 }
 
@@ -129,27 +173,24 @@ proc run_shift_enter_cancel_smoke {} {
     send "第一行中文；abc"
     send "\033\[13;2u"
     send "第二行 English；123"
-    after 300
-    send "\003"
-
-    set output ""
     expect {
         -re "\033\\\[6n" {
-            append output $expect_out(buffer)
             send "\033\[24;1R"
             exp_continue
         }
-        -re "❯❯" {
-            append output $expect_out(buffer)
-        }
+        -re "第二行 English；123" {}
         timeout {
-            error "timeout waiting after Shift+Enter cancel"
+            error "timeout waiting for Shift+Enter second line"
         }
         eof {
-            error "unexpected EOF after Shift+Enter cancel"
+            error "unexpected EOF waiting for Shift+Enter second line"
         }
     }
+    after 300
+    send "\003"
+    set output [wait_cancelled "Shift+Enter cancel"]
     assert_no_model_call "Shift+Enter cancel" $output
+    assert_cancelled "Shift+Enter cancel" $output
     exit_timem
 }
 
@@ -157,31 +198,29 @@ proc run_wrapped_edit_cancel_smoke {} {
     spawn_timem
     after 200
     send "阿萨德；房间啊实打实的发；按时 阿斯蒂芬；阿萨德发生；理发店啊；水电费啊；乐山大佛；拉的放假啊；收到了减肥假啊；收到了减肥假啊；收到了减肥"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "收到了减肥" {}
+        timeout {
+            error "timeout waiting for wrapped input render"
+        }
+        eof {
+            error "unexpected EOF waiting for wrapped input render"
+        }
+    }
     after 200
     send "\177\177\177"
     after 100
     send "\033\[D\033\[D\033\[D\033\[D\033\[D"
     after 300
     send "\003"
-
-    set output ""
-    expect {
-        -re "\033\\\[6n" {
-            append output $expect_out(buffer)
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "❯❯" {
-            append output $expect_out(buffer)
-        }
-        timeout {
-            error "timeout waiting after wrapped edit cancel"
-        }
-        eof {
-            error "unexpected EOF after wrapped edit cancel"
-        }
-    }
+    set output [wait_cancelled "wrapped edit cancel"]
     assert_no_model_call "wrapped edit cancel" $output
+    assert_cancelled "wrapped edit cancel" $output
+    assert_not_repeated_too_much "wrapped edit cancel" $output "收到了减肥" 6
     exit_timem
 }
 

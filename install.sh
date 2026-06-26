@@ -149,38 +149,44 @@ rust_version_at_least() {
   [ "$actual_patch" -ge "$required_patch" ]
 }
 
-OS_KIND="$(detect_os)"
-ensure_build_dependencies "$OS_KIND"
-ensure_rust
+main() {
+  OS_KIND="$(detect_os)"
+  ensure_build_dependencies "$OS_KIND"
+  ensure_rust
 
-cargo build -p timem_shell --release
+  cargo build -p timem_shell --release
 
-mkdir -p "$INSTALL_DIR"
-cp "$ROOT_DIR/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  mkdir -p "$INSTALL_DIR"
+  cp "$ROOT_DIR/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
 
-cat > "$INSTALL_DIR/$COMMAND_NAME" <<SH
+  cat > "$INSTALL_DIR/$COMMAND_NAME" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
 
 exec "\$(dirname "\$0")/timem-native-rs" "\$@"
 SH
-rm -f "$INSTALL_DIR/$OLD_WRAPPER_NAME"
-chmod +x "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/$COMMAND_NAME"
+  rm -f "$INSTALL_DIR/$OLD_WRAPPER_NAME"
+  chmod +x "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/$COMMAND_NAME"
 
-echo "Installed:"
-echo "  binary:  $INSTALL_DIR/$BIN_NAME"
-echo "  command: $INSTALL_DIR/$COMMAND_NAME"
-echo "  env template: $ENV_TEMPLATE"
-echo "  uninstall: $ROOT_DIR/uninstall.sh"
-echo
-echo "Next steps:"
-echo "  1. Create a private env file from the template:"
-echo "     cp $ENV_TEMPLATE $ROOT_DIR/env"
-echo "  2. Edit $ROOT_DIR/env and uncomment the values you need."
-echo "  3. Ensure $INSTALL_DIR is in PATH."
-echo "  4. Load env: source /path/to/your/env"
-echo "  5. Run: $COMMAND_NAME --space .test_mem --model qwen-plus"
-echo
-echo "Update later from this git clone:"
-echo "  git pull --ff-only"
-echo "  ./install.sh"
+  echo "Installed:"
+  echo "  binary:  $INSTALL_DIR/$BIN_NAME"
+  echo "  command: $INSTALL_DIR/$COMMAND_NAME"
+  echo "  env template: $ENV_TEMPLATE"
+  echo "  uninstall: $ROOT_DIR/uninstall.sh"
+  echo
+  echo "Next steps:"
+  echo "  1. Create a private env file from the template:"
+  echo "     cp $ENV_TEMPLATE $ROOT_DIR/env"
+  echo "  2. Edit $ROOT_DIR/env and uncomment the values you need."
+  echo "  3. Ensure $INSTALL_DIR is in PATH."
+  echo "  4. Load env: source /path/to/your/env"
+  echo "  5. Run: $COMMAND_NAME --space .test_mem --model qwen-plus"
+  echo
+  echo "Update later from this git clone:"
+  echo "  git pull --ff-only"
+  echo "  ./install.sh"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

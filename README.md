@@ -25,7 +25,8 @@ agent directly from a terminal without building the iOS app.
 ## Layout
 
 - `agent_core/`: protocol loop, memory/search tools, guarded local actions.
-- `timem_shell/`: terminal UI, provider HTTP adapters, audit log, CLI.
+- `timem_shell/`: terminal UI, input editor, provider HTTP adapters, audit log,
+  CLI.
 - `resources/static_v1.json`: static prompt used by the shell runtime.
 - `docs/architecture.md`: module boundaries, turn lifecycle, runtime contracts.
 
@@ -196,7 +197,8 @@ By default, runtime data is written under the directory where you start
 `timem`:
 
 ```text
-data/<space>/api_audit.jsonl
+data/<space>/audit/api_audit.jsonl
+data/<space>/audit/action_audit.json
 data/<space>/memory/
 data/<space>/memory/shell_jobs/
 data/<space>/shell_history.txt
