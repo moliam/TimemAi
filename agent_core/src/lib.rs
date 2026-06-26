@@ -1,6 +1,6 @@
 use rusqlite::{params_from_iter, types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
@@ -182,6 +182,58 @@ struct ParsedAction {
     after_ms: Option<i64>,
     before_ms: Option<i64>,
 }
+impl ParsedAction {
+    fn audit_input(&self) -> Value {
+        match self.action.as_str() {
+            "run_bash" => json!({
+                "command": self.command,
+                "read_back_command": self.read_back_command,
+                "large_readback_opt_in": self.large_readback_opt_in,
+                "background": self.background,
+                "timeout_ms": self.timeout_ms,
+            }),
+            "shell_job_status" => json!({
+                "job_id": self.job_id,
+                "timeout_ms": self.timeout_ms,
+            }),
+            "memory_sql_query" | "sql_read" => json!({
+                "sql": self.sql,
+                "params": self.params,
+                "limit": self.limit,
+            }),
+            "memory_update" => json!({
+                "operation": self.operation,
+                "id": self.id,
+                "content": self.content,
+            }),
+            "memory_write" | "write_memory" | "scratch_write" => json!({
+                "content": self.content,
+                "query": self.query,
+            }),
+            "scratch_delete" => json!({
+                "id": self.id,
+            }),
+            "prompt_shrink" => json!({
+                "delta_ids": self.delta_ids,
+                "slice_ids": self.slice_ids,
+            }),
+            "chat_history_delete" => json!({
+                "id": self.id,
+                "query": self.query,
+                "limit": self.limit,
+                "after_ms": self.after_ms,
+                "before_ms": self.before_ms,
+            }),
+            _ => json!({
+                "query": self.query,
+                "id": self.id,
+                "limit": self.limit,
+                "after_ms": self.after_ms,
+                "before_ms": self.before_ms,
+            }),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedEnvelope {
     response_to_user: String,
@@ -218,6 +270,125 @@ enum ActionExecution {
     NeedsApproval(PendingApproval),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ActionAuditDocument {
+    version: u32,
+    turns: Vec<ActionAuditTurn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ActionAuditTurn {
+    turn_id: String,
+    started_at_ms: i64,
+    user_question: String,
+    interactions: Vec<ActionAuditInteraction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ActionAuditInteraction {
+    round: u32,
+    actions: Vec<ActionAuditEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ActionAuditEntry {
+    time_ms: i64,
+    round: u32,
+    action: String,
+    intent: String,
+    status: String,
+    input: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FileActionAuditStore {
+    file: PathBuf,
+}
+
+impl FileActionAuditStore {
+    fn new(memory_dir: &Path) -> Self {
+        let space_dir = if memory_dir.file_name().and_then(|name| name.to_str()) == Some("memory") {
+            memory_dir.parent().unwrap_or(memory_dir)
+        } else {
+            memory_dir
+        };
+        let file = space_dir.join("audit").join("action_audit.json");
+        Self { file }
+    }
+
+    fn begin_turn(&self, turn_id: &str, started_at_ms: i64, user_question: &str) {
+        let mut doc = self.read_doc();
+        if doc.turns.iter().any(|turn| turn.turn_id == turn_id) {
+            return;
+        }
+        doc.turns.push(ActionAuditTurn {
+            turn_id: turn_id.to_string(),
+            started_at_ms,
+            user_question: user_question.to_string(),
+            interactions: Vec::new(),
+        });
+        self.write_doc(&doc);
+    }
+
+    fn record_action(&self, entry: ActionAuditEntry, turn_id: &str, user_question: &str) {
+        let mut doc = self.read_doc();
+        let turn_index =
+            if let Some(index) = doc.turns.iter().position(|turn| turn.turn_id == turn_id) {
+                index
+            } else {
+                doc.turns.push(ActionAuditTurn {
+                    turn_id: turn_id.to_string(),
+                    started_at_ms: now_ms(),
+                    user_question: user_question.to_string(),
+                    interactions: Vec::new(),
+                });
+                doc.turns.len().saturating_sub(1)
+            };
+        let turn = &mut doc.turns[turn_index];
+        let interaction_index = if let Some(index) = turn
+            .interactions
+            .iter()
+            .position(|interaction| interaction.round == entry.round)
+        {
+            index
+        } else {
+            turn.interactions.push(ActionAuditInteraction {
+                round: entry.round,
+                actions: Vec::new(),
+            });
+            turn.interactions.len().saturating_sub(1)
+        };
+        turn.interactions[interaction_index].actions.push(entry);
+        self.write_doc(&doc);
+    }
+
+    fn read_doc(&self) -> ActionAuditDocument {
+        let Ok(text) = fs::read_to_string(&self.file) else {
+            return Self::empty_doc();
+        };
+        serde_json::from_str(&text).unwrap_or_else(|_| Self::empty_doc())
+    }
+
+    fn write_doc(&self, doc: &ActionAuditDocument) {
+        if let Some(parent) = self.file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let Ok(text) = serde_json::to_string_pretty(doc) else {
+            return;
+        };
+        let _ = fs::write(&self.file, format!("{text}\n"));
+    }
+
+    fn empty_doc() -> ActionAuditDocument {
+        ActionAuditDocument {
+            version: 1,
+            turns: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AgentCore {
     static_prompt: String,
@@ -226,6 +397,7 @@ pub struct AgentCore {
     scratch: FileScratchStore,
     chat_history: FileChatHistoryStore,
     shell_jobs: FileShellJobStore,
+    action_audit: FileActionAuditStore,
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
     next_shrink_review_prompt_tokens: u32,
@@ -238,6 +410,8 @@ pub struct AgentCore {
     last_repair_issue: Option<String>,
     pending_approval: Option<PendingApproval>,
     bash_approval_mode: BashApprovalMode,
+    current_action_turn_id: Option<String>,
+    current_action_user_question: String,
 }
 impl AgentCore {
     pub fn new(
@@ -253,6 +427,7 @@ impl AgentCore {
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
             shell_jobs: FileShellJobStore::new(memory_dir),
+            action_audit: FileActionAuditStore::new(memory_dir),
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
             next_shrink_review_prompt_tokens: 0,
@@ -265,6 +440,8 @@ impl AgentCore {
             last_repair_issue: None,
             pending_approval: None,
             bash_approval_mode: BashApprovalMode::Ask,
+            current_action_turn_id: None,
+            current_action_user_question: String::new(),
         }
     }
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
@@ -304,6 +481,8 @@ impl AgentCore {
         self.repair_attempted = false;
         self.last_repair_issue = None;
         self.pending_approval = None;
+        self.current_action_turn_id = None;
+        self.current_action_user_question.clear();
     }
     pub fn memory_git_commit_count(&self) -> usize {
         self.memory.git_commit_count()
@@ -315,6 +494,14 @@ impl AgentCore {
         self.repair_attempted = false;
         self.last_repair_issue = None;
         self.pending_approval = None;
+        let action_turn_id = unique_id("action_turn");
+        self.current_action_turn_id = Some(action_turn_id.clone());
+        self.current_action_user_question = user_input.trim().to_string();
+        self.action_audit.begin_turn(
+            &action_turn_id,
+            now_ms(),
+            &self.current_action_user_question,
+        );
         let should_memory_precheck = supporting_context
             .map(should_run_memory_precheck)
             .unwrap_or(false);
@@ -492,6 +679,7 @@ impl AgentCore {
                 pending.command, pending.request.approval_id, pending.request.reason
             )
         };
+        self.record_pending_approval_audit(&pending, approved, &result);
         self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
@@ -816,6 +1004,7 @@ impl AgentCore {
     }
 
     fn execute_action(&mut self, action: ParsedAction) -> ActionExecution {
+        let action_for_audit = action.clone();
         let result = match action.action.as_str() {
             "chat_history_query" => {
                 self.current_stats.tool_calls += 1;
@@ -1059,7 +1248,7 @@ impl AgentCore {
             }
             "run_bash" => {
                 self.current_stats.tool_calls += 1;
-                return execute_guarded_bash(
+                let execution = execute_guarded_bash(
                     &action.command,
                     &action.read_back_command,
                     action.large_readback_opt_in,
@@ -1069,10 +1258,88 @@ impl AgentCore {
                     &action.intent,
                     &self.shell_jobs,
                 );
+                match &execution {
+                    ActionExecution::Completed(result) => {
+                        self.record_action_audit(&action_for_audit, "completed", Some(result));
+                    }
+                    ActionExecution::NeedsApproval(pending) => {
+                        let result = format!(
+                            "Action result: run_bash\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
+                            pending.command,
+                            pending.request.approval_id,
+                            pending.request.risk,
+                            pending.request.reason
+                        );
+                        self.record_action_audit(
+                            &action_for_audit,
+                            "needs_user_approval",
+                            Some(&result),
+                        );
+                    }
+                }
+                return execution;
             }
             other => format!("Action result: {}\nunsupported native action", other),
         };
+        self.record_action_audit(&action_for_audit, "completed", Some(&result));
         ActionExecution::Completed(result)
+    }
+
+    fn record_action_audit(&self, action: &ParsedAction, status: &str, result: Option<&str>) {
+        let turn_id = self
+            .current_action_turn_id
+            .as_deref()
+            .unwrap_or("unknown_turn");
+        self.action_audit.record_action(
+            ActionAuditEntry {
+                time_ms: now_ms(),
+                round: self.current_round.max(1),
+                action: action.action.clone(),
+                intent: action.intent.clone(),
+                status: status.to_string(),
+                input: action.audit_input(),
+                result_summary: result.map(|text| compact_text(text, 2_000)),
+            },
+            turn_id,
+            &self.current_action_user_question,
+        );
+    }
+
+    fn record_pending_approval_audit(
+        &self,
+        pending: &PendingApproval,
+        approved: bool,
+        result: &str,
+    ) {
+        let turn_id = self
+            .current_action_turn_id
+            .as_deref()
+            .unwrap_or("unknown_turn");
+        self.action_audit.record_action(
+            ActionAuditEntry {
+                time_ms: now_ms(),
+                round: self.current_round.max(1),
+                action: pending.request.action.clone(),
+                intent: pending.intent.clone(),
+                status: if approved {
+                    "approved_completed".to_string()
+                } else {
+                    "denied_by_user".to_string()
+                },
+                input: json!({
+                    "command": pending.command,
+                    "read_back_command": pending.read_back_command,
+                    "background": pending.background,
+                    "timeout_ms": pending.timeout_ms,
+                    "approval_id": pending.request.approval_id,
+                    "risk": pending.request.risk,
+                    "reason": pending.request.reason,
+                }),
+                result_summary: Some(compact_text(result, 2_000)),
+            },
+            turn_id,
+            &self.current_action_user_question,
+        );
     }
 
     fn apply_prompt_shrink(&mut self, delta_ids: &[String], slice_ids: &[String]) -> String {

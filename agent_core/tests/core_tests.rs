@@ -2213,6 +2213,53 @@ fn run_bash_allows_readonly_count_command() {
 }
 
 #[test]
+fn action_audit_groups_actions_by_user_turn_and_round() {
+    let dir = tmp_dir("action_audit_grouping");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("整理这个任务", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"记录任务计划","input":{"content":"step one"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    match step {
+        CoreStep::NeedModel { .. } => {}
+        other => panic!("unexpected step: {other:?}"),
+    }
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"查询任务计划","input":{"query":"step","limit":3}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    match step {
+        CoreStep::NeedModel { .. } => {}
+        other => panic!("unexpected step: {other:?}"),
+    }
+
+    let audit_path = dir.join("audit").join("action_audit.json");
+    let audit_text = fs::read_to_string(audit_path).unwrap();
+    let audit: serde_json::Value = serde_json::from_str(&audit_text).unwrap();
+    let turns = audit["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["user_question"], "整理这个任务");
+    let interactions = turns[0]["interactions"].as_array().unwrap();
+    assert_eq!(interactions.len(), 2);
+    assert_eq!(interactions[0]["round"], 1);
+    assert_eq!(interactions[0]["actions"][0]["action"], "scratch_write");
+    assert_eq!(interactions[0]["actions"][0]["intent"], "记录任务计划");
+    assert_eq!(interactions[0]["actions"][0]["status"], "completed");
+    assert_eq!(
+        interactions[0]["actions"][0]["input"]["content"],
+        "step one"
+    );
+    assert_eq!(interactions[1]["round"], 2);
+    assert_eq!(interactions[1]["actions"][0]["action"], "scratch_query");
+    assert_eq!(interactions[1]["actions"][0]["intent"], "查询任务计划");
+}
+
+#[test]
 fn run_bash_accepts_old_timeout_sec_field() {
     let mut core = AgentCore::new(
         "STATIC",

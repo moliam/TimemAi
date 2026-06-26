@@ -951,7 +951,17 @@ pub fn append_audit(path: &Path, event: &Value) -> std::io::Result<()> {
 }
 
 pub fn audit_path(space: &str) -> PathBuf {
-    data_root().join(space).join("api_audit.jsonl")
+    data_root()
+        .join(space)
+        .join("audit")
+        .join("api_audit.jsonl")
+}
+
+pub fn action_audit_path(space: &str) -> PathBuf {
+    data_root()
+        .join(space)
+        .join("audit")
+        .join("action_audit.json")
 }
 
 pub fn data_root() -> PathBuf {
@@ -2258,13 +2268,23 @@ mod tests {
         std::env::remove_var("TIMEM_DATA_DIR");
         assert_eq!(
             audit_path(".test_mem"),
-            std::path::PathBuf::from("data/.test_mem/api_audit.jsonl")
+            std::path::PathBuf::from("data/.test_mem/audit/api_audit.jsonl")
+        );
+        assert_eq!(
+            action_audit_path(".test_mem"),
+            std::path::PathBuf::from("data/.test_mem/audit/action_audit.json")
         );
 
         std::env::set_var("TIMEM_DATA_DIR", "/tmp/timem-shell-data-test");
         assert_eq!(
             audit_path(".test_mem"),
-            std::path::PathBuf::from("/tmp/timem-shell-data-test/.test_mem/api_audit.jsonl")
+            std::path::PathBuf::from("/tmp/timem-shell-data-test/.test_mem/audit/api_audit.jsonl")
+        );
+        assert_eq!(
+            action_audit_path(".test_mem"),
+            std::path::PathBuf::from(
+                "/tmp/timem-shell-data-test/.test_mem/audit/action_audit.json"
+            )
         );
         std::env::remove_var("TIMEM_DATA_DIR");
     }

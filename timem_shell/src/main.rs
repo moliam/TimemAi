@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
-    action_status_hint, append_audit, audit_path, call_model, data_root, local_time_label,
-    observation_events_from_model_response, parse_cli_args, provider_config_from_env,
-    render_final_response_at, render_prof_report, render_shell_status_bar, render_thinking_view_at,
-    supporting_context, ApiProtocol, ModelDirection, ObservationEvent, ObservationPanel,
-    RuntimeProfiler, ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone,
-    ThinkingViewSnapshot, SPINNER_ICONS, TIMEM_LOGO,
+    action_audit_path, action_status_hint, append_audit, audit_path, call_model, data_root,
+    local_time_label, observation_events_from_model_response, parse_cli_args,
+    provider_config_from_env, render_final_response_at, render_prof_report,
+    render_shell_status_bar, render_thinking_view_at, supporting_context, ApiProtocol,
+    ModelDirection, ObservationEvent, ObservationPanel, RuntimeProfiler, ShellStatusMessage,
+    ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -66,6 +66,7 @@ fn main() {
         .or_else(|| env.get("TIMEM_SPACE").cloned())
         .unwrap_or_else(|| ".test_mem".to_string());
     let audit_file = audit_path(&space);
+    let action_audit_file = action_audit_path(&space);
     let memory_dir = audit_file
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -122,7 +123,13 @@ fn main() {
     println!("Timem native shell");
     print!(
         "{}",
-        render_startup_banner(&space, &config, &audit_file, bash_approval_mode)
+        render_startup_banner(
+            &space,
+            &config,
+            &audit_file,
+            &action_audit_file,
+            bash_approval_mode,
+        )
     );
     println!("输入 /prof 查看运行 profiling；输入 /exit 退出；Ctrl+C 取消当前输入。\n");
 
@@ -171,7 +178,13 @@ fn main() {
             if run_config_menu(&mut config, &mut core, &mut bash_approval_mode) {
                 println!(
                     "{}",
-                    render_startup_banner(&space, &config, &audit_file, bash_approval_mode)
+                    render_startup_banner(
+                        &space,
+                        &config,
+                        &audit_file,
+                        &action_audit_file,
+                        bash_approval_mode,
+                    )
                 );
             }
             continue;
@@ -1998,6 +2011,7 @@ fn render_startup_banner(
     space: &str,
     config: &timem_shell::ProviderConfig,
     audit_file: &std::path::Path,
+    action_audit_file: &std::path::Path,
     bash_approval_mode: BashApprovalMode,
 ) -> String {
     let default_protocol = timem_shell::default_api_protocol_for_provider(&config.provider);
@@ -2065,7 +2079,13 @@ fn render_startup_banner(
         ConfigTableItem::Row(ConfigRow {
             key: "local_audit".to_string(),
             value: absolute_display_path(audit_file),
-            desc: "原始流量审计存储",
+            desc: "payload 记录",
+            highlight: false,
+        }),
+        ConfigTableItem::Row(ConfigRow {
+            key: "".to_string(),
+            value: absolute_display_path(action_audit_file),
+            desc: "action 记录",
             highlight: false,
         }),
     ];
@@ -2579,7 +2599,8 @@ mod static_prompt_tests {
         let banner = render_startup_banner(
             ".xxx_mem",
             &config,
-            std::path::Path::new(".xxx_mem/shell_audit.jsonl"),
+            std::path::Path::new(".xxx_mem/audit/api_audit.jsonl"),
+            std::path::Path::new(".xxx_mem/audit/action_audit.json"),
             BashApprovalMode::Approve,
         );
 
@@ -2625,6 +2646,11 @@ mod static_prompt_tests {
         assert!(banner.contains("approve"));
         assert!(banner.contains("TIMEM_DATA_DIR"));
         assert!(banner.contains("/data"));
+        assert!(banner.contains("local_audit"));
+        assert!(banner.contains("api_audit.jsonl"));
+        assert!(banner.contains("payload 记录"));
+        assert!(banner.contains("action_audit.json"));
+        assert!(banner.contains("action 记录"));
         assert!(!banner.contains("TIMEM_API_KEY=secret"));
         let table_lines: Vec<&str> = banner
             .lines()
@@ -2705,7 +2731,8 @@ mod static_prompt_tests {
         let default_banner = render_startup_banner(
             ".test_mem",
             &default_config,
-            std::path::Path::new(".test_mem/shell_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/api_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
         );
         assert!(!default_banner.contains(ANSI_HIGHLIGHT));
@@ -2723,7 +2750,8 @@ mod static_prompt_tests {
         let override_banner = render_startup_banner(
             ".test_mem",
             &override_config,
-            std::path::Path::new(".test_mem/shell_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/api_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
         );
         assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}anthropic")));
@@ -2754,7 +2782,8 @@ mod static_prompt_tests {
         let banner = render_startup_banner(
             ".test_mem",
             &config,
-            std::path::Path::new(".test_mem/shell_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/api_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
         );
 
