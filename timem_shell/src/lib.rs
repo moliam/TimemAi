@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod observation;
 mod profiler;
@@ -979,6 +980,18 @@ pub fn call_model(
     prompt: &str,
     audit_file: &Path,
 ) -> Result<LlmResponse, String> {
+    call_model_with_cancel(config, prompt, audit_file, || false)
+}
+
+pub fn call_model_with_cancel<F>(
+    config: &ProviderConfig,
+    prompt: &str,
+    audit_file: &Path,
+    mut should_cancel: F,
+) -> Result<LlmResponse, String>
+where
+    F: FnMut() -> bool,
+{
     let prompt_blocks = prompt_cache::plan_prompt_cache(prompt);
     let structured_output = structured_output::plan_structured_output(config);
     let request_body =
@@ -1024,11 +1037,8 @@ pub fn call_model(
         }
     }
     let body = serde_json::to_string(&request_body).map_err(|e| e.to_string())?;
-    let output = command
-        .arg("--data")
-        .arg(body)
-        .output()
-        .map_err(|e| e.to_string())?;
+    command.arg("--data").arg(body);
+    let output = run_command_with_cancel(command, &mut should_cancel)?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !output.status.success() && stdout.trim().is_empty() {
@@ -1048,6 +1058,28 @@ pub fn call_model(
         return Err(provider_http_error_message(status, &raw_json));
     }
     parse_llm_response(config, &raw_json)
+}
+
+fn run_command_with_cancel<F>(mut command: Command, should_cancel: &mut F) -> Result<Output, String>
+where
+    F: FnMut() -> bool,
+{
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    loop {
+        if should_cancel() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cancelled_by_user".to_string());
+        }
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(_) => return child.wait_with_output().map_err(|e| e.to_string()),
+            None => thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 pub fn provider_http_error_message(status: u16, body: &Value) -> String {
@@ -1231,6 +1263,24 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn cancellable_command_returns_without_waiting_for_process_timeout() {
+        let started = std::time::Instant::now();
+        let cancel_after = std::time::Instant::now() + Duration::from_millis(80);
+        let err = run_command_with_cancel(
+            {
+                let mut command = Command::new("sh");
+                command.arg("-c").arg("sleep 5; echo done");
+                command
+            },
+            &mut || std::time::Instant::now() >= cancel_after,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "cancelled_by_user");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

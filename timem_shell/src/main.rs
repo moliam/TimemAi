@@ -1,7 +1,13 @@
 use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreStep, UsageStats};
+use crossterm::event::Event;
+use reedline::{
+    default_emacs_keybindings, EditCommand, EditMode, Emacs, FileBackedHistory, Highlighter,
+    KeyCode, KeyModifiers, Keybindings, Prompt, PromptEditMode, PromptHistorySearch,
+    PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineRawEvent, Signal, StyledText,
+};
 use serde_json::json;
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -13,9 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
-    action_audit_path, action_status_hint, append_audit, audit_path, call_model, data_root,
-    local_time_label, memory_path, observation_events_from_model_response, parse_cli_args,
-    provider_config_from_env, render_final_response_at, render_prof_report,
+    action_audit_path, action_status_hint, append_audit, audit_path, call_model_with_cancel,
+    data_root, local_time_label, memory_path, observation_events_from_model_response,
+    parse_cli_args, provider_config_from_env, render_final_response_at, render_prof_report,
     render_shell_status_bar, render_thinking_view_at, supporting_context, ApiProtocol,
     ModelDirection, ObservationEvent, ObservationPanel, RuntimeProfiler, ShellStatusMessage,
     ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, SPINNER_ICONS, TIMEM_LOGO,
@@ -26,6 +32,8 @@ const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.json");
 const ANSI_RESET: &str = timem_shell::ANSI_RESET;
 const ANSI_BOLD: &str = timem_shell::ANSI_BOLD;
 const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
+const PASTE_START_MARKER: char = '\u{2063}';
+const PASTE_END_MARKER: char = '\u{2064}';
 static TURN_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 const STALE_CONTEXT_IDLE: Duration = Duration::from_secs(3 * 60 * 60);
 const STALE_CONTEXT_TOKEN_THRESHOLD: u32 = 10_000;
@@ -273,7 +281,9 @@ fn run_turn(
                     status.set_transient_observation("思考中...");
                 }
                 let model_wait_start = Instant::now();
-                match call_model(config, &prompt, audit_file) {
+                match call_model_with_cancel(config, &prompt, audit_file, || {
+                    TURN_CANCEL_REQUESTED.load(Ordering::SeqCst)
+                }) {
                     Ok(response) => {
                         let model_wait = model_wait_start.elapsed();
                         model_wait_this_turn = model_wait_this_turn.saturating_add(model_wait);
@@ -1188,7 +1198,13 @@ fn sanitize_user_input(input: &str) -> String {
     let without_paste_markers = input.replace("\x1b[200~", "").replace("\x1b[201~", "");
     strip_csi_sequences(&without_paste_markers)
         .chars()
-        .filter(|ch| *ch == '\t' || *ch == '\n' || (!ch.is_control() && *ch != '\r'))
+        .filter(|ch| {
+            *ch == '\t'
+                || *ch == '\n'
+                || *ch == PASTE_START_MARKER
+                || *ch == PASTE_END_MARKER
+                || (!ch.is_control() && *ch != '\r')
+        })
         .collect()
 }
 
@@ -1210,6 +1226,99 @@ fn strip_csi_sequences(input: &str) -> String {
     out
 }
 
+fn normalize_newlines(input: &str) -> String {
+    input.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn pasted_line_count(text: &str) -> usize {
+    normalize_newlines(text).split('\n').count()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PasteRecoverySummary {
+    dirty_count: usize,
+    total_lines: usize,
+}
+
+fn strip_paste_markers(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| *ch != PASTE_START_MARKER && *ch != PASTE_END_MARKER)
+        .collect()
+}
+
+fn paste_recovery_summary_from_markers(
+    input: &str,
+    records: &[PasteRecord],
+) -> Option<PasteRecoverySummary> {
+    let mut dirty_count = 0usize;
+    let mut total_lines = 0usize;
+    for (idx, marked) in paste_marker_segments(input).into_iter().enumerate() {
+        let Some(record) = records.get(idx) else {
+            continue;
+        };
+        if marked != record.placeholder {
+            dirty_count += 1;
+            total_lines += pasted_line_count(&record.content);
+        }
+    }
+    (dirty_count > 0).then_some(PasteRecoverySummary {
+        dirty_count,
+        total_lines,
+    })
+}
+
+fn resolve_paste_markers(input: &str, records: &[PasteRecord], restore_dirty: bool) -> String {
+    let mut out = String::new();
+    let mut chars = input.chars().peekable();
+    let mut record_idx = 0usize;
+    while let Some(ch) = chars.next() {
+        if ch != PASTE_START_MARKER {
+            if ch != PASTE_END_MARKER {
+                out.push(ch);
+            }
+            continue;
+        }
+        let mut marked = String::new();
+        for next in chars.by_ref() {
+            if next == PASTE_END_MARKER {
+                break;
+            }
+            marked.push(next);
+        }
+        if let Some(record) = records.get(record_idx) {
+            if restore_dirty || marked == record.placeholder {
+                out.push_str(&record.content);
+            } else {
+                out.push_str(&marked);
+            }
+        } else {
+            out.push_str(&marked);
+        }
+        record_idx += 1;
+    }
+    out
+}
+
+fn paste_marker_segments(input: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != PASTE_START_MARKER {
+            continue;
+        }
+        let mut marked = String::new();
+        for next in chars.by_ref() {
+            if next == PASTE_END_MARKER {
+                break;
+            }
+            marked.push(next);
+        }
+        segments.push(marked);
+    }
+    segments
+}
+
 enum ShellReadline {
     Line { text: String, display: String },
     Interrupted,
@@ -1218,9 +1327,17 @@ enum ShellReadline {
 }
 
 struct ShellLineEditor {
-    history_file: PathBuf,
-    history: Vec<String>,
+    editor: Reedline,
+    paste_records: SharedPasteRecords,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PasteRecord {
+    placeholder: String,
+    content: String,
+}
+
+type SharedPasteRecords = Arc<Mutex<Vec<PasteRecord>>>;
 
 enum ShellInputSource {
     Tty(File),
@@ -1259,672 +1376,288 @@ impl AsRawFd for ShellInputSource {
 
 impl ShellLineEditor {
     fn new(history_file: PathBuf) -> Self {
-        let history = fs::read_to_string(&history_file)
-            .map(|content| {
-                content
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let history = FileBackedHistory::with_file(500, history_file).ok();
+        let paste_records = Arc::new(Mutex::new(Vec::new()));
+        let edit_mode = Box::new(TimemEditMode::new(paste_records.clone()));
+        let mut editor = Reedline::create()
+            .with_edit_mode(edit_mode)
+            .with_highlighter(Box::new(TimemPasteHighlighter))
+            .with_ansi_colors(true);
+        if let Some(history) = history {
+            editor = editor.with_history(Box::new(history));
+        }
         Self {
-            history_file,
-            history,
+            editor,
+            paste_records,
         }
     }
 
     fn readline(&mut self, prompt: &str) -> ShellReadline {
-        let Ok(mut input) = ShellInputSource::open() else {
-            return ShellReadline::Error("failed to open terminal input".to_string());
+        if let Ok(mut records) = self.paste_records.lock() {
+            records.clear();
+        }
+        let prompt = TimemReedlinePrompt {
+            indicator: prompt.to_string(),
         };
-        let fd = input.as_raw_fd();
-        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
-            return ShellReadline::Error("failed to read terminal mode".to_string());
-        }
-        let mut raw = original;
-        raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-        raw.c_cc[libc::VMIN] = 1;
-        raw.c_cc[libc::VTIME] = 1;
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-            return ShellReadline::Error("failed to enter raw terminal mode".to_string());
-        }
-        let mut terminal_mode = TerminalModeGuard::new(fd, original);
-        print!("\x1b[?2004h");
-
-        let mut buffer = ShellInputBuffer::default();
-        let mut render_state = ShellInputRenderState::default();
-        let mut history_cursor: Option<usize> = None;
-        render_shell_input(prompt, &buffer, &mut render_state);
-
-        let result = loop {
-            match read_shell_key(&mut input) {
-                ShellInputKey::Char(ch) => {
-                    buffer.insert_text(&ch.to_string());
-                    history_cursor = None;
+        let _keyboard_guard = ReedlineKeyboardProtocolGuard::enter();
+        match self.editor.read_line(&prompt) {
+            Ok(Signal::Success(text)) => {
+                let queued = drain_queued_tty_input();
+                if queued.interrupted {
+                    TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+                    return ShellReadline::Interrupted;
                 }
-                ShellInputKey::Paste(text) => {
-                    buffer.insert_paste(&sanitize_user_input(&text));
-                    history_cursor = None;
-                }
-                ShellInputKey::Backspace => {
-                    buffer.delete_before_cursor();
-                    history_cursor = None;
-                }
-                ShellInputKey::Delete => {
-                    buffer.delete_at_cursor();
-                    history_cursor = None;
-                }
-                ShellInputKey::Newline => {
-                    buffer.insert_text("\n");
-                    history_cursor = None;
-                }
-                ShellInputKey::Left => buffer.move_left(),
-                ShellInputKey::Right => buffer.move_right(),
-                ShellInputKey::HistoryPrev => {
-                    if !self.history.is_empty() {
-                        let next = history_cursor
-                            .map(|idx| idx.saturating_sub(1))
-                            .unwrap_or_else(|| self.history.len().saturating_sub(1));
-                        history_cursor = Some(next);
-                        buffer = ShellInputBuffer::from_text(self.history[next].clone());
-                    }
-                }
-                ShellInputKey::HistoryNext => {
-                    if let Some(idx) = history_cursor {
-                        let next = idx + 1;
-                        if next < self.history.len() {
-                            history_cursor = Some(next);
-                            buffer = ShellInputBuffer::from_text(self.history[next].clone());
-                        } else {
-                            history_cursor = None;
-                            buffer = ShellInputBuffer::default();
-                        }
-                    }
-                }
-                ShellInputKey::Enter => {
-                    buffer.move_to_end();
-                    render_shell_input(prompt, &buffer, &mut render_state);
-                    let display = buffer.display_plain();
-                    println!();
-                    print!("\x1b[?2004l");
-                    terminal_mode.restore();
-                    let restore_dirty = buffer
-                        .dirty_paste_summary()
-                        .map(|summary| {
-                            matches!(choose_paste_recovery(&summary), ApprovalChoice::Allow)
-                        })
-                        .unwrap_or(false);
-                    let text = buffer.submit_text(restore_dirty);
-                    if !text.trim().is_empty() {
-                        self.push_history(&text);
-                    }
-                    break ShellReadline::Line { text, display };
-                }
-                ShellInputKey::Cancel => {
-                    println!();
-                    break ShellReadline::Interrupted;
-                }
-                ShellInputKey::Eof => {
-                    println!();
-                    break ShellReadline::Eof;
-                }
-                ShellInputKey::Other => {}
+                let raw_input = merge_queued_input(text, &queued);
+                let raw = sanitize_user_input(&raw_input);
+                let records = self
+                    .paste_records
+                    .lock()
+                    .map(|records| records.clone())
+                    .unwrap_or_default();
+                let summary = paste_recovery_summary_from_markers(&raw, &records);
+                let restore_dirty = summary
+                    .as_ref()
+                    .map(|summary| matches!(choose_paste_recovery(summary), ApprovalChoice::Allow))
+                    .unwrap_or(false);
+                let text = resolve_paste_markers(&raw, &records, restore_dirty);
+                let display = strip_paste_markers(&raw);
+                ShellReadline::Line { display, text }
             }
-            render_shell_input(prompt, &buffer, &mut render_state);
-        };
-
-        print!("\x1b[?2004l");
-        let _ = io::stdout().flush();
-        terminal_mode.restore();
-        result
-    }
-
-    fn push_history(&mut self, text: &str) {
-        if text.contains('\n') {
-            return;
-        }
-        if self.history.last().is_some_and(|last| last == text) {
-            return;
-        }
-        self.history.push(text.to_string());
-        if self.history.len() > 500 {
-            let drain = self.history.len() - 500;
-            self.history.drain(0..drain);
-        }
-        let mut content = self.history.join("\n");
-        content.push('\n');
-        let _ = fs::write(&self.history_file, content);
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ShellInputToken {
-    Text(String),
-    MultiLinePaste {
-        original_placeholder: String,
-        visible_placeholder: String,
-        content: String,
-        line_count: usize,
-    },
-}
-
-impl ShellInputToken {
-    fn display_plain(&self) -> &str {
-        match self {
-            ShellInputToken::Text(text) => text,
-            ShellInputToken::MultiLinePaste {
-                visible_placeholder,
-                ..
-            } => visible_placeholder,
-        }
-    }
-
-    fn submit_text(&self, restore_dirty: bool) -> &str {
-        match self {
-            ShellInputToken::Text(text) => text,
-            ShellInputToken::MultiLinePaste {
-                original_placeholder,
-                visible_placeholder,
-                content,
-                ..
-            } if restore_dirty || visible_placeholder == original_placeholder => content,
-            ShellInputToken::MultiLinePaste {
-                visible_placeholder,
-                ..
-            } => visible_placeholder,
-        }
-    }
-
-    fn display_len(&self) -> usize {
-        self.display_plain().chars().count()
-    }
-
-    fn dirty_paste_line_count(&self) -> Option<usize> {
-        match self {
-            ShellInputToken::MultiLinePaste {
-                original_placeholder,
-                visible_placeholder,
-                line_count,
-                ..
-            } if visible_placeholder != original_placeholder => Some(*line_count),
-            _ => None,
+            Ok(Signal::CtrlC) => ShellReadline::Interrupted,
+            Ok(Signal::CtrlD) => ShellReadline::Eof,
+            Ok(_) => ShellReadline::Interrupted,
+            Err(err) => ShellReadline::Error(format!("readline_failed: {err}")),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PasteRecoverySummary {
-    dirty_count: usize,
-    total_lines: usize,
+#[derive(Default)]
+struct QueuedInputDrain {
+    text: String,
+    interrupted: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct ShellInputBuffer {
-    tokens: Vec<ShellInputToken>,
-    cursor: usize,
+fn merge_queued_input(mut submitted: String, queued: &QueuedInputDrain) -> String {
+    if !queued.text.is_empty() {
+        submitted.push('\n');
+        submitted.push_str(&queued.text);
+    }
+    submitted
 }
 
-impl ShellInputBuffer {
-    fn from_text(text: String) -> Self {
-        let cursor = text.chars().count();
-        Self {
-            tokens: vec![ShellInputToken::Text(text)],
-            cursor,
-        }
-    }
-
-    fn insert_text(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        self.replace_visible_range(
-            self.cursor,
-            self.cursor,
-            vec![ShellInputToken::Text(text.to_string())],
-        );
-        self.cursor += text.chars().count();
-    }
-
-    fn insert_paste(&mut self, text: &str) {
-        let line_count = pasted_line_count(text);
-        if line_count <= 1 {
-            self.insert_text(text);
-            return;
-        }
-        let placeholder = format!("[ pasted {line_count} lines ]");
-        let placeholder_len = placeholder.chars().count();
-        self.replace_visible_range(
-            self.cursor,
-            self.cursor,
-            vec![ShellInputToken::MultiLinePaste {
-                original_placeholder: placeholder.clone(),
-                visible_placeholder: placeholder,
-                content: text.to_string(),
-                line_count,
-            }],
-        );
-        self.cursor += placeholder_len;
-    }
-
-    fn delete_before_cursor(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let start = self.cursor - 1;
-        self.replace_visible_range(start, self.cursor, Vec::new());
-        self.cursor = start;
-    }
-
-    fn delete_at_cursor(&mut self) {
-        if self.cursor >= self.visible_len() {
-            return;
-        }
-        self.replace_visible_range(self.cursor, self.cursor + 1, Vec::new());
-    }
-
-    fn move_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
-    }
-
-    fn move_right(&mut self) {
-        self.cursor = (self.cursor + 1).min(self.visible_len());
-    }
-
-    fn move_to_end(&mut self) {
-        self.cursor = self.visible_len();
-    }
-
-    fn visible_len(&self) -> usize {
-        self.tokens.iter().map(ShellInputToken::display_len).sum()
-    }
-
-    fn display_plain(&self) -> String {
-        self.tokens
-            .iter()
-            .map(ShellInputToken::display_plain)
-            .collect()
-    }
-
-    fn display_styled(&self) -> String {
-        let mut out = String::new();
-        for token in &self.tokens {
-            match token {
-                ShellInputToken::Text(text) => out.push_str(text),
-                ShellInputToken::MultiLinePaste {
-                    visible_placeholder,
-                    ..
-                } => {
-                    out.push_str("\x1b[1m");
-                    out.push_str(visible_placeholder);
-                    out.push_str(ANSI_RESET);
-                }
-            }
-        }
-        out
-    }
-
-    fn submit_text(&self, restore_dirty: bool) -> String {
-        self.tokens
-            .iter()
-            .map(|token| token.submit_text(restore_dirty))
-            .collect()
-    }
-
-    fn dirty_paste_summary(&self) -> Option<PasteRecoverySummary> {
-        let mut dirty_count = 0usize;
-        let mut total_lines = 0usize;
-        for token in &self.tokens {
-            if let Some(lines) = token.dirty_paste_line_count() {
-                dirty_count += 1;
-                total_lines += lines;
-            }
-        }
-        (dirty_count > 0).then_some(PasteRecoverySummary {
-            dirty_count,
-            total_lines,
-        })
-    }
-
-    fn display_prefix_before_cursor(&self) -> String {
-        char_prefix(&self.display_plain(), self.cursor)
-    }
-
-    fn replace_visible_range(
-        &mut self,
-        start: usize,
-        end: usize,
-        replacement: Vec<ShellInputToken>,
-    ) {
-        let mut next = Vec::new();
-        let mut inserted = false;
-        let mut pos = 0usize;
-
-        for token in &self.tokens {
-            let token_start = pos;
-            let token_end = token_start + token.display_len();
-            pos = token_end;
-
-            if end <= token_start {
-                if !inserted {
-                    next.extend(replacement.clone());
-                    inserted = true;
-                }
-                next.push(token.clone());
-                continue;
-            }
-            if start >= token_end {
-                next.push(token.clone());
-                continue;
-            }
-
-            let visible = token.display_plain();
-            let replacement_text = replacement
-                .iter()
-                .map(ShellInputToken::display_plain)
-                .collect::<String>();
-            if let ShellInputToken::MultiLinePaste {
-                original_placeholder,
-                content,
-                line_count,
-                ..
-            } = token
-            {
-                let before = if start > token_start {
-                    char_range(visible, 0, start - token_start)
-                } else {
-                    String::new()
-                };
-                let after = if end < token_end {
-                    char_range(visible, end - token_start, token_end - token_start)
-                } else {
-                    String::new()
-                };
-                next.push(ShellInputToken::MultiLinePaste {
-                    original_placeholder: original_placeholder.clone(),
-                    visible_placeholder: format!("{before}{replacement_text}{after}"),
-                    content: content.clone(),
-                    line_count: *line_count,
-                });
-                inserted = true;
-                continue;
-            }
-            if start > token_start {
-                next.push(ShellInputToken::Text(char_range(
-                    visible,
-                    0,
-                    start - token_start,
-                )));
-            }
-            if !inserted {
-                next.extend(replacement.clone());
-                inserted = true;
-            }
-            if end < token_end {
-                next.push(ShellInputToken::Text(char_range(
-                    visible,
-                    end - token_start,
-                    token_end - token_start,
-                )));
-            }
-        }
-
-        if !inserted {
-            next.extend(replacement);
-        }
-        self.tokens = merge_text_tokens(next);
-    }
-}
-
-fn merge_text_tokens(tokens: Vec<ShellInputToken>) -> Vec<ShellInputToken> {
-    let mut merged: Vec<ShellInputToken> = Vec::new();
-    for token in tokens {
-        match token {
-            ShellInputToken::Text(text) if text.is_empty() => {}
-            ShellInputToken::Text(text) => match merged.last_mut() {
-                Some(ShellInputToken::Text(previous)) => previous.push_str(&text),
-                _ => merged.push(ShellInputToken::Text(text)),
-            },
-            ShellInputToken::MultiLinePaste {
-                original_placeholder,
-                visible_placeholder,
-                content,
-                line_count,
-            } => merged.push(ShellInputToken::MultiLinePaste {
-                original_placeholder,
-                visible_placeholder,
-                content,
-                line_count,
-            }),
-        }
-    }
-    merged
-}
-
-fn pasted_line_count(text: &str) -> usize {
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    normalized.split('\n').count()
-}
-
-fn char_prefix(text: &str, end: usize) -> String {
-    text.chars().take(end).collect()
-}
-
-fn char_range(text: &str, start: usize, end: usize) -> String {
-    text.chars().skip(start).take(end - start).collect()
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ShellInputKey {
-    Char(char),
-    Paste(String),
-    Backspace,
-    Delete,
-    Left,
-    Right,
-    HistoryPrev,
-    HistoryNext,
-    Newline,
-    Enter,
-    Cancel,
-    Eof,
-    Other,
-}
-
-fn read_shell_key(input: &mut impl Read) -> ShellInputKey {
-    let mut buf = [0u8; 1];
-    if input.read_exact(&mut buf).is_err() {
-        return ShellInputKey::Eof;
-    }
-    match buf[0] {
-        b'\r' | b'\n' => ShellInputKey::Enter,
-        3 => ShellInputKey::Cancel,
-        4 => ShellInputKey::Eof,
-        8 | 127 => ShellInputKey::Backspace,
-        27 => read_shell_escape(input),
-        byte if byte.is_ascii_control() => ShellInputKey::Other,
-        first => read_utf8_char(first, input)
-            .map(ShellInputKey::Char)
-            .unwrap_or(ShellInputKey::Other),
-    }
-}
-
-fn read_shell_escape(input: &mut impl Read) -> ShellInputKey {
-    let Some(seq) = read_escape_sequence(input) else {
-        return ShellInputKey::Cancel;
+fn drain_queued_tty_input() -> QueuedInputDrain {
+    let Ok(mut tty) = OpenOptions::new().read(true).open("/dev/tty") else {
+        return QueuedInputDrain::default();
     };
-    match seq.as_slice() {
-        [b'[', b'D'] => ShellInputKey::Left,
-        [b'[', b'C'] => ShellInputKey::Right,
-        [b'[', b'A'] => ShellInputKey::HistoryPrev,
-        [b'[', b'B'] => ShellInputKey::HistoryNext,
-        [b'[', b'3', b'~'] => ShellInputKey::Delete,
-        [b'[', b'1', b'3', b';', b'2', b'u']
-        | [b'[', b'1', b'3', b';', b'2', b'~']
-        | [b'[', b'2', b'7', b';', b'2', b';', b'1', b'3', b'~'] => ShellInputKey::Newline,
-        [b'[', b'2', b'0', b'0', b'~'] => ShellInputKey::Paste(read_bracketed_paste(input)),
-        _ => ShellInputKey::Other,
+    let fd = tty.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return QueuedInputDrain::default();
     }
-}
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return QueuedInputDrain::default();
+    }
 
-fn read_bracketed_paste(input: &mut impl Read) -> String {
     let mut bytes = Vec::new();
-    let end = b"\x1b[201~";
-    loop {
-        let mut buf = [0u8; 1];
-        if input.read_exact(&mut buf).is_err() {
-            break;
+    let mut buf = [0u8; 4096];
+    let first = tty.read(&mut buf);
+    match first {
+        Ok(0) => {
+            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+            return QueuedInputDrain::default();
         }
-        bytes.push(buf[0]);
-        if bytes.ends_with(end) {
-            let new_len = bytes.len().saturating_sub(end.len());
-            bytes.truncate(new_len);
-            break;
+        Ok(n) => bytes.extend_from_slice(&buf[..n]),
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+            return QueuedInputDrain::default();
+        }
+        Err(_) => {
+            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+            return QueuedInputDrain::default();
         }
     }
-    String::from_utf8_lossy(&bytes).into_owned()
-}
 
-fn read_utf8_char(first: u8, input: &mut impl Read) -> Option<char> {
-    let width = if first < 0x80 {
-        1
-    } else if first & 0b1110_0000 == 0b1100_0000 {
-        2
-    } else if first & 0b1111_0000 == 0b1110_0000 {
-        3
-    } else if first & 0b1111_1000 == 0b1111_0000 {
-        4
-    } else {
-        return None;
-    };
-    let mut bytes = vec![first];
-    for _ in 1..width {
-        let mut buf = [0u8; 1];
-        input.read_exact(&mut buf).ok()?;
-        bytes.push(buf[0]);
+    let started = Instant::now();
+    let mut quiet_deadline = Instant::now() + Duration::from_millis(20);
+    let hard_deadline = started + Duration::from_millis(200);
+    while Instant::now() < quiet_deadline && Instant::now() < hard_deadline {
+        match tty.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                quiet_deadline = Instant::now() + Duration::from_millis(20);
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(_) => break,
+        }
     }
-    std::str::from_utf8(&bytes).ok()?.chars().next()
+    let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+
+    queued_input_drain_from_bytes(&bytes)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct ShellInputRenderState {
-    rows: usize,
-    cursor_row: usize,
+fn queued_input_drain_from_bytes(bytes: &[u8]) -> QueuedInputDrain {
+    QueuedInputDrain {
+        interrupted: bytes.contains(&3),
+        text: String::from_utf8_lossy(bytes).replace('\x03', ""),
+    }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct ShellInputLayout {
-    rows: usize,
-    cursor_row: usize,
-    cursor_col: usize,
+struct ReedlineKeyboardProtocolGuard;
+
+impl ReedlineKeyboardProtocolGuard {
+    fn enter() -> Self {
+        print!("{}", reedline_keyboard_protocol_enter_sequence());
+        let _ = io::stdout().flush();
+        Self
+    }
 }
 
-fn render_shell_input(prompt: &str, buffer: &ShellInputBuffer, state: &mut ShellInputRenderState) {
-    print!("{}", render_shell_input_clear_sequence(*state));
-    print!("{}{}", prompt, buffer.display_styled());
+impl Drop for ReedlineKeyboardProtocolGuard {
+    fn drop(&mut self) {
+        print!("{}", reedline_keyboard_protocol_exit_sequence());
+        let _ = io::stdout().flush();
+    }
+}
 
-    let width = terminal_width().max(1);
-    let prompt_width = display_width(prompt);
-    let plain = buffer.display_plain();
-    let layout = shell_input_layout(
-        prompt_width,
-        &plain,
-        &buffer.display_prefix_before_cursor(),
-        width,
+fn reedline_keyboard_protocol_enter_sequence() -> &'static str {
+    "\x1b[>4;2m\x1b[>1u"
+}
+
+fn reedline_keyboard_protocol_exit_sequence() -> &'static str {
+    "\x1b[>4;0m\x1b[<u"
+}
+
+fn timem_reedline_keybindings() -> Keybindings {
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::SHIFT,
+        KeyCode::Enter,
+        ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
     );
-    let total_row = layout.rows.saturating_sub(1);
-    if total_row > 0 {
-        print!("\x1b[{total_row}F");
-    }
-    print!("\r");
-    if layout.cursor_row > 0 {
-        print!("\x1b[{}B", layout.cursor_row);
-    }
-    if layout.cursor_col > 0 {
-        print!("\x1b[{}C", layout.cursor_col);
-    }
-    *state = ShellInputRenderState {
-        rows: layout.rows,
-        cursor_row: layout.cursor_row,
-    };
-    let _ = io::stdout().flush();
+    keybindings
 }
 
-fn shell_input_layout(
-    prompt_width: usize,
-    plain: &str,
-    cursor_prefix: &str,
-    terminal_width: usize,
-) -> ShellInputLayout {
-    let width = terminal_width.max(1);
-    let cursor = advance_terminal_position(
-        prompt_width / width,
-        prompt_width % width,
-        cursor_prefix,
-        width,
-    );
-    let end = advance_terminal_position(prompt_width / width, prompt_width % width, plain, width);
-    ShellInputLayout {
-        rows: end.0 + 1,
-        cursor_row: cursor.0,
-        cursor_col: cursor.1,
+struct TimemEditMode {
+    inner: Emacs,
+    paste_records: SharedPasteRecords,
+}
+
+impl TimemEditMode {
+    fn new(paste_records: SharedPasteRecords) -> Self {
+        Self {
+            inner: Emacs::new(timem_reedline_keybindings()),
+            paste_records,
+        }
     }
 }
 
-fn advance_terminal_position(
-    mut row: usize,
-    mut col: usize,
-    text: &str,
-    terminal_width: usize,
-) -> (usize, usize) {
-    let width = terminal_width.max(1);
-    for ch in text.chars() {
-        if ch == '\n' {
-            row += 1;
-            col = 0;
-            continue;
+impl EditMode for TimemEditMode {
+    fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
+        let event: Event = event.into();
+        if let Event::Key(key) = &event {
+            if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+                return ReedlineEvent::Edit(vec![EditCommand::InsertNewline]);
+            }
+            if key.code == KeyCode::Char(' ') {
+                return ReedlineEvent::Edit(vec![EditCommand::InsertString(" ".to_string())]);
+            }
         }
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if ch_width == 0 {
-            continue;
+        if let Event::Paste(body) = event {
+            let content = normalize_newlines(&body);
+            let line_count = pasted_line_count(&content);
+            if line_count > 1 {
+                let placeholder = format!("[ pasted {line_count} lines ]");
+                if let Ok(mut records) = self.paste_records.lock() {
+                    records.push(PasteRecord {
+                        placeholder: placeholder.clone(),
+                        content,
+                    });
+                }
+                return ReedlineEvent::Edit(vec![EditCommand::InsertString(format!(
+                    "{PASTE_START_MARKER}{placeholder}{PASTE_END_MARKER}"
+                ))]);
+            }
+            return ReedlineEvent::Edit(vec![EditCommand::InsertString(content)]);
         }
-        if col > 0 && col + ch_width > width {
-            row += 1;
-            col = 0;
-        }
-        col += ch_width;
-        while col >= width {
-            row += 1;
-            col -= width;
+        match ReedlineRawEvent::try_from(event) {
+            Ok(event) => self.inner.parse_event(event),
+            Err(_) => ReedlineEvent::None,
         }
     }
-    (row, col)
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
 }
 
-fn render_shell_input_clear_sequence(state: ShellInputRenderState) -> String {
-    let mut out = String::new();
-    if state.rows == 0 {
-        return out;
-    }
-    if state.cursor_row > 0 {
-        out.push_str(&format!("\r\x1b[{}F", state.cursor_row));
-    } else {
-        out.push('\r');
-    }
-    for idx in 0..state.rows {
-        out.push_str("\x1b[2K");
-        if idx + 1 < state.rows {
-            out.push_str("\x1b[1E");
+struct TimemPasteHighlighter;
+
+impl Highlighter for TimemPasteHighlighter {
+    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
+        let mut styled = StyledText::new();
+        styled.push((nu_ansi_term::Style::new(), line.to_string()));
+        for (start, end) in paste_marker_ranges(line) {
+            styled.style_range(start, end, nu_ansi_term::Style::new().bold());
         }
+        styled
     }
-    if state.rows > 1 {
-        out.push_str(&format!("\r\x1b[{}F", state.rows - 1));
-    } else {
-        out.push('\r');
+}
+
+fn paste_marker_ranges(input: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(start_rel) = input[search_from..].find(PASTE_START_MARKER) {
+        let start_marker = search_from + start_rel;
+        let content_start = start_marker + PASTE_START_MARKER.len_utf8();
+        let Some(end_rel) = input[content_start..].find(PASTE_END_MARKER) else {
+            break;
+        };
+        let content_end = content_start + end_rel;
+        if content_start < content_end {
+            ranges.push((content_start, content_end));
+        }
+        search_from = content_end + PASTE_END_MARKER.len_utf8();
     }
-    out
+    ranges
+}
+
+struct TimemReedlinePrompt {
+    indicator: String,
+}
+
+impl Prompt for TimemReedlinePrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed(self.indicator.as_str())
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: PromptHistorySearch,
+    ) -> Cow<'_, str> {
+        let prefix = match history_search.status {
+            PromptHistorySearchStatus::Passing => "",
+            PromptHistorySearchStatus::Failing => "failing ",
+        };
+        Cow::Owned(format!(
+            "({prefix}reverse-search: {}) ",
+            history_search.term
+        ))
+    }
 }
 
 fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
@@ -2418,24 +2151,35 @@ fn time_label() -> String {
 mod static_prompt_tests {
     use super::{
         apply_config_value, boxed_config_table_at_width, cancelled_turn_result, config_field_value,
-        consume_turn_cancel_request, display_width, epoch_millis, help_text, pasted_line_count,
-        random_spinner_tick, read_approval_key, read_menu_key, read_shell_key,
+        consume_turn_cancel_request, display_width, epoch_millis, help_text, merge_queued_input,
+        normalize_newlines, paste_marker_ranges, paste_marker_segments,
+        paste_recovery_summary_from_markers, pasted_line_count, queued_input_drain_from_bytes,
+        random_spinner_tick, read_approval_key, read_menu_key,
+        reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
         render_approval_choices, render_config_menu, render_expand_output_choices,
         render_expand_output_prompt, render_paste_recovery_choices, render_paste_recovery_prompt,
-        render_round_limit_choices, render_round_limit_prompt, render_shell_input_clear_sequence,
-        render_stale_context_choices, render_stale_context_prompt, render_startup_banner,
-        render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
-        sanitize_user_input, shell_input_layout, stale_context_prompt_needed,
-        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField, ConfigRow,
-        ConfigTableItem, MenuKey, PasteRecoverySummary, ShellInputBuffer, ShellInputKey,
-        ShellInputRenderState, ANSI_HIGHLIGHT, ANSI_RESET, STALE_CONTEXT_IDLE,
+        render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
+        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
+        render_user_approval_prompt, render_user_input_prompt, resolve_paste_markers,
+        sanitize_user_input, stale_context_prompt_needed, strip_paste_markers,
+        timem_reedline_keybindings, wrapped_terminal_rows, ApprovalChoice, ApprovalKey,
+        ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary,
+        QueuedInputDrain, TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt,
+        ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE,
         STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
+    use crossterm::event::Event;
+    use crossterm::event::KeyEvent;
+    use reedline::{
+        EditCommand, EditMode, Highlighter, KeyCode, KeyModifiers, Prompt, ReedlineEvent,
+        ReedlineRawEvent,
+    };
     use std::fs;
     use std::io::Cursor;
     use std::process::Command;
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use timem_shell::{ApiProtocol, ProviderConfig, SPINNER_ICONS};
 
@@ -2527,29 +2271,6 @@ mod static_prompt_tests {
         assert!(!text.contains("模型调用失败"));
         assert_eq!(stats.llm_calls, 0);
         assert_eq!(issue.as_deref(), Some("cancelled_by_user"));
-    }
-
-    #[test]
-    fn wrapped_input_rerender_does_not_clear_screen_below_prompt() {
-        let sequence = render_shell_input_clear_sequence(ShellInputRenderState {
-            rows: 3,
-            cursor_row: 2,
-        });
-        assert!(sequence.contains("\x1b[2K"));
-        assert!(sequence.contains("\x1b[1E"));
-        assert!(!sequence.contains("\x1b[J"));
-    }
-
-    #[test]
-    fn wrapped_input_rerender_clears_from_previous_cursor_row() {
-        let sequence = render_shell_input_clear_sequence(ShellInputRenderState {
-            rows: 20,
-            cursor_row: 7,
-        });
-        assert!(sequence.starts_with("\r\x1b[7F"));
-        assert!(sequence.ends_with("\r\x1b[19F"));
-        assert_eq!(sequence.matches("\x1b[2K").count(), 20);
-        assert!(!sequence.contains("\x1b[J"));
     }
 
     #[test]
@@ -3097,95 +2818,214 @@ mod static_prompt_tests {
     }
 
     #[test]
-    fn multiline_paste_displays_bold_placeholder_but_submits_full_text() {
-        let mut buffer = ShellInputBuffer::default();
-        buffer.insert_text("请处理 ");
-        buffer.insert_paste("alpha\nbeta\ngamma");
-        buffer.insert_text(" 谢谢");
-
-        assert_eq!(buffer.display_plain(), "请处理 [ pasted 3 lines ] 谢谢");
-        assert_eq!(
-            buffer.display_styled(),
-            format!("请处理 \x1b[1m[ pasted 3 lines ]{ANSI_RESET} 谢谢")
+    fn queued_paste_fallback_merges_pending_lines_into_one_submission() {
+        let merged = merge_queued_input(
+            "first line".to_string(),
+            &QueuedInputDrain {
+                text: "second line\nthird line\n".to_string(),
+                interrupted: false,
+            },
         );
-        assert_eq!(buffer.submit_text(false), "请处理 alpha\nbeta\ngamma 谢谢");
-        assert_eq!(buffer.dirty_paste_summary(), None);
+        assert_eq!(merged, "first line\nsecond line\nthird line\n");
     }
 
     #[test]
-    fn editing_multiline_placeholder_prompts_and_can_recover_backing_content() {
-        let mut buffer = ShellInputBuffer::default();
-        buffer.insert_paste("alpha\nbeta\ngamma");
-        buffer.move_left();
-        buffer.move_left();
-        buffer.delete_before_cursor();
+    fn queued_paste_fallback_keeps_multiline_config_table_as_one_user_input() {
+        let queued = queued_input_drain_from_bytes(
+            "│ TIMEM_MODEL             │ qwen-plus │ 模型名称 │\n│ TIMEM_BASE_URL          │ https://example.com/v1 │ 网关 base url │\n"
+                .as_bytes(),
+        );
+        let merged = merge_queued_input("请分析这段配置".to_string(), &queued);
 
-        assert_eq!(buffer.display_plain(), "[ pasted 3 line ]");
+        assert!(!queued.interrupted);
         assert_eq!(
-            buffer.dirty_paste_summary(),
+            merged,
+            "请分析这段配置\n│ TIMEM_MODEL             │ qwen-plus │ 模型名称 │\n│ TIMEM_BASE_URL          │ https://example.com/v1 │ 网关 base url │\n"
+        );
+        assert_eq!(merged.matches("│ TIMEM_").count(), 2);
+    }
+
+    #[test]
+    fn queued_paste_fallback_marks_ctrl_c_and_removes_control_byte() {
+        let queued = queued_input_drain_from_bytes(b"line 2\n\x03line 3\n");
+
+        assert!(queued.interrupted);
+        assert_eq!(queued.text, "line 2\nline 3\n");
+    }
+
+    #[test]
+    fn bracketed_multiline_paste_sanitizes_to_single_multiline_text() {
+        let pasted = "\x1b[200~alpha\nbeta\n中文；gamma\x1b[201~";
+
+        assert_eq!(sanitize_user_input(pasted), "alpha\nbeta\n中文；gamma");
+    }
+
+    fn marked_placeholder(lines: usize) -> String {
+        format!("{PASTE_START_MARKER}[ pasted {lines} lines ]{PASTE_END_MARKER}")
+    }
+
+    #[test]
+    fn reedline_shift_enter_is_bound_to_insert_newline() {
+        let bindings = timem_reedline_keybindings();
+        assert_eq!(
+            bindings.find_binding(KeyModifiers::SHIFT, KeyCode::Enter),
+            Some(ReedlineEvent::Edit(vec![EditCommand::InsertNewline]))
+        );
+    }
+
+    #[test]
+    fn reedline_input_enables_keyboard_modifier_reporting() {
+        let enter = reedline_keyboard_protocol_enter_sequence();
+        assert!(enter.contains("\x1b[>4;2m"));
+        assert!(enter.contains("\x1b[>1u"));
+
+        let exit = reedline_keyboard_protocol_exit_sequence();
+        assert!(exit.contains("\x1b[>4;0m"));
+        assert!(exit.contains("\x1b[<u"));
+    }
+
+    #[test]
+    fn reedline_shift_enter_event_inserts_newline_without_submit() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut mode = TimemEditMode::new(records);
+        let event = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        )))
+        .unwrap();
+
+        assert_eq!(
+            mode.parse_event(event),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+    }
+
+    #[test]
+    fn reedline_multiline_paste_inserts_marked_placeholder_and_records_content() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut mode = TimemEditMode::new(records.clone());
+        let event =
+            ReedlineRawEvent::try_from(Event::Paste("alpha\r\nbeta\ngamma".to_string())).unwrap();
+
+        assert_eq!(
+            mode.parse_event(event),
+            ReedlineEvent::Edit(vec![EditCommand::InsertString(marked_placeholder(3))])
+        );
+        assert_eq!(
+            *records.lock().unwrap(),
+            vec![PasteRecord {
+                placeholder: "[ pasted 3 lines ]".to_string(),
+                content: "alpha\nbeta\ngamma".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn reedline_single_line_paste_stays_plain_text() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut mode = TimemEditMode::new(records.clone());
+        let event = ReedlineRawEvent::try_from(Event::Paste("just one line".to_string())).unwrap();
+
+        assert_eq!(
+            mode.parse_event(event),
+            ReedlineEvent::Edit(vec![EditCommand::InsertString("just one line".to_string())])
+        );
+        assert!(records.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reedline_space_inserts_string_to_avoid_cjk_abbreviation_boundary_panic() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut mode = TimemEditMode::new(records);
+        let event = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+
+        assert_eq!(
+            mode.parse_event(event),
+            ReedlineEvent::Edit(vec![EditCommand::InsertString(" ".to_string())])
+        );
+    }
+
+    #[test]
+    fn paste_marker_helpers_expand_clean_placeholder_but_display_only_label() {
+        let records = vec![PasteRecord {
+            placeholder: "[ pasted 3 lines ]".to_string(),
+            content: "alpha\nbeta\ngamma".to_string(),
+        }];
+        let raw = format!("请处理 {} 谢谢", marked_placeholder(3));
+
+        assert_eq!(strip_paste_markers(&raw), "请处理 [ pasted 3 lines ] 谢谢");
+        assert_eq!(paste_marker_segments(&raw), vec!["[ pasted 3 lines ]"]);
+        assert_eq!(paste_recovery_summary_from_markers(&raw, &records), None);
+        assert_eq!(
+            resolve_paste_markers(&raw, &records, false),
+            "请处理 alpha\nbeta\ngamma 谢谢"
+        );
+    }
+
+    #[test]
+    fn paste_highlighter_bolds_placeholder_inside_invisible_markers() {
+        let raw = format!("请处理 {} 谢谢", marked_placeholder(3));
+        let ranges = paste_marker_ranges(&raw);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(&raw[ranges[0].0..ranges[0].1], "[ pasted 3 lines ]");
+
+        let highlighted = TimemPasteHighlighter.highlight(&raw, raw.len());
+        assert!(
+            highlighted
+                .buffer
+                .iter()
+                .any(|(style, text)| style.is_bold && text == "[ pasted 3 lines ]"),
+            "pasted placeholder should render as bold: {:?}",
+            highlighted
+                .buffer
+                .iter()
+                .map(|(style, text)| (style.is_bold, text.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dirty_paste_placeholder_can_submit_literal_or_restore_backing_content() {
+        let records = vec![PasteRecord {
+            placeholder: "[ pasted 3 lines ]".to_string(),
+            content: "alpha\nbeta\ngamma".to_string(),
+        }];
+        let raw = format!("{PASTE_START_MARKER}[ pasted 3 line ]{PASTE_END_MARKER}");
+
+        assert_eq!(
+            paste_recovery_summary_from_markers(&raw, &records),
             Some(PasteRecoverySummary {
                 dirty_count: 1,
                 total_lines: 3,
             })
         );
-        assert_eq!(buffer.submit_text(false), "[ pasted 3 line ]");
-        assert_eq!(buffer.submit_text(true), "alpha\nbeta\ngamma");
         assert_eq!(
-            buffer.display_styled(),
-            format!("\x1b[1m[ pasted 3 line ]{ANSI_RESET}")
+            resolve_paste_markers(&raw, &records, false),
+            "[ pasted 3 line ]"
         );
-    }
-
-    #[test]
-    fn deleting_next_placeholder_char_prompts_and_can_submit_literal() {
-        let mut buffer = ShellInputBuffer::default();
-        buffer.insert_text("x");
-        buffer.insert_paste("a\nb");
-        buffer.insert_text("y");
-        while buffer.display_prefix_before_cursor() != "x" {
-            buffer.move_left();
-        }
-        buffer.delete_at_cursor();
-
-        assert_eq!(buffer.display_plain(), "x pasted 2 lines ]y");
         assert_eq!(
-            buffer.dirty_paste_summary(),
-            Some(PasteRecoverySummary {
-                dirty_count: 1,
-                total_lines: 2,
-            })
+            resolve_paste_markers(&raw, &records, true),
+            "alpha\nbeta\ngamma"
         );
-        assert_eq!(buffer.submit_text(false), "x pasted 2 lines ]y");
-        assert_eq!(buffer.submit_text(true), "xa\nby");
     }
 
     #[test]
     fn editing_text_around_placeholder_keeps_paste_association() {
-        let mut buffer = ShellInputBuffer::default();
-        buffer.insert_text("this is ");
-        buffer.insert_paste("a\nb\nc\nd\ne");
-        buffer.insert_text(" done");
-        while buffer.display_prefix_before_cursor() != "this is " {
-            buffer.move_left();
-        }
-        buffer.delete_before_cursor();
-        buffer.delete_before_cursor();
-        buffer.delete_before_cursor();
-        buffer.insert_text("was ");
+        let records = vec![PasteRecord {
+            placeholder: "[ pasted 5 lines ]".to_string(),
+            content: "a\nb\nc\nd\ne".to_string(),
+        }];
+        let raw = format!("this was {} done", marked_placeholder(5));
 
-        assert_eq!(buffer.display_plain(), "this was [ pasted 5 lines ] done");
-        assert_eq!(buffer.dirty_paste_summary(), None);
-        assert_eq!(buffer.submit_text(false), "this was a\nb\nc\nd\ne done");
-    }
-
-    #[test]
-    fn single_line_paste_stays_plain_text() {
-        let mut buffer = ShellInputBuffer::default();
-        buffer.insert_paste("just one line");
-
-        assert_eq!(buffer.display_plain(), "just one line");
-        assert_eq!(buffer.display_styled(), "just one line");
-        assert_eq!(buffer.submit_text(false), "just one line");
+        assert_eq!(paste_recovery_summary_from_markers(&raw, &records), None);
+        assert_eq!(
+            resolve_paste_markers(&raw, &records, false),
+            "this was a\nb\nc\nd\ne done"
+        );
     }
 
     #[test]
@@ -3209,73 +3049,12 @@ mod static_prompt_tests {
     }
 
     #[test]
-    fn pasted_line_count_handles_common_newline_shapes() {
+    fn pasted_line_count_and_normalization_handle_common_newline_shapes() {
+        assert_eq!(normalize_newlines("a\r\nb\rc"), "a\nb\nc");
         assert_eq!(pasted_line_count("a"), 1);
         assert_eq!(pasted_line_count("a\nb"), 2);
         assert_eq!(pasted_line_count("a\r\nb\r\nc"), 3);
         assert_eq!(pasted_line_count("a\nb\n"), 3);
-    }
-
-    #[test]
-    fn shell_key_reader_converts_bracketed_paste_to_paste_event() {
-        let mut input = Cursor::new(b"\x1b[200~a\nb\nc\x1b[201~".to_vec());
-        assert_eq!(
-            read_shell_key(&mut input),
-            ShellInputKey::Paste("a\nb\nc".to_string())
-        );
-    }
-
-    #[test]
-    fn shell_key_reader_handles_navigation_and_delete_keys() {
-        assert_eq!(
-            read_shell_key(&mut Cursor::new(vec![27, b'[', b'D'])),
-            ShellInputKey::Left
-        );
-        assert_eq!(
-            read_shell_key(&mut Cursor::new(vec![27, b'[', b'C'])),
-            ShellInputKey::Right
-        );
-        assert_eq!(
-            read_shell_key(&mut Cursor::new(vec![27, b'[', b'A'])),
-            ShellInputKey::HistoryPrev
-        );
-        assert_eq!(
-            read_shell_key(&mut Cursor::new(vec![27, b'[', b'B'])),
-            ShellInputKey::HistoryNext
-        );
-        assert_eq!(
-            read_shell_key(&mut Cursor::new(vec![27, b'[', b'3', b'~'])),
-            ShellInputKey::Delete
-        );
-    }
-
-    #[test]
-    fn shell_key_reader_maps_common_shift_enter_sequences_to_newline() {
-        for sequence in [
-            vec![27, b'[', b'1', b'3', b';', b'2', b'u'],
-            vec![27, b'[', b'1', b'3', b';', b'2', b'~'],
-            vec![27, b'[', b'2', b'7', b';', b'2', b';', b'1', b'3', b'~'],
-        ] {
-            assert_eq!(
-                read_shell_key(&mut Cursor::new(sequence)),
-                ShellInputKey::Newline
-            );
-        }
-        assert_eq!(
-            read_shell_key(&mut Cursor::new(vec![b'\n'])),
-            ShellInputKey::Enter
-        );
-    }
-
-    #[test]
-    fn shell_input_layout_accounts_for_explicit_newlines_and_cjk_width() {
-        let prompt_width = display_width("[10:34:27] You ❯❯ ");
-        let plain = "阿萨德 abc\n假啊；收到了减肥";
-        let cursor_prefix = "阿萨德 abc\n假啊";
-        let layout = shell_input_layout(prompt_width, plain, cursor_prefix, 20);
-        assert!(layout.rows >= 3);
-        assert!(layout.cursor_row > 0);
-        assert_eq!(layout.cursor_col % 2, 0);
     }
 
     #[test]
@@ -3291,6 +3070,14 @@ mod static_prompt_tests {
             render_user_input_prompt("12:00:00"),
             "[12:00:00] \x1b[1mYou\x1b[0m ❯❯ "
         );
+    }
+
+    #[test]
+    fn reedline_multiline_prompt_has_no_visible_prefix() {
+        let prompt = TimemReedlinePrompt {
+            indicator: "[12:00:00] You ❯❯ ".to_string(),
+        };
+        assert_eq!(prompt.render_prompt_multiline_indicator(), "");
     }
 
     #[test]
