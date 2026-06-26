@@ -1531,6 +1531,9 @@ fn read_escape_sequence(input: &mut impl Read) -> Option<Vec<u8>> {
 
 fn read_key_byte_wait(input: &mut impl Read) -> Option<u8> {
     loop {
+        if consume_turn_cancel_request() {
+            return None;
+        }
         match read_key_byte_once(input) {
             KeyByteRead::Byte(byte) => return Some(byte),
             KeyByteRead::Pending => thread::sleep(Duration::from_millis(20)),
@@ -1541,6 +1544,9 @@ fn read_key_byte_wait(input: &mut impl Read) -> Option<u8> {
 
 fn read_key_byte_until(input: &mut impl Read, deadline: Instant) -> Option<u8> {
     loop {
+        if consume_turn_cancel_request() {
+            return None;
+        }
         match read_key_byte_once(input) {
             KeyByteRead::Byte(byte) => return Some(byte),
             KeyByteRead::Closed => return None,
