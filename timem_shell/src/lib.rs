@@ -12,6 +12,7 @@ mod observation;
 mod profiler;
 mod prompt_cache;
 mod protocol_adapter;
+mod session_runtime;
 mod structured_output;
 
 pub use observation::{
@@ -23,6 +24,9 @@ pub use prompt_cache::{
     plan_incremental_cache, plan_prompt_cache, prompt_parts_from_rendered_prompt,
     split_old_and_new_delta, split_prompt, stable_text_fingerprint, CacheControl, PromptBlock,
     PromptBlockRole, PromptParts,
+};
+pub use session_runtime::{
+    cancelled_turn_result, run_session_turn, NoopTurnUi, TurnOutcome, TurnRequest, TurnUi,
 };
 pub use structured_output::{plan_structured_output, StructuredOutputHint};
 
@@ -239,6 +243,14 @@ pub fn compact_count(value: u32) -> String {
         return trim_decimal(format!("{:.1}", value as f64 / 1_000.0)) + "K";
     }
     trim_decimal(format!("{:.2}", value as f64 / 1_000_000.0)) + "M"
+}
+
+pub fn format_token_count(value: u32) -> String {
+    if value % 1_000 == 0 && value >= 1_000 {
+        format!("{}K", value / 1_000)
+    } else {
+        value.to_string()
+    }
 }
 
 fn trim_decimal(mut text: String) -> String {

@@ -18,12 +18,15 @@ bounded shell tools.
 ```mermaid
 flowchart LR
     User["User terminal"] --> Shell["timem_shell\nterminal UI + CLI"]
-    Shell --> Provider["Provider adapter\nOpenAI-compatible / Anthropic"]
+    Browser["Future local web UI"] -.-> Web["web adapter\nplanned"]
+    Shell --> Runtime["session_runtime\nUI-neutral turn runner"]
+    Web -.-> Runtime
+    Runtime --> Provider["Provider adapter\nOpenAI-compatible / Anthropic"]
     Provider --> LLM["LLM provider"]
-    Shell --> Core["agent_core\nagent state machine"]
+    Runtime --> Core["agent_core\nagent state machine"]
     Core --> Store["Local data\nmemory + chat history"]
     Core --> Bash["run_bash\nbounded local shell"]
-    Shell --> Audit["audit/api_audit.jsonl\naudit/action_audit.json"]
+    Runtime --> Audit["audit/api_audit.jsonl\naudit/action_audit.json"]
 ```
 
 ### `agent_core/`
@@ -52,7 +55,13 @@ flowchart LR
 Key shell-side modules:
 
 - `main.rs`: CLI, interactive loop, Reedline input adapter, config menu, paste
-  placeholder recovery, cancellation handling, and startup banner rendering.
+  placeholder recovery, cancellation handling, startup banner rendering, and
+  the CLI implementation of the turn UI callbacks.
+- `session_runtime.rs`: UI-neutral turn runner. It drives `AgentCore`, provider
+  calls, audit writes, profiler updates, cancellation checks, approval
+  decisions, round-limit decisions, and output-token expansion decisions through
+  a small `TurnUi` trait. CLI is one adapter; future Web UI should implement
+  the same callbacks instead of copying the agent loop.
 - `protocol_adapter.rs`: provider-specific request/response packing.
 - `prompt_cache.rs`: provider cache-control planning over static prompt and
   retained dynamic deltas.
@@ -71,25 +80,34 @@ stable because providers can cache it.
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant S as timem_shell
+    participant UI as UI adapter
+    participant R as session_runtime
     participant C as agent_core
     participant P as Provider
     participant T as Local tools/data
 
-    U->>S: type a message
-    S->>C: begin_turn(user_input, context)
-    C-->>S: prompt with static prefix + dynamic deltas
-    S->>P: provider request
-    P-->>S: model response
-    S->>C: apply_model_response(response)
+    U->>UI: type a message
+    UI->>R: run_session_turn(input, config, callbacks)
+    R->>C: begin_turn(user_input, context)
+    C-->>R: prompt with static prefix + dynamic deltas
+    R->>UI: on_model_request(round)
+    R->>P: provider request
+    P-->>R: model response
+    R->>UI: on_model_response(round, usage, content)
+    R->>C: apply_model_response(response)
     alt response asks for actions
         C->>T: execute structured action
         T-->>C: bounded result
-        C-->>S: next prompt
-        S->>P: next provider request
+        C-->>R: next prompt
+        R->>P: next provider request
+    else approval or round decision is needed
+        R->>UI: pause_for_user_decision()
+        UI-->>R: approval / continue / expand output
+        R->>UI: resume_after_user_decision()
     else response is final
-        C-->>S: final answer + stats
-        S-->>U: render answer and status
+        C-->>R: final answer + stats
+        R-->>UI: TurnOutcome
+        UI-->>U: render answer and status
     end
 ```
 
@@ -97,6 +115,18 @@ Each turn can use multiple model/action rounds. The model must return exactly
 one response envelope. If it emits malformed JSON or an invalid action shape,
 the core sends one protocol repair request. If the repaired response is still
 invalid, raw model text is blocked from the user and a safe fallback is shown.
+
+The UI adapter must not own the agent loop. Its responsibilities are limited to:
+
+- Present turn progress events such as model request/response and observations.
+- Provide user decisions for approvals, round-limit continuation, stale context,
+  and output-token expansion when the UI is interactive.
+- Provide cancellation state.
+- Render `TurnOutcome`.
+
+Non-interactive callers should use `NoopTurnUi`, whose defaults deny approvals,
+do not continue round limits, do not request output expansion, and do not
+require terminal state.
 
 ## Prompt Concepts
 

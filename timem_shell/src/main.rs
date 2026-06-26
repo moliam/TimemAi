@@ -1,4 +1,4 @@
-use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreStep, UsageStats};
+use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, UsageStats};
 use crossterm::event::Event;
 use reedline::{
     default_emacs_keybindings, EditCommand, EditMode, Emacs, FileBackedHistory, Highlighter,
@@ -19,13 +19,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
-    action_audit_path, action_status_hint, append_audit, audit_path, call_model_with_cancel,
-    data_root, load_workspace_dirs, local_time_label, memory_path,
-    observation_events_from_model_response, parse_cli_args, provider_config_from_env,
-    render_final_response_at, render_prof_report, render_shell_status_bar, render_thinking_view_at,
-    save_workspace_dirs, supporting_context, ApiProtocol, ModelDirection, ObservationEvent,
-    ObservationPanel, RuntimeProfiler, ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone,
-    ThinkingViewSnapshot, SPINNER_ICONS, TIMEM_LOGO,
+    action_audit_path, action_status_hint, append_audit, audit_path, data_root, format_token_count,
+    load_workspace_dirs, local_time_label, memory_path, observation_events_from_model_response,
+    parse_cli_args, provider_config_from_env, render_final_response_at, render_prof_report,
+    render_shell_status_bar, render_thinking_view_at, run_session_turn, save_workspace_dirs,
+    ApiProtocol, ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, RuntimeProfiler,
+    ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, TurnRequest,
+    TurnUi, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -87,25 +87,27 @@ fn main() {
 
     if let Some(input) = options.once_json_input.as_deref() {
         let context = options.supporting_context.as_deref();
-        let (text, stats, elapsed) = run_turn(
+        let mut ui = NoopTurnUi;
+        let outcome = run_session_turn(
             &mut core,
-            input,
-            &session,
-            &audit_file,
             &mut config,
-            context,
-            None,
-            false,
+            TurnRequest {
+                input,
+                session: &session,
+                audit_file: &audit_file,
+                additional_context: context,
+            },
+            &mut ui,
             Some(&mut profiler),
         );
         println!(
             "{}",
             json!({
-                "output": text,
+                "output": outcome.text,
                 "session_id": session,
-                "stats": stats,
+                "stats": outcome.stats,
                 "status": "done",
-                "elapsed_ms": elapsed.as_millis()
+                "elapsed_ms": outcome.elapsed.as_millis()
             })
         );
         return;
@@ -243,257 +245,107 @@ fn main() {
             None
         };
         let mut status = ThinkingStatus::start(&config.provider, &config.model);
-        let (text, stats, elapsed) = run_turn(
+        TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+        let _sigint_guard = SigintGuard::install();
+        let mut turn_ui = CliTurnUi {
+            status: Some(&mut status),
+            interactive_approval: true,
+        };
+        let outcome = run_session_turn(
             &mut core,
-            &input,
-            &session,
-            &audit_file,
             &mut config,
-            workspace_ctx.as_deref(),
-            Some(&mut status),
-            true,
+            TurnRequest {
+                input: &input,
+                session: &session,
+                audit_file: &audit_file,
+                additional_context: workspace_ctx.as_deref(),
+            },
+            &mut turn_ui,
             Some(&mut profiler),
         );
         status.finish();
-        print_final_response(&text, &stats, &config.provider, &config.model, elapsed);
+        print_final_response(
+            &outcome.text,
+            &outcome.stats,
+            &config.provider,
+            &config.model,
+            outcome.elapsed,
+        );
         last_dialog_activity = Instant::now();
     }
-}
-
-fn run_turn(
-    core: &mut AgentCore,
-    input: &str,
-    session: &str,
-    audit_file: &std::path::Path,
-    config: &mut timem_shell::ProviderConfig,
-    additional_context: Option<&str>,
-    mut status: Option<&mut ThinkingStatus>,
-    interactive_approval: bool,
-    mut profiler: Option<&mut RuntimeProfiler>,
-) -> (String, UsageStats, Duration) {
-    TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-    let _sigint_guard = if status.is_some() {
-        SigintGuard::install()
-    } else {
-        None
-    };
-    let turn_id = format!("turn_{}", epoch_millis());
-    let _ = append_audit(
-        audit_file,
-        &json!({"type":"turn_start","session":session,"turn_id":turn_id,"user_input":input}),
-    );
-    let start = Instant::now();
-    let mut user_wait_this_turn = Duration::ZERO;
-    let mut context = supporting_context(&config.provider, &config.model, input);
-    if let Some(extra) = additional_context
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    {
-        context.push_str("\n\n");
-        context.push_str(extra);
-    }
-    let mut step = core.begin_turn(input, Some(&context));
-    let mut rounds = 0u32;
-    let mut model_wait_this_turn = Duration::ZERO;
-
-    let (text, stats, repair_issue) = loop {
-        if consume_turn_cancel_request() {
-            break cancelled_turn_result();
-        }
-        match step {
-            CoreStep::NeedModel { ref prompt, .. } => {
-                rounds += 1;
-                if let Some(status) = status.as_deref_mut() {
-                    status.set_model_direction(rounds, ModelDirection::Upstream);
-                    status.set_transient_observation("思考中...");
-                }
-                let model_wait_start = Instant::now();
-                match call_model_with_cancel(config, &prompt, audit_file, || {
-                    TURN_CANCEL_REQUESTED.load(Ordering::SeqCst)
-                }) {
-                    Ok(response) => {
-                        let model_wait = model_wait_start.elapsed();
-                        model_wait_this_turn = model_wait_this_turn.saturating_add(model_wait);
-                        if let Some(profiler) = profiler.as_deref_mut() {
-                            profiler.record_model_wait(
-                                &config.provider,
-                                &response.model_name,
-                                &response.usage,
-                                model_wait,
-                            );
-                        }
-                        if consume_turn_cancel_request() {
-                            break cancelled_turn_result();
-                        }
-                        if response.truncated && interactive_approval {
-                            if let Some(status) = status.as_deref_mut() {
-                                status.clear_transient_observation();
-                            }
-                            if request_expand_output_tokens(config.max_llm_output_tokens) {
-                                config.max_llm_output_tokens =
-                                    config.max_llm_output_tokens.saturating_add(10_000);
-                                let _ = append_audit(
-                                    audit_file,
-                                    &json!({
-                                        "type":"max_llm_output_increased",
-                                        "session":session,
-                                        "turn_id":turn_id,
-                                        "max_llm_output_tokens":config.max_llm_output_tokens
-                                    }),
-                                );
-                                continue;
-                            }
-                            break (
-                                format!(
-                                    "模型输出达到当前上限 {}，已按你的选择停止本轮。可用 /config 调大 TIMEM_MAX_LLM_OUTPUT 后重试。",
-                                    format_token_count(config.max_llm_output_tokens)
-                                ),
-                                response.usage,
-                                Some("truncated_output_stopped_by_user".to_string()),
-                            );
-                        }
-                        if let Some(status) = status.as_deref_mut() {
-                            status.clear_transient_observation();
-                            status.set_usage(response.usage.clone());
-                            status.set_model_direction(rounds, ModelDirection::Downstream);
-                            if let Some(hint) = action_status_hint(&response.content) {
-                                status.set_intent(&hint.intent, &hint.memory_marker);
-                            }
-                            status.apply_observation_events(
-                                observation_events_from_model_response(&response.content),
-                            );
-                        }
-                        step = core.apply_model_response(response);
-                        if let Some(status) = status.as_deref_mut() {
-                            status.settle_active_observations();
-                        }
-                    }
-                    Err(err) => {
-                        let model_wait = model_wait_start.elapsed();
-                        model_wait_this_turn = model_wait_this_turn.saturating_add(model_wait);
-                        if let Some(profiler) = profiler.as_deref_mut() {
-                            profiler.record_model_wait(
-                                &config.provider,
-                                &config.model,
-                                &UsageStats::zero(),
-                                model_wait,
-                            );
-                        }
-                        if consume_turn_cancel_request() {
-                            break cancelled_turn_result();
-                        }
-                        if let Some(status) = status.as_deref_mut() {
-                            status.clear_transient_observation();
-                        }
-                        let _ = append_audit(
-                            audit_file,
-                            &json!({"type":"turn_error","session":session,"turn_id":turn_id,"error":err}),
-                        );
-                        break (format!("模型调用失败：{err}"), UsageStats::zero(), None);
-                    }
-                }
-            }
-            CoreStep::NeedsUserApproval { request } => {
-                if let Some(status) = status.as_deref_mut() {
-                    status.pause_for_user_approval();
-                }
-                let user_wait_start = Instant::now();
-                let approved = if interactive_approval {
-                    request_user_approval(&request)
-                } else {
-                    false
-                };
-                user_wait_this_turn = user_wait_this_turn.saturating_add(user_wait_start.elapsed());
-                if consume_turn_cancel_request() {
-                    step = core.resolve_user_approval(&request.approval_id, false);
-                    continue;
-                }
-                let _ = append_audit(
-                    audit_file,
-                    &json!({
-                        "type":"user_approval",
-                        "session":session,
-                        "turn_id":turn_id,
-                        "approval_id":request.approval_id,
-                        "action":request.action,
-                        "command":request.command,
-                        "risk":request.risk,
-                        "reason":request.reason,
-                        "approved":approved
-                    }),
-                );
-                step = core.resolve_user_approval(&request.approval_id, approved);
-                if let Some(status) = status.as_deref_mut() {
-                    status.resume_after_user_approval();
-                }
-            }
-            CoreStep::RoundLimitReached { max_rounds } => {
-                if let Some(status) = status.as_deref_mut() {
-                    status.pause_for_user_approval();
-                }
-                let user_wait_start = Instant::now();
-                let should_continue =
-                    interactive_approval && request_round_limit_continue(max_rounds);
-                user_wait_this_turn = user_wait_this_turn.saturating_add(user_wait_start.elapsed());
-                let _ = append_audit(
-                    audit_file,
-                    &json!({
-                        "type":"round_limit",
-                        "session":session,
-                        "turn_id":turn_id,
-                        "max_rounds":max_rounds,
-                        "continued":should_continue
-                    }),
-                );
-                if should_continue {
-                    step = core.continue_after_round_limit();
-                    if let Some(status) = status.as_deref_mut() {
-                        status.resume_after_user_approval();
-                    }
-                } else {
-                    break (
-                        format!(
-                            "已达到本轮最大交互次数 {max_rounds}，已停止。你可以继续输入来开启新一轮。"
-                        ),
-                        core.current_stats().clone(),
-                        Some("round_limit_reached".to_string()),
-                    );
-                }
-            }
-            CoreStep::Final(turn) => {
-                break (turn.response_to_user, turn.stats, turn.repair_issue);
-            }
-        }
-    };
-    let elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
-    if let Some(profiler) = profiler.as_deref_mut() {
-        profiler.record_turn(elapsed, model_wait_this_turn);
-    }
-    let _ = append_audit(
-        audit_file,
-        &json!({
-            "type":"turn_final",
-            "session":session,
-            "turn_id":turn_id,
-            "assistant_output":text,
-            "stats":stats,
-            "repair_issue":repair_issue,
-            "elapsed_ms":elapsed.as_millis()
-        }),
-    );
-    (text, stats, elapsed)
 }
 
 fn consume_turn_cancel_request() -> bool {
     TURN_CANCEL_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
-fn cancelled_turn_result() -> (String, UsageStats, Option<String>) {
-    (
-        "已取消本轮。".to_string(),
-        UsageStats::zero(),
-        Some("cancelled_by_user".to_string()),
-    )
+struct CliTurnUi<'a> {
+    status: Option<&'a mut ThinkingStatus>,
+    interactive_approval: bool,
+}
+
+impl TurnUi for CliTurnUi<'_> {
+    fn is_cancel_requested(&mut self) -> bool {
+        TURN_CANCEL_REQUESTED.load(Ordering::SeqCst)
+    }
+
+    fn take_cancel_request(&mut self) -> bool {
+        consume_turn_cancel_request()
+    }
+
+    fn on_model_request(&mut self, round: u32) {
+        if let Some(status) = self.status.as_deref_mut() {
+            status.set_model_direction(round, ModelDirection::Upstream);
+            status.set_transient_observation("思考中...");
+        }
+    }
+
+    fn on_model_response(&mut self, round: u32, usage: &UsageStats, content: &str) {
+        if let Some(status) = self.status.as_deref_mut() {
+            status.clear_transient_observation();
+            status.set_usage(usage.clone());
+            status.set_model_direction(round, ModelDirection::Downstream);
+            if let Some(hint) = action_status_hint(content) {
+                status.set_intent(&hint.intent, &hint.memory_marker);
+            }
+            status.apply_observation_events(observation_events_from_model_response(content));
+            status.settle_active_observations();
+        }
+    }
+
+    fn on_model_error(&mut self, _error: &str) {
+        if let Some(status) = self.status.as_deref_mut() {
+            status.clear_transient_observation();
+        }
+    }
+
+    fn pause_for_user_decision(&mut self) {
+        if let Some(status) = self.status.as_deref_mut() {
+            status.pause_for_user_approval();
+        }
+    }
+
+    fn resume_after_user_decision(&mut self) {
+        if let Some(status) = self.status.as_deref_mut() {
+            status.resume_after_user_approval();
+        }
+    }
+
+    fn request_user_approval(&mut self, request: &ApprovalRequest) -> bool {
+        self.interactive_approval && request_user_approval(request)
+    }
+
+    fn request_round_limit_continue(&mut self, max_rounds: u32) -> bool {
+        self.interactive_approval && request_round_limit_continue(max_rounds)
+    }
+
+    fn can_request_output_expansion(&mut self) -> bool {
+        self.interactive_approval
+    }
+
+    fn request_expand_output_tokens(&mut self, current_tokens: u32) -> bool {
+        self.interactive_approval && request_expand_output_tokens(current_tokens)
+    }
 }
 
 struct ThinkingStatus {
@@ -2529,14 +2381,6 @@ fn help_text() -> &'static str {
     "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C cancels the current input, menu, or turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
-fn format_token_count(value: u32) -> String {
-    if value % 1_000 == 0 && value >= 1_000 {
-        format!("{}K", value / 1_000)
-    } else {
-        value.to_string()
-    }
-}
-
 fn bash_approval_mode_from_options(
     options: &timem_shell::CliOptions,
     env: &HashMap<String, String>,
@@ -2581,25 +2425,24 @@ fn time_label() -> String {
 #[cfg(test)]
 mod static_prompt_tests {
     use super::{
-        active_elapsed_secs, apply_config_value, boxed_config_table_at_width,
-        cancelled_turn_result, config_field_value, consume_turn_cancel_request, display_width,
-        epoch_millis, help_text, merge_queued_input, normalize_newlines, normalize_workspace_dir,
-        paste_marker_ranges, paste_marker_segments, paste_recovery_summary_from_markers,
-        pasted_line_count, queued_input_drain_from_bytes, random_spinner_tick, read_approval_key,
-        read_menu_key, reedline_keyboard_protocol_enter_sequence,
-        reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_menu,
-        render_expand_output_choices, render_expand_output_prompt, render_paste_recovery_choices,
-        render_paste_recovery_prompt, render_round_limit_choices, render_round_limit_prompt,
-        render_stale_context_choices, render_stale_context_prompt, render_startup_banner,
-        render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
-        render_workspace_delete_choices, render_workspace_menu, resolve_paste_markers,
-        sanitize_user_input, stale_context_prompt_needed, strip_paste_markers,
-        timem_reedline_keybindings, utf8_expected_len, workspace_menu_line_count,
-        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField, ConfigRow,
-        ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary, QueuedInputDrain,
-        TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
-        PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
-        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        active_elapsed_secs, apply_config_value, boxed_config_table_at_width, config_field_value,
+        consume_turn_cancel_request, display_width, epoch_millis, help_text, merge_queued_input,
+        normalize_newlines, normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
+        paste_recovery_summary_from_markers, pasted_line_count, queued_input_drain_from_bytes,
+        random_spinner_tick, read_approval_key, read_menu_key,
+        reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
+        render_approval_choices, render_config_menu, render_expand_output_choices,
+        render_expand_output_prompt, render_paste_recovery_choices, render_paste_recovery_prompt,
+        render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
+        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
+        render_user_approval_prompt, render_user_input_prompt, render_workspace_delete_choices,
+        render_workspace_menu, resolve_paste_markers, sanitize_user_input,
+        stale_context_prompt_needed, strip_paste_markers, timem_reedline_keybindings,
+        utf8_expected_len, workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice,
+        ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecord,
+        PasteRecoverySummary, QueuedInputDrain, TimemEditMode, TimemPasteHighlighter,
+        TimemReedlinePrompt, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
+        STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use crossterm::event::Event;
@@ -2716,7 +2559,7 @@ mod static_prompt_tests {
 
     #[test]
     fn cancelled_turn_message_does_not_look_like_model_failure() {
-        let (text, stats, issue) = cancelled_turn_result();
+        let (text, stats, issue) = timem_shell::cancelled_turn_result();
         assert_eq!(text, "已取消本轮。");
         assert!(!text.contains("模型调用失败"));
         assert_eq!(stats.llm_calls, 0);
