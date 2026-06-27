@@ -165,11 +165,12 @@ and other providers use OpenAI-compatible chat completions. For a custom
 gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 
 `TIMEM_MAX_LLM_INPUT` defaults to `100K`; `TIMEM_MAX_LLM_OUTPUT` defaults to
-`10K`. Runtime asks the model to consider `prompt_shrink` when the observed
-provider input tokens plus the new prompt delta estimate reaches about one
-third of the input window. After that first review, the next review threshold
-advances by one fifth of the window each time. If the prompt reaches 95% of the
-configured input window, runtime marks shrink as required.
+`10K`. When observed provider input tokens plus the new prompt delta estimate
+reaches 90% of `TIMEM_MAX_LLM_INPUT`, runtime requires the model to compact
+dynamic prompt deltas before continuing: summarize useful dynamic context to
+about 10% of its current token footprint, discard stale details, and place
+important but lengthy state into scratch notes before shrinking covered
+delta/slice ids.
 
 If a provider reports that output was cut off by the output-token limit, Timem
 asks whether to temporarily increase `TIMEM_MAX_LLM_OUTPUT` by `10K` and retry

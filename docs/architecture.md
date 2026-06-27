@@ -249,15 +249,16 @@ Runtime shrink review and future shrink actions should use these ids:
   scoring is absent, and must not render scoring fields into prompt deltas.
   Shrink decisions should rely on explicit `delta_id` / `slice_id`, task
   relevance, age, and observed context size.
-- Runtime injects long-context shrink review when observed provider input
-  tokens plus the new prompt delta estimate reaches about one third of
-  `TIMEM_MAX_LLM_INPUT`. After the first review, the next threshold advances
-  by one fifth of the window. The default context window is `100K`; new prompt
-  delta text that has not yet gone through the provider is estimated as roughly
+- Runtime injects long-context maintenance only when observed provider input
+  tokens plus the new prompt delta estimate reaches 90% of
+  `TIMEM_MAX_LLM_INPUT`. The default context window is `100K`; new prompt delta
+  text that has not yet gone through the provider is estimated as roughly
   `chars / 4`.
-- At 95% of the configured window, runtime marks shrink as required. The model
-  should use `prompt_shrink` before continuing and preserve only active
-  work-relevant knowledge in compact rewritten form.
+- At that 90% threshold, runtime marks shrink as required. The model should
+  compact before continuing: summarize useful dynamic prompt deltas to about
+  10% of their current token footprint, discard stale details, put important
+  but lengthy state into scratch notes, and then use `prompt_shrink` on covered
+  `delta_id` / `slice_id` ranges.
 
 ### Prompt Delta
 

@@ -514,7 +514,6 @@ pub struct AgentCore {
     action_audit: FileActionAuditStore,
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
-    next_shrink_review_prompt_tokens: u32,
     last_observed_prompt_tokens: u32,
     configured_round_budget: u32,
     round_budget: u32,
@@ -544,7 +543,6 @@ impl AgentCore {
             action_audit: FileActionAuditStore::new(memory_dir),
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
-            next_shrink_review_prompt_tokens: 0,
             last_observed_prompt_tokens: 0,
             configured_round_budget: DEFAULT_ROUND_BUDGET,
             round_budget: DEFAULT_ROUND_BUDGET,
@@ -588,7 +586,6 @@ impl AgentCore {
     }
     pub fn clear_dynamic_context(&mut self) {
         self.deltas.clear();
-        self.next_shrink_review_prompt_tokens = 0;
         self.last_observed_prompt_tokens = 0;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
@@ -908,20 +905,12 @@ impl AgentCore {
     }
     fn consume_shrink_review_if_needed(&mut self, incoming_prompt_tokens: u32) -> Option<String> {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
-        let first_threshold = self.max_llm_input_tokens / 3;
-        let followup_step = self.max_llm_input_tokens / 5;
-        let force_threshold = self.max_llm_input_tokens.saturating_mul(95) / 100;
-        let threshold = if self.next_shrink_review_prompt_tokens == 0 {
-            first_threshold
-        } else {
-            self.next_shrink_review_prompt_tokens
-        };
+        let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
         let slices = self.render_prompt_slices();
         if slices.is_empty() {
             return None;
         }
-        let force_shrink = estimated_prompt_tokens >= force_threshold;
-        if estimated_prompt_tokens < threshold && !force_shrink {
+        if estimated_prompt_tokens < force_threshold {
             return None;
         }
         let current_count = self.deltas.len();
@@ -964,20 +953,9 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        self.next_shrink_review_prompt_tokens =
-            estimated_prompt_tokens.saturating_add(followup_step);
-        let mode = if force_shrink {
-            "force_shrink_required"
-        } else {
-            "shrink_review"
-        };
-        let instruction = if force_shrink {
-            "Context is above 95% of the configured window. You must use prompt_shrink before continuing: remove stale or irrelevant dynamic deltas/slices, and rewrite a compact summary for only the current work-relevant knowledge in response_to_user or scratch/memory actions as appropriate. Do not target prompt_0."
-        } else {
-            "Decide whether stale or irrelevant dynamic prompt deltas or rendered slices should be compacted with prompt_shrink. If suggesting shrink, refer to delta_id for whole logical deltas or slice_id for specific rendered slices; if not, continue normally."
-        };
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10% of their current token footprint, discard useless/stale details, preserve only active work-relevant state, and put important but lengthy material into scratch_write notes before using prompt_shrink on covered delta_id/slice_id ranges. Do not target prompt_0.";
         Some(format!(
-            "mode={mode}\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nshrink_review_threshold_tokens={threshold}\nfirst_shrink_review_threshold_tokens={first_threshold}\nnext_shrink_review_step_tokens={followup_step}\nforce_shrink_threshold_tokens={force_threshold}\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
+            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
             self.max_llm_input_tokens
         ))
     }
@@ -1469,10 +1447,6 @@ impl AgentCore {
             .current_stats
             .shrunk_tokens
             .saturating_add(shrunk_tokens_estimate);
-        if removed_delta_count > 0 || hidden_slice_count > 0 {
-            self.next_shrink_review_prompt_tokens = 0;
-        }
-
         let missing_text = if missing.is_empty() {
             "none".to_string()
         } else {

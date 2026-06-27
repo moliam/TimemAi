@@ -78,15 +78,6 @@ fn action_result_field(prompt: &str, field: &str) -> String {
     first_field_value(prompt, field)
 }
 
-fn key_value(prompt: &str, key: &str) -> String {
-    let prefix = format!("{key}=");
-    prompt
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .unwrap_or("")
-        .to_string()
-}
-
 fn field_values(prompt: &str, field: &str) -> Vec<String> {
     let prefix = format!("{field}: ");
     prompt
@@ -446,79 +437,25 @@ fn dynamic_context_can_be_estimated_and_cleared_without_touching_static_prompt()
 }
 
 #[test]
-fn long_context_injects_shrink_review_at_one_third_context_window() {
+fn long_context_does_not_inject_shrink_review_below_ninety_percent_window() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("shrink_threshold"),
+        tmp_dir("shrink_below_force_threshold"),
     );
     core.set_max_llm_input_tokens(3_000);
-    let _ = core.begin_turn(&"seed ".repeat(900), None);
+    let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
             r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
         ),
         model_name: "qwen-plus".to_string(),
-        usage: usage(),
+        usage: usage_with_prompt_tokens(2_600),
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
 
-    let prompt = match core.begin_turn("after one third context", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(prompt.contains("Long-context maintenance:"));
-    assert!(prompt.contains("estimated_prompt_tokens="));
-    assert!(prompt.contains("max_llm_input_tokens=3000"));
-    assert!(prompt.contains("shrink_review_threshold_tokens=1000"));
-    assert!(prompt.contains("prompt_delta_count="));
-    assert!(prompt.contains("prompt_slice_count="));
-    assert!(prompt.contains("recent_prompt_slice_refs:"));
-    assert!(prompt.contains("slice_id="));
-    let first_review_count = prompt.matches("Long-context maintenance:").count();
-    assert_eq!(first_review_count, 1);
-
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"ok","acceptance_check":{"is_satisfied":true}}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let next_prompt = match core.begin_turn("small followup", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert_eq!(
-        next_prompt.matches("Long-context maintenance:").count(),
-        first_review_count
-    );
-}
-
-#[test]
-fn long_context_does_not_inject_shrink_review_below_one_third_context_window() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("shrink_below_threshold"),
-    );
-    core.set_max_llm_input_tokens(30_000);
-    for index in 0..3 {
-        let _ = core.begin_turn(&format!("short q {}", index), None);
-        let step = core.apply_model_response(LlmResponse {
-            content: scored(format!(
-                r#"{{"response_to_user":"a{}","acceptance_check":{{"is_satisfied":true}}}}"#,
-                index
-            )),
-            model_name: "qwen-plus".to_string(),
-            usage: usage(),
-            truncated: false,
-        });
-        assert!(matches!(step, CoreStep::Final(_)));
-    }
-
-    let prompt = match core.begin_turn("still below threshold", None) {
+    let prompt = match core.begin_turn("below ninety percent", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
@@ -539,70 +476,23 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
             r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
         ),
         model_name: "qwen-plus".to_string(),
-        usage: usage_with_prompt_tokens(950),
+        usage: usage_with_prompt_tokens(2_700),
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
 
-    let prompt = match core.begin_turn(&"next ".repeat(100), None) {
+    let prompt = match core.begin_turn("next", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Long-context maintenance:"));
+    assert!(prompt.contains("mode=force_shrink_required"));
     assert!(prompt.contains("max_llm_input_tokens=3000"));
-    assert!(prompt.contains("shrink_review_threshold_tokens=1000"));
+    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
 }
 
 #[test]
-fn long_context_repeats_review_every_one_fifth_after_first_review() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("shrink_followup_step"),
-    );
-    core.set_max_llm_input_tokens(3_000);
-    let _ = core.begin_turn("seed", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
-        ),
-        model_name: "qwen-plus".to_string(),
-        usage: usage_with_prompt_tokens(1_000),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-
-    let prompt = match core.begin_turn("first review", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(prompt.contains("Long-context maintenance:"));
-    assert!(prompt.contains("first_shrink_review_threshold_tokens=1000"));
-    assert!(prompt.contains("next_shrink_review_step_tokens=600"));
-    let first_estimate = key_value(&prompt, "estimated_prompt_tokens")
-        .parse::<u32>()
-        .unwrap();
-
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"response_to_user":"not shrinking yet","acceptance_check":{"is_satisfied":true}}"#,
-        ),
-        model_name: "qwen-plus".to_string(),
-        usage: usage_with_prompt_tokens(first_estimate + 600),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = match core.begin_turn("second review", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(prompt.contains("Long-context maintenance:"));
-    assert!(prompt.contains("shrink_review_threshold_tokens="));
-    assert!(prompt.contains("next_shrink_review_step_tokens=600"));
-}
-
-#[test]
-fn long_context_forces_shrink_at_ninety_five_percent_window() {
+fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instruction() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -615,7 +505,7 @@ fn long_context_forces_shrink_at_ninety_five_percent_window() {
             r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
         ),
         model_name: "qwen-plus".to_string(),
-        usage: usage_with_prompt_tokens(2_850),
+        usage: usage_with_prompt_tokens(2_700),
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
@@ -625,50 +515,15 @@ fn long_context_forces_shrink_at_ninety_five_percent_window() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("mode=force_shrink_required"));
-    assert!(prompt.contains("force_shrink_threshold_tokens=2850"));
-    assert!(prompt.contains("You must use prompt_shrink before continuing"));
+    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
+    assert!(prompt.contains("target_dynamic_context_ratio=10%"));
+    assert!(prompt.contains("summarize all dynamic prompt deltas into about 10%"));
+    assert!(prompt.contains("scratch_write"));
+    assert!(prompt.contains("prompt_shrink"));
+    assert!(!prompt.contains("shrink_review_threshold_tokens"));
+    assert!(!prompt.contains("first_shrink_review_threshold_tokens"));
+    assert!(!prompt.contains("next_shrink_review_step_tokens"));
     assert!(!prompt.contains("durable_ctx_score"));
-}
-
-#[test]
-fn force_shrink_overrides_deferred_followup_threshold() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("shrink_force_overrides"),
-    );
-    core.set_max_llm_input_tokens(3_000);
-    let _ = core.begin_turn("seed", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
-        ),
-        model_name: "qwen-plus".to_string(),
-        usage: usage_with_prompt_tokens(2_500),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = match core.begin_turn("first high review", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(prompt.contains("Long-context maintenance:"));
-    assert!(!prompt.contains("mode=force_shrink_required"));
-
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"response_to_user":"still no shrink","acceptance_check":{"is_satisfied":true}}"#,
-        ),
-        model_name: "qwen-plus".to_string(),
-        usage: usage_with_prompt_tokens(2_850),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = match core.begin_turn("force despite deferred threshold", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(prompt.contains("mode=force_shrink_required"));
 }
 
 #[test]
@@ -3033,7 +2888,9 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     };
     assert!(long_prompt.starts_with("[BEGIN SEGMENT 0: prompt_0]\nSTATIC_GLOBAL_RULES"));
     assert!(long_prompt.contains("Long-context maintenance:"));
-    assert!(long_prompt.contains("shrink_review_threshold_tokens=1000"));
+    assert!(long_prompt.contains("mode=force_shrink_required"));
+    assert!(long_prompt.contains("force_shrink_threshold_tokens=2700"));
+    assert!(long_prompt.contains("target_dynamic_context_ratio=10%"));
     assert!(long_prompt.contains("prompt_delta_count="));
 }
 
