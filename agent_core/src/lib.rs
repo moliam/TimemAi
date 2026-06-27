@@ -112,8 +112,6 @@ pub enum CoreStep {
 pub struct PromptDelta {
     pub delta_id: String,
     pub time_ms: i64,
-    #[serde(default)]
-    pub durable_ctx_score: Option<u8>,
     slices: Vec<PromptSlice>,
     #[serde(default)]
     pub hidden_slice_ids: Vec<String>,
@@ -122,7 +120,6 @@ pub struct PromptDelta {
 struct PromptSlice {
     delta_id: String,
     slice_id: String,
-    durable_ctx_score: Option<u8>,
     prompt_type: String,
     time_ms: i64,
     text: String,
@@ -246,14 +243,7 @@ struct ParsedEnvelope {
     thought: String,
     next_actions: Vec<ParsedAction>,
     memory_candidates: Vec<String>,
-    delta_scores: Vec<DeltaScore>,
     repair_issue: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DeltaScore {
-    delta_id: Option<String>,
-    durable_ctx_score: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -664,18 +654,6 @@ impl AgentCore {
             );
         }
         let parsed = parse_envelope(&response.content);
-        if parsed.repair_issue.is_none()
-            && parsed.delta_scores.is_empty()
-            && self.has_unscored_prompt_delta()
-        {
-            if !self.repair_attempted {
-                return self.request_protocol_repair(
-                    "durable_ctx_score_required_for_unscored_delta",
-                    "Return exactly one valid JSON object and include durable_ctx_score for the most recent unscored prompt_delta, or delta_scores with explicit delta_id values.",
-                );
-            }
-        }
-        self.apply_delta_scores(&parsed.delta_scores);
         let mut slices = Vec::new();
         if !parsed.thought.is_empty() {
             slices.push((
@@ -841,12 +819,8 @@ impl AgentCore {
             out.push('\n');
             out.push_str(&format!("[BEGIN SEGMENT {}: prompt_delta]\n", idx + 1));
             out.push_str(&format!(
-                "delta_id: {}\ndurable_ctx_score: {}\nslice_id: {}\nslice: {}/{}\n",
-                slice.delta_id,
-                durable_score_label(slice.durable_ctx_score),
-                slice.slice_id,
-                slice.slice_index,
-                slice.slice_count
+                "delta_id: {}\nslice_id: {}\nslice: {}/{}\n",
+                slice.delta_id, slice.slice_id, slice.slice_index, slice.slice_count
             ));
             out.push_str(&format!(
                 "prompt_type: {}\n{}\ntime: {}\n",
@@ -864,12 +838,6 @@ impl AgentCore {
     }
     fn remaining_rounds(&self) -> u32 {
         self.round_budget.saturating_sub(self.current_round)
-    }
-
-    fn has_unscored_prompt_delta(&self) -> bool {
-        self.deltas
-            .iter()
-            .any(|delta| delta.durable_ctx_score.is_none())
     }
 
     fn request_protocol_repair(&mut self, issue: &str, instruction: &str) -> CoreStep {
@@ -891,40 +859,6 @@ impl AgentCore {
                 "result_of_llm_action".to_string(),
                 format!("Long-context maintenance:\n{shrink_review}"),
             )]);
-        }
-    }
-
-    fn apply_delta_scores(&mut self, delta_scores: &[DeltaScore]) {
-        for score in delta_scores {
-            if let Some(delta_id) = score
-                .delta_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-            {
-                if let Some(delta) = self
-                    .deltas
-                    .iter_mut()
-                    .find(|delta| delta.delta_id == delta_id)
-                {
-                    delta.durable_ctx_score = Some(score.durable_ctx_score);
-                    for slice in &mut delta.slices {
-                        slice.durable_ctx_score = Some(score.durable_ctx_score);
-                    }
-                }
-                continue;
-            }
-            if let Some(delta) = self
-                .deltas
-                .iter_mut()
-                .rev()
-                .find(|delta| delta.durable_ctx_score.is_none())
-            {
-                delta.durable_ctx_score = Some(score.durable_ctx_score);
-                for slice in &mut delta.slices {
-                    slice.durable_ctx_score = Some(score.durable_ctx_score);
-                }
-            }
         }
     }
 
@@ -957,7 +891,6 @@ impl AgentCore {
                         delta_id.trim_start_matches("pd_"),
                         slice_index
                     ),
-                    durable_ctx_score: None,
                     prompt_type,
                     time_ms,
                     text,
@@ -969,7 +902,6 @@ impl AgentCore {
         self.deltas.push(PromptDelta {
             delta_id,
             time_ms: timestamp,
-            durable_ctx_score: None,
             slices,
             hidden_slice_ids: Vec::new(),
         });
@@ -1006,9 +938,8 @@ impl AgentCore {
                     .map(|slice| estimate_prompt_tokens(&slice.text))
                     .sum::<u32>();
                 format!(
-                    "- delta_id={} durable_ctx_score={} time_ms={} visible_slices={} estimated_tokens={}",
+                    "- delta_id={} time_ms={} visible_slices={} estimated_tokens={}",
                     delta.delta_id,
-                    durable_score_label(delta.durable_ctx_score),
                     delta.time_ms,
                     render_delta_slices(delta).len(),
                     token_estimate
@@ -1022,10 +953,9 @@ impl AgentCore {
             .take(8)
             .map(|slice| {
                 format!(
-                    "- slice_id={} delta_id={} durable_ctx_score={} slice={}/{} prompt_type={} time_ms={}",
+                    "- slice_id={} delta_id={} slice={}/{} prompt_type={} time_ms={}",
                     slice.slice_id,
                     slice.delta_id,
-                    durable_score_label(slice.durable_ctx_score),
                     slice.slice_index,
                     slice.slice_count,
                     slice.prompt_type,
@@ -1042,9 +972,9 @@ impl AgentCore {
             "shrink_review"
         };
         let instruction = if force_shrink {
-            "Context is above 95% of the configured window. You must use prompt_shrink before continuing: remove low durable_ctx_score or stale dynamic deltas/slices, and rewrite a compact summary for only the current work-relevant and high durable_ctx_score knowledge in response_to_user or scratch/memory actions as appropriate. Do not target prompt_0."
+            "Context is above 95% of the configured window. You must use prompt_shrink before continuing: remove stale or irrelevant dynamic deltas/slices, and rewrite a compact summary for only the current work-relevant knowledge in response_to_user or scratch/memory actions as appropriate. Do not target prompt_0."
         } else {
-            "Decide whether stale or irrelevant dynamic prompt deltas or rendered slices should be compacted with prompt_shrink. Prefer shrinking low durable_ctx_score content first. If suggesting shrink, refer to delta_id for whole logical deltas or slice_id for specific rendered slices; if not, continue normally."
+            "Decide whether stale or irrelevant dynamic prompt deltas or rendered slices should be compacted with prompt_shrink. If suggesting shrink, refer to delta_id for whole logical deltas or slice_id for specific rendered slices; if not, continue normally."
         };
         Some(format!(
             "mode={mode}\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nshrink_review_threshold_tokens={threshold}\nfirst_shrink_review_threshold_tokens={first_threshold}\nnext_shrink_review_step_tokens={followup_step}\nforce_shrink_threshold_tokens={force_threshold}\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
@@ -2556,16 +2486,6 @@ fn estimate_prompt_tokens(text: &str) -> u32 {
     text.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
 
-fn clamp_durable_ctx_score(raw: u64) -> u8 {
-    raw.clamp(1, 10) as u8
-}
-
-fn durable_score_label(score: Option<u8>) -> String {
-    score
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unscored".to_string())
-}
-
 fn repair_failure_message(first_issue: &str, final_issue: &str) -> String {
     if first_issue == "truncated_model_output" || final_issue == "truncated_model_output" {
         return "模型回复被 API 提供商按最大输出 token 限制截断（例如 stop_reason=max_tokens），导致返回的 JSON 协议不完整。请调大 TIMEM_MAX_LLM_OUTPUT，或在交互提示中选择增加 10K 后重试。".to_string();
@@ -2589,7 +2509,6 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 thought: String::new(),
                 next_actions: vec![],
                 memory_candidates: vec![],
-                delta_scores: Vec::new(),
                 repair_issue: Some("invalid_json".to_string()),
             }
         }
@@ -2600,7 +2519,6 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
             thought: String::new(),
             next_actions: vec![],
             memory_candidates: vec![],
-            delta_scores: Vec::new(),
             repair_issue: Some("root_must_be_json_object".to_string()),
         };
     }
@@ -2619,22 +2537,6 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         .filter(|text| !text.is_empty())
         .map(ToString::to_string)
         .unwrap_or_default();
-    let mut delta_scores = parse_delta_scores(value.get("delta_scores"));
-    if let Some(score) = value
-        .get("durable_ctx_score")
-        .and_then(Value::as_u64)
-        .map(clamp_durable_ctx_score)
-    {
-        delta_scores.push(DeltaScore {
-            delta_id: value
-                .get("scored_delta_id")
-                .or_else(|| value.get("delta_id"))
-                .and_then(Value::as_str)
-                .map(|id| id.trim().to_string())
-                .filter(|id| !id.is_empty()),
-            durable_ctx_score: score,
-        });
-    }
     let acceptance_satisfied = value
         .get("acceptance_check")
         .and_then(|check| check.get("is_satisfied"))
@@ -2968,36 +2870,8 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         thought,
         next_actions,
         memory_candidates,
-        delta_scores,
         repair_issue,
     }
-}
-
-fn parse_delta_scores(value: Option<&Value>) -> Vec<DeltaScore> {
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    let Some(items) = value.as_array() else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| {
-            let score = item
-                .get("durable_ctx_score")
-                .or_else(|| item.get("score"))
-                .and_then(Value::as_u64)
-                .map(clamp_durable_ctx_score)?;
-            Some(DeltaScore {
-                delta_id: item
-                    .get("delta_id")
-                    .and_then(Value::as_str)
-                    .map(|id| id.trim().to_string())
-                    .filter(|id| !id.is_empty()),
-                durable_ctx_score: score,
-            })
-        })
-        .collect()
 }
 
 fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::Error> {

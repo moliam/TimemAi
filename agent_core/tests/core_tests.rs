@@ -62,21 +62,7 @@ fn usage_with_prompt_tokens(prompt_tokens: u32) -> UsageStats {
 }
 
 fn scored(content: impl Into<String>) -> String {
-    let content = content.into();
-    if content.contains("\"durable_ctx_score\"") || content.contains("\"delta_scores\"") {
-        return content;
-    }
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return content;
-    };
-    let Some(object) = value.as_object_mut() else {
-        return content;
-    };
-    object.insert(
-        "durable_ctx_score".to_string(),
-        serde_json::Value::Number(5.into()),
-    );
-    serde_json::to_string(&value).unwrap()
+    content.into()
 }
 
 fn first_field_value(prompt: &str, field: &str) -> String {
@@ -275,51 +261,19 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
 }
 
 #[test]
-fn model_scores_previously_submitted_delta_not_its_own_response_delta() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("durable_ctx_score"),
-    );
-    let first_prompt = match core.begin_turn("记住这个项目决策", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    let submitted_delta_id = first_field_value(&first_prompt, "delta_id");
-    assert!(first_prompt.contains("durable_ctx_score: unscored"));
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"已记录这个项目决策。","durable_ctx_score":9,"acceptance_check":{"is_satisfied":true}}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = core.render_prompt();
-    assert!(prompt.contains(&format!(
-        "delta_id: {}\ndurable_ctx_score: 9",
-        submitted_delta_id
-    )));
-    assert!(prompt.contains("durable_ctx_score: 9"));
-    assert!(prompt.contains("prompt_type: llm_response"));
-    assert!(prompt.contains("durable_ctx_score: unscored"));
-}
-
-#[test]
-fn missing_durable_score_for_visible_unscored_delta_requests_repair() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("durable_ctx_score_required"),
-    );
-    let first_prompt = match core.begin_turn("simple question", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(first_prompt.contains("durable_ctx_score: unscored"));
+fn missing_durable_score_does_not_block_valid_actions() {
+    let dir = tmp_dir("durable_ctx_score_not_required");
+    fs::write(
+        dir.join("memory.jsonl"),
+        r#"{"id":"user_name","created_at_ms":1,"content":"用户的名字是李默"}
+"#,
+    )
+    .unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("我叫什么名字？", None);
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"response_to_user":"simple answer","acceptance_check":{"is_satisfied":true}}"#
-            .to_string(),
+        content: r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"查找已确认的用户姓名记忆。","input":{"query":"名字","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["已确认的用户姓名记忆"]}}"#.to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -328,106 +282,24 @@ fn missing_durable_score_for_visible_unscored_delta_requests_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("durable_ctx_score_required_for_unscored_delta"));
-    assert!(prompt.contains("include durable_ctx_score"));
+    assert!(prompt.contains("Action result: query_memory"));
+    assert!(prompt.contains("用户的名字是李默"));
+    assert!(!prompt.contains("Protocol repair request"));
 }
 
 #[test]
-fn model_can_score_delta_by_explicit_delta_id() {
+fn prompt_rendering_does_not_expose_durable_ctx_score() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("durable_ctx_explicit_id"),
-    );
-    let first_prompt = match core.begin_turn("first delta", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    let first_delta_id = first_field_value(&first_prompt, "delta_id");
-    let step = core.apply_model_response(LlmResponse {
-        content: format!(
-            r#"{{"response_to_user":"done","delta_scores":[{{"delta_id":"{}","durable_ctx_score":3}}],"acceptance_check":{{"is_satisfied":true}}}}"#,
-            first_delta_id
-        ),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = core.render_prompt();
-    assert!(prompt.contains(&format!(
-        "delta_id: {}\ndurable_ctx_score: 3",
-        first_delta_id
-    )));
-}
-
-#[test]
-fn shorthand_score_targets_latest_unscored_delta_when_older_unscored_exists() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("durable_ctx_latest_unscored"),
-    );
-    let first_prompt = match core.begin_turn("first unscored", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    let first_user_delta_id = first_field_value(&first_prompt, "delta_id");
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"first answer without score","acceptance_check":{"is_satisfied":true}}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let prompt_after_first_reply = core.render_prompt();
-    let first_reply_delta_id = field_values(&prompt_after_first_reply, "delta_id")
-        .last()
-        .cloned()
-        .unwrap();
-    assert_ne!(first_user_delta_id, first_reply_delta_id);
-
-    let second_prompt = match core.begin_turn("second unscored", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    let delta_ids = field_values(&second_prompt, "delta_id");
-    let latest_delta_id = delta_ids.last().cloned().unwrap();
-    assert_ne!(first_reply_delta_id, latest_delta_id);
-
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"score latest only","durable_ctx_score":2,"acceptance_check":{"is_satisfied":true}}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = core.render_prompt();
-    assert!(prompt.contains(&format!(
-        "delta_id: {}\ndurable_ctx_score: 2",
-        latest_delta_id
-    )));
-    assert!(prompt.contains(&format!(
-        "delta_id: {}\ndurable_ctx_score: unscored",
-        first_reply_delta_id
-    )));
-}
-
-#[test]
-fn runtime_does_not_infer_durable_score_from_user_text_semantics() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("durable_ctx_no_semantic_infer"),
+        tmp_dir("durable_ctx_not_rendered"),
     );
     let prompt = match core.begin_turn("不要记住：生日这个词只是测试", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("User question:\n不要记住：生日这个词只是测试"));
-    assert!(prompt.contains("durable_ctx_score: unscored"));
-    assert!(!prompt.contains("durable_ctx_score: 8"));
+    assert!(!prompt.contains("durable_ctx_score"));
 }
 
 #[test]
@@ -755,7 +627,7 @@ fn long_context_forces_shrink_at_ninety_five_percent_window() {
     assert!(prompt.contains("mode=force_shrink_required"));
     assert!(prompt.contains("force_shrink_threshold_tokens=2850"));
     assert!(prompt.contains("You must use prompt_shrink before continuing"));
-    assert!(prompt.contains("durable_ctx_score="));
+    assert!(!prompt.contains("durable_ctx_score"));
 }
 
 #[test]
@@ -956,7 +828,6 @@ ok
 
 {
   "thought": "Final summary",
-  "durable_ctx_score": 5,
   "response_to_user": "只展示最终摘要。",
   "acceptance_check": {
     "is_satisfied": true
@@ -989,7 +860,6 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
 
 ```json
 {
-  "durable_ctx_score": 5,
   "response_to_user": "转码已在后台顺利运行，输出文件：`~/Videos/example_3x.mp4`。",
   "acceptance_check": {
     "is_satisfied": true
@@ -1024,7 +894,6 @@ fn response_text_with_unescaped_inner_quotes_is_repaired() {
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{
   "thought": "The answer is available from chat history.",
-  "durable_ctx_score": 5,
   "response_to_user": "根据聊天记录，你问"当前目录的代码量，rust 代码有多少行？"这个问题的时间是今天（2026-06-23）17:46:36 左右。",
   "acceptance_check": {
     "is_satisfied": true
@@ -1055,7 +924,6 @@ fn response_text_preserves_valid_complex_symbols_and_quotes() {
 第二行。"#;
     let payload = serde_json::json!({
         "thought": "Symbols should remain normal text.",
-        "durable_ctx_score": 5,
         "response_to_user": text,
         "acceptance_check": {"is_satisfied": true}
     });
@@ -1133,7 +1001,6 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
     let step = core.apply_model_response(LlmResponse {
         content: scored(
             r#"{
-  "durable_ctx_score": 5,
   "response_to_user": "",
   "next_actions": [
     {
@@ -3221,6 +3088,8 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(static_prompt.contains("\"action_result_guard\""));
     assert!(static_prompt.contains("memory_conflict"));
     assert!(static_prompt.contains("row version changed"));
+    assert!(!static_prompt.contains("durable_ctx_score"));
+    assert!(!static_prompt.contains("delta_scores"));
     assert!(!static_prompt.contains("no_result_terminate"));
     assert!(!static_prompt.contains("long_running_shell"));
     assert!(!static_prompt.contains("lang_retry"));

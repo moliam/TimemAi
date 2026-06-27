@@ -14,7 +14,6 @@
         "llm_response": "Runtime-created logical prompt delta from a model response or final answer already shown to the user; it may render as one or more prompt_delta slices.",
         "llm_thought": "Runtime-created logical prompt delta from the model's private reasoning draft, optional and not shown to the user; it may render as one or more prompt_delta slices."
       },
-      "durable_ctx_score": "A runtime-created new prompt_delta is initially unscored because it has not yet been evaluated by the model. Every model response must score at least one currently visible unscored prompt_delta, using top-level durable_ctx_score as shorthand for the most recent unscored delta or explicit delta_scores entries with delta_id. 1 means disposable/raw transient detail, 5 means normal conversation context, 10 means highly reusable project/user/task knowledge. Runtime records the score on that existing delta and renders it on later requests. Never tell the user that scoring was not required when unscored deltas are visible.",
       "dynamic_fields": {
         "rounds_remaining": "Number of additional reasoning/action rounds available after the current model response. If 0, do not request new actions; return the best user-facing answer or progress summary.",
         "retrieval": "Runtime does not prefetch by default. Request memory/search actions only when evidence is needed.",
@@ -261,8 +260,6 @@
         "memory_candidates?": "array; emit only for new/corrected durable facts",
         "diagnostics.intent_inference?": "string; enum one_of: time_constrained|exact_date|created_axis|none. Output only for time-related questions; omit for normal Q&A.",
         "diagnostics.self_audit?": "string; enum one_of: memory_write_worthy|fact_correction|prompt_shrink_recommended|scratch_checkpoint_needed|evidence_insufficient|none. Output the matching enum value when the corresponding situation is triggered; otherwise omit.",
-        "durable_ctx_score": "integer 1..10 required when any visible prompt_delta is unscored; shorthand score for the most recent submitted unscored prompt_delta, not for the model response delta being generated now.",
-        "delta_scores?": "array of {delta_id?, durable_ctx_score}; explicit scores for already submitted prompt deltas. Use delta_id when scoring any delta other than the most recent unscored one.",
         "diagnostics.note?": "string"
       },
       "additional_properties": "allowed for forward compatibility; keep them sparse"
@@ -270,7 +267,6 @@
     "examples": {
       "minimal_satisfied": {
         "response_to_user": "好的，我明白了。",
-        "durable_ctx_score": 5,
         "acceptance_check": {
           "is_satisfied": true
         }
