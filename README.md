@@ -168,7 +168,7 @@ gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 `10K`. When observed provider input tokens plus the new prompt delta estimate
 reaches 90% of `TIMEM_MAX_LLM_INPUT`, runtime requires the model to compact
 dynamic prompt deltas before continuing: summarize useful dynamic context to
-about 10% of its current token footprint, discard stale details, and place
+about 10%-20% of its current token footprint, discard stale details, and place
 important but lengthy state into scratch notes before shrinking covered
 delta/slice ids.
 

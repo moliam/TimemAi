@@ -256,7 +256,7 @@ Runtime shrink review and future shrink actions should use these ids:
   `chars / 4`.
 - At that 90% threshold, runtime marks shrink as required. The model should
   compact before continuing: summarize useful dynamic prompt deltas to about
-  10% of their current token footprint, discard stale details, put important
+  10%-20% of their current token footprint, discard stale details, put important
   but lengthy state into scratch notes, and then use `prompt_shrink` on covered
   `delta_id` / `slice_id` ranges.
 
@@ -558,6 +558,38 @@ Rules:
 - `prompt_0` is never removable.
 - Hidden slices are not rendered in later prompts and are not returned by
   prompt-delta fallback search.
+
+Forced compaction uses the same response envelope and action protocol; it does
+not introduce a separate `compressed_delta` schema. A typical forced shrink
+response first writes the compact working summary into scratch memory, then
+shrinks the covered dynamic context:
+
+```json
+{
+  "thought": "Compact dynamic context before continuing.",
+  "response_to_user": "",
+  "next_actions": [
+    {
+      "action": "scratch_write",
+      "intent": "Save compact working context before shrinking.",
+      "input": {
+        "content": "Compact context summary: current goal, important decisions, active blockers, and next steps."
+      }
+    },
+    {
+      "action": "prompt_shrink",
+      "intent": "Remove dynamic prompt deltas covered by the compact summary.",
+      "input": {
+        "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
+      }
+    }
+  ],
+  "acceptance_check": {
+    "is_satisfied": false,
+    "missing_info": ["shrink action results"]
+  }
+}
+```
 
 ## Provider Layer
 

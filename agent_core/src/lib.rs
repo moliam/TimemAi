@@ -953,9 +953,9 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10% of their current token footprint, discard useless/stale details, preserve only active work-relevant state, and put important but lengthy material into scratch_write notes before using prompt_shrink on covered delta_id/slice_id ranges. Do not target prompt_0.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, preserve only active work-relevant state, and put important but lengthy material into scratch using scratch memory notes before using prompt_shrink on covered delta_id/slice_id ranges. Do not target prompt_0.";
         Some(format!(
-            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
+            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
             self.max_llm_input_tokens
         ))
     }

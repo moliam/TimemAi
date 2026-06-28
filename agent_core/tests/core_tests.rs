@@ -516,9 +516,9 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     };
     assert!(prompt.contains("mode=force_shrink_required"));
     assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
-    assert!(prompt.contains("target_dynamic_context_ratio=10%"));
-    assert!(prompt.contains("summarize all dynamic prompt deltas into about 10%"));
-    assert!(prompt.contains("scratch_write"));
+    assert!(prompt.contains("target_dynamic_context_ratio=10%-20%"));
+    assert!(prompt.contains("summarize all dynamic prompt deltas into about 10%-20%"));
+    assert!(prompt.contains("scratch using scratch memory notes"));
     assert!(prompt.contains("prompt_shrink"));
     assert!(!prompt.contains("shrink_review_threshold_tokens"));
     assert!(!prompt.contains("first_shrink_review_threshold_tokens"));
@@ -2890,7 +2890,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(long_prompt.contains("Long-context maintenance:"));
     assert!(long_prompt.contains("mode=force_shrink_required"));
     assert!(long_prompt.contains("force_shrink_threshold_tokens=2700"));
-    assert!(long_prompt.contains("target_dynamic_context_ratio=10%"));
+    assert!(long_prompt.contains("target_dynamic_context_ratio=10%-20%"));
     assert!(long_prompt.contains("prompt_delta_count="));
 }
 
