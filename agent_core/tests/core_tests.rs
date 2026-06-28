@@ -518,7 +518,8 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
     assert!(prompt.contains("target_dynamic_context_ratio=10%-20%"));
     assert!(prompt.contains("summarize all dynamic prompt deltas into about 10%-20%"));
-    assert!(prompt.contains("scratch using scratch memory notes"));
+    assert!(prompt.contains("scratch_write type=context_offload"));
+    assert!(prompt.contains("type=notes"));
     assert!(prompt.contains("prompt_shrink"));
     assert!(!prompt.contains("shrink_review_threshold_tokens"));
     assert!(!prompt.contains("first_shrink_review_threshold_tokens"));
@@ -1004,7 +1005,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
     );
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create a task checkpoint.","input":{"content":"continue this task later"}}]}"#),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create a task checkpoint.","input":{"type":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1014,7 +1015,9 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: scratch_write"));
-    assert!(prompt.contains("stored: continue this task later"));
+    assert!(prompt.contains("label: release checkpoint"));
+    assert!(prompt.contains("type: notes"));
+    assert!(prompt.contains("content_preview: continue this task later"));
     let stored = fs::read_to_string(core.scratch_file()).unwrap();
     let scratch_id = stored
         .lines()
@@ -1028,7 +1031,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         .expect("scratch id should exist");
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_query","intent":"Find task checkpoint.","input":{"query":"continue","limit":5}}]}"#),
+        content: scored(format!(r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_read","intent":"Read saved checkpoint by id.","input":{{"id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1037,7 +1040,8 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: scratch_query"));
+    assert!(prompt.contains("Action result: scratch_read"));
+    assert!(prompt.contains("found: true"));
     assert!(prompt.contains("continue this task later"));
 
     let step = core.apply_model_response(LlmResponse {
@@ -1066,8 +1070,8 @@ fn scratch_query_empty_query_lists_recent_notes_with_limit() {
     );
     fs::write(
         core.scratch_file(),
-        r#"{"id":"scratch_old","created_at_ms":1,"content":"old checkpoint"}
-{"id":"scratch_new","created_at_ms":2,"content":"new checkpoint"}
+        r#"{"id":"scratch_old","created_at_ms":1,"scratch_type":"notes","label":"old label","content":"old checkpoint","prompt_delta_ids":[],"prompt_slice_ids":[]}
+{"id":"scratch_new","created_at_ms":2,"scratch_type":"notes","label":"new label","content":"new checkpoint","prompt_delta_ids":[],"prompt_slice_ids":[]}
 "#,
     )
     .unwrap();
@@ -1085,6 +1089,7 @@ fn scratch_query_empty_query_lists_recent_notes_with_limit() {
     };
     assert!(prompt.contains("Action result: scratch_query"));
     assert!(prompt.contains("scratch_new"));
+    assert!(prompt.contains("label=new label"));
     assert!(prompt.contains("new checkpoint"));
     assert!(!prompt.contains("old checkpoint"));
 }
@@ -1109,8 +1114,36 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("input.content_required"));
+    assert!(prompt.contains("input.type_required"));
     assert!(!core.scratch_file().exists());
+
+    let _ = core.begin_turn("写一条没有标签的草稿", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Create unlabeled checkpoint.","input":{"type":"notes","content":"x"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("input.label_required"));
+
+    let _ = core.begin_turn("读取一条没有 id 的草稿", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_read","intent":"Read checkpoint.","input":{}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("input.id_required"));
 
     let _ = core.begin_turn("删除一条没有 id 的草稿", None);
     let step = core.apply_model_response(LlmResponse {
@@ -1136,7 +1169,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
     );
     fs::write(
         core.scratch_file(),
-        r#"{"id":"scratch_keep","created_at_ms":1,"content":"keep this checkpoint"}
+        r#"{"id":"scratch_keep","created_at_ms":1,"scratch_type":"notes","label":"keep","content":"keep this checkpoint","prompt_delta_ids":[],"prompt_slice_ids":[]}
 "#,
     )
     .unwrap();
@@ -1157,6 +1190,113 @@ fn scratch_delete_missing_id_is_non_destructive() {
     assert!(fs::read_to_string(core.scratch_file())
         .unwrap()
         .contains("keep this checkpoint"));
+}
+
+#[test]
+fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scratch_context_offload"),
+    );
+    let prompt = match core.begin_turn(
+        "large investigation context that should move to scratch",
+        None,
+    ) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_id = first_field_value(&prompt, "delta_id");
+    assert!(delta_id.starts_with("pd_"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_write","intent":"Offload visible prompt delta by id.","input":{{"type":"context_offload","label":"large investigation context","delta_ids":["{}"]}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch write result"]}}}}"#,
+            delta_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: scratch_write"));
+    assert!(prompt.contains("label: large investigation context"));
+    assert!(prompt.contains("type: context_offload"));
+    assert!(prompt.contains(&format!("prompt_delta_ids: {delta_id}")));
+    assert!(prompt.contains("content_preview: [BEGIN SCRATCH OFFLOAD DELTA"));
+    let scratch_id = action_result_field(&prompt, "id");
+    assert!(scratch_id.starts_with("scratch_"));
+
+    let stored = fs::read_to_string(core.scratch_file()).unwrap();
+    assert!(stored.contains("\"scratch_type\":\"context_offload\""));
+    assert!(stored.contains("\"label\":\"large investigation context\""));
+    assert!(stored.contains("large investigation context that should move to scratch"));
+    assert!(stored.contains(&delta_id));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_read","intent":"Read offloaded prompt context.","input":{{"id":"{}"}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch content"]}}}}"#,
+            scratch_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: scratch_read"));
+    assert!(prompt.contains("found: true"));
+    assert!(prompt.contains("large investigation context that should move to scratch"));
+}
+
+#[test]
+fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scratch_context_offload_invalid"),
+    );
+    let _ = core.begin_turn("seed context", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Attempt invalid offload.","input":{"type":"context_offload","label":"bad refs","delta_ids":["pd_missing"]}}],"acceptance_check":{"is_satisfied":false,"missing_info":["scratch write result"]}}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: scratch_write"));
+    assert!(prompt.contains("error: invalid_prompt_refs missing_ids=pd_missing"));
+    assert!(!core.scratch_file().exists());
+}
+
+#[test]
+fn scratch_context_offload_requires_prompt_refs_in_protocol() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scratch_context_offload_refs_required"),
+    );
+    let _ = core.begin_turn("seed context", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"Missing refs.","input":{"type":"context_offload","label":"missing refs"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("input.prompt_refs_required"));
 }
 
 #[test]
@@ -2258,7 +2398,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("整理这个任务", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"记录任务计划","input":{"content":"step one"}}]}"#),
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"scratch_write","intent":"记录任务计划","input":{"type":"notes","label":"任务计划","content":"step one"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2294,6 +2434,8 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
         interactions[0]["actions"][0]["input"]["content"],
         "step one"
     );
+    assert_eq!(interactions[0]["actions"][0]["input"]["type"], "notes");
+    assert_eq!(interactions[0]["actions"][0]["input"]["label"], "任务计划");
     assert_eq!(interactions[1]["round"], 2);
     assert_eq!(interactions[1]["actions"][0]["action"], "scratch_query");
     assert_eq!(interactions[1]["actions"][0]["intent"], "查询任务计划");

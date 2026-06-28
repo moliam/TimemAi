@@ -278,9 +278,9 @@ fn observation_event_from_action(action: &Value) -> Option<ObservationEvent> {
         "memory_write" | "write_memory" | "memory_update" => Some(ObservationEvent::Persistent(
             format!("更新记忆: {}", intent.unwrap_or("写入记忆")),
         )),
-        "scratch_write" | "scratch_query" | "scratch_delete" => Some(ObservationEvent::Persistent(
-            format!("处理草稿区: {}", intent.unwrap_or("更新草稿")),
-        )),
+        "scratch_write" | "scratch_read" | "scratch_query" | "scratch_delete" => Some(
+            ObservationEvent::Persistent(format!("处理草稿区: {}", intent.unwrap_or("更新草稿"))),
+        ),
         _ => intent.map(|text| ObservationEvent::Persistent(text.to_string())),
     }
 }

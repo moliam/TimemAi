@@ -169,8 +169,9 @@ gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 reaches 90% of `TIMEM_MAX_LLM_INPUT`, runtime requires the model to compact
 dynamic prompt deltas before continuing: summarize useful dynamic context to
 about 10%-20% of its current token footprint, discard stale details, and place
-important but lengthy state into scratch notes before shrinking covered
-delta/slice ids.
+important but lengthy state into scratch memory before shrinking covered
+delta/slice ids. For prompt context the model can ask runtime to offload
+specific delta/slice ids instead of rewriting that context itself.
 
 If a provider reports that output was cut off by the output-token limit, Timem
 asks whether to temporarily increase `TIMEM_MAX_LLM_OUTPUT` by `10K` and retry
@@ -184,7 +185,7 @@ If the shell has been idle for at least 3 hours and the existing dynamic task
 context is over about 10K tokens, Timem asks whether to continue the previous
 task context. Choose `YES` to keep it, or `NO` to clear only the old dynamic
 prompt context and start the new question cleanly. Durable memory, chat history,
-scratch notes, and runtime data are not deleted by this choice.
+scratch memory, and runtime data are not deleted by this choice.
 
 Override the default URL only when needed:
 

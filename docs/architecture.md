@@ -140,7 +140,7 @@ A Timem memory space is the unit of shared memory state:
 identity = realpath(TIMEM_DATA_DIR) + TIMEM_SPACE
 ```
 
-Within one identity, durable memory, scratch notes, chat history, SQL snapshots,
+Within one identity, durable memory, scratch memory, chat history, SQL snapshots,
 memory git snapshots, shell job indexes, and audit files are different layers of
 the same mem space. They must not be split into per-session stores merely
 because the UI has multiple sessions.
@@ -188,7 +188,7 @@ The guard has two responsibilities:
 Guarded operations include:
 
 - durable memory append/update/delete and git snapshot
-- scratch write/query/delete
+- scratch write/read/query/delete
 - chat history query/delete over audit-backed records
 - read-only SQL snapshots over durable memory and chat history
 - `api_audit.jsonl` append
@@ -257,7 +257,7 @@ Runtime shrink review and future shrink actions should use these ids:
 - At that 90% threshold, runtime marks shrink as required. The model should
   compact before continuing: summarize useful dynamic prompt deltas to about
   10%-20% of their current token footprint, discard stale details, put important
-  but lengthy state into scratch notes, and then use `prompt_shrink` on covered
+  but lengthy state into scratch memory, and then use `prompt_shrink` on covered
   `delta_id` / `slice_id` ranges.
 
 ### Prompt Delta
@@ -407,8 +407,8 @@ Each `next_actions` item is a structured command:
 Fields:
 
 - `action`: canonical tool name, such as `run_bash`, `chat_history_query`,
-  `query_memory`, `memory_sql_query`, `memory_update`, `memory_schema`, or
-  `prompt_shrink`.
+  `query_memory`, `memory_sql_query`, `memory_update`, `memory_schema`,
+  `scratch_write`, `scratch_read`, or `prompt_shrink`.
 - `intent`: concise human-readable reason. It is required because shell UI uses
   it as action status.
 - `input`: action-specific structured parameters. Runtime validates this shape
@@ -474,7 +474,7 @@ flowchart TB
     Core --> Chat["chat_history_query / chat_history_delete\nUI-visible chat records"]
     Core --> Memory["query_memory / memory_update\ndurable facts"]
     Core --> SQL["memory_sql_query\nread-only SQLite snapshot"]
-    Core --> Scratch["scratch_write/query/delete\ntask checkpoints"]
+    Core --> Scratch["scratch_write/read/query/delete\ntyped notes and context offload"]
     Core --> Bash["run_bash\nlocal command"]
     Core --> Shrink["prompt_shrink\nremove delta/slice context"]
 ```
@@ -501,7 +501,7 @@ Current implemented surface:
   update/delete requires `expected_version` to avoid stale multi-CLI writes.
 - Durable memory versioning: `memory_update` snapshots `memory.jsonl` in a local
   git repository under the selected memory directory when git is available.
-- Scratch notes/checkpoints: `scratch_write`, `scratch_query`, and
+- Scratch memory: `scratch_write`, `scratch_read`, `scratch_query`, and
   `scratch_delete` over `scratch_notes.jsonl`.
 
 ### Read-only SQL
@@ -560,9 +560,10 @@ Rules:
   prompt-delta fallback search.
 
 Forced compaction uses the same response envelope and action protocol; it does
-not introduce a separate `compressed_delta` schema. A typical forced shrink
-response first writes the compact working summary into scratch memory, then
-shrinks the covered dynamic context:
+not introduce a separate `compressed_delta` schema. The model decides what
+should be offloaded and supplies ids; runtime owns validation and copies actual
+prompt delta/slice content into scratch. A typical forced shrink response first
+asks runtime to offload covered prompt context, then shrinks those dynamic ids:
 
 ```json
 {
@@ -571,9 +572,11 @@ shrinks the covered dynamic context:
   "next_actions": [
     {
       "action": "scratch_write",
-      "intent": "Save compact working context before shrinking.",
+      "intent": "Offload dynamic prompt context before shrinking.",
       "input": {
-        "content": "Compact context summary: current goal, important decisions, active blockers, and next steps."
+        "type": "context_offload",
+        "label": "release validation context",
+        "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
       }
     },
     {
@@ -590,6 +593,19 @@ shrinks the covered dynamic context:
   }
 }
 ```
+
+`scratch_write` has two modes:
+
+- `type=notes`: model provides `label` and `content`; runtime stores the note and
+  returns `id`, `label`, `type`, and a short preview.
+- `type=context_offload`: model provides `label` and `delta_ids`/`slice_ids`;
+  runtime verifies the ids are visible dynamic prompt context, rejects `prompt_0`,
+  copies the real content into scratch, and returns only index metadata plus a
+  preview. The model later uses `scratch_read` with the returned id to retrieve
+  full details when needed.
+
+This keeps the boundary explicit: the model reasons over labels and ids, while
+runtime performs trusted prompt-context transfer.
 
 ## Provider Layer
 

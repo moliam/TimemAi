@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
@@ -140,7 +141,17 @@ pub struct MemoryRecord {
 pub struct ScratchNoteRecord {
     pub id: String,
     pub created_at_ms: i64,
+    pub scratch_type: String,
+    pub label: String,
     pub content: String,
+    pub prompt_delta_ids: Vec<String>,
+    pub prompt_slice_ids: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScratchContextOffload {
+    content: String,
+    delta_ids: Vec<String>,
+    slice_ids: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatHistoryRecord {
@@ -167,6 +178,8 @@ struct ParsedAction {
     intent: String,
     query: String,
     content: String,
+    scratch_type: String,
+    label: String,
     sql: String,
     params: Vec<String>,
     operation: String,
@@ -209,9 +222,19 @@ impl ParsedAction {
                 "expected_version": self.expected_version,
                 "content": self.content,
             }),
-            "memory_write" | "write_memory" | "scratch_write" => json!({
+            "memory_write" | "write_memory" => json!({
                 "content": self.content,
                 "query": self.query,
+            }),
+            "scratch_write" => json!({
+                "type": self.scratch_type,
+                "label": self.label,
+                "content": self.content,
+                "delta_ids": self.delta_ids,
+                "slice_ids": self.slice_ids,
+            }),
+            "scratch_read" => json!({
+                "id": self.id,
             }),
             "scratch_delete" => json!({
                 "id": self.id,
@@ -953,7 +976,7 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, preserve only active work-relevant state, and put important but lengthy material into scratch using scratch memory notes before using prompt_shrink on covered delta_id/slice_id ranges. Do not target prompt_0.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, preserve only active work-relevant state, use scratch_write type=context_offload for important but lengthy existing delta/slice content or type=notes for compact checkpoints, then use prompt_shrink on covered delta_id/slice_id ranges. Do not target prompt_0.";
         Some(format!(
             "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
             self.max_llm_input_tokens
@@ -1227,12 +1250,41 @@ impl AgentCore {
             }
             "scratch_write" => {
                 self.current_stats.tool_calls += 1;
-                match self.scratch.write(&action.content) {
-                    Ok(record) => format!(
-                        "Action result: scratch_write\nid: {}\nstored: {}",
-                        record.id, record.content
-                    ),
+                let scratch_type = normalized_scratch_type(&action.scratch_type);
+                let write_result = if scratch_type == "context_offload" {
+                    self.collect_prompt_context_for_scratch(&action.delta_ids, &action.slice_ids)
+                        .and_then(|offload| {
+                            self.scratch.write_record(
+                                &scratch_type,
+                                &action.label,
+                                &offload.content,
+                                &offload.delta_ids,
+                                &offload.slice_ids,
+                            )
+                        })
+                } else {
+                    self.scratch.write_record(
+                        &scratch_type,
+                        &action.label,
+                        &action.content,
+                        &[],
+                        &[],
+                    )
+                };
+                match write_result {
+                    Ok(record) => format_scratch_write_result(&record),
                     Err(err) => format!("Action result: scratch_write\nerror: {}", err),
+                }
+            }
+            "scratch_read" => {
+                self.current_stats.tool_calls += 1;
+                match self.scratch.read(&action.id) {
+                    Ok(Some(record)) => format_scratch_read_result(&record),
+                    Ok(None) => format!(
+                        "Action result: scratch_read\nid: {}\nfound: false",
+                        action.id
+                    ),
+                    Err(err) => format!("Action result: scratch_read\nerror: {}", err),
                 }
             }
             "scratch_query" => {
@@ -1247,8 +1299,10 @@ impl AgentCore {
                             .into_iter()
                             .map(|row| {
                                 format!(
-                                    "- id={} time_ms={} content={}",
+                                    "- id={} label={} type={} time_ms={} content_preview={}",
                                     row.id,
+                                    scratch_label_for_display(&row),
+                                    normalized_scratch_type(&row.scratch_type),
                                     row.created_at_ms,
                                     compact_text(&row.content, 240)
                                 )
@@ -1379,6 +1433,91 @@ impl AgentCore {
             turn_id,
             &self.current_action_user_question,
         );
+    }
+
+    fn collect_prompt_context_for_scratch(
+        &self,
+        delta_ids: &[String],
+        slice_ids: &[String],
+    ) -> Result<ScratchContextOffload, String> {
+        let delta_id_set = delta_ids
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>();
+        let slice_id_set = slice_ids
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>();
+        if delta_id_set.is_empty() && slice_id_set.is_empty() {
+            return Err("delta_ids_or_slice_ids_required".to_string());
+        }
+        if delta_id_set.contains("prompt_0") || slice_id_set.contains("prompt_0") {
+            return Err("prompt_0_not_allowed".to_string());
+        }
+
+        let existing_delta_ids = self
+            .deltas
+            .iter()
+            .map(|delta| delta.delta_id.clone())
+            .collect::<HashSet<_>>();
+        let mut matched_delta_ids = HashSet::new();
+        let mut matched_slice_ids = HashSet::new();
+        let mut sections = Vec::new();
+        for delta in &self.deltas {
+            let rendered = render_delta_slices(delta);
+            if delta_id_set.contains(&delta.delta_id) {
+                matched_delta_ids.insert(delta.delta_id.clone());
+                sections.push(format!(
+                    "[BEGIN SCRATCH OFFLOAD DELTA {} time_ms={}]",
+                    delta.delta_id, delta.time_ms
+                ));
+                for slice in rendered {
+                    matched_slice_ids.insert(slice.slice_id.clone());
+                    sections.push(format_prompt_slice_for_scratch(&slice));
+                }
+                sections.push(format!("[END SCRATCH OFFLOAD DELTA {}]", delta.delta_id));
+                continue;
+            }
+            for slice in rendered {
+                if slice_id_set.contains(&slice.slice_id) {
+                    matched_slice_ids.insert(slice.slice_id.clone());
+                    sections.push(format_prompt_slice_for_scratch(&slice));
+                }
+            }
+        }
+
+        let mut missing = delta_id_set
+            .difference(&existing_delta_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in slice_id_set {
+            if !matched_slice_ids.contains(&id) {
+                missing.push(id);
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        if !missing.is_empty() {
+            return Err(format!(
+                "invalid_prompt_refs missing_ids={}",
+                missing.join(",")
+            ));
+        }
+        if sections.is_empty() {
+            return Err("no_visible_prompt_context_to_offload".to_string());
+        }
+
+        let mut matched_delta_ids = matched_delta_ids.into_iter().collect::<Vec<_>>();
+        matched_delta_ids.sort();
+        let mut matched_slice_ids = matched_slice_ids.into_iter().collect::<Vec<_>>();
+        matched_slice_ids.sort();
+        Ok(ScratchContextOffload {
+            content: sections.join("\n"),
+            delta_ids: matched_delta_ids,
+            slice_ids: matched_slice_ids,
+        })
     }
 
     fn apply_prompt_shrink(&mut self, delta_ids: &[String], slice_ids: &[String]) -> String {
@@ -1785,7 +1924,7 @@ impl FileMemoryStore {
 
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, content TEXT)\nsafe_interfaces: memory_schema, memory_sql_query, memory_update, memory_write, chat_history_query, chat_history_delete, scratch_write, scratch_query, scratch_delete\nrules: memory_sql_query accepts SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memory_update for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use chat_history_delete for explicit chat transcript deletion; use scratch_* for temporary task checkpoints. Empty chat_history_query.query lists recent chat records. loaded_chat_records={}.",
+            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interfaces: memory_schema, memory_sql_query, memory_update, memory_write, chat_history_query, chat_history_delete, scratch_write, scratch_read, scratch_query, scratch_delete\nrules: memory_sql_query accepts SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memory_update for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use chat_history_delete for explicit chat transcript deletion; scratch_write requires type=notes with content or type=context_offload with delta_ids/slice_ids plus label; scratch_read requires id and returns full scratch content. Empty chat_history_query.query lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -1920,19 +2059,74 @@ impl FileScratchStore {
         }
     }
 
-    fn write(&self, content: &str) -> Result<ScratchNoteRecord, String> {
-        let clean = content.trim();
-        if clean.is_empty() {
+    fn write_record(
+        &self,
+        scratch_type: &str,
+        label: &str,
+        content: &str,
+        prompt_delta_ids: &[String],
+        prompt_slice_ids: &[String],
+    ) -> Result<ScratchNoteRecord, String> {
+        let clean_type = normalized_scratch_type(scratch_type);
+        let clean_label = label.trim();
+        let clean_content = content.trim();
+        if !matches!(clean_type.as_str(), "notes" | "context_offload") {
+            return Err("type_unsupported".to_string());
+        }
+        if clean_label.is_empty() {
+            return Err("label_required".to_string());
+        }
+        if clean_content.is_empty() {
             return Err("content_required".to_string());
         }
-        self.guard.with_write(|| self.write_clean_unlocked(clean))?
+        self.guard.with_write(|| {
+            self.write_clean_unlocked(
+                &clean_type,
+                clean_label,
+                clean_content,
+                prompt_delta_ids,
+                prompt_slice_ids,
+            )
+        })?
     }
 
-    fn write_clean_unlocked(&self, clean: &str) -> Result<ScratchNoteRecord, String> {
+    fn write_clean_unlocked(
+        &self,
+        scratch_type: &str,
+        label: &str,
+        clean: &str,
+        prompt_delta_ids: &[String],
+        prompt_slice_ids: &[String],
+    ) -> Result<ScratchNoteRecord, String> {
+        let created_at_ms = now_ms();
+        let mut clean_delta_ids = prompt_delta_ids
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect::<Vec<_>>();
+        clean_delta_ids.sort();
+        clean_delta_ids.dedup();
+        let mut clean_slice_ids = prompt_slice_ids
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect::<Vec<_>>();
+        clean_slice_ids.sort();
+        clean_slice_ids.dedup();
         let record = ScratchNoteRecord {
-            id: unique_id("scratch"),
-            created_at_ms: now_ms(),
+            id: scratch_hash_id(
+                scratch_type,
+                label,
+                clean,
+                &clean_delta_ids,
+                &clean_slice_ids,
+            ),
+            created_at_ms,
+            scratch_type: scratch_type.to_string(),
+            label: label.to_string(),
             content: clean.to_string(),
+            prompt_delta_ids: clean_delta_ids,
+            prompt_slice_ids: clean_slice_ids,
         };
         let mut file = OpenOptions::new()
             .create(true)
@@ -1948,6 +2142,19 @@ impl FileScratchStore {
         Ok(record)
     }
 
+    fn read(&self, id: &str) -> Result<Option<ScratchNoteRecord>, String> {
+        let clean_id = id.trim();
+        if clean_id.is_empty() {
+            return Err("id_required".to_string());
+        }
+        self.guard.with_read(|| {
+            Ok(self
+                .read_all_unlocked()?
+                .into_iter()
+                .find(|record| record.id == clean_id))
+        })?
+    }
+
     fn query(&self, query: &str, limit: usize) -> Result<Vec<ScratchNoteRecord>, String> {
         self.guard.with_read(|| self.query_unlocked(query, limit))?
     }
@@ -1957,7 +2164,7 @@ impl FileScratchStore {
         let mut rows = self.read_all_unlocked()?;
         if !terms.is_empty() {
             rows.retain(|record| {
-                let normalized = record.content.to_lowercase();
+                let normalized = format!("{} {}", record.label, record.content).to_lowercase();
                 terms.iter().any(|term| normalized.contains(term))
             });
         }
@@ -2554,6 +2761,22 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .unwrap_or("")
                     .trim()
                     .to_string();
+                let scratch_type = input
+                    .get("type")
+                    .or_else(|| input.get("scratch_type"))
+                    .or_else(|| action.get("type"))
+                    .or_else(|| action.get("scratch_type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let label = input
+                    .get("label")
+                    .or_else(|| action.get("label"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 let sql = input
                     .get("sql")
                     .or_else(|| action.get("sql"))
@@ -2700,9 +2923,39 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                         }
                     }
                     "scratch_write" => {
-                        if content.is_empty() {
+                        let normalized_type = normalized_scratch_type(&scratch_type);
+                        if scratch_type.trim().is_empty() {
+                            repair_issue = Some(format!("next_actions[{idx}].input.type_required"));
+                            break;
+                        }
+                        if !matches!(normalized_type.as_str(), "notes" | "context_offload") {
+                            repair_issue = Some(format!(
+                                "next_actions[{idx}].input.type_unsupported:{scratch_type}"
+                            ));
+                            break;
+                        }
+                        if label.is_empty() {
+                            repair_issue =
+                                Some(format!("next_actions[{idx}].input.label_required"));
+                            break;
+                        }
+                        if normalized_type == "notes" && content.is_empty() {
                             repair_issue =
                                 Some(format!("next_actions[{idx}].input.content_required"));
+                            break;
+                        }
+                        if normalized_type == "context_offload"
+                            && delta_ids.is_empty()
+                            && slice_ids.is_empty()
+                        {
+                            repair_issue =
+                                Some(format!("next_actions[{idx}].input.prompt_refs_required"));
+                            break;
+                        }
+                    }
+                    "scratch_read" => {
+                        if id.is_empty() {
+                            repair_issue = Some(format!("next_actions[{idx}].input.id_required"));
                             break;
                         }
                     }
@@ -2770,6 +3023,8 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     intent: intent.to_string(),
                     query,
                     content,
+                    scratch_type,
+                    label,
                     sql,
                     params,
                     operation,
@@ -3374,6 +3629,87 @@ fn compact_text(text: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
+}
+
+fn normalized_scratch_type(scratch_type: &str) -> String {
+    match scratch_type.trim() {
+        "context_offload" => "context_offload".to_string(),
+        "notes" => "notes".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn scratch_label_for_display(record: &ScratchNoteRecord) -> String {
+    if record.label.trim().is_empty() {
+        "(unlabeled)".to_string()
+    } else {
+        record.label.trim().to_string()
+    }
+}
+
+fn format_scratch_write_result(record: &ScratchNoteRecord) -> String {
+    format!(
+        "Action result: scratch_write\nid: {}\nlabel: {}\ntype: {}\nprompt_delta_ids: {}\nprompt_slice_ids: {}\ncontent_preview: {}",
+        record.id,
+        scratch_label_for_display(record),
+        normalized_scratch_type(&record.scratch_type),
+        comma_or_none(&record.prompt_delta_ids),
+        comma_or_none(&record.prompt_slice_ids),
+        compact_text(&record.content, 320)
+    )
+}
+
+fn format_scratch_read_result(record: &ScratchNoteRecord) -> String {
+    format!(
+        "Action result: scratch_read\nid: {}\nfound: true\nlabel: {}\ntype: {}\nprompt_delta_ids: {}\nprompt_slice_ids: {}\ncontent:\n{}",
+        record.id,
+        scratch_label_for_display(record),
+        normalized_scratch_type(&record.scratch_type),
+        comma_or_none(&record.prompt_delta_ids),
+        comma_or_none(&record.prompt_slice_ids),
+        record.content
+    )
+}
+
+fn format_prompt_slice_for_scratch(slice: &PromptSlice) -> String {
+    format!(
+        "[BEGIN SCRATCH OFFLOAD SLICE {}]\ndelta_id: {}\nslice_id: {}\nslice: {}/{}\nprompt_type: {}\ntime_ms: {}\n{}\n[END SCRATCH OFFLOAD SLICE {}]",
+        slice.slice_id,
+        slice.delta_id,
+        slice.slice_id,
+        slice.slice_index,
+        slice.slice_count,
+        slice.prompt_type,
+        slice.time_ms,
+        slice.text,
+        slice.slice_id
+    )
+}
+
+fn comma_or_none(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(",")
+    }
+}
+
+fn scratch_hash_id(
+    scratch_type: &str,
+    label: &str,
+    content: &str,
+    delta_ids: &[String],
+    slice_ids: &[String],
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    scratch_type.hash(&mut hasher);
+    label.hash(&mut hasher);
+    content.hash(&mut hasher);
+    delta_ids.hash(&mut hasher);
+    slice_ids.hash(&mut hasher);
+    now_ms().hash(&mut hasher);
+    ID_COUNTER.fetch_add(1, Ordering::SeqCst).hash(&mut hasher);
+    format!("scratch_{:016x}", hasher.finish())
 }
 
 fn now_ms() -> i64 {

@@ -26,7 +26,7 @@
     "schema": {
       "chat_history": "persisted user/assistant chat records shown in the conversation UI; SQL table chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id); use memory_sql_query for precise SQL/time-window reads or chat_history_query for a simple lexical/recent wrapper; normal app restarts and build updates should preserve it, while reinstall/reset/cleared app data may remove it; not durable memory",
       "memories": "durable local memory; SQL table memories(id, created_at_ms, updated_at_ms, version, content); query through query_memory or memory_sql_query; update/delete existing rows with memory_update.expected_version to avoid multi-CLI conflicts",
-      "scratch_notes": "temporary task checkpoints when work should continue across turns"
+      "scratch_notes": "typed temporary working memory records: notes for model-written checkpoints, context_offload for runtime-copied prompt delta/slice content"
     },
     "evidence_policy": "Use chat_history for prior conversations and exact wording; use durable memory for long-lived user facts; use created_at_ms when time of storage or conversation matters.",
     "retrieval_policy": "Runtime does not infer semantic intent for the model. When evidence is needed, choose an explicit tool action and include a concise intent. Do not say you are checking unless the same response includes the corresponding next_actions entry.",
@@ -130,22 +130,41 @@
         }
       },
       "scratch_write": {
-        "when": "Write a temporary task checkpoint or working note when work is likely to continue across turns. Scratch notes are task-local working memory, not durable user facts.",
+        "when": "Write task-local scratch memory. Use type=notes for a model-written checkpoint. Use type=context_offload to ask runtime to copy existing prompt delta/slice content by id; do not rewrite that content yourself.",
         "input": {
-          "content": "string"
+          "type": "notes|context_offload",
+          "label": "short retrieval label shown in later context with the runtime-generated scratch id",
+          "content?": "string; required for type=notes",
+          "delta_ids?": "array of prompt delta ids; for type=context_offload",
+          "slice_ids?": "array of prompt slice ids; for type=context_offload"
         },
         "example": {
           "action": "scratch_write",
           "intent": "Save a checkpoint before stopping.",
           "input": {
+            "type": "notes",
+            "label": "release validation checkpoint",
             "content": "Task: continue release validation. Tried: tests passed. Next: verify install script."
           }
         }
       },
-      "scratch_query": {
-        "when": "Search or list temporary task checkpoints and working notes.",
+      "scratch_read": {
+        "when": "Read full scratch memory content when a visible scratch id and label indicate the details are needed.",
         "input": {
-          "query?": "string; empty means list recent scratch notes",
+          "id": "scratch id returned by scratch_write or scratch_query"
+        },
+        "example": {
+          "action": "scratch_read",
+          "intent": "Read offloaded context details.",
+          "input": {
+            "id": "scratch_0123456789abcdef"
+          }
+        }
+      },
+      "scratch_query": {
+        "when": "Search or list scratch memory metadata when the needed scratch id is not already visible.",
+        "input": {
+          "query?": "string over labels and content previews; empty means list recent scratch records",
           "limit?": "integer <= 50"
         },
         "example": {
@@ -158,9 +177,9 @@
         }
       },
       "scratch_delete": {
-        "when": "Delete a scratch note after it is obsolete or the user explicitly asks to remove it.",
+        "when": "Delete a scratch memory record after it is obsolete or the user explicitly asks to remove it.",
         "input": {
-          "id": "scratch note id returned by scratch_query or scratch_write"
+          "id": "scratch id returned by scratch_write or scratch_query"
         },
         "example": {
           "action": "scratch_delete",
