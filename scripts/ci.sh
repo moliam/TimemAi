@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "== shell scripts syntax =="
-bash -n install.sh uninstall.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/ci.sh
+bash -n install.sh uninstall.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/edge_regression.sh scripts/ci.sh
 
 echo "== install script logic =="
 scripts/install_logic_test.sh
@@ -18,6 +18,9 @@ cargo fmt --check
 
 echo "== rust tests =="
 cargo test --workspace
+
+echo "== repeated edge regression =="
+scripts/edge_regression.sh
 
 echo "== release build =="
 cargo build -p timem_shell --release

@@ -611,6 +611,129 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    struct ContinueRoundLimitUi {
+        continue_requests: u32,
+    }
+
+    impl TurnUi for ContinueRoundLimitUi {
+        fn request_round_limit_continue(&mut self, _max_rounds: u32) -> bool {
+            self.continue_requests += 1;
+            true
+        }
+    }
+
+    #[test]
+    fn session_turn_round_limit_continue_recharges_and_finishes_same_task() {
+        let dir = tmp_dir("round_limit_continue_e2e");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_max_rounds(1);
+        let mut config = test_config();
+        let mut ui = ContinueRoundLimitUi {
+            continue_requests: 0,
+        };
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Look up evidence before answering.","input":{"query":"round limit e2e","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory evidence"]}}"#,
+                4_000,
+                false,
+            )),
+            Ok(llm(
+                r#"{"response_to_user":"续跑后完成。","acceptance_check":{"is_satisfied":true}}"#,
+                4_200,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "需要多轮完成",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "续跑后完成。");
+        assert_eq!(ui.continue_requests, 1);
+        assert_eq!(model.prompts.len(), 2);
+        assert!(model.prompts[1].contains("Runtime round budget continued by user."));
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert!(audit_text.contains("\"round_limit\""));
+        assert!(audit_text.contains("\"continued\":true"));
+        assert!(audit_text.contains("\"turn_final\""));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    struct ApproveAllUi {
+        approval_requests: u32,
+    }
+
+    impl TurnUi for ApproveAllUi {
+        fn request_user_approval(&mut self, _request: &ApprovalRequest) -> bool {
+            self.approval_requests += 1;
+            true
+        }
+    }
+
+    #[test]
+    fn session_turn_bash_approval_executes_action_then_finishes_with_audit() {
+        let dir = tmp_dir("bash_approval_e2e");
+        let audit = dir.join("audit.jsonl");
+        let output_file = dir.join("approved.txt");
+        let command = format!("printf approved > {}", output_file.display());
+        let first_response = format!(
+            r#"{{"response_to_user":"","next_actions":[{{"action":"run_bash","intent":"Write approved test output.","input":{{"command":{},"timeout_ms":5000}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["bash result"]}}}}"#,
+            serde_json::to_string(&command).unwrap()
+        );
+
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_bash_approval_mode(BashApprovalMode::Ask);
+        let mut config = test_config();
+        let mut ui = ApproveAllUi {
+            approval_requests: 0,
+        };
+        let mut model = ReplayModel::new([
+            Ok(llm(first_response, 3_000, false)),
+            Ok(llm(
+                r#"{"response_to_user":"命令已执行并确认。","acceptance_check":{"is_satisfied":true}}"#,
+                3_100,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "执行一个需要审批的本地写入",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "命令已执行并确认。");
+        assert_eq!(ui.approval_requests, 1);
+        assert_eq!(std::fs::read_to_string(&output_file).unwrap(), "approved");
+        assert_eq!(model.prompts.len(), 2);
+        assert!(model.prompts[1].contains("Action result: run_bash"));
+        assert!(model.prompts[1].contains("status: 0"));
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert!(audit_text.contains("\"user_approval\""));
+        assert!(audit_text.contains("\"approved\":true"));
+        assert!(audit_text.contains("\"turn_final\""));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn noop_turn_ui_defaults_to_noninteractive_denials() {
         let mut ui = NoopTurnUi;
