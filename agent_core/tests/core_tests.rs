@@ -528,6 +528,84 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
 }
 
 #[test]
+fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("shrink_invalidates_observed_tokens"),
+    );
+    core.set_max_llm_input_tokens(10_000);
+    let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(13_253),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let shrink_prompt = match core.begin_turn("compact now", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(shrink_prompt.contains("mode=force_shrink_required"));
+    let mut delta_ids = field_values(&shrink_prompt, "delta_id");
+    delta_ids.sort();
+    delta_ids.dedup();
+    assert!(!delta_ids.is_empty());
+
+    let shrink_response = format!(
+        r#"{{"response_to_user":"","next_actions":[{{"action":"prompt_shrink","intent":"Remove visible dynamic context after checkpointing.","input":{{"delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+        serde_json::to_string(&delta_ids).unwrap()
+    );
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(shrink_response),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(13_253),
+        truncated: false,
+    });
+    let next_prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert!(next_prompt.contains("Action result: prompt_shrink"));
+    assert!(!next_prompt.contains("mode=force_shrink_required"));
+
+    let final_step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"response_to_user":"压缩已完成，可以继续对话。","acceptance_check":{"is_satisfied":true}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_200),
+        truncated: false,
+    });
+    let final_turn = match final_step {
+        CoreStep::Final(final_turn) => final_turn,
+        other => panic!("unexpected step after shrink follow-up: {other:?}"),
+    };
+    assert_eq!(final_turn.response_to_user, "压缩已完成，可以继续对话。");
+}
+
+#[test]
+fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
+    let mut core = AgentCore::new(
+        &"STATIC_PROMPT ".repeat(9_500),
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("shrink_static_dominant"),
+    );
+    core.set_max_llm_input_tokens(3_000);
+
+    let prompt = match core.begin_turn("short question", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("mode=force_shrink_required"));
+}
+
+#[test]
 fn memory_candidates_are_persisted() {
     let dir = tmp_dir("memory_write");
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);

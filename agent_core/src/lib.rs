@@ -933,7 +933,16 @@ impl AgentCore {
         if slices.is_empty() {
             return None;
         }
+        let dynamic_tokens = slices
+            .iter()
+            .map(|slice| estimate_prompt_tokens(&slice.text))
+            .sum::<u32>();
         if estimated_prompt_tokens < force_threshold {
+            return None;
+        }
+        let excess_tokens = estimated_prompt_tokens.saturating_sub(force_threshold);
+        let practical_shrink_capacity = dynamic_tokens.saturating_mul(8) / 10;
+        if practical_shrink_capacity < excess_tokens {
             return None;
         }
         let current_count = self.deltas.len();
@@ -1586,6 +1595,9 @@ impl AgentCore {
             .current_stats
             .shrunk_tokens
             .saturating_add(shrunk_tokens_estimate);
+        if shrunk_tokens_estimate > 0 {
+            self.last_observed_prompt_tokens = 0;
+        }
         let missing_text = if missing.is_empty() {
             "none".to_string()
         } else {
