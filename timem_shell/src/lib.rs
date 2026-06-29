@@ -262,15 +262,19 @@ pub fn token_status_with_latest(
     }
     if !show_latest_ctx {
         if let Some(usage) = latest {
-            if usage.prompt_tokens > 0 {
+            if usage.prompt_tokens > 0 && stats.prompt_tokens > 0 {
                 input.push_str(&format!("(+{})", compact_count(usage.prompt_tokens)));
+            } else if usage.prompt_tokens > 0 && stats.prompt_tokens == 0 {
+                input = format!("▲{}", compact_count(usage.prompt_tokens));
             }
         }
     }
     let mut output = format!("▼{}", compact_count(stats.completion_tokens));
     if let Some(usage) = latest {
-        if usage.completion_tokens > 0 {
+        if usage.completion_tokens > 0 && stats.completion_tokens > 0 {
             output.push_str(&format!("(+{})", compact_count(usage.completion_tokens)));
+        } else if usage.completion_tokens > 0 && stats.completion_tokens == 0 {
+            output = format!("▼{}", compact_count(usage.completion_tokens));
         }
     }
     if ctx.is_empty() {
@@ -2146,6 +2150,22 @@ mod tests {
         assert_eq!(
             token_status_with_latest(&total, Some(&latest), true),
             "Token [ctx] 2K ▲4.4K ▼56(+32)"
+        );
+    }
+
+    #[test]
+    fn token_status_uses_pending_request_as_current_when_total_is_zero() {
+        let pending = UsageStats {
+            prompt_tokens: 5_000,
+            ..UsageStats::zero()
+        };
+        assert_eq!(
+            token_status_with_latest(&UsageStats::zero(), Some(&pending), false),
+            "Token: ▲5K ▼0"
+        );
+        assert!(
+            !token_status_with_latest(&UsageStats::zero(), Some(&pending), false)
+                .contains("▲0(+5K)")
         );
     }
 
