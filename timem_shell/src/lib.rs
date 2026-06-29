@@ -26,7 +26,8 @@ pub use prompt_cache::{
     PromptBlockRole, PromptParts,
 };
 pub use session_runtime::{
-    cancelled_turn_result, run_session_turn, NoopTurnUi, TurnOutcome, TurnRequest, TurnUi,
+    cancelled_turn_result, estimate_prompt_context_tokens, run_session_turn, NoopTurnUi,
+    TurnOutcome, TurnRequest, TurnUi,
 };
 pub use structured_output::{plan_structured_output, StructuredOutputHint};
 
@@ -55,6 +56,7 @@ pub struct ShellStatusSnapshot {
     pub model_round: u32,
     pub direction: ModelDirection,
     pub usage: UsageStats,
+    pub latest_usage: Option<UsageStats>,
     pub tick: usize,
     pub elapsed_secs: u64,
 }
@@ -108,7 +110,11 @@ pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str
         snapshot.provider, snapshot.model, direction, snapshot.model_round
     ));
     status_parts.push(format!("已用 {}", format_elapsed(snapshot.elapsed_secs)));
-    status_parts.push(token_status(&snapshot.usage));
+    status_parts.push(token_status_with_latest(
+        &snapshot.usage,
+        snapshot.latest_usage.as_ref(),
+        false,
+    ));
     let intent = compact_status_text(&snapshot.intent, 36);
     let intent_line = dim_line(&format!("{icon} {intent}..."));
     let status_line = dim_line(&format!("  {}", status_parts.join(" ║ ")));
@@ -144,7 +150,11 @@ fn render_thinking_status_line(snapshot: &ShellStatusSnapshot) -> String {
         snapshot.provider, snapshot.model, direction, snapshot.model_round
     ));
     status_parts.push(format!("已用 {}", format_elapsed(snapshot.elapsed_secs)));
-    status_parts.push(token_status(&snapshot.usage));
+    status_parts.push(token_status_with_latest(
+        &snapshot.usage,
+        snapshot.latest_usage.as_ref(),
+        false,
+    ));
     dim_line(&format!("  {}", status_parts.join(" ║ ")))
 }
 
@@ -174,6 +184,7 @@ pub fn compact_status_text(text: &str, max_chars: usize) -> String {
 pub fn render_final_response_at(
     text: &str,
     stats: &UsageStats,
+    latest_usage: Option<&UsageStats>,
     provider: &str,
     model: &str,
     elapsed_secs: u64,
@@ -185,7 +196,7 @@ pub fn render_final_response_at(
         status_parts.push(memory.to_string());
     }
     status_parts.push(format!("{}:{}: {}", provider, model, stats.llm_calls));
-    status_parts.push(token_status(stats));
+    status_parts.push(token_status_with_latest(stats, latest_usage, true));
     let status_line = dim_line(&format!(
         " ↳ {elapsed_secs}s    ( {} )",
         status_parts.join(" ║ ")
@@ -217,6 +228,27 @@ pub fn render_terminal_markdown(text: &str) -> String {
 }
 
 pub fn token_status(stats: &UsageStats) -> String {
+    token_status_with_latest(stats, None, false)
+}
+
+pub fn token_status_with_latest(
+    stats: &UsageStats,
+    latest_usage: Option<&UsageStats>,
+    show_latest_ctx: bool,
+) -> String {
+    let latest = latest_usage.filter(|usage| {
+        usage.prompt_tokens > 0
+            || usage.completion_tokens > 0
+            || usage.cached_tokens > 0
+            || usage.shrunk_tokens > 0
+    });
+    let ctx = if show_latest_ctx {
+        latest
+            .map(|usage| format!(" [ctx] {}", compact_count(usage.prompt_tokens)))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let mut input = format!("▲{}", compact_count(stats.prompt_tokens));
     let mut input_annotations = Vec::new();
     if stats.cached_tokens > 0 {
@@ -228,11 +260,24 @@ pub fn token_status(stats: &UsageStats) -> String {
     if !input_annotations.is_empty() {
         input.push_str(&format!("({})", input_annotations.join(" , ")));
     }
-    format!(
-        "Token: {} ▼{}",
-        input,
-        compact_count(stats.completion_tokens)
-    )
+    if !show_latest_ctx {
+        if let Some(usage) = latest {
+            if usage.prompt_tokens > 0 {
+                input.push_str(&format!("(+{})", compact_count(usage.prompt_tokens)));
+            }
+        }
+    }
+    let mut output = format!("▼{}", compact_count(stats.completion_tokens));
+    if let Some(usage) = latest {
+        if usage.completion_tokens > 0 {
+            output.push_str(&format!("(+{})", compact_count(usage.completion_tokens)));
+        }
+    }
+    if ctx.is_empty() {
+        format!("Token: {} {}", input, output)
+    } else {
+        format!("Token{} {} {}", ctx, input, output)
+    }
 }
 
 pub fn compact_count(value: u32) -> String {
@@ -2047,6 +2092,7 @@ mod tests {
                 cached_tokens: 1_210_000,
                 ..UsageStats::zero()
             },
+            None,
             "aliyun",
             "qwen-plus",
             1,
@@ -2078,6 +2124,28 @@ mod tests {
                 ..UsageStats::zero()
             }),
             "Token: ▲22.2K(⌁1.2K , ⇃200) ▼1.4K"
+        );
+    }
+
+    #[test]
+    fn token_status_shows_latest_delta_and_context_window() {
+        let total = UsageStats {
+            prompt_tokens: 4_400,
+            completion_tokens: 56,
+            ..UsageStats::zero()
+        };
+        let latest = UsageStats {
+            prompt_tokens: 2_000,
+            completion_tokens: 32,
+            ..UsageStats::zero()
+        };
+        assert_eq!(
+            token_status_with_latest(&total, Some(&latest), false),
+            "Token: ▲4.4K(+2K) ▼56(+32)"
+        );
+        assert_eq!(
+            token_status_with_latest(&total, Some(&latest), true),
+            "Token [ctx] 2K ▲4.4K ▼56(+32)"
         );
     }
 
@@ -2506,6 +2574,11 @@ mod tests {
                     cached_tokens: 0,
                     ..UsageStats::zero()
                 },
+                latest_usage: Some(UsageStats {
+                    prompt_tokens: 110,
+                    completion_tokens: 9,
+                    ..UsageStats::zero()
+                }),
                 tick: 0,
                 elapsed_secs: 7,
             },
@@ -2515,7 +2588,7 @@ mod tests {
         assert!(block.contains("🦩 查询记忆..."));
         assert!(block.contains("◂⛃ ║ aliyun:qwen-plus: ▼2"));
         assert!(block.contains("已用 7s"));
-        assert!(block.contains("Token: ▲210 ▼21"));
+        assert!(block.contains("Token: ▲210(+110) ▼21(+9)"));
         assert!(!block.contains("⚡cache"));
         assert_eq!(block.lines().count(), 3);
         assert!(!block.contains("thinking..."));
@@ -2532,6 +2605,10 @@ mod tests {
                 model_round: 1,
                 direction: ModelDirection::Upstream,
                 usage: UsageStats::zero(),
+                latest_usage: Some(UsageStats {
+                    prompt_tokens: 812,
+                    ..UsageStats::zero()
+                }),
                 tick: 8,
                 elapsed_secs: 65,
             },
@@ -2567,6 +2644,11 @@ mod tests {
                         cached_tokens: 300,
                         ..UsageStats::zero()
                     },
+                    latest_usage: Some(UsageStats {
+                        prompt_tokens: 800,
+                        completion_tokens: 12,
+                        ..UsageStats::zero()
+                    }),
                     tick: 0,
                     elapsed_secs: 12,
                 },
@@ -2581,7 +2663,7 @@ mod tests {
         assert!(view.contains("\x1b[38;5;245m· 执行 Bash: rg --files | wc -l"));
         assert!(view.contains("aliyun:qwen-plus: ▼2"));
         assert!(view.contains("已用 12s"));
-        assert!(view.contains("Token: ▲1.2K(⌁300) ▼20"));
+        assert!(view.contains("Token: ▲1.2K(⌁300)(+800) ▼20(+12)"));
         assert!(!view.contains("ignored in panel mode"));
     }
 
@@ -2598,6 +2680,11 @@ mod tests {
                 cached_tokens: 384,
                 ..UsageStats::zero()
             },
+            Some(&UsageStats {
+                prompt_tokens: 410,
+                completion_tokens: 31,
+                ..UsageStats::zero()
+            }),
             "aliyun",
             "qwen-plus",
             2,
@@ -2612,7 +2699,7 @@ mod tests {
             .is_some_and(|line| line == "你叫默默。"));
         assert!(rendered.contains("你叫默默。"));
         assert!(rendered.contains("◂▸⛃ ║ aliyun:qwen-plus: 2"));
-        assert!(rendered.contains("Token: ▲812(⌁384) ▼52"));
+        assert!(rendered.contains("Token [ctx] 410 ▲812(⌁384) ▼52(+31)"));
         assert!(!rendered.contains("你 >"));
         assert!(!rendered.contains("thinking..."));
     }
@@ -2627,6 +2714,7 @@ mod tests {
                 completion_tokens: 2,
                 ..UsageStats::zero()
             },
+            None,
             "custom",
             "aws-claude-sonnet-4-6",
             1,
@@ -2646,6 +2734,7 @@ mod tests {
                 completion_tokens: 2,
                 ..UsageStats::zero()
             },
+            None,
             "aliyun",
             "qwen-plus",
             1,
@@ -2684,6 +2773,7 @@ mod tests {
                 completion_tokens: 26,
                 ..UsageStats::zero()
             },
+            None,
             "aliyun",
             "qwen-plus",
             1,

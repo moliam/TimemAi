@@ -18,6 +18,7 @@ pub struct TurnRequest<'a> {
 pub struct TurnOutcome {
     pub text: String,
     pub stats: UsageStats,
+    pub latest_usage: Option<UsageStats>,
     pub elapsed: Duration,
     pub repair_issue: Option<String>,
 }
@@ -31,7 +32,7 @@ pub trait TurnUi {
         self.is_cancel_requested()
     }
 
-    fn on_model_request(&mut self, _round: u32) {}
+    fn on_model_request(&mut self, _round: u32, _prompt: &str) {}
 
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
 
@@ -88,15 +89,16 @@ pub fn run_session_turn(
     let mut step = core.begin_turn(request.input, Some(&context));
     let mut rounds = 0u32;
     let mut model_wait_this_turn = Duration::ZERO;
+    let mut latest_usage: Option<UsageStats> = None;
 
-    let (text, stats, repair_issue) = loop {
+    let (text, stats, latest_usage, repair_issue) = loop {
         if ui.take_cancel_request() {
             break cancelled_turn_result();
         }
         match step {
             CoreStep::NeedModel { ref prompt, .. } => {
                 rounds += 1;
-                ui.on_model_request(rounds);
+                ui.on_model_request(rounds, prompt);
                 let model_wait_start = Instant::now();
                 match call_model_with_cancel(config, prompt, request.audit_file, || {
                     ui.is_cancel_requested()
@@ -142,10 +144,12 @@ pub fn run_session_turn(
                                     "模型输出达到当前上限 {}，已按你的选择停止本轮。可用 /config 调大 TIMEM_MAX_LLM_OUTPUT 后重试。",
                                     format_token_count(config.max_llm_output_tokens)
                                 ),
-                                response.usage,
+                                response.usage.clone(),
+                                Some(response.usage),
                                 Some("truncated_output_stopped_by_user".to_string()),
                             );
                         }
+                        latest_usage = Some(response.usage.clone());
                         ui.on_model_response(rounds, &response.usage, &response.content);
                         step = core.apply_model_response(response);
                     }
@@ -168,7 +172,12 @@ pub fn run_session_turn(
                             request.audit_file,
                             &json!({"type":"turn_error","session":request.session,"turn_id":turn_id,"error":err}),
                         );
-                        break (format!("模型调用失败：{err}"), UsageStats::zero(), None);
+                        break (
+                            format!("模型调用失败：{err}"),
+                            UsageStats::zero(),
+                            None,
+                            None,
+                        );
                     }
                 }
             }
@@ -222,12 +231,18 @@ pub fn run_session_turn(
                             "已达到本轮最大交互次数 {max_rounds}，已停止。你可以继续输入来开启新一轮。"
                         ),
                         core.current_stats().clone(),
+                        latest_usage,
                         Some("round_limit_reached".to_string()),
                     );
                 }
             }
             CoreStep::Final(turn) => {
-                break (turn.response_to_user, turn.stats, turn.repair_issue);
+                break (
+                    turn.response_to_user,
+                    turn.stats,
+                    latest_usage,
+                    turn.repair_issue,
+                );
             }
         }
     };
@@ -244,6 +259,7 @@ pub fn run_session_turn(
             "turn_id":turn_id,
             "assistant_output":text,
             "stats":stats,
+            "latest_usage":latest_usage,
             "repair_issue":repair_issue,
             "elapsed_ms":elapsed.as_millis()
         }),
@@ -251,17 +267,23 @@ pub fn run_session_turn(
     TurnOutcome {
         text,
         stats,
+        latest_usage,
         elapsed,
         repair_issue,
     }
 }
 
-pub fn cancelled_turn_result() -> (String, UsageStats, Option<String>) {
+pub fn cancelled_turn_result() -> (String, UsageStats, Option<UsageStats>, Option<String>) {
     (
         "已取消本轮。".to_string(),
         UsageStats::zero(),
+        None,
         Some("cancelled_by_user".to_string()),
     )
+}
+
+pub fn estimate_prompt_context_tokens(prompt: &str) -> u32 {
+    prompt.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
 
 fn epoch_millis() -> u128 {

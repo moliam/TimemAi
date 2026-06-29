@@ -19,13 +19,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
-    action_audit_path, action_status_hint, append_audit, audit_path, data_root, format_token_count,
-    load_workspace_dirs, local_time_label, memory_path, observation_events_from_model_response,
-    parse_cli_args, provider_config_from_env, render_final_response_at, render_prof_report,
-    render_shell_status_bar, render_thinking_view_at, run_session_turn, save_workspace_dirs,
-    ApiProtocol, ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, RuntimeProfiler,
-    ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, TurnRequest,
-    TurnUi, SPINNER_ICONS, TIMEM_LOGO,
+    action_audit_path, action_status_hint, append_audit, audit_path, data_root,
+    estimate_prompt_context_tokens, format_token_count, load_workspace_dirs, local_time_label,
+    memory_path, observation_events_from_model_response, parse_cli_args, provider_config_from_env,
+    render_final_response_at, render_prof_report, render_shell_status_bar, render_thinking_view_at,
+    run_session_turn, save_workspace_dirs, ApiProtocol, ModelDirection, NoopTurnUi,
+    ObservationEvent, ObservationPanel, RuntimeProfiler, ShellStatusMessage, ShellStatusSnapshot,
+    ShellStatusTone, ThinkingViewSnapshot, TurnRequest, TurnUi, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -267,6 +267,7 @@ fn main() {
         print_final_response(
             &outcome.text,
             &outcome.stats,
+            outcome.latest_usage.as_ref(),
             &config.provider,
             &config.model,
             outcome.elapsed,
@@ -293,9 +294,10 @@ impl TurnUi for CliTurnUi<'_> {
         consume_turn_cancel_request()
     }
 
-    fn on_model_request(&mut self, round: u32) {
+    fn on_model_request(&mut self, round: u32, prompt: &str) {
         if let Some(status) = self.status.as_deref_mut() {
             status.set_model_direction(round, ModelDirection::Upstream);
+            status.set_pending_request_usage(estimate_prompt_context_tokens(prompt));
             status.set_transient_observation("思考中...");
         }
     }
@@ -371,6 +373,7 @@ impl ThinkingStatus {
                 model_round: 1,
                 direction: ModelDirection::Upstream,
                 usage: UsageStats::zero(),
+                latest_usage: None,
                 tick: random_spinner_tick(),
                 elapsed_secs: 0,
             },
@@ -415,7 +418,18 @@ impl ThinkingStatus {
 
     fn set_usage(&mut self, usage: UsageStats) {
         if let Ok(mut state) = self.state.lock() {
-            state.status.usage = usage;
+            state.status.usage.add(&usage);
+            state.status.latest_usage = Some(usage);
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn set_pending_request_usage(&mut self, prompt_tokens: u32) {
+        if let Ok(mut state) = self.state.lock() {
+            state.status.latest_usage = Some(UsageStats {
+                prompt_tokens,
+                ..UsageStats::zero()
+            });
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -2084,6 +2098,7 @@ fn terminal_width_from_fd(_fd: i32) -> Option<usize> {
 fn print_final_response(
     text: &str,
     stats: &UsageStats,
+    latest_usage: Option<&UsageStats>,
     provider: &str,
     model: &str,
     elapsed: Duration,
@@ -2091,6 +2106,7 @@ fn print_final_response(
     let rendered = render_final_response_at(
         text,
         stats,
+        latest_usage,
         provider,
         model,
         elapsed.as_secs(),
@@ -2560,10 +2576,11 @@ mod static_prompt_tests {
 
     #[test]
     fn cancelled_turn_message_does_not_look_like_model_failure() {
-        let (text, stats, issue) = timem_shell::cancelled_turn_result();
+        let (text, stats, latest_usage, issue) = timem_shell::cancelled_turn_result();
         assert_eq!(text, "已取消本轮。");
         assert!(!text.contains("模型调用失败"));
         assert_eq!(stats.llm_calls, 0);
+        assert!(latest_usage.is_none());
         assert_eq!(issue.as_deref(), Some("cancelled_by_user"));
     }
 
