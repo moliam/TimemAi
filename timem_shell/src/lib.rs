@@ -255,7 +255,7 @@ pub fn token_status_with_latest(
     });
     let ctx = if mode == TokenStatusMode::Final {
         latest
-            .map(|usage| format!(" [ctx] {}", compact_count(usage.prompt_tokens)))
+            .map(|usage| format!(" [ctx {}]", compact_count(usage.prompt_tokens)))
             .unwrap_or_default()
     } else {
         String::new()
@@ -2162,7 +2162,7 @@ mod tests {
         );
         assert_eq!(
             token_status_with_latest(&total, Some(&latest), TokenStatusMode::Final),
-            "Token [ctx] 2K ▲4.4K ▼56"
+            "Token [ctx 2K] ▲4.4K ▼56"
         );
     }
 
@@ -2208,7 +2208,7 @@ mod tests {
             2,
             "09:24:00",
         );
-        assert!(rendered.contains("Token [ctx] 5.1K ▲5.1K ▼45"));
+        assert!(rendered.contains("Token [ctx 5.1K] ▲5.1K ▼45"));
         assert!(!rendered.contains("▼45(+45)"));
     }
 
@@ -2762,7 +2762,7 @@ mod tests {
             .is_some_and(|line| line == "你叫默默。"));
         assert!(rendered.contains("你叫默默。"));
         assert!(rendered.contains("◂▸⛃ ║ aliyun:qwen-plus: 2"));
-        assert!(rendered.contains("Token [ctx] 410 ▲812(⌁384) ▼52"));
+        assert!(rendered.contains("Token [ctx 410] ▲812(⌁384) ▼52"));
         assert!(!rendered.contains("▼52(+31)"));
         assert!(!rendered.contains("你 >"));
         assert!(!rendered.contains("thinking..."));
