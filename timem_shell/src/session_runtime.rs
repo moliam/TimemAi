@@ -2,7 +2,7 @@ use crate::{
     append_audit, call_model_with_cancel, format_token_count, supporting_context, ProviderConfig,
     RuntimeProfiler,
 };
-use agent_core::{AgentCore, ApprovalRequest, CoreStep, UsageStats};
+use agent_core::{AgentCore, ApprovalRequest, CoreStep, LlmResponse, UsageStats};
 use serde_json::json;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -63,12 +63,48 @@ pub struct NoopTurnUi;
 
 impl TurnUi for NoopTurnUi {}
 
+trait ModelClient {
+    fn call_model(
+        &mut self,
+        config: &ProviderConfig,
+        prompt: &str,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String>;
+}
+
+struct CurlModelClient;
+
+impl ModelClient for CurlModelClient {
+    fn call_model(
+        &mut self,
+        config: &ProviderConfig,
+        prompt: &str,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        call_model_with_cancel(config, prompt, audit_file, should_cancel)
+    }
+}
+
 pub fn run_session_turn(
     core: &mut AgentCore,
     config: &mut ProviderConfig,
     request: TurnRequest<'_>,
     ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+) -> TurnOutcome {
+    let mut model_client = CurlModelClient;
+    run_session_turn_with_model_client(core, config, request, ui, profiler, &mut model_client)
+}
+
+fn run_session_turn_with_model_client(
+    core: &mut AgentCore,
+    config: &mut ProviderConfig,
+    request: TurnRequest<'_>,
+    ui: &mut dyn TurnUi,
     mut profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
 ) -> TurnOutcome {
     let turn_id = format!("turn_{}", epoch_millis());
     let _ = append_audit(
@@ -100,7 +136,7 @@ pub fn run_session_turn(
                 rounds += 1;
                 ui.on_model_request(rounds, prompt);
                 let model_wait_start = Instant::now();
-                match call_model_with_cancel(config, prompt, request.audit_file, || {
+                match model_client.call_model(config, prompt, request.audit_file, &mut || {
                     ui.is_cancel_requested()
                 }) {
                     Ok(response) => {
@@ -297,6 +333,134 @@ fn epoch_millis() -> u128 {
 mod tests {
     use super::*;
     use agent_core::{BashApprovalMode, CoreProfile};
+    use std::collections::VecDeque;
+
+    fn tmp_dir(name: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "timem_session_runtime_{}_{}_{}",
+            name,
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_profile() -> CoreProfile {
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        }
+    }
+
+    fn test_config() -> ProviderConfig {
+        ProviderConfig {
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+            api_key: "dummy".to_string(),
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_protocol: crate::ApiProtocol::OpenAiCompatible,
+            timeout_secs: 1,
+            max_llm_input_tokens: 100_000,
+            max_llm_output_tokens: 10_000,
+        }
+    }
+
+    fn usage(prompt_tokens: u32, completion_tokens: u32) -> UsageStats {
+        UsageStats {
+            llm_calls: 1,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            ..UsageStats::zero()
+        }
+    }
+
+    fn llm(content: impl Into<String>, prompt_tokens: u32, truncated: bool) -> LlmResponse {
+        LlmResponse {
+            content: content.into(),
+            model_name: "test-model".to_string(),
+            usage: usage(prompt_tokens, 10),
+            truncated,
+        }
+    }
+
+    fn prompt_field_values(prompt: &str, field: &str) -> Vec<String> {
+        let prefix = format!("{field}: ");
+        prompt
+            .lines()
+            .filter_map(|line| line.strip_prefix(&prefix))
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    struct ReplayModel {
+        responses: VecDeque<Result<LlmResponse, String>>,
+        prompts: Vec<String>,
+    }
+
+    impl ReplayModel {
+        fn new(responses: impl IntoIterator<Item = Result<LlmResponse, String>>) -> Self {
+            Self {
+                responses: responses.into_iter().collect(),
+                prompts: Vec::new(),
+            }
+        }
+    }
+
+    impl ModelClient for ReplayModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            self.responses
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected_extra_model_call".to_string()))
+        }
+    }
+
+    struct ShrinkReplayModel {
+        prompts: Vec<String>,
+    }
+
+    impl ModelClient for ShrinkReplayModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            if self.prompts.len() == 1 {
+                assert!(prompt.contains("mode=force_shrink_required"));
+                let mut delta_ids = prompt_field_values(prompt, "delta_id");
+                delta_ids.sort();
+                delta_ids.dedup();
+                assert!(!delta_ids.is_empty());
+                let content = format!(
+                    r#"{{"response_to_user":"","next_actions":[{{"action":"prompt_shrink","intent":"Remove visible dynamic context after checkpointing.","input":{{"delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+                    serde_json::to_string(&delta_ids).unwrap()
+                );
+                return Ok(llm(content, 13_253, false));
+            }
+            assert_eq!(self.prompts.len(), 2);
+            assert!(prompt.contains("Action result: prompt_shrink"));
+            assert!(!prompt.contains("mode=force_shrink_required"));
+            Ok(llm(
+                r#"{"response_to_user":"压缩已完成，可以继续对话。","acceptance_check":{"is_satisfied":true}}"#,
+                1_200,
+                false,
+            ))
+        }
+    }
 
     struct CancelImmediately;
 
@@ -308,34 +472,11 @@ mod tests {
 
     #[test]
     fn session_turn_can_cancel_before_provider_call_without_network() {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
-            "timem_session_runtime_cancel_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir("cancel");
         let audit = dir.join("audit.jsonl");
-        let mut core = AgentCore::new(
-            r#"{"role":"test static prompt"}"#,
-            CoreProfile {
-                name: "test".to_string(),
-                provider: "test".to_string(),
-                model: "test-model".to_string(),
-            },
-            &dir,
-        );
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         core.set_bash_approval_mode(BashApprovalMode::Ask);
-        let mut config = ProviderConfig {
-            provider: "test".to_string(),
-            model: "test-model".to_string(),
-            api_key: "dummy".to_string(),
-            base_url: "http://127.0.0.1:9/v1".to_string(),
-            api_protocol: crate::ApiProtocol::OpenAiCompatible,
-            timeout_secs: 1,
-            max_llm_input_tokens: 100_000,
-            max_llm_output_tokens: 10_000,
-        };
+        let mut config = test_config();
         let mut ui = CancelImmediately;
 
         let outcome = run_session_turn(
@@ -357,6 +498,116 @@ mod tests {
         assert!(audit_text.contains("\"turn_start\""));
         assert!(audit_text.contains("\"turn_final\""));
         assert!(!audit_text.contains("\"llm_request\""));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
+        let dir = tmp_dir("forced_shrink_e2e");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_max_llm_input_tokens(10_000);
+        let mut config = test_config();
+        config.max_llm_input_tokens = 10_000;
+
+        let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
+        let seed_step = core.apply_model_response(llm(
+            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
+            13_253,
+            false,
+        ));
+        assert!(matches!(seed_step, CoreStep::Final(_)));
+
+        let mut ui = NoopTurnUi;
+        let mut model = ShrinkReplayModel {
+            prompts: Vec::new(),
+        };
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "继续",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "压缩已完成，可以继续对话。");
+        assert_eq!(model.prompts.len(), 2);
+        assert_eq!(
+            model
+                .prompts
+                .iter()
+                .filter(|prompt| prompt.contains("mode=force_shrink_required"))
+                .count(),
+            1
+        );
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert!(audit_text.contains("\"turn_start\""));
+        assert!(audit_text.contains("\"turn_final\""));
+        assert!(audit_text.contains("压缩已完成，可以继续对话。"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    struct ExpandOutputUi {
+        expansion_requests: u32,
+    }
+
+    impl TurnUi for ExpandOutputUi {
+        fn can_request_output_expansion(&mut self) -> bool {
+            true
+        }
+
+        fn request_expand_output_tokens(&mut self, _current_tokens: u32) -> bool {
+            self.expansion_requests += 1;
+            true
+        }
+    }
+
+    #[test]
+    fn session_turn_truncated_output_expands_limit_and_retries_same_turn() {
+        let dir = tmp_dir("truncated_expansion_e2e");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        config.max_llm_output_tokens = 10_000;
+        let mut ui = ExpandOutputUi {
+            expansion_requests: 0,
+        };
+        let mut model = ReplayModel::new([
+            Ok(llm(r#"{"response_to_user":"partial""#, 5_000, true)),
+            Ok(llm(
+                r#"{"response_to_user":"扩容后完成。","acceptance_check":{"is_satisfied":true}}"#,
+                5_100,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "生成长报告",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "扩容后完成。");
+        assert_eq!(ui.expansion_requests, 1);
+        assert_eq!(model.prompts.len(), 2);
+        assert_eq!(config.max_llm_output_tokens, 20_000);
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert!(audit_text.contains("\"max_llm_output_increased\""));
+        assert!(audit_text.contains("\"turn_final\""));
         let _ = std::fs::remove_dir_all(dir);
     }
 
