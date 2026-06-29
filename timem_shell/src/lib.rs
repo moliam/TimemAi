@@ -113,7 +113,7 @@ pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str
     status_parts.push(token_status_with_latest(
         &snapshot.usage,
         snapshot.latest_usage.as_ref(),
-        false,
+        TokenStatusMode::Thinking,
     ));
     let intent = compact_status_text(&snapshot.intent, 36);
     let intent_line = dim_line(&format!("{icon} {intent}..."));
@@ -153,7 +153,7 @@ fn render_thinking_status_line(snapshot: &ShellStatusSnapshot) -> String {
     status_parts.push(token_status_with_latest(
         &snapshot.usage,
         snapshot.latest_usage.as_ref(),
-        false,
+        TokenStatusMode::Thinking,
     ));
     dim_line(&format!("  {}", status_parts.join(" ║ ")))
 }
@@ -196,7 +196,11 @@ pub fn render_final_response_at(
         status_parts.push(memory.to_string());
     }
     status_parts.push(format!("{}:{}: {}", provider, model, stats.llm_calls));
-    status_parts.push(token_status_with_latest(stats, latest_usage, true));
+    status_parts.push(token_status_with_latest(
+        stats,
+        latest_usage,
+        TokenStatusMode::Final,
+    ));
     let status_line = dim_line(&format!(
         " ↳ {elapsed_secs}s    ( {} )",
         status_parts.join(" ║ ")
@@ -228,13 +232,20 @@ pub fn render_terminal_markdown(text: &str) -> String {
 }
 
 pub fn token_status(stats: &UsageStats) -> String {
-    token_status_with_latest(stats, None, false)
+    token_status_with_latest(stats, None, TokenStatusMode::Plain)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenStatusMode {
+    Plain,
+    Thinking,
+    Final,
 }
 
 pub fn token_status_with_latest(
     stats: &UsageStats,
     latest_usage: Option<&UsageStats>,
-    show_latest_ctx: bool,
+    mode: TokenStatusMode,
 ) -> String {
     let latest = latest_usage.filter(|usage| {
         usage.prompt_tokens > 0
@@ -242,7 +253,7 @@ pub fn token_status_with_latest(
             || usage.cached_tokens > 0
             || usage.shrunk_tokens > 0
     });
-    let ctx = if show_latest_ctx {
+    let ctx = if mode == TokenStatusMode::Final {
         latest
             .map(|usage| format!(" [ctx] {}", compact_count(usage.prompt_tokens)))
             .unwrap_or_default()
@@ -260,7 +271,7 @@ pub fn token_status_with_latest(
     if !input_annotations.is_empty() {
         input.push_str(&format!("({})", input_annotations.join(" , ")));
     }
-    if !show_latest_ctx {
+    if mode == TokenStatusMode::Thinking {
         if let Some(usage) = latest {
             if usage.prompt_tokens > 0 && stats.prompt_tokens > 0 {
                 input.push_str(&format!("(+{})", compact_count(usage.prompt_tokens)));
@@ -270,11 +281,13 @@ pub fn token_status_with_latest(
         }
     }
     let mut output = format!("▼{}", compact_count(stats.completion_tokens));
-    if let Some(usage) = latest {
-        if usage.completion_tokens > 0 && stats.completion_tokens > 0 {
-            output.push_str(&format!("(+{})", compact_count(usage.completion_tokens)));
-        } else if usage.completion_tokens > 0 && stats.completion_tokens == 0 {
-            output = format!("▼{}", compact_count(usage.completion_tokens));
+    if mode == TokenStatusMode::Thinking {
+        if let Some(usage) = latest {
+            if usage.completion_tokens > 0 && stats.completion_tokens > 0 {
+                output.push_str(&format!("(+{})", compact_count(usage.completion_tokens)));
+            } else if usage.completion_tokens > 0 && stats.completion_tokens == 0 {
+                output = format!("▼{}", compact_count(usage.completion_tokens));
+            }
         }
     }
     if ctx.is_empty() {
@@ -2144,12 +2157,12 @@ mod tests {
             ..UsageStats::zero()
         };
         assert_eq!(
-            token_status_with_latest(&total, Some(&latest), false),
+            token_status_with_latest(&total, Some(&latest), TokenStatusMode::Thinking),
             "Token: ▲4.4K(+2K) ▼56(+32)"
         );
         assert_eq!(
-            token_status_with_latest(&total, Some(&latest), true),
-            "Token [ctx] 2K ▲4.4K ▼56(+32)"
+            token_status_with_latest(&total, Some(&latest), TokenStatusMode::Final),
+            "Token [ctx] 2K ▲4.4K ▼56"
         );
     }
 
@@ -2160,13 +2173,43 @@ mod tests {
             ..UsageStats::zero()
         };
         assert_eq!(
-            token_status_with_latest(&UsageStats::zero(), Some(&pending), false),
+            token_status_with_latest(
+                &UsageStats::zero(),
+                Some(&pending),
+                TokenStatusMode::Thinking
+            ),
             "Token: ▲5K ▼0"
         );
-        assert!(
-            !token_status_with_latest(&UsageStats::zero(), Some(&pending), false)
-                .contains("▲0(+5K)")
+        assert!(!token_status_with_latest(
+            &UsageStats::zero(),
+            Some(&pending),
+            TokenStatusMode::Thinking
+        )
+        .contains("▲0(+5K)"));
+    }
+
+    #[test]
+    fn final_token_status_does_not_show_latest_output_delta() {
+        let rendered = render_final_response_at(
+            "Hi!",
+            &UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 5_100,
+                completion_tokens: 45,
+                ..UsageStats::zero()
+            },
+            Some(&UsageStats {
+                prompt_tokens: 5_100,
+                completion_tokens: 45,
+                ..UsageStats::zero()
+            }),
+            "custom",
+            "aws-claude-sonnet-4-6",
+            2,
+            "09:24:00",
         );
+        assert!(rendered.contains("Token [ctx] 5.1K ▲5.1K ▼45"));
+        assert!(!rendered.contains("▼45(+45)"));
     }
 
     #[test]
@@ -2719,7 +2762,8 @@ mod tests {
             .is_some_and(|line| line == "你叫默默。"));
         assert!(rendered.contains("你叫默默。"));
         assert!(rendered.contains("◂▸⛃ ║ aliyun:qwen-plus: 2"));
-        assert!(rendered.contains("Token [ctx] 410 ▲812(⌁384) ▼52(+31)"));
+        assert!(rendered.contains("Token [ctx] 410 ▲812(⌁384) ▼52"));
+        assert!(!rendered.contains("▼52(+31)"));
         assert!(!rendered.contains("你 >"));
         assert!(!rendered.contains("thinking..."));
     }
