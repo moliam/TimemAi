@@ -734,6 +734,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    struct ScratchOffloadReplayModel {
+        prompts: Vec<String>,
+    }
+
+    impl ModelClient for ScratchOffloadReplayModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            if self.prompts.len() == 1 {
+                let mut delta_ids = prompt_field_values(prompt, "delta_id");
+                delta_ids.sort();
+                delta_ids.dedup();
+                assert!(!delta_ids.is_empty());
+                let content = format!(
+                    r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_write","intent":"Offload visible prompt context for later retrieval.","input":{{"type":"context_offload","label":"session e2e offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch id"]}}}}"#,
+                    serde_json::to_string(&delta_ids).unwrap()
+                );
+                return Ok(llm(content, 4_000, false));
+            }
+            assert_eq!(self.prompts.len(), 2);
+            assert!(prompt.contains("Action result: scratch_write"));
+            assert!(prompt.contains("id: scratch_"));
+            assert!(prompt.contains("label: session e2e offload"));
+            Ok(llm(
+                r#"{"response_to_user":"scratch 已记录，可以继续。","acceptance_check":{"is_satisfied":true}}"#,
+                4_100,
+                false,
+            ))
+        }
+    }
+
+    #[test]
+    fn session_turn_scratch_context_offload_records_id_and_continues() {
+        let dir = tmp_dir("scratch_offload_e2e");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut model = ScratchOffloadReplayModel {
+            prompts: Vec::new(),
+        };
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "把当前上下文转存到 scratch 后继续",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: Some("extra context that should be offloaded"),
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "scratch 已记录，可以继续。");
+        assert_eq!(model.prompts.len(), 2);
+        let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
+        assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
+        assert!(scratch_text.contains(r#""label":"session e2e offload""#));
+        assert!(scratch_text.contains("extra context that should be offloaded"));
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert!(audit_text.contains("\"turn_final\""));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn noop_turn_ui_defaults_to_noninteractive_denials() {
         let mut ui = NoopTurnUi;
