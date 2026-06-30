@@ -264,6 +264,7 @@ impl ParsedAction {
 struct ParsedEnvelope {
     response_to_user: String,
     thought: String,
+    thought_durable: bool,
     next_actions: Vec<ParsedAction>,
     memory_candidates: Vec<String>,
     repair_issue: Option<String>,
@@ -675,7 +676,7 @@ impl AgentCore {
         }
         let parsed = parse_envelope(&response.content);
         let mut slices = Vec::new();
-        if !parsed.thought.is_empty() {
+        if !parsed.thought.is_empty() && parsed.thought_durable {
             slices.push((
                 "llm_thought".to_string(),
                 format!("Thought:\n{}", parsed.thought),
@@ -2700,6 +2701,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
             return ParsedEnvelope {
                 response_to_user: String::new(),
                 thought: String::new(),
+                thought_durable: false,
                 next_actions: vec![],
                 memory_candidates: vec![],
                 repair_issue: Some("invalid_json".to_string()),
@@ -2710,6 +2712,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         return ParsedEnvelope {
             response_to_user: String::new(),
             thought: String::new(),
+            thought_durable: false,
             next_actions: vec![],
             memory_candidates: vec![],
             repair_issue: Some("root_must_be_json_object".to_string()),
@@ -2723,13 +2726,33 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
             String::new()
         }
     };
-    let thought = value
-        .get("thought")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_default();
+    let (thought, thought_durable) = {
+        let v = value.get("thought");
+        if let Some(obj) = v.and_then(Value::as_object) {
+            let content = obj
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let durable = obj
+                .get("durable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            (content, durable)
+        } else {
+            // backward compat: plain string thought is always durable
+            let s = v
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let durable = !s.is_empty();
+            (s, durable)
+        }
+    };
     let acceptance_satisfied = value
         .get("acceptance_check")
         .and_then(|check| check.get("is_satisfied"))
@@ -3109,6 +3132,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
     ParsedEnvelope {
         response_to_user,
         thought,
+        thought_durable,
         next_actions,
         memory_candidates,
         repair_issue,

@@ -3157,6 +3157,46 @@ fn thought_field_optional_does_not_trigger_repair() {
     assert!(!prompt.contains("prompt_type: llm_thought"));
 }
 
+
+#[test]
+fn thought_object_durable_true_is_persisted_as_llm_thought_slice() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("thought_obj_durable"),
+    );
+    let _ = core.begin_turn("需要推理", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"thought":{"content":"对象形式的思考","durable":true},"response_to_user":"好的","acceptance_check":{"is_satisfied":true}}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("prompt_type: llm_thought"));
+    assert!(prompt.contains("Thought:\n对象形式的思考"));
+}
+
+#[test]
+fn thought_object_durable_false_is_not_persisted() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("thought_obj_not_durable"),
+    );
+    let _ = core.begin_turn("需要推理", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"thought":{"content":"临时思考不保留","durable":false},"response_to_user":"好的","acceptance_check":{"is_satisfied":true}}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = core.render_prompt();
+    assert!(!prompt.contains("prompt_type: llm_thought"));
+}
+
 #[test]
 fn static_prompt_keeps_contracts_concise() {
     let static_prompt = include_str!("../../resources/static_v1.json");

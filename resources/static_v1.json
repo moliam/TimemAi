@@ -269,7 +269,11 @@
         "next_actions": "array required when is_satisfied=false; non-empty when response_to_user is empty"
       },
       "optional": {
-        "thought?": "string; optional. Internal reasoning draft written before response_to_user / next_actions. Not shown to the user; runtime keeps it as a prompt_delta for reference in later rounds. Recommended for complex multi-step tasks; omit for simple Q&A.",
+        "thought?": {
+          "content": "string; optional. You can record your internal reasoning draft here. Not shown to the user; Recommended for complex multi-step tasks; omit for simple Q&A.",
+          "durable": "boolean; optional. Default false. Tell the runtime whether to include the thought for you in future round's prompt text."
+        },
+        
         "next_actions?": "array<string|object>",
         "continuation?": {
           "carryover_needed?": "boolean",

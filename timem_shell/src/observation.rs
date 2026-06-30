@@ -215,13 +215,17 @@ pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationE
         return Vec::new();
     };
     let mut events = Vec::new();
-    if let Some(thought) = value
+    if let Some(thought_content) = value
         .get("thought")
-        .and_then(Value::as_str)
+        .and_then(|t| {
+                                                                 t.get("content")
+                                                                     .and_then(Value::as_str)
+                                                                     .or_else(|| t.as_str())
+                                                             })
         .map(str::trim)
         .filter(|text| !text.is_empty())
     {
-        events.push(ObservationEvent::Persistent(thought.to_string()));
+        events.push(ObservationEvent::Persistent(thought_content.to_string()));
     }
     if let Some(actions) = value.get("next_actions").and_then(Value::as_array) {
         for action in actions.iter().take(2) {
