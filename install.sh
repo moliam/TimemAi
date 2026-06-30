@@ -180,7 +180,7 @@ SH
   echo "  2. Edit $ROOT_DIR/env and uncomment the values you need."
   echo "  3. Ensure $INSTALL_DIR is in PATH."
   echo "  4. Load env: source /path/to/your/env"
-  echo "  5. Run: $COMMAND_NAME --space .test_mem --model qwen-plus"
+  echo "  5. Run: $COMMAND_NAME"
   echo
   echo "Update later from this git clone:"
   echo "  git pull --ff-only"

@@ -25,7 +25,7 @@ and remaining supplement decisions stay visible.
 
 | Feature area | Function / unit coverage | Integration / E2E coverage | Repeated edge coverage |
 |---|---|---|---|
-| Provider config, protocol, URL, output/input limits | `provider_config_from_env`, `parse_cli_args`, protocol adapter tests | startup banner and `/config` real TTY smoke | full CI |
+| Provider config, protocol, URL, output/input limits | `provider_config_from_env`, `parse_cli_args`, provider switch default-reset tests, protocol adapter tests | startup banner and `/config` real TTY smoke including provider switch/default URL validation | full CI |
 | Provider response parsing and errors | OpenAI-compatible, OpenAI Responses, Anthropic usage/error tests | truncated output expansion session test | edge regression session group |
 | Prompt cache planning | `prompt_cache_strategy_*`, provider request cache-control tests | request audit redaction/hash tests | full CI |
 | Prompt delta/slice rendering | prompt segmentation and multi-slice core tests | shrink session E2E | edge regression shrink group |
@@ -34,15 +34,15 @@ and remaining supplement decisions stay visible.
 | Durable memory | query/update/delete, expected version, SQL read surface | realistic multi-turn memory story | memory concurrency + realistic story groups |
 | Multi-CLI memory conflicts | mem guard cross-process and same-version conflict tests | realistic story exercises shared storage shape | memory concurrency group |
 | Chat history | persisted query, delete, SQL time-window, current prompt fallback | realistic story | full CI |
-| Bash actions | approval risk, foreground shell, readback, background jobs | bash approval session E2E | shell job group |
+| Bash actions | approval risk, foreground shell, readback, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
 | Shell jobs | background start/poll/status timeout tests | realistic story where applicable | shell job group |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |
 | Cancellation | cancel before provider call, command cancellation tests | real TTY Ctrl+C smoke | real TTY smoke |
-| Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping | real TTY multiline/paste/config/workspace smokes | real TTY smoke in CI |
+| Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts | real TTY multiline/paste/config/workspace smokes | real TTY smoke in CI |
 | Observation panel | observation event/rendering tests | thinking view tests | full CI |
 | Profiling | profiler aggregation and storage tests | `/prof` real TTY smoke | real TTY smoke |
 | Audit and secrets | append audit, action grouping, redaction tests, sensitive scan | session tests assert turn/action audit records | sensitive scan + full CI |
-| Install/update scripts | install logic tests | CI script syntax and install logic | full CI |
+| Install/update scripts | install logic tests, install run-hint contract | CI script syntax and install logic | full CI |
 
 ## CI Gates
 

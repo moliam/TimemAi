@@ -766,6 +766,15 @@ pub fn default_base_url_for_provider(provider: &str) -> String {
     default_base_url(&provider.to_lowercase()).to_string()
 }
 
+pub fn known_default_base_url_for_provider(provider: &str) -> Option<String> {
+    let provider = provider.to_lowercase();
+    matches!(
+        provider.as_str(),
+        "openai" | "anthropic" | "aliyun" | "dashscope"
+    )
+    .then(|| default_base_url(&provider).to_string())
+}
+
 pub fn is_default_base_url_for_provider(provider: &str, base_url: &str) -> bool {
     let provider = provider.to_lowercase();
     match provider.as_str() {

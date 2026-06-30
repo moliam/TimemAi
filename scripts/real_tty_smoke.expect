@@ -63,6 +63,15 @@ proc spawn_timem {} {
         TIMEM_MODEL=qwen-plus \
         TIMEM_DATA_DIR=$data_dir \
         $binary --space .tty_smoke_mem
+    expect {
+        -re "\033\\\[\\?2004h" {}
+        timeout {
+            error "timeout waiting for bracketed paste mode enable"
+        }
+        eof {
+            error "unexpected EOF waiting for bracketed paste mode enable"
+        }
+    }
     wait_prompt
 }
 
@@ -431,6 +440,100 @@ proc run_config_base_url_update_after_idle_smoke {} {
     exit_timem
 }
 
+proc run_config_provider_switch_smoke {} {
+    spawn_timem
+    send "/config\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "选择要修改的配置" {}
+        timeout {
+            error "timeout waiting for /config menu before provider switch"
+        }
+        eof {
+            error "unexpected EOF waiting for /config menu before provider switch"
+        }
+    }
+    send "\033\[B\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "TIMEM_GATEWAY_PROVIDER 当前值" {}
+        timeout {
+            error "timeout waiting for TIMEM_GATEWAY_PROVIDER value prompt"
+        }
+        eof {
+            error "unexpected EOF waiting for TIMEM_GATEWAY_PROVIDER value prompt"
+        }
+    }
+    send "anthropic\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "https://api.anthropic.com" {}
+        timeout {
+            error "timeout waiting for anthropic default URL after provider switch"
+        }
+        eof {
+            error "unexpected EOF during provider switch"
+        }
+    }
+    wait_prompt
+    exit_timem
+
+    spawn_timem
+    send "/config\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "选择要修改的配置" {}
+        timeout {
+            error "timeout waiting for /config menu before private provider rejection"
+        }
+        eof {
+            error "unexpected EOF waiting for /config menu before private provider rejection"
+        }
+    }
+    send "\033\[B\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "TIMEM_GATEWAY_PROVIDER 当前值" {}
+        timeout {
+            error "timeout waiting for provider value prompt before private rejection"
+        }
+        eof {
+            error "unexpected EOF waiting for provider value prompt before private rejection"
+        }
+    }
+    send "private\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "TIMEM_BASE_URL" {}
+        timeout {
+            error "timeout waiting for private provider base-url validation"
+        }
+        eof {
+            error "unexpected EOF during private provider rejection"
+        }
+    }
+    wait_prompt
+    exit_timem
+}
+
 proc run_workspace_add_cancel_smoke {} {
     spawn_timem
     send "/workspace\r"
@@ -486,6 +589,7 @@ run_wrapped_edit_cancel_smoke
 run_config_value_cancel_smoke
 run_config_menu_cancel_smoke
 run_config_base_url_update_after_idle_smoke
+run_config_provider_switch_smoke
 run_workspace_add_cancel_smoke
 
 puts "real_tty_smoke: ok"

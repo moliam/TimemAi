@@ -21,6 +21,7 @@ required_patterns=(
   "run_shift_enter_cancel_smoke"
   "run_wrapped_edit_cancel_smoke"
   "run_config_value_cancel_smoke"
+  "run_config_provider_switch_smoke"
   "run_workspace_add_cancel_smoke"
   "raw_multiline_paste_requires_confirmation_before_model_submit"
   "queued_paste_fallback_handles_crlf_boundary_without_extra_blank_line"

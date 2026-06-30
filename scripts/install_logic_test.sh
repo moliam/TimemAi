@@ -38,4 +38,14 @@ case "$(detect_os)" in
     ;;
 esac
 
+if ! grep -q 'Run: $COMMAND_NAME"' "$ROOT_DIR/install.sh"; then
+  echo "install prompt should recommend running timem directly after sourcing env" >&2
+  exit 1
+fi
+
+if grep -q 'Run: $COMMAND_NAME --space' "$ROOT_DIR/install.sh"; then
+  echo "install prompt should not require duplicate --space/--model options" >&2
+  exit 1
+fi
+
 echo "install_logic_test: ok"

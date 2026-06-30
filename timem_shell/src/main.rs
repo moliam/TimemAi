@@ -151,6 +151,21 @@ fn main() {
         let prompt = render_user_input_prompt(&time_label());
         let (input, submitted_display) = match editor.readline(&prompt) {
             ShellReadline::Line { text, display } => (text, display),
+            ShellReadline::PendingPaste {
+                text,
+                display,
+                line_count,
+            } => {
+                if matches!(
+                    choose_raw_multiline_paste_submit(line_count),
+                    ApprovalChoice::Allow
+                ) {
+                    (text, display)
+                } else {
+                    prompt_status.show_info("已取消多行粘贴。");
+                    continue;
+                }
+            }
             ShellReadline::Interrupted => {
                 prompt_status.show_info("已取消当前输入。Ctrl+D 退出。");
                 continue;
@@ -671,6 +686,27 @@ fn render_paste_recovery_choices(selected: ApprovalChoice) -> String {
     }
 }
 
+fn render_raw_multiline_paste_submit_prompt(line_count: usize) -> String {
+    format!(
+        "\n检测到 {line_count} 行粘贴内容。为避免把粘贴中的换行误当成多次提交，请确认是否作为一条消息提交。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n"
+    )
+}
+
+fn render_raw_multiline_paste_submit_choices(selected: ApprovalChoice) -> String {
+    match selected {
+        ApprovalChoice::Allow => "\x1b[7m[ 提交 ]\x1b[0m   取消".to_string(),
+        ApprovalChoice::Deny => "  提交   \x1b[7m[ 取消 ]\x1b[0m".to_string(),
+    }
+}
+
+fn choose_raw_multiline_paste_submit(line_count: usize) -> ApprovalChoice {
+    print!("{}", render_raw_multiline_paste_submit_prompt(line_count));
+    choose_with_keyboard(
+        render_raw_multiline_paste_submit_choices,
+        ApprovalChoice::Deny,
+    )
+}
+
 fn choose_user_approval(request: &ApprovalRequest) -> ApprovalChoice {
     print!("{}", render_user_approval_prompt(request));
     choose_with_keyboard(render_approval_choices, ApprovalChoice::Deny)
@@ -1073,7 +1109,37 @@ fn apply_config_value(
 ) -> Result<(), String> {
     match field {
         ConfigField::Model => config.model = value.to_string(),
-        ConfigField::GatewayProvider => config.provider = value.to_lowercase(),
+        ConfigField::GatewayProvider => {
+            let old_provider = config.provider.clone();
+            let next_provider = value.to_lowercase();
+            if next_provider.trim().is_empty() {
+                return Err("TIMEM_GATEWAY_PROVIDER 不能为空".to_string());
+            }
+            if let Some(default_base_url) =
+                timem_shell::known_default_base_url_for_provider(&next_provider)
+            {
+                config.provider = next_provider.clone();
+                config.api_protocol =
+                    timem_shell::default_api_protocol_for_provider(&next_provider);
+                config.base_url = default_base_url;
+            } else {
+                let old_default_base_url =
+                    timem_shell::known_default_base_url_for_provider(&old_provider);
+                let using_old_default = old_default_base_url
+                    .as_deref()
+                    .map(|default| {
+                        config.base_url.trim_end_matches('/') == default.trim_end_matches('/')
+                    })
+                    .unwrap_or(false);
+                if using_old_default {
+                    return Err(
+                        "自定义 gateway provider 需要先设置 TIMEM_BASE_URL，避免沿用旧平台默认 URL"
+                            .to_string(),
+                    );
+                }
+                config.provider = next_provider;
+            }
+        }
         ConfigField::ApiProtocol => {
             config.api_protocol = parse_api_protocol_for_config(value)?;
         }
@@ -1617,7 +1683,15 @@ fn paste_marker_segments(input: &str) -> Vec<String> {
 }
 
 enum ShellReadline {
-    Line { text: String, display: String },
+    Line {
+        text: String,
+        display: String,
+    },
+    PendingPaste {
+        text: String,
+        display: String,
+        line_count: usize,
+    },
     Interrupted,
     Eof,
     Error(String),
@@ -1679,7 +1753,8 @@ impl ShellLineEditor {
         let mut editor = Reedline::create()
             .with_edit_mode(edit_mode)
             .with_highlighter(Box::new(TimemPasteHighlighter))
-            .with_ansi_colors(true);
+            .with_ansi_colors(true)
+            .use_bracketed_paste(true);
         if let Some(history) = history {
             editor = editor.with_history(Box::new(history));
         }
@@ -1699,13 +1774,21 @@ impl ShellLineEditor {
         let _keyboard_guard = ReedlineKeyboardProtocolGuard::enter();
         match self.editor.read_line(&prompt) {
             Ok(Signal::Success(text)) => {
-                let queued = drain_queued_tty_input();
+                let queued = drain_queued_tty_input_for_submission();
                 if queued.interrupted {
                     TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+                    discard_queued_tty_input_after_cancel();
                     return ShellReadline::Interrupted;
                 }
                 let raw_input = merge_queued_input(text, &queued);
                 let raw = sanitize_user_input(&raw_input);
+                if raw_multiline_paste_needs_confirmation(&queued, &raw) {
+                    return ShellReadline::PendingPaste {
+                        display: raw_multiline_paste_display(&raw),
+                        line_count: pasted_line_count(&raw),
+                        text: raw,
+                    };
+                }
                 let records = self
                     .paste_records
                     .lock()
@@ -1720,9 +1803,15 @@ impl ShellLineEditor {
                 let display = strip_paste_markers(&raw);
                 ShellReadline::Line { display, text }
             }
-            Ok(Signal::CtrlC) => ShellReadline::Interrupted,
+            Ok(Signal::CtrlC) => {
+                discard_queued_tty_input_after_cancel();
+                ShellReadline::Interrupted
+            }
             Ok(Signal::CtrlD) => ShellReadline::Eof,
-            Ok(_) => ShellReadline::Interrupted,
+            Ok(_) => {
+                discard_queued_tty_input_after_cancel();
+                ShellReadline::Interrupted
+            }
             Err(err) => ShellReadline::Error(format!("readline_failed: {err}")),
         }
     }
@@ -1735,14 +1824,43 @@ struct QueuedInputDrain {
 }
 
 fn merge_queued_input(mut submitted: String, queued: &QueuedInputDrain) -> String {
-    if !queued.text.is_empty() {
+    let queued_text = queued.text.strip_prefix('\n').unwrap_or(&queued.text);
+    if !queued_text.is_empty() {
         submitted.push('\n');
-        submitted.push_str(&queued.text);
+        submitted.push_str(queued_text);
     }
     submitted
 }
 
-fn drain_queued_tty_input() -> QueuedInputDrain {
+fn raw_multiline_paste_needs_confirmation(queued: &QueuedInputDrain, raw: &str) -> bool {
+    !queued.text.is_empty() && pasted_line_count(raw) > 1
+}
+
+fn raw_multiline_paste_display(raw: &str) -> String {
+    format!("[ pasted {} lines ]", pasted_line_count(raw))
+}
+
+fn drain_queued_tty_input_for_submission() -> QueuedInputDrain {
+    drain_queued_tty_input(
+        Duration::from_millis(90),
+        Duration::from_millis(35),
+        Duration::from_millis(500),
+    )
+}
+
+fn discard_queued_tty_input_after_cancel() {
+    let _ = drain_queued_tty_input(
+        Duration::from_millis(300),
+        Duration::from_millis(60),
+        Duration::from_millis(1200),
+    );
+}
+
+fn drain_queued_tty_input(
+    initial_wait: Duration,
+    quiet_window: Duration,
+    hard_window: Duration,
+) -> QueuedInputDrain {
     let Ok(mut tty) = OpenOptions::new().read(true).open("/dev/tty") else {
         return QueuedInputDrain::default();
     };
@@ -1757,32 +1875,34 @@ fn drain_queued_tty_input() -> QueuedInputDrain {
 
     let mut bytes = Vec::new();
     let mut buf = [0u8; 4096];
-    let first = tty.read(&mut buf);
-    match first {
-        Ok(0) => {
-            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-            return QueuedInputDrain::default();
+    let initial_deadline = Instant::now() + initial_wait;
+    while Instant::now() < initial_deadline {
+        match tty.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                break;
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(_) => break,
         }
-        Ok(n) => bytes.extend_from_slice(&buf[..n]),
-        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-            return QueuedInputDrain::default();
-        }
-        Err(_) => {
-            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-            return QueuedInputDrain::default();
-        }
+    }
+    if bytes.is_empty() {
+        let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+        return QueuedInputDrain::default();
     }
 
     let started = Instant::now();
-    let mut quiet_deadline = Instant::now() + Duration::from_millis(20);
-    let hard_deadline = started + Duration::from_millis(200);
+    let mut quiet_deadline = Instant::now() + quiet_window;
+    let hard_deadline = started + hard_window;
     while Instant::now() < quiet_deadline && Instant::now() < hard_deadline {
         match tty.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 bytes.extend_from_slice(&buf[..n]);
-                quiet_deadline = Instant::now() + Duration::from_millis(20);
+                quiet_deadline = Instant::now() + quiet_window;
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(2));
@@ -1798,7 +1918,7 @@ fn drain_queued_tty_input() -> QueuedInputDrain {
 fn queued_input_drain_from_bytes(bytes: &[u8]) -> QueuedInputDrain {
     QueuedInputDrain {
         interrupted: bytes.contains(&3),
-        text: String::from_utf8_lossy(bytes).replace('\x03', ""),
+        text: normalize_newlines(&String::from_utf8_lossy(bytes).replace('\x03', "")),
     }
 }
 
@@ -2062,12 +2182,27 @@ fn render_submitted_user_line_rewrite(
 ) -> String {
     let prompt_prefix = render_user_input_prompt(time_label);
     let prompt_width = display_width(&prompt_prefix);
-    let input_rows = wrapped_terminal_rows(prompt_width + display_width(input), terminal_width);
+    let input_rows = submitted_input_rows(prompt_width, input, terminal_width);
     let rows_to_clear = input_rows + usize::from(status_line_visible);
     format!(
         "\x1b[{}F\r\x1b[J{}{}\n",
         rows_to_clear, prompt_prefix, input
     )
+}
+
+fn submitted_input_rows(prompt_width: usize, input: &str, terminal_width: usize) -> usize {
+    let width = terminal_width.max(1);
+    let mut rows = 0usize;
+    for (idx, line) in input.split('\n').enumerate() {
+        let line_width = display_width(line);
+        let occupied = if idx == 0 {
+            prompt_width + line_width
+        } else {
+            line_width
+        };
+        rows += wrapped_terminal_rows(occupied, width);
+    }
+    rows.max(1)
 }
 
 fn wrapped_terminal_rows(display_width: usize, terminal_width: usize) -> usize {
@@ -2406,12 +2541,11 @@ fn bash_approval_mode_from_options(
         .clone()
         .or_else(|| env.get("TIMEM_BASH_APPROVAL").cloned())
         .unwrap_or_else(|| "ask".to_string())
+        .trim()
         .to_lowercase();
     match raw.as_str() {
-        "approve" | "approval" | "always" | "never" | "off" | "none" | "false" | "0" => {
-            BashApprovalMode::Approve
-        }
-        "ask" | "prompt" | "true" | "1" => BashApprovalMode::Ask,
+        "approve" => BashApprovalMode::Approve,
+        "ask" => BashApprovalMode::Ask,
         _ => BashApprovalMode::Ask,
     }
 }
@@ -2441,24 +2575,27 @@ fn time_label() -> String {
 #[cfg(test)]
 mod static_prompt_tests {
     use super::{
-        active_elapsed_secs, apply_config_value, boxed_config_table_at_width, config_field_value,
-        consume_turn_cancel_request, display_width, epoch_millis, help_text, merge_queued_input,
-        normalize_newlines, normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
+        active_elapsed_secs, apply_config_value, bash_approval_mode_from_options,
+        boxed_config_table_at_width, config_field_value, consume_turn_cancel_request,
+        display_width, epoch_millis, help_text, merge_queued_input, normalize_newlines,
+        normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
         paste_recovery_summary_from_markers, pasted_line_count, queued_input_drain_from_bytes,
-        random_spinner_tick, read_approval_key, read_menu_key,
-        reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
-        render_approval_choices, render_config_menu, render_expand_output_choices,
-        render_expand_output_prompt, render_paste_recovery_choices, render_paste_recovery_prompt,
-        render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
-        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
-        render_user_approval_prompt, render_user_input_prompt, render_workspace_delete_choices,
-        render_workspace_menu, resolve_paste_markers, sanitize_user_input,
-        stale_context_prompt_needed, strip_paste_markers, timem_reedline_keybindings,
-        utf8_expected_len, workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice,
-        ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecord,
-        PasteRecoverySummary, QueuedInputDrain, TimemEditMode, TimemPasteHighlighter,
-        TimemReedlinePrompt, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
-        STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
+        read_approval_key, read_menu_key, reedline_keyboard_protocol_enter_sequence,
+        reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_menu,
+        render_expand_output_choices, render_expand_output_prompt, render_paste_recovery_choices,
+        render_paste_recovery_prompt, render_raw_multiline_paste_submit_choices,
+        render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
+        render_round_limit_prompt, render_stale_context_choices, render_stale_context_prompt,
+        render_startup_banner, render_submitted_user_line_rewrite, render_user_approval_prompt,
+        render_user_input_prompt, render_workspace_delete_choices, render_workspace_menu,
+        resolve_paste_markers, sanitize_user_input, stale_context_prompt_needed,
+        strip_paste_markers, submitted_input_rows, timem_reedline_keybindings, utf8_expected_len,
+        workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
+        ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary, QueuedInputDrain,
+        TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
+        PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
+        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use crossterm::event::Event;
@@ -2467,6 +2604,7 @@ mod static_prompt_tests {
         EditCommand, EditMode, Highlighter, KeyCode, KeyModifiers, Prompt, ReedlineEvent,
         ReedlineRawEvent,
     };
+    use std::collections::HashMap;
     use std::fs;
     use std::io::Cursor;
     use std::process::Command;
@@ -2734,6 +2872,115 @@ mod static_prompt_tests {
         assert_eq!(config.max_llm_output_tokens, 20_000);
         assert_eq!(config.max_llm_input_tokens, 120_000);
         assert_eq!(bash, BashApprovalMode::Approve);
+    }
+
+    #[test]
+    fn config_provider_update_keeps_dependent_defaults_consistent() {
+        let mut config = ProviderConfig {
+            provider: "aliyun".to_string(),
+            api_protocol: ApiProtocol::OpenAiCompatible,
+            api_key: "secret".to_string(),
+            model: "qwen-plus".to_string(),
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            timeout_secs: 120,
+            max_llm_output_tokens: 10_000,
+            max_llm_input_tokens: 100_000,
+        };
+        let mut core = AgentCore::new(
+            "STATIC",
+            CoreProfile {
+                name: "aliyun".to_string(),
+                provider: "aliyun".to_string(),
+                model: "qwen-plus".to_string(),
+            },
+            std::env::temp_dir().join(format!("timem_config_provider_test_{}", epoch_millis())),
+        );
+        let mut bash = BashApprovalMode::Ask;
+
+        apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            ConfigField::GatewayProvider,
+            "anthropic",
+        )
+        .unwrap();
+
+        assert_eq!(config.provider, "anthropic");
+        assert_eq!(config.api_protocol, ApiProtocol::Anthropic);
+        assert_eq!(config.base_url, "https://api.anthropic.com");
+
+        let err = apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            ConfigField::GatewayProvider,
+            "private",
+        )
+        .unwrap_err();
+        assert!(err.contains("TIMEM_BASE_URL"));
+
+        apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            ConfigField::BaseUrl,
+            "https://private.example/v1",
+        )
+        .unwrap();
+        apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            ConfigField::GatewayProvider,
+            "private",
+        )
+        .unwrap();
+        assert_eq!(config.provider, "private");
+        assert_eq!(config.base_url, "https://private.example/v1");
+    }
+
+    #[test]
+    fn config_provider_update_resets_custom_settings_when_returning_to_known_provider() {
+        let mut config = ProviderConfig {
+            provider: "private".to_string(),
+            api_protocol: ApiProtocol::Anthropic,
+            api_key: "secret".to_string(),
+            model: "aws-claude-sonnet-4-6".to_string(),
+            base_url: "https://private.example/v1".to_string(),
+            timeout_secs: 120,
+            max_llm_output_tokens: 10_000,
+            max_llm_input_tokens: 100_000,
+        };
+        let mut core = AgentCore::new(
+            "STATIC",
+            CoreProfile {
+                name: "private".to_string(),
+                provider: "private".to_string(),
+                model: "aws-claude-sonnet-4-6".to_string(),
+            },
+            std::env::temp_dir().join(format!(
+                "timem_config_provider_reset_test_{}",
+                epoch_millis()
+            )),
+        );
+        let mut bash = BashApprovalMode::Ask;
+
+        apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            ConfigField::GatewayProvider,
+            "aliyun",
+        )
+        .unwrap();
+
+        assert_eq!(config.provider, "aliyun");
+        assert_eq!(config.api_protocol, ApiProtocol::OpenAiCompatible);
+        assert_eq!(
+            config.base_url,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
     }
 
     #[test]
@@ -3069,6 +3316,39 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn bash_approval_mode_accepts_only_current_documented_values() {
+        let options = timem_shell::CliOptions::default();
+        let empty = HashMap::new();
+        assert_eq!(
+            bash_approval_mode_from_options(&options, &empty),
+            BashApprovalMode::Ask
+        );
+
+        let mut approve_env = HashMap::new();
+        approve_env.insert("TIMEM_BASH_APPROVAL".to_string(), " APPROVE ".to_string());
+        assert_eq!(
+            bash_approval_mode_from_options(&options, &approve_env),
+            BashApprovalMode::Approve
+        );
+
+        let mut stale_env = HashMap::new();
+        stale_env.insert("TIMEM_BASH_APPROVAL".to_string(), "approval".to_string());
+        assert_eq!(
+            bash_approval_mode_from_options(&options, &stale_env),
+            BashApprovalMode::Ask
+        );
+
+        let stale_option = timem_shell::CliOptions {
+            bash_approval: Some("never".to_string()),
+            ..timem_shell::CliOptions::default()
+        };
+        assert_eq!(
+            bash_approval_mode_from_options(&stale_option, &empty),
+            BashApprovalMode::Ask
+        );
+    }
+
+    #[test]
     fn approval_prompt_shows_risk_command_and_keyboard_choices() {
         let prompt = render_user_approval_prompt(&ApprovalRequest {
             approval_id: "approval_test".to_string(),
@@ -3193,6 +3473,48 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn queued_paste_fallback_handles_crlf_boundary_without_extra_blank_line() {
+        let queued = queued_input_drain_from_bytes(b"\nsecond line\r\nthird line\r\n");
+        let merged = merge_queued_input("first line".to_string(), &queued);
+
+        assert_eq!(queued.text, "\nsecond line\nthird line\n");
+        assert_eq!(merged, "first line\nsecond line\nthird line\n");
+    }
+
+    #[test]
+    fn queued_paste_fallback_preserves_user_blank_line_after_crlf_boundary() {
+        let queued = queued_input_drain_from_bytes(b"\n\r\nsecond line\r\n");
+        let merged = merge_queued_input("first line".to_string(), &queued);
+
+        assert_eq!(queued.text, "\n\nsecond line\n");
+        assert_eq!(merged, "first line\n\nsecond line\n");
+    }
+
+    #[test]
+    fn raw_multiline_paste_requires_confirmation_before_model_submit() {
+        let queued = queued_input_drain_from_bytes(b"\nsecond line\r\nthird line");
+        let raw = merge_queued_input("first line".to_string(), &queued);
+
+        assert!(raw_multiline_paste_needs_confirmation(&queued, &raw));
+        assert_eq!(raw_multiline_paste_display(&raw), "[ pasted 3 lines ]");
+    }
+
+    #[test]
+    fn raw_multiline_paste_submit_prompt_is_keyboard_driven() {
+        let prompt = render_raw_multiline_paste_submit_prompt(3);
+        assert!(prompt.contains("检测到 3 行粘贴内容"));
+        assert!(prompt.contains("避免把粘贴中的换行误当成多次提交"));
+        assert_eq!(
+            render_raw_multiline_paste_submit_choices(ApprovalChoice::Allow),
+            "\x1b[7m[ 提交 ]\x1b[0m   取消"
+        );
+        assert_eq!(
+            render_raw_multiline_paste_submit_choices(ApprovalChoice::Deny),
+            "  提交   \x1b[7m[ 取消 ]\x1b[0m"
+        );
+    }
+
+    #[test]
     fn queued_paste_fallback_keeps_multiline_config_table_as_one_user_input() {
         let queued = queued_input_drain_from_bytes(
             "│ TIMEM_MODEL             │ qwen-plus │ 模型名称 │\n│ TIMEM_BASE_URL          │ https://example.com/v1 │ 网关 base url │\n"
@@ -3210,7 +3532,7 @@ mod static_prompt_tests {
 
     #[test]
     fn queued_paste_fallback_marks_ctrl_c_and_removes_control_byte() {
-        let queued = queued_input_drain_from_bytes(b"line 2\n\x03line 3\n");
+        let queued = queued_input_drain_from_bytes(b"line 2\r\n\x03line 3\r\n");
 
         assert!(queued.interrupted);
         assert_eq!(queued.text, "line 2\nline 3\n");
@@ -3447,6 +3769,37 @@ mod static_prompt_tests {
     fn submitted_user_line_rewrite_clears_status_and_wrapped_rows() {
         let rendered = render_submitted_user_line_rewrite("abcdef", true, 10, "12:00:00");
         assert!(rendered.starts_with("\x1b[4F\r\x1b[J"));
+    }
+
+    #[test]
+    fn submitted_user_line_rewrite_clears_actual_multiline_input_rows() {
+        let rendered =
+            render_submitted_user_line_rewrite("first\n第二行\nthird", false, 80, "12:00:00");
+        assert!(rendered.starts_with("\x1b[3F\r\x1b[J"), "{rendered:?}");
+        assert!(rendered.contains("first\n第二行\nthird\n"));
+
+        let rendered_with_status =
+            render_submitted_user_line_rewrite("first\n第二行\nthird", true, 80, "12:00:00");
+        assert!(
+            rendered_with_status.starts_with("\x1b[4F\r\x1b[J"),
+            "{rendered_with_status:?}"
+        );
+    }
+
+    #[test]
+    fn submitted_input_rows_counts_real_newlines_independently_of_wrapping() {
+        let prompt_width = display_width("[12:00:00] You ❯❯ ");
+
+        assert_eq!(
+            submitted_input_rows(prompt_width, "short\n中文；line\n", 80),
+            3
+        );
+        assert_eq!(
+            submitted_input_rows(prompt_width, "abcdef\n第二行", 20),
+            wrapped_terminal_rows(prompt_width + display_width("abcdef"), 20)
+                + wrapped_terminal_rows(display_width("第二行"), 20)
+        );
+        assert_eq!(submitted_input_rows(prompt_width, "", 80), 1);
     }
 
     #[test]
