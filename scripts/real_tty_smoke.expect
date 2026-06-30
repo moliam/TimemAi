@@ -178,6 +178,111 @@ proc run_multiline_paste_cancel_smoke {} {
     exit_timem
 }
 
+proc run_edited_paste_recovery_ctrl_c_smoke {} {
+    spawn_timem
+    after 200
+    send "\033\[200~第一行中文；abc\n第二行 English；123\n第三行 │ TIMEM_MODEL │ qwen-plus │\033\[201~"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "pasted 3 lines" {}
+        timeout {
+            error "timeout waiting for edited paste placeholder"
+        }
+        eof {
+            error "unexpected EOF waiting for edited paste placeholder"
+        }
+    }
+    after 300
+    send "\033\[D"
+    send "x"
+    send "\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "可能被误编辑" {}
+        timeout {
+            error "timeout waiting for paste recovery confirmation"
+        }
+        eof {
+            error "unexpected EOF waiting for paste recovery confirmation"
+        }
+    }
+    send "\003"
+    set output [wait_cancelled "edited paste recovery ctrl-c"]
+    assert_no_model_call "edited paste recovery ctrl-c" $output
+    assert_cancelled "edited paste recovery ctrl-c" $output
+    exit_timem
+}
+
+proc run_edited_paste_recovery_return_to_edit_smoke {} {
+    spawn_timem
+    after 200
+    send "\033\[200~第一行中文；abc\n第二行 English；123\n第三行 │ TIMEM_MODEL │ qwen-plus │\033\[201~"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "pasted 3 lines" {}
+        timeout {
+            error "timeout waiting for return-edit paste placeholder"
+        }
+        eof {
+            error "unexpected EOF waiting for return-edit paste placeholder"
+        }
+    }
+    after 300
+    send "\033\[D"
+    send "x"
+    send "\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "返回编辑" {}
+        timeout {
+            error "timeout waiting for paste recovery return-edit option"
+        }
+        eof {
+            error "unexpected EOF waiting for paste recovery return-edit option"
+        }
+    }
+    send "\r"
+    set return_edit_output ""
+    expect {
+        -re "\033\\\[6n" {
+            append return_edit_output $expect_out(buffer)
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "pasted 3 lines.*x" {}
+        timeout {
+            error "timeout waiting for edited paste text to return to input"
+        }
+        eof {
+            error "unexpected EOF waiting for edited paste text to return to input"
+        }
+    }
+    append return_edit_output $expect_out(buffer)
+    if {![regexp {\033\[([0-9]+)F\033\[J} $return_edit_output _ clear_lines]} {
+        error "return-edit did not clear the paste recovery note before restoring input"
+    }
+    if {$clear_lines <= 8} {
+        error "return-edit cleared only $clear_lines lines; expected note plus original input line"
+    }
+    send "\003"
+    set output [wait_cancelled "edited paste recovery return-edit"]
+    assert_no_model_call "edited paste recovery return-edit" $output
+    assert_cancelled "edited paste recovery return-edit" $output
+    exit_timem
+}
+
 proc run_shift_enter_cancel_smoke {} {
     spawn_timem
     after 200
@@ -584,6 +689,8 @@ proc run_workspace_add_cancel_smoke {} {
 
 run_prof_smoke
 run_multiline_paste_cancel_smoke
+run_edited_paste_recovery_ctrl_c_smoke
+run_edited_paste_recovery_return_to_edit_smoke
 run_shift_enter_cancel_smoke
 run_wrapped_edit_cancel_smoke
 run_config_value_cancel_smoke

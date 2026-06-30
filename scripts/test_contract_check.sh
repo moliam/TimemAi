@@ -18,6 +18,8 @@ required_patterns=(
   "shell_job_status_waits_for_model_chosen_timeout_before_running_result"
   "ci_realistic_multiturn_memory_tools_security_and_shrink_story"
   "run_multiline_paste_cancel_smoke"
+  "run_edited_paste_recovery_ctrl_c_smoke"
+  "run_edited_paste_recovery_return_to_edit_smoke"
   "run_shift_enter_cancel_smoke"
   "run_wrapped_edit_cancel_smoke"
   "run_config_value_cancel_smoke"

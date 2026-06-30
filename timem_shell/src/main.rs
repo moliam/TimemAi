@@ -591,6 +591,31 @@ enum ApprovalChoice {
     Deny,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApprovalDecision {
+    Choice(ApprovalChoice),
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasteRecoveryChoice {
+    SubmitEdited,
+    Restore,
+    ReturnToEdit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasteRecoveryDecision {
+    Choice(PasteRecoveryChoice),
+    Cancel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PasteRecoveryOutcome {
+    decision: PasteRecoveryDecision,
+    rendered_lines: usize,
+}
+
 fn render_user_approval_prompt(request: &ApprovalRequest) -> String {
     let intent_line = if request.intent.trim().is_empty() {
         String::new()
@@ -672,17 +697,81 @@ fn format_idle_duration(duration: Duration) -> String {
 }
 
 fn render_paste_recovery_prompt(summary: &PasteRecoverySummary) -> String {
+    let lines = vec![
+        format!(
+            "检测到 {} 个粘贴关联标签 {} 可能被误编辑，请确认：",
+            summary.dirty_count,
+            ansi_inverse(&summary.first_dirty_marker)
+        ),
+        "继续/恢复粘贴/返回编辑".to_string(),
+        "使用 ←/→ 或 ↑/↓ 选择，回车确认，Ctrl+C/Esc 取消当前输入。".to_string(),
+        format!("原始粘贴内容共 {} 行。", summary.total_lines),
+    ];
+    format!("\n{}", render_note_box("Note", &lines))
+}
+
+fn ansi_inverse(text: &str) -> String {
+    format!("\x1b[7m{text}\x1b[0m")
+}
+
+fn render_note_box(title: &str, lines: &[String]) -> String {
+    let width = terminal_width().clamp(48, 88).saturating_sub(2);
+    render_note_box_at_width(title, lines, width)
+}
+
+fn render_note_box_at_width(title: &str, lines: &[String], width: usize) -> String {
+    let content_width = width.saturating_sub(4).max(24);
+    let title = format!(" {title} ");
+    let mut out = String::new();
+    out.push_str("\x1b[1m┏━");
+    out.push_str(&title);
+    out.push_str(&"━".repeat(content_width.saturating_sub(display_width(&title) + 1)));
+    out.push_str("┓\x1b[0m\n");
+    for line in lines {
+        for wrapped in wrap_display_ansi(line, content_width.saturating_sub(2)) {
+            let padded = pad_display_width_ansi(&wrapped, content_width.saturating_sub(2));
+            out.push('┃');
+            out.push(' ');
+            out.push_str(&padded);
+            out.push(' ');
+            out.push_str("┃\n");
+        }
+    }
+    out.push_str("\x1b[1m┗");
+    out.push_str(&"━".repeat(content_width));
+    out.push_str("┛\x1b[0m\n");
+    out
+}
+
+fn render_paste_recovery_choices(selected: PasteRecoveryChoice) -> String {
+    fn label(choice: PasteRecoveryChoice, text: &str, selected: PasteRecoveryChoice) -> String {
+        if choice == selected {
+            format!("\x1b[7m[ {text} ]\x1b[0m")
+        } else {
+            format!("  {text}  ")
+        }
+    }
     format!(
-        "\n检测到 {count} 个粘贴关联标签可能被误编辑，原始粘贴内容共 {lines} 行。\n是否恢复关联粘贴文本？选择 Yes 会提交原始粘贴内容；选择 No 会把已编辑标签当普通文本提交。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
-        count = summary.dirty_count,
-        lines = summary.total_lines
+        "{}   {}   {}",
+        label(PasteRecoveryChoice::SubmitEdited, "继续", selected),
+        label(PasteRecoveryChoice::Restore, "恢复粘贴", selected),
+        label(PasteRecoveryChoice::ReturnToEdit, "返回编辑", selected)
     )
 }
 
-fn render_paste_recovery_choices(selected: ApprovalChoice) -> String {
-    match selected {
-        ApprovalChoice::Allow => "\x1b[7m[ Yes ]\x1b[0m   No".to_string(),
-        ApprovalChoice::Deny => "  Yes   \x1b[7m[ No ]\x1b[0m".to_string(),
+fn next_paste_recovery_choice(choice: PasteRecoveryChoice) -> PasteRecoveryChoice {
+    match choice {
+        PasteRecoveryChoice::SubmitEdited => PasteRecoveryChoice::Restore,
+        PasteRecoveryChoice::Restore => PasteRecoveryChoice::ReturnToEdit,
+        PasteRecoveryChoice::ReturnToEdit => PasteRecoveryChoice::SubmitEdited,
+    }
+}
+
+fn prev_paste_recovery_choice(choice: PasteRecoveryChoice) -> PasteRecoveryChoice {
+    match choice {
+        PasteRecoveryChoice::SubmitEdited => PasteRecoveryChoice::ReturnToEdit,
+        PasteRecoveryChoice::Restore => PasteRecoveryChoice::SubmitEdited,
+        PasteRecoveryChoice::ReturnToEdit => PasteRecoveryChoice::Restore,
     }
 }
 
@@ -730,9 +819,108 @@ fn choose_stale_context_continue(idle: Duration, dynamic_context_tokens: u32) ->
     choose_with_keyboard(render_stale_context_choices, ApprovalChoice::Allow)
 }
 
-fn choose_paste_recovery(summary: &PasteRecoverySummary) -> ApprovalChoice {
-    print!("{}", render_paste_recovery_prompt(summary));
-    choose_with_keyboard(render_paste_recovery_choices, ApprovalChoice::Allow)
+fn choose_paste_recovery(summary: &PasteRecoverySummary) -> PasteRecoveryOutcome {
+    choose_paste_recovery_with_keyboard(summary, PasteRecoveryChoice::ReturnToEdit)
+}
+
+fn choose_paste_recovery_with_keyboard(
+    summary: &PasteRecoverySummary,
+    initial: PasteRecoveryChoice,
+) -> PasteRecoveryOutcome {
+    let mut selected = initial;
+    let prompt = render_paste_recovery_prompt(summary);
+    let rendered_lines = prompt.lines().count() + 1;
+
+    let Ok(mut input) = ShellInputSource::open() else {
+        println!();
+        return PasteRecoveryOutcome {
+            decision: PasteRecoveryDecision::Cancel,
+            rendered_lines: 1,
+        };
+    };
+    let fd = input.as_raw_fd();
+    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+        println!();
+        return PasteRecoveryOutcome {
+            decision: PasteRecoveryDecision::Cancel,
+            rendered_lines: 1,
+        };
+    }
+    let mut raw = original;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 1;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        println!();
+        return PasteRecoveryOutcome {
+            decision: PasteRecoveryDecision::Cancel,
+            rendered_lines: 1,
+        };
+    }
+    let mut terminal_mode = TerminalModeGuard::new(fd, original);
+    let mut nonblocking_mode = match NonblockingGuard::new(fd) {
+        Ok(guard) => guard,
+        Err(_) => {
+            terminal_mode.restore();
+            println!();
+            return PasteRecoveryOutcome {
+                decision: PasteRecoveryDecision::Cancel,
+                rendered_lines: 1,
+            };
+        }
+    };
+    print!("{}{}", prompt, render_paste_recovery_choices(selected));
+    let _ = io::stdout().flush();
+
+    let result = loop {
+        match read_paste_recovery_key(&mut input) {
+            PasteRecoveryKey::Previous => {
+                selected = prev_paste_recovery_choice(selected);
+                print!("\r\x1b[2K{}", render_paste_recovery_choices(selected));
+                let _ = io::stdout().flush();
+            }
+            PasteRecoveryKey::Next => {
+                selected = next_paste_recovery_choice(selected);
+                print!("\r\x1b[2K{}", render_paste_recovery_choices(selected));
+                let _ = io::stdout().flush();
+            }
+            PasteRecoveryKey::Select(choice) => {
+                selected = choice;
+                print!("\r\x1b[2K{}", render_paste_recovery_choices(selected));
+                let _ = io::stdout().flush();
+            }
+            PasteRecoveryKey::Enter => break PasteRecoveryDecision::Choice(selected),
+            PasteRecoveryKey::Cancel => break PasteRecoveryDecision::Cancel,
+            PasteRecoveryKey::Other => {}
+        }
+    };
+    nonblocking_mode.restore();
+    terminal_mode.restore();
+    println!();
+    PasteRecoveryOutcome {
+        decision: result,
+        rendered_lines,
+    }
+}
+
+fn clear_previous_terminal_lines(lines: usize) {
+    if lines == 0 {
+        return;
+    }
+    print!("\x1b[{lines}F\x1b[J");
+    let _ = io::stdout().flush();
+}
+
+fn paste_recovery_return_edit_clear_lines(
+    rendered_recovery_lines: usize,
+    prompt: &str,
+    raw_input: &str,
+    terminal_width: usize,
+) -> usize {
+    let prompt_width = display_width(prompt);
+    let displayed_input = strip_paste_markers(raw_input);
+    rendered_recovery_lines + submitted_input_rows(prompt_width, &displayed_input, terminal_width)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1287,17 +1475,27 @@ fn choose_with_keyboard(
     render_choices: fn(ApprovalChoice) -> String,
     initial: ApprovalChoice,
 ) -> ApprovalChoice {
+    match choose_with_keyboard_decision(render_choices, initial) {
+        ApprovalDecision::Choice(choice) => choice,
+        ApprovalDecision::Cancel => ApprovalChoice::Deny,
+    }
+}
+
+fn choose_with_keyboard_decision(
+    render_choices: fn(ApprovalChoice) -> String,
+    initial: ApprovalChoice,
+) -> ApprovalDecision {
     let mut selected = initial;
 
     let Ok(mut input) = ShellInputSource::open() else {
         println!();
-        return ApprovalChoice::Deny;
+        return ApprovalDecision::Cancel;
     };
     let fd = input.as_raw_fd();
     let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
     if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
         println!();
-        return ApprovalChoice::Deny;
+        return ApprovalDecision::Cancel;
     }
     let mut raw = original;
     raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
@@ -1305,7 +1503,7 @@ fn choose_with_keyboard(
     raw.c_cc[libc::VTIME] = 1;
     if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
         println!();
-        return ApprovalChoice::Deny;
+        return ApprovalDecision::Cancel;
     }
     let mut terminal_mode = TerminalModeGuard::new(fd, original);
     let mut nonblocking_mode = match NonblockingGuard::new(fd) {
@@ -1313,7 +1511,7 @@ fn choose_with_keyboard(
         Err(_) => {
             terminal_mode.restore();
             println!();
-            return ApprovalChoice::Deny;
+            return ApprovalDecision::Cancel;
         }
     };
     print!("{}", render_choices(selected));
@@ -1334,8 +1532,8 @@ fn choose_with_keyboard(
                 print!("\r\x1b[2K{}", render_choices(selected));
                 let _ = io::stdout().flush();
             }
-            ApprovalKey::Enter => break selected,
-            ApprovalKey::Cancel => break ApprovalChoice::Deny,
+            ApprovalKey::Enter => break ApprovalDecision::Choice(selected),
+            ApprovalKey::Cancel => break ApprovalDecision::Cancel,
             ApprovalKey::Other => {}
         }
     };
@@ -1419,6 +1617,16 @@ enum ApprovalKey {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasteRecoveryKey {
+    Previous,
+    Next,
+    Select(PasteRecoveryChoice),
+    Enter,
+    Cancel,
+    Other,
+}
+
 fn read_approval_key(input: &mut impl Read) -> ApprovalKey {
     let Some(byte) = read_key_byte_wait(input) else {
         return ApprovalKey::Cancel;
@@ -1443,6 +1651,32 @@ fn read_approval_key(input: &mut impl Read) -> ApprovalKey {
         b'y' | b'Y' => ApprovalKey::Select(ApprovalChoice::Allow),
         b'n' | b'N' => ApprovalKey::Select(ApprovalChoice::Deny),
         _ => ApprovalKey::Other,
+    }
+}
+
+fn read_paste_recovery_key(input: &mut impl Read) -> PasteRecoveryKey {
+    let Some(byte) = read_key_byte_wait(input) else {
+        return PasteRecoveryKey::Cancel;
+    };
+    match byte {
+        b'\r' | b'\n' => PasteRecoveryKey::Enter,
+        3 | 4 => PasteRecoveryKey::Cancel,
+        27 => {
+            let Some(seq) = read_escape_sequence(input) else {
+                return PasteRecoveryKey::Cancel;
+            };
+            match seq.as_slice() {
+                [b'[', b'A'] | [b'[', b'D'] => PasteRecoveryKey::Previous,
+                [b'[', b'B'] | [b'[', b'C'] => PasteRecoveryKey::Next,
+                _ => PasteRecoveryKey::Other,
+            }
+        }
+        b'h' | b'k' => PasteRecoveryKey::Previous,
+        b'\t' | b' ' | b'j' | b'l' => PasteRecoveryKey::Next,
+        b'y' | b'Y' => PasteRecoveryKey::Select(PasteRecoveryChoice::Restore),
+        b'n' | b'N' => PasteRecoveryKey::Select(PasteRecoveryChoice::SubmitEdited),
+        b'e' | b'E' => PasteRecoveryKey::Select(PasteRecoveryChoice::ReturnToEdit),
+        _ => PasteRecoveryKey::Other,
     }
 }
 
@@ -1597,10 +1831,11 @@ fn pasted_line_count(text: &str) -> usize {
     normalize_newlines(text).split('\n').count()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PasteRecoverySummary {
     dirty_count: usize,
     total_lines: usize,
+    first_dirty_marker: String,
 }
 
 fn strip_paste_markers(input: &str) -> String {
@@ -1616,6 +1851,7 @@ fn paste_recovery_summary_from_markers(
 ) -> Option<PasteRecoverySummary> {
     let mut dirty_count = 0usize;
     let mut total_lines = 0usize;
+    let mut first_dirty_marker = String::new();
     for (idx, marked) in paste_marker_segments(input).into_iter().enumerate() {
         let Some(record) = records.get(idx) else {
             continue;
@@ -1623,11 +1859,15 @@ fn paste_recovery_summary_from_markers(
         if marked != record.placeholder {
             dirty_count += 1;
             total_lines += pasted_line_count(&record.content);
+            if dirty_count == 1 {
+                first_dirty_marker = strip_paste_markers(&marked);
+            }
         }
     }
     (dirty_count > 0).then_some(PasteRecoverySummary {
         dirty_count,
         total_lines,
+        first_dirty_marker,
     })
 }
 
@@ -1700,6 +1940,7 @@ enum ShellReadline {
 struct ShellLineEditor {
     editor: Reedline,
     paste_records: SharedPasteRecords,
+    prefill_input: SharedPrefillInput,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1709,6 +1950,7 @@ struct PasteRecord {
 }
 
 type SharedPasteRecords = Arc<Mutex<Vec<PasteRecord>>>;
+type SharedPrefillInput = Arc<Mutex<Option<String>>>;
 
 enum ShellInputSource {
     Tty(File),
@@ -1749,7 +1991,11 @@ impl ShellLineEditor {
     fn new(history_file: PathBuf) -> Self {
         let history = FileBackedHistory::with_file(500, history_file).ok();
         let paste_records = Arc::new(Mutex::new(Vec::new()));
-        let edit_mode = Box::new(TimemEditMode::new(paste_records.clone()));
+        let prefill_input = Arc::new(Mutex::new(None));
+        let edit_mode = Box::new(TimemEditMode::new(
+            paste_records.clone(),
+            prefill_input.clone(),
+        ));
         let mut editor = Reedline::create()
             .with_edit_mode(edit_mode)
             .with_highlighter(Box::new(TimemPasteHighlighter))
@@ -1761,58 +2007,97 @@ impl ShellLineEditor {
         Self {
             editor,
             paste_records,
+            prefill_input,
         }
     }
 
     fn readline(&mut self, prompt: &str) -> ShellReadline {
-        if let Ok(mut records) = self.paste_records.lock() {
-            records.clear();
-        }
-        let prompt = TimemReedlinePrompt {
-            indicator: prompt.to_string(),
-        };
-        let _keyboard_guard = ReedlineKeyboardProtocolGuard::enter();
-        match self.editor.read_line(&prompt) {
-            Ok(Signal::Success(text)) => {
-                let queued = drain_queued_tty_input_for_submission();
-                if queued.interrupted {
-                    TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
-                    discard_queued_tty_input_after_cancel();
-                    return ShellReadline::Interrupted;
+        let mut preserve_paste_records_once = false;
+        loop {
+            let preserve_records = std::mem::take(&mut preserve_paste_records_once);
+            if !preserve_records {
+                if let Ok(mut records) = self.paste_records.lock() {
+                    records.clear();
                 }
-                let raw_input = merge_queued_input(text, &queued);
-                let raw = sanitize_user_input(&raw_input);
-                if raw_multiline_paste_needs_confirmation(&queued, &raw) {
-                    return ShellReadline::PendingPaste {
-                        display: raw_multiline_paste_display(&raw),
-                        line_count: pasted_line_count(&raw),
-                        text: raw,
+            }
+            let prompt = TimemReedlinePrompt {
+                indicator: prompt.to_string(),
+            };
+            if let Some(prefill) = self
+                .prefill_input
+                .lock()
+                .ok()
+                .and_then(|mut prefill| prefill.take())
+            {
+                self.editor
+                    .run_edit_commands(&[EditCommand::InsertString(prefill)]);
+            }
+            let _keyboard_guard = ReedlineKeyboardProtocolGuard::enter();
+            let result = match self.editor.read_line(&prompt) {
+                Ok(Signal::Success(text)) => {
+                    let queued = drain_queued_tty_input_for_submission();
+                    if queued.interrupted {
+                        TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+                        discard_queued_tty_input_after_cancel();
+                        return ShellReadline::Interrupted;
+                    }
+                    let raw_input = merge_queued_input(text, &queued);
+                    let raw = sanitize_user_input(&raw_input);
+                    if raw_multiline_paste_needs_confirmation(&queued, &raw) {
+                        return ShellReadline::PendingPaste {
+                            display: raw_multiline_paste_display(&raw),
+                            line_count: pasted_line_count(&raw),
+                            text: raw,
+                        };
+                    }
+                    let records = self
+                        .paste_records
+                        .lock()
+                        .map(|records| records.clone())
+                        .unwrap_or_default();
+                    let summary = paste_recovery_summary_from_markers(&raw, &records);
+                    let recovery = summary.as_ref().map(choose_paste_recovery);
+                    let restore_dirty = match recovery.as_ref().map(|outcome| &outcome.decision) {
+                        Some(PasteRecoveryDecision::Choice(PasteRecoveryChoice::Restore)) => true,
+                        Some(PasteRecoveryDecision::Choice(PasteRecoveryChoice::SubmitEdited))
+                        | None => false,
+                        Some(PasteRecoveryDecision::Choice(PasteRecoveryChoice::ReturnToEdit)) => {
+                            if let Some(outcome) = recovery.as_ref() {
+                                let lines = paste_recovery_return_edit_clear_lines(
+                                    outcome.rendered_lines,
+                                    prompt.indicator.as_str(),
+                                    &raw,
+                                    terminal_width(),
+                                );
+                                clear_previous_terminal_lines(lines);
+                            }
+                            if let Ok(mut prefill) = self.prefill_input.lock() {
+                                *prefill = Some(raw);
+                            }
+                            preserve_paste_records_once = true;
+                            continue;
+                        }
+                        Some(PasteRecoveryDecision::Cancel) => {
+                            discard_queued_tty_input_after_cancel();
+                            return ShellReadline::Interrupted;
+                        }
                     };
+                    let text = resolve_paste_markers(&raw, &records, restore_dirty);
+                    let display = strip_paste_markers(&raw);
+                    ShellReadline::Line { display, text }
                 }
-                let records = self
-                    .paste_records
-                    .lock()
-                    .map(|records| records.clone())
-                    .unwrap_or_default();
-                let summary = paste_recovery_summary_from_markers(&raw, &records);
-                let restore_dirty = summary
-                    .as_ref()
-                    .map(|summary| matches!(choose_paste_recovery(summary), ApprovalChoice::Allow))
-                    .unwrap_or(false);
-                let text = resolve_paste_markers(&raw, &records, restore_dirty);
-                let display = strip_paste_markers(&raw);
-                ShellReadline::Line { display, text }
-            }
-            Ok(Signal::CtrlC) => {
-                discard_queued_tty_input_after_cancel();
-                ShellReadline::Interrupted
-            }
-            Ok(Signal::CtrlD) => ShellReadline::Eof,
-            Ok(_) => {
-                discard_queued_tty_input_after_cancel();
-                ShellReadline::Interrupted
-            }
-            Err(err) => ShellReadline::Error(format!("readline_failed: {err}")),
+                Ok(Signal::CtrlC) => {
+                    discard_queued_tty_input_after_cancel();
+                    ShellReadline::Interrupted
+                }
+                Ok(Signal::CtrlD) => ShellReadline::Eof,
+                Ok(_) => {
+                    discard_queued_tty_input_after_cancel();
+                    ShellReadline::Interrupted
+                }
+                Err(err) => ShellReadline::Error(format!("readline_failed: {err}")),
+            };
+            return result;
         }
     }
 }
@@ -1960,19 +2245,40 @@ fn timem_reedline_keybindings() -> Keybindings {
 struct TimemEditMode {
     inner: Emacs,
     paste_records: SharedPasteRecords,
+    prefill_input: SharedPrefillInput,
 }
 
 impl TimemEditMode {
-    fn new(paste_records: SharedPasteRecords) -> Self {
+    fn new(paste_records: SharedPasteRecords, prefill_input: SharedPrefillInput) -> Self {
         Self {
             inner: Emacs::new(timem_reedline_keybindings()),
             paste_records,
+            prefill_input,
         }
     }
 }
 
 impl EditMode for TimemEditMode {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
+        let prefill = self
+            .prefill_input
+            .lock()
+            .ok()
+            .and_then(|mut prefill| prefill.take());
+        let parsed = self.parse_event_without_prefill(event);
+        if let Some(prefill) = prefill {
+            return prepend_prefill_event(prefill, parsed);
+        }
+        parsed
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+}
+
+impl TimemEditMode {
+    fn parse_event_without_prefill(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let event: Event = event.into();
         if let Event::Key(key) = &event {
             if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -2004,9 +2310,20 @@ impl EditMode for TimemEditMode {
             Err(_) => ReedlineEvent::None,
         }
     }
+}
 
-    fn edit_mode(&self) -> PromptEditMode {
-        self.inner.edit_mode()
+fn prepend_prefill_event(prefill: String, parsed: ReedlineEvent) -> ReedlineEvent {
+    let insert = ReedlineEvent::Edit(vec![EditCommand::InsertString(prefill)]);
+    match parsed {
+        ReedlineEvent::None => insert,
+        ReedlineEvent::Edit(mut edits) => {
+            let ReedlineEvent::Edit(mut with_prefill) = insert else {
+                unreachable!();
+            };
+            with_prefill.append(&mut edits);
+            ReedlineEvent::Edit(with_prefill)
+        }
+        other => ReedlineEvent::Multiple(vec![insert, other]),
     }
 }
 
@@ -2017,7 +2334,7 @@ impl Highlighter for TimemPasteHighlighter {
         let mut styled = StyledText::new();
         styled.push((nu_ansi_term::Style::new(), line.to_string()));
         for (start, end) in paste_marker_ranges(line) {
-            styled.style_range(start, end, nu_ansi_term::Style::new().bold());
+            styled.style_range(start, end, nu_ansi_term::Style::new().reverse());
         }
         styled
     }
@@ -2494,6 +2811,53 @@ fn wrap_display(text: &str, target_width: usize) -> Vec<String> {
     lines
 }
 
+fn pad_display_width_ansi(text: &str, target_width: usize) -> String {
+    let width = display_width(text);
+    if width >= target_width {
+        text.to_string()
+    } else {
+        format!("{}{}", text, " ".repeat(target_width - width))
+    }
+}
+
+fn wrap_display_ansi(text: &str, target_width: usize) -> Vec<String> {
+    if target_width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    for raw_line in text.lines().default_if_empty() {
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        let mut chars = raw_line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' && chars.peek() == Some(&'[') {
+                current.push(ch);
+                current.push(chars.next().unwrap_or('['));
+                for code_ch in chars.by_ref() {
+                    current.push(code_ch);
+                    if code_ch.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width > 0 && current_width + ch_width > target_width {
+                lines.push(pad_display_width_ansi(&current, target_width));
+                current.clear();
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += ch_width;
+        }
+        lines.push(pad_display_width_ansi(&current, target_width));
+    }
+    if lines.is_empty() {
+        lines.push(" ".repeat(target_width));
+    }
+    lines
+}
+
 trait DefaultIfEmpty<'a> {
     fn default_if_empty(self) -> Vec<&'a str>;
 }
@@ -2577,13 +2941,15 @@ mod static_prompt_tests {
     use super::{
         active_elapsed_secs, apply_config_value, bash_approval_mode_from_options,
         boxed_config_table_at_width, config_field_value, consume_turn_cancel_request,
-        display_width, epoch_millis, help_text, merge_queued_input, normalize_newlines,
-        normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
-        paste_recovery_summary_from_markers, pasted_line_count, queued_input_drain_from_bytes,
+        display_width, epoch_millis, help_text, merge_queued_input, next_paste_recovery_choice,
+        normalize_newlines, normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
+        paste_recovery_return_edit_clear_lines, paste_recovery_summary_from_markers,
+        pasted_line_count, prev_paste_recovery_choice, queued_input_drain_from_bytes,
         random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
-        read_approval_key, read_menu_key, reedline_keyboard_protocol_enter_sequence,
-        reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_menu,
-        render_expand_output_choices, render_expand_output_prompt, render_paste_recovery_choices,
+        read_approval_key, read_menu_key, read_paste_recovery_key,
+        reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
+        render_approval_choices, render_config_menu, render_expand_output_choices,
+        render_expand_output_prompt, render_note_box_at_width, render_paste_recovery_choices,
         render_paste_recovery_prompt, render_raw_multiline_paste_submit_choices,
         render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
         render_round_limit_prompt, render_stale_context_choices, render_stale_context_prompt,
@@ -2592,7 +2958,8 @@ mod static_prompt_tests {
         resolve_paste_markers, sanitize_user_input, stale_context_prompt_needed,
         strip_paste_markers, submitted_input_rows, timem_reedline_keybindings, utf8_expected_len,
         workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
-        ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary, QueuedInputDrain,
+        ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoveryChoice, PasteRecoveryKey,
+        PasteRecoverySummary, QueuedInputDrain, SharedPasteRecords, SharedPrefillInput,
         TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
         PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
         STATIC_PROMPT, TURN_CANCEL_REQUESTED,
@@ -3437,6 +3804,14 @@ mod static_prompt_tests {
             read_approval_key(&mut Cursor::new(vec![b'n'])),
             ApprovalKey::Select(ApprovalChoice::Deny)
         );
+        assert_eq!(
+            read_approval_key(&mut Cursor::new(vec![3])),
+            ApprovalKey::Cancel
+        );
+        assert_eq!(
+            read_approval_key(&mut Cursor::new(vec![27])),
+            ApprovalKey::Cancel
+        );
     }
 
     #[test]
@@ -3549,6 +3924,13 @@ mod static_prompt_tests {
         format!("{PASTE_START_MARKER}[ pasted {lines} lines ]{PASTE_END_MARKER}")
     }
 
+    fn timem_edit_mode_for_test(
+        records: SharedPasteRecords,
+    ) -> (TimemEditMode, SharedPrefillInput) {
+        let prefill = Arc::new(Mutex::new(None));
+        (TimemEditMode::new(records, prefill.clone()), prefill)
+    }
+
     #[test]
     fn reedline_shift_enter_is_bound_to_insert_newline() {
         let bindings = timem_reedline_keybindings();
@@ -3572,7 +3954,7 @@ mod static_prompt_tests {
     #[test]
     fn reedline_shift_enter_event_inserts_newline_without_submit() {
         let records = Arc::new(Mutex::new(Vec::new()));
-        let mut mode = TimemEditMode::new(records);
+        let (mut mode, _) = timem_edit_mode_for_test(records);
         let event = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::SHIFT,
@@ -3588,7 +3970,7 @@ mod static_prompt_tests {
     #[test]
     fn reedline_multiline_paste_inserts_marked_placeholder_and_records_content() {
         let records = Arc::new(Mutex::new(Vec::new()));
-        let mut mode = TimemEditMode::new(records.clone());
+        let (mut mode, _) = timem_edit_mode_for_test(records.clone());
         let event =
             ReedlineRawEvent::try_from(Event::Paste("alpha\r\nbeta\ngamma".to_string())).unwrap();
 
@@ -3608,7 +3990,7 @@ mod static_prompt_tests {
     #[test]
     fn reedline_single_line_paste_stays_plain_text() {
         let records = Arc::new(Mutex::new(Vec::new()));
-        let mut mode = TimemEditMode::new(records.clone());
+        let (mut mode, _) = timem_edit_mode_for_test(records.clone());
         let event = ReedlineRawEvent::try_from(Event::Paste("just one line".to_string())).unwrap();
 
         assert_eq!(
@@ -3621,7 +4003,7 @@ mod static_prompt_tests {
     #[test]
     fn reedline_space_inserts_string_to_avoid_cjk_abbreviation_boundary_panic() {
         let records = Arc::new(Mutex::new(Vec::new()));
-        let mut mode = TimemEditMode::new(records);
+        let (mut mode, _) = timem_edit_mode_for_test(records);
         let event = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
             KeyCode::Char(' '),
             KeyModifiers::NONE,
@@ -3632,6 +4014,23 @@ mod static_prompt_tests {
             mode.parse_event(event),
             ReedlineEvent::Edit(vec![EditCommand::InsertString(" ".to_string())])
         );
+    }
+
+    #[test]
+    fn reedline_prefill_is_inserted_before_next_user_event() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let (mut mode, prefill) = timem_edit_mode_for_test(records);
+        *prefill.lock().unwrap() = Some("已编辑 [ pasted 3 lin ]".to_string());
+        let event = ReedlineRawEvent::try_from(Event::Paste("x".to_string())).unwrap();
+
+        assert_eq!(
+            mode.parse_event(event),
+            ReedlineEvent::Edit(vec![
+                EditCommand::InsertString("已编辑 [ pasted 3 lin ]".to_string()),
+                EditCommand::InsertString("x".to_string())
+            ])
+        );
+        assert!(prefill.lock().unwrap().is_none());
     }
 
     #[test]
@@ -3652,7 +4051,7 @@ mod static_prompt_tests {
     }
 
     #[test]
-    fn paste_highlighter_bolds_placeholder_inside_invisible_markers() {
+    fn paste_highlighter_reverses_placeholder_inside_invisible_markers() {
         let raw = format!("请处理 {} 谢谢", marked_placeholder(3));
         let ranges = paste_marker_ranges(&raw);
         assert_eq!(ranges.len(), 1);
@@ -3663,12 +4062,12 @@ mod static_prompt_tests {
             highlighted
                 .buffer
                 .iter()
-                .any(|(style, text)| style.is_bold && text == "[ pasted 3 lines ]"),
-            "pasted placeholder should render as bold: {:?}",
+                .any(|(style, text)| style.is_reverse && text == "[ pasted 3 lines ]"),
+            "pasted placeholder should render as reverse video: {:?}",
             highlighted
                 .buffer
                 .iter()
-                .map(|(style, text)| (style.is_bold, text.as_str()))
+                .map(|(style, text)| (style.is_reverse, text.as_str()))
                 .collect::<Vec<_>>()
         );
     }
@@ -3686,6 +4085,7 @@ mod static_prompt_tests {
             Some(PasteRecoverySummary {
                 dirty_count: 1,
                 total_lines: 3,
+                first_dirty_marker: "[ pasted 3 line ]".to_string(),
             })
         );
         assert_eq!(
@@ -3718,18 +4118,102 @@ mod static_prompt_tests {
         let summary = PasteRecoverySummary {
             dirty_count: 1,
             total_lines: 5,
+            first_dirty_marker: "[ pasted 5 lin ]".to_string(),
         };
         let prompt = render_paste_recovery_prompt(&summary);
-        assert!(prompt.contains("粘贴关联标签可能被误编辑"));
+        assert!(prompt.contains("粘贴关联标签"));
+        assert!(prompt.contains("可能被误编辑"));
+        assert!(prompt.contains("\x1b[7m[ pasted 5 lin ]\x1b[0m"));
+        assert!(prompt.contains("┏━ Note"));
+        assert!(prompt.contains('┗'));
+        assert!(prompt.contains("继续/恢复粘贴/返回编辑"));
         assert!(prompt.contains("原始粘贴内容共 5 行"));
         assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
-        assert_eq!(
-            render_paste_recovery_choices(ApprovalChoice::Allow),
-            "\x1b[7m[ Yes ]\x1b[0m   No"
+        assert!(prompt.contains("Ctrl+C/Esc 取消当前输入"));
+        let submit_selected = render_paste_recovery_choices(PasteRecoveryChoice::SubmitEdited);
+        assert!(submit_selected.contains("\x1b[7m[ 继续 ]\x1b[0m"));
+        assert!(submit_selected.contains("恢复粘贴"));
+        assert!(submit_selected.contains("返回编辑"));
+        let edit_selected = render_paste_recovery_choices(PasteRecoveryChoice::ReturnToEdit);
+        assert!(edit_selected.contains("继续"));
+        assert!(edit_selected.contains("恢复粘贴"));
+        assert!(edit_selected.contains("\x1b[7m[ 返回编辑 ]\x1b[0m"));
+    }
+
+    #[test]
+    fn note_box_wraps_lines_and_keeps_reverse_video_marker() {
+        let rendered = render_note_box_at_width(
+            "Note",
+            &[
+                format!(
+                    "检测到 1 个粘贴关联标签 {} 可能被误编辑，请确认：",
+                    "\x1b[7m[ pasted 9 linas;djf ;j ]\x1b[0m"
+                ),
+                "继续/恢复粘贴/返回编辑".to_string(),
+            ],
+            64,
+        );
+
+        assert!(rendered.contains("\x1b[1m┏━ Note"));
+        assert!(rendered.contains("\x1b[7m[ pasted 9 linas;djf ;j ]\x1b[0m"));
+        assert!(rendered.contains("继续/恢复粘贴/返回编辑"));
+        assert!(rendered.lines().all(|line| display_width(line) == 62));
+    }
+
+    #[test]
+    fn return_to_edit_clear_lines_include_note_choices_and_original_input_rows() {
+        let prompt = render_user_input_prompt("12:00:00");
+        let input = format!("阿萨德；。 {} ；大家按阿萨德；", marked_placeholder(11));
+        let prompt_width = display_width(&prompt);
+        let input_rows = submitted_input_rows(prompt_width, &strip_paste_markers(&input), 32);
+
+        assert!(
+            input_rows > 1,
+            "test must cover wrapped/nontrivial input rows"
         );
         assert_eq!(
-            render_paste_recovery_choices(ApprovalChoice::Deny),
-            "  Yes   \x1b[7m[ No ]\x1b[0m"
+            paste_recovery_return_edit_clear_lines(8, &prompt, &input, 32),
+            8 + input_rows
+        );
+    }
+
+    #[test]
+    fn paste_recovery_choice_order_cycles_across_three_actions() {
+        assert_eq!(
+            next_paste_recovery_choice(PasteRecoveryChoice::SubmitEdited),
+            PasteRecoveryChoice::Restore
+        );
+        assert_eq!(
+            next_paste_recovery_choice(PasteRecoveryChoice::Restore),
+            PasteRecoveryChoice::ReturnToEdit
+        );
+        assert_eq!(
+            next_paste_recovery_choice(PasteRecoveryChoice::ReturnToEdit),
+            PasteRecoveryChoice::SubmitEdited
+        );
+        assert_eq!(
+            prev_paste_recovery_choice(PasteRecoveryChoice::ReturnToEdit),
+            PasteRecoveryChoice::Restore
+        );
+    }
+
+    #[test]
+    fn paste_recovery_key_reader_supports_cancel_and_direct_shortcuts() {
+        assert_eq!(
+            read_paste_recovery_key(&mut Cursor::new(vec![3])),
+            PasteRecoveryKey::Cancel
+        );
+        assert_eq!(
+            read_paste_recovery_key(&mut Cursor::new(vec![b'y'])),
+            PasteRecoveryKey::Select(PasteRecoveryChoice::Restore)
+        );
+        assert_eq!(
+            read_paste_recovery_key(&mut Cursor::new(vec![b'n'])),
+            PasteRecoveryKey::Select(PasteRecoveryChoice::SubmitEdited)
+        );
+        assert_eq!(
+            read_paste_recovery_key(&mut Cursor::new(vec![b'e'])),
+            PasteRecoveryKey::Select(PasteRecoveryChoice::ReturnToEdit)
         );
     }
 
