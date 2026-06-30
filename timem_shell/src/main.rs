@@ -151,6 +151,21 @@ fn main() {
         let prompt = render_user_input_prompt(&time_label());
         let (input, submitted_display) = match editor.readline(&prompt) {
             ShellReadline::Line { text, display } => (text, display),
+            ShellReadline::PendingPaste {
+                text,
+                display,
+                line_count,
+            } => {
+                if matches!(
+                    choose_raw_multiline_paste_submit(line_count),
+                    ApprovalChoice::Allow
+                ) {
+                    (text, display)
+                } else {
+                    prompt_status.show_info("已取消多行粘贴。");
+                    continue;
+                }
+            }
             ShellReadline::Interrupted => {
                 prompt_status.show_info("已取消当前输入。Ctrl+D 退出。");
                 continue;
@@ -669,6 +684,27 @@ fn render_paste_recovery_choices(selected: ApprovalChoice) -> String {
         ApprovalChoice::Allow => "\x1b[7m[ Yes ]\x1b[0m   No".to_string(),
         ApprovalChoice::Deny => "  Yes   \x1b[7m[ No ]\x1b[0m".to_string(),
     }
+}
+
+fn render_raw_multiline_paste_submit_prompt(line_count: usize) -> String {
+    format!(
+        "\n检测到 {line_count} 行粘贴内容。为避免把粘贴中的换行误当成多次提交，请确认是否作为一条消息提交。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n"
+    )
+}
+
+fn render_raw_multiline_paste_submit_choices(selected: ApprovalChoice) -> String {
+    match selected {
+        ApprovalChoice::Allow => "\x1b[7m[ 提交 ]\x1b[0m   取消".to_string(),
+        ApprovalChoice::Deny => "  提交   \x1b[7m[ 取消 ]\x1b[0m".to_string(),
+    }
+}
+
+fn choose_raw_multiline_paste_submit(line_count: usize) -> ApprovalChoice {
+    print!("{}", render_raw_multiline_paste_submit_prompt(line_count));
+    choose_with_keyboard(
+        render_raw_multiline_paste_submit_choices,
+        ApprovalChoice::Deny,
+    )
 }
 
 fn choose_user_approval(request: &ApprovalRequest) -> ApprovalChoice {
@@ -1617,7 +1653,15 @@ fn paste_marker_segments(input: &str) -> Vec<String> {
 }
 
 enum ShellReadline {
-    Line { text: String, display: String },
+    Line {
+        text: String,
+        display: String,
+    },
+    PendingPaste {
+        text: String,
+        display: String,
+        line_count: usize,
+    },
     Interrupted,
     Eof,
     Error(String),
@@ -1679,7 +1723,8 @@ impl ShellLineEditor {
         let mut editor = Reedline::create()
             .with_edit_mode(edit_mode)
             .with_highlighter(Box::new(TimemPasteHighlighter))
-            .with_ansi_colors(true);
+            .with_ansi_colors(true)
+            .use_bracketed_paste(true);
         if let Some(history) = history {
             editor = editor.with_history(Box::new(history));
         }
@@ -1699,13 +1744,21 @@ impl ShellLineEditor {
         let _keyboard_guard = ReedlineKeyboardProtocolGuard::enter();
         match self.editor.read_line(&prompt) {
             Ok(Signal::Success(text)) => {
-                let queued = drain_queued_tty_input();
+                let queued = drain_queued_tty_input_for_submission();
                 if queued.interrupted {
                     TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+                    discard_queued_tty_input_after_cancel();
                     return ShellReadline::Interrupted;
                 }
                 let raw_input = merge_queued_input(text, &queued);
                 let raw = sanitize_user_input(&raw_input);
+                if raw_multiline_paste_needs_confirmation(&queued, &raw) {
+                    return ShellReadline::PendingPaste {
+                        display: raw_multiline_paste_display(&raw),
+                        line_count: pasted_line_count(&raw),
+                        text: raw,
+                    };
+                }
                 let records = self
                     .paste_records
                     .lock()
@@ -1720,9 +1773,15 @@ impl ShellLineEditor {
                 let display = strip_paste_markers(&raw);
                 ShellReadline::Line { display, text }
             }
-            Ok(Signal::CtrlC) => ShellReadline::Interrupted,
+            Ok(Signal::CtrlC) => {
+                discard_queued_tty_input_after_cancel();
+                ShellReadline::Interrupted
+            }
             Ok(Signal::CtrlD) => ShellReadline::Eof,
-            Ok(_) => ShellReadline::Interrupted,
+            Ok(_) => {
+                discard_queued_tty_input_after_cancel();
+                ShellReadline::Interrupted
+            }
             Err(err) => ShellReadline::Error(format!("readline_failed: {err}")),
         }
     }
@@ -1735,14 +1794,43 @@ struct QueuedInputDrain {
 }
 
 fn merge_queued_input(mut submitted: String, queued: &QueuedInputDrain) -> String {
-    if !queued.text.is_empty() {
+    let queued_text = queued.text.strip_prefix('\n').unwrap_or(&queued.text);
+    if !queued_text.is_empty() {
         submitted.push('\n');
-        submitted.push_str(&queued.text);
+        submitted.push_str(queued_text);
     }
     submitted
 }
 
-fn drain_queued_tty_input() -> QueuedInputDrain {
+fn raw_multiline_paste_needs_confirmation(queued: &QueuedInputDrain, raw: &str) -> bool {
+    !queued.text.is_empty() && pasted_line_count(raw) > 1
+}
+
+fn raw_multiline_paste_display(raw: &str) -> String {
+    format!("[ pasted {} lines ]", pasted_line_count(raw))
+}
+
+fn drain_queued_tty_input_for_submission() -> QueuedInputDrain {
+    drain_queued_tty_input(
+        Duration::from_millis(90),
+        Duration::from_millis(35),
+        Duration::from_millis(500),
+    )
+}
+
+fn discard_queued_tty_input_after_cancel() {
+    let _ = drain_queued_tty_input(
+        Duration::from_millis(300),
+        Duration::from_millis(60),
+        Duration::from_millis(1200),
+    );
+}
+
+fn drain_queued_tty_input(
+    initial_wait: Duration,
+    quiet_window: Duration,
+    hard_window: Duration,
+) -> QueuedInputDrain {
     let Ok(mut tty) = OpenOptions::new().read(true).open("/dev/tty") else {
         return QueuedInputDrain::default();
     };
@@ -1757,32 +1845,34 @@ fn drain_queued_tty_input() -> QueuedInputDrain {
 
     let mut bytes = Vec::new();
     let mut buf = [0u8; 4096];
-    let first = tty.read(&mut buf);
-    match first {
-        Ok(0) => {
-            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-            return QueuedInputDrain::default();
+    let initial_deadline = Instant::now() + initial_wait;
+    while Instant::now() < initial_deadline {
+        match tty.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                break;
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(_) => break,
         }
-        Ok(n) => bytes.extend_from_slice(&buf[..n]),
-        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-            return QueuedInputDrain::default();
-        }
-        Err(_) => {
-            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-            return QueuedInputDrain::default();
-        }
+    }
+    if bytes.is_empty() {
+        let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+        return QueuedInputDrain::default();
     }
 
     let started = Instant::now();
-    let mut quiet_deadline = Instant::now() + Duration::from_millis(20);
-    let hard_deadline = started + Duration::from_millis(200);
+    let mut quiet_deadline = Instant::now() + quiet_window;
+    let hard_deadline = started + hard_window;
     while Instant::now() < quiet_deadline && Instant::now() < hard_deadline {
         match tty.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 bytes.extend_from_slice(&buf[..n]);
-                quiet_deadline = Instant::now() + Duration::from_millis(20);
+                quiet_deadline = Instant::now() + quiet_window;
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(2));
@@ -1798,7 +1888,7 @@ fn drain_queued_tty_input() -> QueuedInputDrain {
 fn queued_input_drain_from_bytes(bytes: &[u8]) -> QueuedInputDrain {
     QueuedInputDrain {
         interrupted: bytes.contains(&3),
-        text: String::from_utf8_lossy(bytes).replace('\x03', ""),
+        text: normalize_newlines(&String::from_utf8_lossy(bytes).replace('\x03', "")),
     }
 }
 
@@ -2445,20 +2535,22 @@ mod static_prompt_tests {
         consume_turn_cancel_request, display_width, epoch_millis, help_text, merge_queued_input,
         normalize_newlines, normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
         paste_recovery_summary_from_markers, pasted_line_count, queued_input_drain_from_bytes,
-        random_spinner_tick, read_approval_key, read_menu_key,
-        reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
-        render_approval_choices, render_config_menu, render_expand_output_choices,
-        render_expand_output_prompt, render_paste_recovery_choices, render_paste_recovery_prompt,
-        render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
-        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
-        render_user_approval_prompt, render_user_input_prompt, render_workspace_delete_choices,
-        render_workspace_menu, resolve_paste_markers, sanitize_user_input,
-        stale_context_prompt_needed, strip_paste_markers, timem_reedline_keybindings,
-        utf8_expected_len, workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice,
-        ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, MenuKey, PasteRecord,
-        PasteRecoverySummary, QueuedInputDrain, TimemEditMode, TimemPasteHighlighter,
-        TimemReedlinePrompt, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
-        STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
+        read_approval_key, read_menu_key, reedline_keyboard_protocol_enter_sequence,
+        reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_menu,
+        render_expand_output_choices, render_expand_output_prompt, render_paste_recovery_choices,
+        render_paste_recovery_prompt, render_raw_multiline_paste_submit_choices,
+        render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
+        render_round_limit_prompt, render_stale_context_choices, render_stale_context_prompt,
+        render_startup_banner, render_submitted_user_line_rewrite, render_user_approval_prompt,
+        render_user_input_prompt, render_workspace_delete_choices, render_workspace_menu,
+        resolve_paste_markers, sanitize_user_input, stale_context_prompt_needed,
+        strip_paste_markers, timem_reedline_keybindings, utf8_expected_len,
+        workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
+        ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoverySummary, QueuedInputDrain,
+        TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
+        PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
+        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
     use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
     use crossterm::event::Event;
@@ -3193,6 +3285,48 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn queued_paste_fallback_handles_crlf_boundary_without_extra_blank_line() {
+        let queued = queued_input_drain_from_bytes(b"\nsecond line\r\nthird line\r\n");
+        let merged = merge_queued_input("first line".to_string(), &queued);
+
+        assert_eq!(queued.text, "\nsecond line\nthird line\n");
+        assert_eq!(merged, "first line\nsecond line\nthird line\n");
+    }
+
+    #[test]
+    fn queued_paste_fallback_preserves_user_blank_line_after_crlf_boundary() {
+        let queued = queued_input_drain_from_bytes(b"\n\r\nsecond line\r\n");
+        let merged = merge_queued_input("first line".to_string(), &queued);
+
+        assert_eq!(queued.text, "\n\nsecond line\n");
+        assert_eq!(merged, "first line\n\nsecond line\n");
+    }
+
+    #[test]
+    fn raw_multiline_paste_requires_confirmation_before_model_submit() {
+        let queued = queued_input_drain_from_bytes(b"\nsecond line\r\nthird line");
+        let raw = merge_queued_input("first line".to_string(), &queued);
+
+        assert!(raw_multiline_paste_needs_confirmation(&queued, &raw));
+        assert_eq!(raw_multiline_paste_display(&raw), "[ pasted 3 lines ]");
+    }
+
+    #[test]
+    fn raw_multiline_paste_submit_prompt_is_keyboard_driven() {
+        let prompt = render_raw_multiline_paste_submit_prompt(3);
+        assert!(prompt.contains("检测到 3 行粘贴内容"));
+        assert!(prompt.contains("避免把粘贴中的换行误当成多次提交"));
+        assert_eq!(
+            render_raw_multiline_paste_submit_choices(ApprovalChoice::Allow),
+            "\x1b[7m[ 提交 ]\x1b[0m   取消"
+        );
+        assert_eq!(
+            render_raw_multiline_paste_submit_choices(ApprovalChoice::Deny),
+            "  提交   \x1b[7m[ 取消 ]\x1b[0m"
+        );
+    }
+
+    #[test]
     fn queued_paste_fallback_keeps_multiline_config_table_as_one_user_input() {
         let queued = queued_input_drain_from_bytes(
             "│ TIMEM_MODEL             │ qwen-plus │ 模型名称 │\n│ TIMEM_BASE_URL          │ https://example.com/v1 │ 网关 base url │\n"
@@ -3210,7 +3344,7 @@ mod static_prompt_tests {
 
     #[test]
     fn queued_paste_fallback_marks_ctrl_c_and_removes_control_byte() {
-        let queued = queued_input_drain_from_bytes(b"line 2\n\x03line 3\n");
+        let queued = queued_input_drain_from_bytes(b"line 2\r\n\x03line 3\r\n");
 
         assert!(queued.interrupted);
         assert_eq!(queued.text, "line 2\nline 3\n");

@@ -63,6 +63,15 @@ proc spawn_timem {} {
         TIMEM_MODEL=qwen-plus \
         TIMEM_DATA_DIR=$data_dir \
         $binary --space .tty_smoke_mem
+    expect {
+        -re "\033\\\[\\?2004h" {}
+        timeout {
+            error "timeout waiting for bracketed paste mode enable"
+        }
+        eof {
+            error "unexpected EOF waiting for bracketed paste mode enable"
+        }
+    }
     wait_prompt
 }
 
