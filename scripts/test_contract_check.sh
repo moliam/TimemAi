@@ -22,6 +22,8 @@ required_patterns=(
   "run_wrapped_edit_cancel_smoke"
   "run_config_value_cancel_smoke"
   "run_workspace_add_cancel_smoke"
+  "raw_multiline_paste_requires_confirmation_before_model_submit"
+  "queued_paste_fallback_handles_crlf_boundary_without_extra_blank_line"
 )
 
 for pattern in "${required_patterns[@]}"; do
@@ -41,6 +43,35 @@ ci_required=(
 for pattern in "${ci_required[@]}"; do
   if ! rg -q -F -- "$pattern" scripts/ci.sh; then
     echo "missing required CI gate: $pattern" >&2
+    exit 1
+  fi
+done
+
+feature_doc="docs/feature-test-management.md"
+if [ ! -f "$feature_doc" ]; then
+  echo "missing feature/test management document: $feature_doc" >&2
+  exit 1
+fi
+
+feature_doc_required=(
+  "Feature and Test Management"
+  "Maintenance Rules"
+  "Feature Coverage Matrix"
+  "Current Supplement Decisions"
+  "every new feature"
+)
+
+for pattern in "${feature_doc_required[@]}"; do
+  if ! rg -q -F -- "$pattern" "$feature_doc"; then
+    echo "missing required feature management item: $pattern" >&2
+    exit 1
+  fi
+done
+
+for id in $(seq 1 25); do
+  feature_id="$(printf 'F%02d' "$id")"
+  if ! rg -q -F -- "| $feature_id |" "$feature_doc"; then
+    echo "missing required feature row: $feature_id" >&2
     exit 1
   fi
 done

@@ -4,6 +4,11 @@ This project uses layered tests. A feature is not considered protected when it
 only has a helper-function assertion; state-machine features need an end-to-end
 path and repeated edge regression coverage.
 
+The authoritative feature-to-test ledger is
+`docs/feature-test-management.md`. When adding or changing a feature, update
+that ledger in the same change so the feature, test suites, covered boundaries,
+and remaining supplement decisions stay visible.
+
 ## Required Layers
 
 - Function tests: pure parsing, formatting, prompt cache planning, provider

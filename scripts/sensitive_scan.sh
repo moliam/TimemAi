@@ -79,6 +79,15 @@ scan_history() {
       failed=1
     fi
   done
+
+  for regex in "${secret_regexes[@]}"; do
+    if git grep -n --perl-regexp -- "$regex" "$(git rev-list --all)" >/tmp/timem_sensitive_history_hits.$$ 2>/dev/null; then
+      echo "secret-like token found in git history: $regex" >&2
+      cat /tmp/timem_sensitive_history_hits.$$ >&2
+      failed=1
+    fi
+  done
+
   rm -f /tmp/timem_sensitive_history_hits.$$
   if [ "$failed" -ne 0 ]; then
     return 1
