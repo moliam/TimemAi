@@ -215,29 +215,15 @@ pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationE
         return Vec::new();
     };
     let mut events = Vec::new();
-    if let Some(thought_content) = value
-        .get("thought")
-        .and_then(|t| {
-                                                                 t.get("content")
-                                                                     .and_then(Value::as_str)
-                                                                     .or_else(|| t.as_str())
-                                                             })
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    {
-        events.push(ObservationEvent::Persistent(thought_content.to_string()));
-    }
     if let Some(actions) = value.get("next_actions").and_then(Value::as_array) {
         for action in actions.iter().take(2) {
-            if let Some(event) = observation_event_from_action(action) {
-                events.push(event);
-            }
+            events.extend(observation_events_from_action(action));
         }
     }
     events
 }
 
-fn observation_event_from_action(action: &Value) -> Option<ObservationEvent> {
+fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
     let action_name = action.get("action").and_then(Value::as_str).unwrap_or("");
     let input = action.get("input").unwrap_or(&Value::Null);
     let intent = action
@@ -248,7 +234,7 @@ fn observation_event_from_action(action: &Value) -> Option<ObservationEvent> {
         .filter(|text| !text.is_empty());
     match action_name {
         "run_bash" => {
-            let command = input
+            let Some(command) = input
                 .get("command")
                 .or_else(|| action.get("command"))
                 .and_then(Value::as_str)
@@ -259,33 +245,47 @@ fn observation_event_from_action(action: &Value) -> Option<ObservationEvent> {
                         .and_then(Value::as_str)
                 })
                 .map(str::trim)
-                .filter(|text| !text.is_empty())?;
-            Some(ObservationEvent::Active(format!("执行 Bash: {command}")))
+                .filter(|text| !text.is_empty())
+            else {
+                return Vec::new();
+            };
+            let mut events = Vec::new();
+            if let Some(text) = intent {
+                events.push(ObservationEvent::Persistent(text.to_string()));
+            }
+            events.push(ObservationEvent::Active(format!("Bash: {command}")));
+            events
         }
-        "shell_job_status" => Some(ObservationEvent::Active(format!(
+        "shell_job_status" => vec![ObservationEvent::Active(format!(
             "检查后台任务: {}",
             input
                 .get("job_id")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
-        ))),
+        ))],
         "query_memory" | "memory_query" | "memory_sql_query" | "sql_read" | "memory_schema" => {
-            Some(ObservationEvent::Persistent(format!(
+            vec![ObservationEvent::Persistent(format!(
                 "查询记忆: {}",
                 intent.unwrap_or("读取相关记忆")
-            )))
+            ))]
         }
-        "chat_history_query" => Some(ObservationEvent::Persistent(format!(
+        "chat_history_query" => vec![ObservationEvent::Persistent(format!(
             "查询聊天记录: {}",
             intent.unwrap_or("读取聊天记录")
-        ))),
-        "memory_write" | "write_memory" | "memory_update" => Some(ObservationEvent::Persistent(
+        ))],
+        "memory_write" | "write_memory" | "memory_update" => vec![ObservationEvent::Persistent(
             format!("更新记忆: {}", intent.unwrap_or("写入记忆")),
-        )),
-        "scratch_write" | "scratch_read" | "scratch_query" | "scratch_delete" => Some(
-            ObservationEvent::Persistent(format!("处理草稿区: {}", intent.unwrap_or("更新草稿"))),
-        ),
-        _ => intent.map(|text| ObservationEvent::Persistent(text.to_string())),
+        )],
+        "scratch_write" | "scratch_read" | "scratch_query" | "scratch_delete" => {
+            vec![ObservationEvent::Persistent(format!(
+                "处理草稿区: {}",
+                intent.unwrap_or("更新草稿")
+            ))]
+        }
+        _ => match intent {
+            Some(text) => vec![ObservationEvent::Persistent(text.to_string())],
+            None => Vec::new(),
+        },
     }
 }
 
@@ -340,17 +340,17 @@ mod tests {
     #[test]
     fn active_lines_cycle_text_depth_across_ticks() {
         let mut panel = ObservationPanel::new(8, 48);
-        panel.apply(ObservationEvent::Active("执行 Bash: pwd".to_string()));
+        panel.apply(ObservationEvent::Active("Bash: pwd".to_string()));
 
         let dark = render_observation_panel_at(&panel, 0);
         let mid = render_observation_panel_at(&panel, 1);
         let light = render_observation_panel_at(&panel, 2);
         let looped = render_observation_panel_at(&panel, 3);
 
-        assert!(dark.contains("\x1b[38;5;245m· 执行 Bash"));
-        assert!(mid.contains("\x1b[38;5;250m· 执行 Bash"));
-        assert!(light.contains("\x1b[38;5;255m· 执行 Bash"));
-        assert!(looped.contains("\x1b[38;5;245m· 执行 Bash"));
+        assert!(dark.contains("\x1b[38;5;245m· Bash"));
+        assert!(mid.contains("\x1b[38;5;250m· Bash"));
+        assert!(light.contains("\x1b[38;5;255m· Bash"));
+        assert!(looped.contains("\x1b[38;5;245m· Bash"));
     }
 
     #[test]
@@ -412,26 +412,34 @@ mod tests {
     #[test]
     fn active_line_can_settle_to_normal() {
         let mut panel = ObservationPanel::new(8, 48);
-        panel.apply(ObservationEvent::Active("执行 Bash: pwd".to_string()));
-        assert!(render_observation_panel(&panel).contains("\x1b[38;5;245m· 执行 Bash"));
+        panel.apply(ObservationEvent::Active("Bash: pwd".to_string()));
+        assert!(render_observation_panel(&panel).contains("\x1b[38;5;245m· Bash"));
         panel.apply(ObservationEvent::SettleActive);
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains("· 执行 Bash: pwd"));
-        assert!(!rendered.contains("\x1b[38;5;245m· 执行 Bash"));
+        assert!(rendered.contains("· Bash: pwd"));
+        assert!(!rendered.contains("\x1b[38;5;245m· Bash"));
     }
 
     #[test]
     fn model_response_maps_run_bash_to_user_facing_bash() {
         let events = observation_events_from_model_response(
-            r#"{"thought":"先看代码","next_actions":[{"action":"run_bash","intent":"统计","input":{"command":"rg --files | wc -l"}}]}"#,
+            r#"{"thought":"不要展示的模型思考","next_actions":[{"action":"run_bash","intent":"统计当前代码量","input":{"command":"rg --files | wc -l"}}]}"#,
         );
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("先看代码".to_string()),
-                ObservationEvent::Active("执行 Bash: rg --files | wc -l".to_string())
+                ObservationEvent::Persistent("统计当前代码量".to_string()),
+                ObservationEvent::Active("Bash: rg --files | wc -l".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn model_thought_is_hidden_from_observation_panel() {
+        let events = observation_events_from_model_response(
+            r#"{"thought":{"content":"内部推理，不给用户看","durable":true},"response_to_user":"ok"}"#,
+        );
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -441,8 +449,19 @@ mod tests {
             r#"{"next_actions":[{"action":"run_bash","intent":"统计","input":{"command":"rg --files | wc -l"}}]}"#,
         ));
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains("· 执行 Bash"));
+        assert!(rendered.contains("· Bash:"));
         assert!(!rendered.contains("run_bash"));
+    }
+
+    #[test]
+    fn run_bash_without_intent_shows_plain_label() {
+        let events = observation_events_from_model_response(
+            r#"{"next_actions":[{"action":"run_bash","input":{"command":"ls -la"}}]}"#,
+        );
+        assert_eq!(
+            events,
+            vec![ObservationEvent::Active("Bash: ls -la".to_string())]
+        );
     }
 
     #[test]
@@ -457,7 +476,7 @@ mod tests {
     fn panel_truncates_long_command_to_width() {
         let mut panel = ObservationPanel::new(8, 44);
         panel.apply(ObservationEvent::Active(format!(
-            "执行 Bash: {}",
+            "Bash: {}",
             "rg --files -g '*.rs' | xargs wc -l && echo very-long-tail"
         )));
         let rendered = render_observation_panel(&panel);

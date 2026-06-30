@@ -2698,9 +2698,7 @@ mod tests {
     fn thinking_view_renders_observation_panel_and_status_line() {
         let mut observations = ObservationPanel::new(8, 60);
         observations.apply(ObservationEvent::Persistent("正在分析用户请求".into()));
-        observations.apply(ObservationEvent::Active(
-            "执行 Bash: rg --files | wc -l".into(),
-        ));
+        observations.apply(ObservationEvent::Active("Bash: rg --files | wc -l".into()));
         let view = render_thinking_view_at(
             &ThinkingViewSnapshot {
                 status: ShellStatusSnapshot {
@@ -2732,7 +2730,7 @@ mod tests {
         assert!(view.contains("[12:00:00] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
         assert!(view.contains("Thought / Action"));
         assert!(view.contains("· 正在分析用户请求"));
-        assert!(view.contains("\x1b[38;5;245m· 执行 Bash: rg --files | wc -l"));
+        assert!(view.contains("\x1b[38;5;245m· Bash: rg --files | wc -l"));
         assert!(view.contains("aliyun:qwen-plus: ▼2"));
         assert!(view.contains("已用 12s"));
         assert!(view.contains("Token: ▲1.2K(⌁300)(+800) ▼20(+12)"));
