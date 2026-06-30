@@ -502,6 +502,53 @@ mod tests {
     }
 
     #[test]
+    fn session_turn_shows_plain_text_after_protocol_repair_failure() {
+        let dir = tmp_dir("plain_text_repair_fallback");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut model = ReplayModel::new([
+            Ok(llm("not json", 5_000, false)),
+            Ok(llm(
+                "提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`",
+                5_100,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "代码提交下",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(
+            outcome.text,
+            "提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`"
+        );
+        assert_eq!(
+            outcome.repair_issue.as_deref(),
+            Some("invalid_json_plain_text_fallback")
+        );
+        assert_eq!(model.prompts.len(), 2);
+        assert!(model.prompts[1].contains("Protocol repair request"));
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert!(audit_text.contains("\"turn_final\""));
+        assert!(audit_text.contains("提交成功"));
+        assert!(!audit_text.contains("模型的回复不符合本地协议"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
         let dir = tmp_dir("forced_shrink_e2e");
         let audit = dir.join("audit.jsonl");

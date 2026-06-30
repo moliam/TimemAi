@@ -651,7 +651,7 @@ fn query_memory_action_returns_action_result_delta() {
 }
 
 #[test]
-fn malformed_response_gets_one_repair_then_fallback() {
+fn plain_text_after_repair_failure_is_shown_as_final_answer() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("repair"));
     let _ = core.begin_turn("你好", None);
     let step = core.apply_model_response(LlmResponse {
@@ -667,7 +667,45 @@ fn malformed_response_gets_one_repair_then_fallback() {
     assert!(prompt.contains("Protocol repair request"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: "still not json".to_string(),
+        content: "提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`"
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        final_turn.response_to_user,
+        "提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`"
+    );
+    assert_eq!(
+        final_turn.repair_issue.as_deref(),
+        Some("invalid_json_plain_text_fallback")
+    );
+}
+
+#[test]
+fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("repair_action_like"),
+    );
+    let _ = core.begin_turn("你好", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: "not json".to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: r#"next_actions: [{"action":"run_bash","input":{"command":"git commit"}}]"#
+            .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3156,7 +3194,6 @@ fn thought_field_optional_does_not_trigger_repair() {
     let prompt = core.render_prompt();
     assert!(!prompt.contains("prompt_type: llm_thought"));
 }
-
 
 #[test]
 fn thought_object_durable_true_is_persisted_as_llm_thought_slice() {

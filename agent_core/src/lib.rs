@@ -689,6 +689,22 @@ impl AgentCore {
                     "Return exactly one valid JSON object with response_to_user. Do not use markdown fences.",
                 );
             }
+            if issue == "invalid_json"
+                && can_show_plain_text_after_repair_failure(&response.content)
+            {
+                let final_text = response.content.trim().to_string();
+                slices.push((
+                    "llm_response".to_string(),
+                    format!("Response shown to user:\n{}", final_text),
+                ));
+                self.append_delta(slices);
+                return CoreStep::Final(TurnFinal {
+                    response_to_user: final_text,
+                    stats: self.current_stats.clone(),
+                    profile_label: self.profile.label(),
+                    repair_issue: Some("invalid_json_plain_text_fallback".to_string()),
+                });
+            }
             let final_text = if parsed.response_to_user.trim().is_empty() {
                 repair_failure_message(self.last_repair_issue.as_deref().unwrap_or(&issue), &issue)
             } else {
@@ -2711,6 +2727,32 @@ fn repair_failure_message(first_issue: &str, final_issue: &str) -> String {
     )
 }
 
+fn can_show_plain_text_after_repair_failure(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if matches!(trimmed.chars().next(), Some('{') | Some('[')) {
+        return false;
+    }
+    if trimmed.contains("```") || trimmed.contains('{') || trimmed.contains('}') {
+        return false;
+    }
+    if extract_balanced_json_object(trimmed).is_some() {
+        return false;
+    }
+    let lowered = trimmed.to_lowercase();
+    ![
+        "next_actions",
+        "response_to_user",
+        "memory_candidates",
+        "\"action\"",
+        "'action'",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
 fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
@@ -2756,10 +2798,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 .filter(|t| !t.is_empty())
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            let durable = obj
-                .get("durable")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let durable = obj.get("durable").and_then(Value::as_bool).unwrap_or(false);
             (content, durable)
         } else {
             // backward compat: plain string thought is always durable
