@@ -706,6 +706,28 @@ impl AgentCore {
                 repair_issue: Some(issue),
             });
         }
+        // Plan A: non-empty response_to_user → immediate final (next_actions ignored)
+        if !parsed.response_to_user.trim().is_empty() {
+            for candidate in parsed.memory_candidates {
+                if self.memory.write(&candidate).is_ok() {
+                    self.current_stats.tool_calls += 1;
+                    self.current_stats.mem_writes += 1;
+                }
+            }
+            let final_text = parsed.response_to_user.trim().to_string();
+            slices.push((
+                "llm_response".to_string(),
+                format!("Response shown to user:\n{}", final_text),
+            ));
+            self.append_delta(slices);
+            return CoreStep::Final(TurnFinal {
+                response_to_user: final_text,
+                stats: self.current_stats.clone(),
+                profile_label: self.profile.label(),
+                repair_issue: None,
+            });
+        }
+
         if !parsed.next_actions.is_empty() {
             let mut result_lines = Vec::new();
             for action in parsed.next_actions {
@@ -2719,13 +2741,11 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         };
     }
     let mut repair_issue: Option<String> = None;
-    let response_to_user = match value.get("response_to_user").and_then(Value::as_str) {
-        Some(text) => text.to_string(),
-        None => {
-            repair_issue = Some("response_to_user_required".to_string());
-            String::new()
-        }
-    };
+    let response_to_user = value
+        .get("response_to_user")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let (thought, thought_durable) = {
         let v = value.get("thought");
         if let Some(obj) = v.and_then(Value::as_object) {
@@ -2753,10 +2773,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
             (s, durable)
         }
     };
-    let acceptance_satisfied = value
-        .get("acceptance_check")
-        .and_then(|check| check.get("is_satisfied"))
-        .and_then(Value::as_bool);
+
     let mut next_actions = Vec::new();
     if let Some(next_actions_value) = value.get("next_actions") {
         if let Some(actions) = next_actions_value.as_array() {
@@ -3112,22 +3129,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         }
     }
     if repair_issue.is_none() && response_to_user.trim().is_empty() && next_actions.is_empty() {
-        repair_issue = Some("empty_response_to_user_and_no_next_actions".to_string());
-    }
-    if repair_issue.is_none() && next_actions.is_empty() && acceptance_satisfied.is_none() {
-        repair_issue = Some("acceptance_check.is_satisfied_required".to_string());
-    }
-    if repair_issue.is_none() && acceptance_satisfied == Some(false) {
-        let missing_info_ok = value
-            .get("acceptance_check")
-            .and_then(|check| check.get("missing_info"))
-            .and_then(Value::as_array)
-            .is_some_and(|items| !items.is_empty());
-        if !missing_info_ok {
-            repair_issue = Some("acceptance_check.missing_info_required".to_string());
-        } else if next_actions.is_empty() {
-            repair_issue = Some("next_actions_required_when_unsatisfied".to_string());
-        }
+        repair_issue = Some("next_actions_required".to_string());
     }
     ParsedEnvelope {
         response_to_user,

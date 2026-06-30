@@ -2990,7 +2990,7 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("\"Response_rule\""));
         assert!(STATIC_PROMPT.contains("\"Self_audit\""));
         assert!(STATIC_PROMPT.contains("\"json_schema_summary\""));
-        assert!(STATIC_PROMPT.contains("\"acceptance_check.is_satisfied\""));
+        assert!(STATIC_PROMPT.contains("\"acceptance_check?\""));
         assert!(STATIC_PROMPT.contains("\"perspective_policy\""));
         assert!(STATIC_PROMPT.contains("\"tool_claim_policy\""));
         assert!(STATIC_PROMPT.contains("\"storage_style_policy\""));

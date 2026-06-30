@@ -260,21 +260,12 @@
     "json_schema_summary": {
       "$id": "https://timem.local/schemas/response_v1.schema.json",
       "notation": "A key ending with '?' in this summary means optional and should be omitted when empty/false/n/a. The actual JSON key name must not include '?'.",
-      "required": {
-        "response_to_user": "string; may be empty only when next_actions is non-empty",
-        "acceptance_check.is_satisfied": "boolean"
-      },
-      "conditional_required": {
-        "acceptance_check.missing_info": "array required when is_satisfied=false",
-        "next_actions": "array required when is_satisfied=false; non-empty when response_to_user is empty"
-      },
       "optional": {
         "thought?": {
           "content": "string; optional. You can record your internal reasoning draft here. Not shown to the user; Recommended for complex multi-step tasks; omit for simple Q&A.",
           "durable": "boolean; optional. Default false. Tell the runtime whether to include the thought for you in future round's prompt text."
         },
-        
-        "next_actions?": "array<string|object>",
+        "next_actions?": "array<string|object>; required when response_to_user is absent or empty",
         "continuation?": {
           "carryover_needed?": "boolean",
           "next_turn_summary?": "string",
@@ -283,19 +274,25 @@
         "memory_candidates?": "array; emit only for new/corrected durable facts",
         "diagnostics.intent_inference?": "string; enum one_of: time_constrained|exact_date|created_axis|none. Output only for time-related questions; omit for normal Q&A.",
         "diagnostics.self_audit?": "string; enum one_of: memory_write_worthy|fact_correction|prompt_shrink_recommended|scratch_checkpoint_needed|evidence_insufficient|none. Output the matching enum value when the corresponding situation is triggered; otherwise omit.",
-        "diagnostics.note?": "string"
+        "diagnostics.note?": "string",
+        "acceptance_check?": "object; optional metadata. acceptance_check.missing_info array may describe what the model is waiting for.",
+        "response_to_user?": "string; optional, but must be present if next_actions is absent or empty. Non-empty string = final answer shown to user (turn ends immediately, next_actions ignored). Absent or empty = action round (next_actions must be present)."
       },
-      "additional_properties": "allowed for forward compatibility; keep them sparse"
+      "additional_properties": "allowed for forward compatibility; keep them sparse",
+      "action_object_spec": {
+        "description": "Each item in next_actions must be an object with these fields:",
+        "action": "string; required. Canonical tool name from Tool_capability.tool_catalog. Do not invent names.",
+        "intent": "string; required. Concise description of why this action is being taken. Runtime rejects missing intent.",
+        "input": "object; required. Tool-specific input fields as defined in tool_catalog.",
+        "ui_label?": "string; optional display label shown in UI.",
+        "ui_visible?": "boolean; optional. Set false to hide raw technical actions from UI."
+      }
     },
     "examples": {
-      "minimal_satisfied": {
-        "response_to_user": "好的，我明白了。",
-        "acceptance_check": {
-          "is_satisfied": true
-        }
+      "final_answer": {
+        "response_to_user": "好的，我明白了。"
       },
-      "need_action": {
-        "response_to_user": "",
+      "action_round": {
         "next_actions": [
           {
             "action": "query_memory",
@@ -305,13 +302,7 @@
               "limit": 5
             }
           }
-        ],
-        "acceptance_check": {
-          "is_satisfied": false,
-          "missing_info": [
-            "confirmed memory evidence"
-          ]
-        }
+        ]
       }
     },
     "contracts": {
