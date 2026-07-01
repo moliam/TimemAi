@@ -55,6 +55,10 @@ checks. If a dimension is not applicable, record that residual decision in
 - Unit tests: `agent_core` actions and storage behavior with real temp files.
 - Integration tests: complete `session_runtime` turns with a fake model client,
   real `AgentCore`, real action execution, real audit writes, and UI decisions.
+- Replay story tests: scripted multi-turn user/model conversations that exercise
+  normal replies, malformed model recovery, memory retrieve, scratch offload,
+  context shrink, audit writes, and observation rendering in one end-to-end
+  path.
 - Real TTY smoke: compiled release binary driven through a pseudo terminal for
   input/editor/menu behavior.
 - Repeated edge regression: high-risk state machines run multiple times in CI
@@ -75,6 +79,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Chat history | persisted query, delete, SQL time-window, current prompt fallback | realistic story | full CI |
 | Bash actions | approval risk, foreground shell, readback, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
 | Shell jobs | background start/poll/status timeout tests | realistic story where applicable | shell job group |
+| Multi-turn replay story | protocol parsing, memory/scratch/shrink primitives | `session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering` | full CI |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |
 | Cancellation | cancel before provider call, command cancellation tests | real TTY Ctrl+C smoke | real TTY smoke |
 | Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts | real TTY multiline/paste/config/workspace smokes | real TTY smoke in CI |

@@ -13,6 +13,9 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   `type`/`op` fields.
 - Session-runtime integration tests for `memmgr` durable lookup, scratch
   context offload, and forced context shrink.
+- Multi-turn replay integration test covering normal replies, malformed model
+  response recovery, durable memory retrieve, scratch context offload, forced
+  shrink, audit writes, and observation rendering in one scripted story.
 - GitHub Actions CI that runs the same production gate as local development:
   script syntax checks, install logic, contract checks, sensitive scan,
   formatting, full Rust tests, edge regression, release build, real TTY smoke,
@@ -81,4 +84,3 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Initial public Timem Shell Agent release with local Bash action support,
   local structured memory, provider adapters, audit logs, install scripts, and
   README run instructions.
-

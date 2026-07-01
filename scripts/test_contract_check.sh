@@ -10,6 +10,7 @@ required_patterns=(
   "session_turn_round_limit_continue_recharges_and_finishes_same_task"
   "session_turn_bash_approval_executes_action_then_finishes_with_audit"
   "session_turn_scratch_context_offload_records_id_and_continues"
+  "session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering"
   "successful_prompt_shrink_invalidates_stale_observed_prompt_tokens"
   "forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough"
   "memory_update_concurrent_same_version_conflicts_allow_only_one_winner"

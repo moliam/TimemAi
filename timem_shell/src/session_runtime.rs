@@ -332,6 +332,9 @@ fn epoch_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        observation_events_from_model_response, render_observation_panel_at, ObservationPanel,
+    };
     use agent_core::{BashApprovalMode, CoreProfile};
     use std::collections::VecDeque;
 
@@ -854,6 +857,229 @@ mod tests {
         assert!(scratch_text.contains("extra context that should be offloaded"));
         let audit_text = std::fs::read_to_string(&audit).unwrap();
         assert!(audit_text.contains("\"turn_final\""));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[derive(Default)]
+    struct RecordingObservationUi {
+        panel: ObservationPanel,
+        renders: Vec<String>,
+    }
+
+    impl TurnUi for RecordingObservationUi {
+        fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, content: &str) {
+            self.panel
+                .apply_all(observation_events_from_model_response(content));
+            let rendered = render_observation_panel_at(&self.panel, self.renders.len());
+            if !rendered.is_empty() {
+                self.renders.push(rendered);
+            }
+        }
+    }
+
+    struct StoryReplayModel {
+        calls: usize,
+        prompts: Vec<String>,
+    }
+
+    impl StoryReplayModel {
+        fn new() -> Self {
+            Self {
+                calls: 0,
+                prompts: Vec::new(),
+            }
+        }
+    }
+
+    impl ModelClient for StoryReplayModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.calls += 1;
+            self.prompts.push(prompt.to_string());
+            match self.calls {
+                1 => Ok(llm(
+                    r#"{"response_to_user":"你好，我在。","acceptance_check":{"is_satisfied":true}}"#,
+                    2_000,
+                    false,
+                )),
+                2 => Ok(llm("这不是合法 JSON，但应该走协议修复。", 2_100, false)),
+                3 => {
+                    assert!(prompt.contains("Protocol repair request"));
+                    Ok(llm("畸形回复已恢复为用户可读文本。", 2_200, false))
+                }
+                4 => Ok(llm(
+                    r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"记录项目代号。","input":{"type":"durable","op":"upsert","id":"project_code","content":"项目代号是 AURORA"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#,
+                    2_300,
+                    false,
+                )),
+                5 => {
+                    assert!(prompt.contains("Action result: memmgr"));
+                    assert!(prompt.contains("type: durable"));
+                    assert!(prompt.contains("operation: insert"));
+                    assert!(prompt.contains("project_code"));
+                    Ok(llm(
+                        r#"{"response_to_user":"已记录项目代号。","acceptance_check":{"is_satisfied":true}}"#,
+                        2_400,
+                        false,
+                    ))
+                }
+                6 => Ok(llm(
+                    r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"查询项目代号记忆。","input":{"type":"durable","op":"query","query":"项目代号","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#,
+                    2_500,
+                    false,
+                )),
+                7 => {
+                    assert!(prompt.contains("Action result: memmgr"));
+                    assert!(prompt.contains("type: durable"));
+                    assert!(prompt.contains("op: query"));
+                    assert!(prompt.contains("项目代号是 AURORA"));
+                    Ok(llm(
+                        r#"{"response_to_user":"项目代号是 AURORA。","acceptance_check":{"is_satisfied":true}}"#,
+                        7_600,
+                        false,
+                    ))
+                }
+                8 => {
+                    assert!(prompt.contains("mode=force_shrink_required"));
+                    let mut delta_ids = prompt_field_values(prompt, "delta_id");
+                    delta_ids.sort();
+                    delta_ids.dedup();
+                    assert!(
+                        !delta_ids.is_empty(),
+                        "forced shrink prompt should expose delta ids"
+                    );
+                    let content = format!(
+                        r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","input":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch offload id"]}}}}"#,
+                        serde_json::to_string(&delta_ids).unwrap()
+                    );
+                    Ok(llm(content, 7_650, false))
+                }
+                9 => {
+                    assert!(prompt.contains("mode=force_shrink_required"));
+                    assert!(prompt.contains("Action result: memmgr"));
+                    assert!(prompt.contains("type: scratch"));
+                    assert!(prompt.contains("op: write"));
+                    assert!(prompt.contains("id: scratch_"));
+                    let mut delta_ids = prompt_field_values(prompt, "delta_id");
+                    delta_ids.sort();
+                    delta_ids.dedup();
+                    assert!(
+                        !delta_ids.is_empty(),
+                        "post-scratch forced shrink prompt should expose delta ids"
+                    );
+                    let content = format!(
+                        r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+                        serde_json::to_string(&delta_ids).unwrap()
+                    );
+                    Ok(llm(content, 7_700, false))
+                }
+                10 => {
+                    assert!(prompt.contains("Action result: memmgr"));
+                    assert!(prompt.contains("type: context"));
+                    assert!(prompt.contains("op: shrink"));
+                    assert!(!prompt.contains("mode=force_shrink_required"));
+                    Ok(llm(
+                        r#"{"response_to_user":"上下文已转存并压缩，可以继续。","acceptance_check":{"is_satisfied":true}}"#,
+                        2_000,
+                        false,
+                    ))
+                }
+                _ => Err(format!("unexpected_extra_model_call_{}", self.calls)),
+            }
+        }
+    }
+
+    #[test]
+    fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering() {
+        let dir = tmp_dir("story_replay_e2e");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_max_llm_input_tokens(8_000);
+        let mut config = test_config();
+        config.max_llm_input_tokens = 8_000;
+        let mut ui = RecordingObservationUi {
+            panel: ObservationPanel::new(8, 80),
+            renders: Vec::new(),
+        };
+        let mut model = StoryReplayModel::new();
+
+        let inputs = [
+            "你好",
+            "请用畸形回复测试协议恢复",
+            "记住项目代号是 AURORA",
+            "项目代号是什么？",
+            "继续长上下文任务",
+        ];
+        let long_work_context = "长工作上下文片段。".repeat(2_500);
+        let additional_contexts = [None, None, None, Some(long_work_context.as_str()), None];
+        let expected_outputs = [
+            "你好，我在。",
+            "畸形回复已恢复为用户可读文本。",
+            "已记录项目代号。",
+            "项目代号是 AURORA。",
+            "上下文已转存并压缩，可以继续。",
+        ];
+
+        let mut outputs = Vec::new();
+        for (input, additional_context) in inputs.into_iter().zip(additional_contexts) {
+            let outcome = run_session_turn_with_model_client(
+                &mut core,
+                &mut config,
+                TurnRequest {
+                    input,
+                    session: "story_session",
+                    audit_file: &audit,
+                    additional_context,
+                },
+                &mut ui,
+                None,
+                &mut model,
+            );
+            outputs.push(outcome.text);
+        }
+
+        assert_eq!(outputs, expected_outputs);
+        assert_eq!(model.calls, 10);
+        assert!(
+            model
+                .prompts
+                .iter()
+                .any(|prompt| prompt.contains("Protocol repair request")),
+            "story should exercise malformed model response repair"
+        );
+        assert_eq!(
+            model
+                .prompts
+                .iter()
+                .filter(|prompt| prompt.contains("mode=force_shrink_required"))
+                .count(),
+            2,
+            "story should force shrink through scratch offload then context shrink"
+        );
+
+        let memory_text = std::fs::read_to_string(dir.join("memory.jsonl")).unwrap();
+        assert!(memory_text.contains("项目代号是 AURORA"));
+        let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
+        assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
+        assert!(scratch_text.contains(r#""label":"story replay context offload""#));
+
+        let rendered = ui.renders.join("\n");
+        assert!(rendered.contains("更新记忆: 记录项目代号。"));
+        assert!(rendered.contains("查询记忆: 查询项目代号记忆。"));
+        assert!(rendered.contains("处理草稿区: 先把长上下文转存到 scratch。"));
+        assert!(rendered.contains("整理上下文: 删除已转存的动态上下文。"));
+        assert!(!rendered.contains("memmgr"));
+
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert_eq!(audit_text.matches("\"turn_start\"").count(), inputs.len());
+        assert_eq!(audit_text.matches("\"turn_final\"").count(), inputs.len());
+        assert!(audit_text.contains("畸形回复已恢复为用户可读文本。"));
+        assert!(audit_text.contains("上下文已转存并压缩，可以继续。"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
