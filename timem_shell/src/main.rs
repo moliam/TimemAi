@@ -1667,6 +1667,7 @@ fn read_paste_recovery_key(input: &mut impl Read) -> PasteRecoveryKey {
                 return PasteRecoveryKey::Cancel;
             };
             match seq.as_slice() {
+                [] | [27] => PasteRecoveryKey::Cancel,
                 [b'[', b'A'] | [b'[', b'D'] => PasteRecoveryKey::Previous,
                 [b'[', b'B'] | [b'[', b'C'] => PasteRecoveryKey::Next,
                 _ => PasteRecoveryKey::Other,
@@ -1853,10 +1854,14 @@ fn paste_recovery_summary_from_markers(
     let mut dirty_count = 0usize;
     let mut total_lines = 0usize;
     let mut first_dirty_marker = String::new();
+    let mut used_records = vec![false; records.len()];
     for (idx, marked) in paste_marker_segments(input).into_iter().enumerate() {
-        let Some(record) = records.get(idx) else {
+        let Some(record_idx) = paste_record_index_for_marker(&marked, idx, records, &used_records)
+        else {
             continue;
         };
+        used_records[record_idx] = true;
+        let record = &records[record_idx];
         if marked != record.placeholder {
             dirty_count += 1;
             total_lines += pasted_line_count(&record.content);
@@ -1876,6 +1881,7 @@ fn resolve_paste_markers(input: &str, records: &[PasteRecord], restore_dirty: bo
     let mut out = String::new();
     let mut chars = input.chars().peekable();
     let mut record_idx = 0usize;
+    let mut used_records = vec![false; records.len()];
     while let Some(ch) = chars.next() {
         if ch != PASTE_START_MARKER {
             if ch != PASTE_END_MARKER {
@@ -1890,7 +1896,11 @@ fn resolve_paste_markers(input: &str, records: &[PasteRecord], restore_dirty: bo
             }
             marked.push(next);
         }
-        if let Some(record) = records.get(record_idx) {
+        if let Some(matched_idx) =
+            paste_record_index_for_marker(&marked, record_idx, records, &used_records)
+        {
+            used_records[matched_idx] = true;
+            let record = &records[matched_idx];
             if restore_dirty || marked == record.placeholder {
                 out.push_str(&record.content);
             } else {
@@ -1902,6 +1912,32 @@ fn resolve_paste_markers(input: &str, records: &[PasteRecord], restore_dirty: bo
         record_idx += 1;
     }
     out
+}
+
+fn paste_record_index_for_marker(
+    marked: &str,
+    marker_idx: usize,
+    records: &[PasteRecord],
+    used_records: &[bool],
+) -> Option<usize> {
+    if let Some((idx, _)) = records.iter().enumerate().find(|(idx, record)| {
+        !used_records.get(*idx).copied().unwrap_or(false) && record.placeholder == marked
+    }) {
+        return Some(idx);
+    }
+    records
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !used_records.get(*idx).copied().unwrap_or(false))
+        .nth(marker_idx)
+        .map(|(idx, _)| idx)
+        .or_else(|| {
+            records
+                .iter()
+                .enumerate()
+                .find(|(idx, _)| !used_records.get(*idx).copied().unwrap_or(false))
+                .map(|(idx, _)| idx)
+        })
 }
 
 fn paste_marker_segments(input: &str) -> Vec<String> {
@@ -4061,6 +4097,31 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn paste_marker_matching_ignores_stale_preserved_records_when_placeholder_matches_later_record()
+    {
+        let records = vec![
+            PasteRecord {
+                placeholder: "[ pasted 2 lines ]".to_string(),
+                content: "old-a\nold-b".to_string(),
+            },
+            PasteRecord {
+                placeholder: "[ pasted 3 lines ]".to_string(),
+                content: "new-a\nnew-b\nnew-c".to_string(),
+            },
+        ];
+        let raw = format!(
+            "问题 {}",
+            format!("{PASTE_START_MARKER}[ pasted 3 lines ]{PASTE_END_MARKER}")
+        );
+
+        assert_eq!(paste_recovery_summary_from_markers(&raw, &records), None);
+        assert_eq!(
+            resolve_paste_markers(&raw, &records, false),
+            "问题 new-a\nnew-b\nnew-c"
+        );
+    }
+
+    #[test]
     fn paste_highlighter_reverses_placeholder_inside_invisible_markers() {
         let raw = format!("请处理 {} 谢谢", marked_placeholder(3));
         let ranges = paste_marker_ranges(&raw);
@@ -4211,6 +4272,10 @@ mod static_prompt_tests {
     fn paste_recovery_key_reader_supports_cancel_and_direct_shortcuts() {
         assert_eq!(
             read_paste_recovery_key(&mut Cursor::new(vec![3])),
+            PasteRecoveryKey::Cancel
+        );
+        assert_eq!(
+            read_paste_recovery_key(&mut Cursor::new(vec![27, 27])),
             PasteRecoveryKey::Cancel
         );
         assert_eq!(
