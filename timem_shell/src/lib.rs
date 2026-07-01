@@ -310,9 +310,9 @@ fn context_bar(context_tokens: u32, max_llm_input_tokens: u32) -> String {
     .min(10);
     let empty = 10 - filled;
     format!(
-        "[{}{}]",
-        "■".repeat(filled as usize),
-        "□".repeat(empty as usize)
+        "{}{}",
+        "▰".repeat(filled as usize),
+        "▱".repeat(empty as usize)
     )
 }
 
@@ -2818,7 +2818,7 @@ mod tests {
         assert!(block.contains("[08:56:33] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
         assert!(block.contains("🦩 查询记忆..."));
         assert!(block.contains("aliyun:qwen-plus ⇌2 ║ ▲210 | ▼21"));
-        assert!(block.contains("├─ context : [■□□□□□□□□□]"));
+        assert!(block.contains("├─ context : ▰▱▱▱▱▱▱▱▱▱"));
         assert!(block.contains("└─ △110  ▽9"));
         assert!(!block.contains("已用 7s"));
         assert!(!block.contains("⚡cache"));
@@ -2850,7 +2850,7 @@ mod tests {
 
         assert_eq!(block.lines().count(), 5);
         assert!(block.contains("Check local system"));
-        assert!(block.contains("├─ context : [■□□□□□□□□□]"));
+        assert!(block.contains("├─ context : ▰▱▱▱▱▱▱▱▱▱"));
         assert!(block.contains('…'));
         assert!(!block.contains("observance"));
     }
@@ -2895,7 +2895,7 @@ mod tests {
         assert!(view.contains("· 正在分析用户请求"));
         assert!(view.contains("\x1b[38;5;245m· Bash: rg --files | wc -l"));
         assert!(view.contains("aliyun:qwen-plus ⇌2 ║ ▲1.2K | ▼20 | ⌁300"));
-        assert!(view.contains("├─ context : [■□□□□□□□□□]"));
+        assert!(view.contains("├─ context : ▰▱▱▱▱▱▱▱▱▱"));
         assert!(view.contains("└─ △800  ▽12"));
         assert!(!view.contains("已用 12s"));
         assert!(!view.contains("ignored in panel mode"));

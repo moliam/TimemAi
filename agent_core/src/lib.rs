@@ -302,13 +302,23 @@ impl ParsedAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedEnvelope {
     report_job_progress: String,
+    final_answer: String,
     continue_work: bool,
-    continue_was_implicit: bool,
     thought: String,
-    thought_durable: bool,
+    thought_keep_in_context: bool,
     next_actions: Vec<ParsedAction>,
     memory_candidates: Vec<String>,
     repair_issue: Option<String>,
+}
+
+impl ParsedEnvelope {
+    fn final_text(&self) -> String {
+        if self.final_answer.trim().is_empty() {
+            self.report_job_progress.trim().to_string()
+        } else {
+            self.final_answer.trim().to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -432,6 +442,7 @@ impl Drop for MemGuardLock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 enum ActionExecution {
     Completed(String),
     NeedsApproval(PendingApproval),
@@ -722,7 +733,7 @@ impl AgentCore {
         }
         let parsed = parse_envelope(&response.content, &self.capabilities);
         let mut slices = Vec::new();
-        if !parsed.thought.is_empty() && parsed.thought_durable {
+        if !parsed.thought.is_empty() && parsed.thought_keep_in_context {
             slices.push((
                 "llm_thought".to_string(),
                 format!("Thought:\n{}", parsed.thought),
@@ -730,10 +741,7 @@ impl AgentCore {
         }
         if let Some(issue) = parsed.repair_issue.clone() {
             if !self.repair_attempted {
-                return self.request_protocol_repair(
-                    &issue,
-                    "Return exactly one valid JSON object with report_job_progress and continue. Do not use markdown fences.",
-                );
+                return self.request_protocol_repair(&issue, protocol_repair_instruction(&issue));
             }
             if issue == "invalid_json"
                 && can_show_plain_text_after_repair_failure(&response.content)
@@ -751,10 +759,10 @@ impl AgentCore {
                     repair_issue: Some("invalid_json_plain_text_fallback".to_string()),
                 });
             }
-            let final_text = if parsed.report_job_progress.trim().is_empty() {
+            let final_text = if parsed.final_text().is_empty() {
                 repair_failure_message(self.last_repair_issue.as_deref().unwrap_or(&issue), &issue)
             } else {
-                parsed.report_job_progress
+                parsed.final_text()
             };
             slices.push((
                 "llm_response".to_string(),
@@ -770,13 +778,13 @@ impl AgentCore {
         }
         if !parsed.continue_work {
             if parsed.next_actions.is_empty() {
-                for candidate in parsed.memory_candidates {
-                    if self.memory.write(&candidate).is_ok() {
+                for candidate in &parsed.memory_candidates {
+                    if self.memory.write(candidate).is_ok() {
                         self.current_stats.tool_calls += 1;
                         self.current_stats.mem_writes += 1;
                     }
                 }
-                let final_text = parsed.report_job_progress.trim().to_string();
+                let final_text = parsed.final_text();
                 slices.push((
                     "llm_response".to_string(),
                     format!("Response shown to user:\n{}", final_text),
@@ -789,7 +797,7 @@ impl AgentCore {
                     repair_issue: None,
                 });
             }
-            let pending_final_text = parsed.report_job_progress.trim().to_string();
+            let pending_final_text = parsed.final_text();
             let last_idx = parsed.next_actions.len() - 1;
             let expect_cmd = parsed.next_actions[last_idx].expect.clone();
             let expect_timeout = parsed.next_actions[last_idx].expect_timeout_ms;
@@ -855,7 +863,7 @@ impl AgentCore {
             }
             slices.push((
                 "runtime_note".to_string(),
-                "Note: 你上轮用 continue:false + expect 声明完成，但 expect 命令 exit!=0。请根据以上证据修正后再回复。".to_string(),
+                "Note: 你上轮用 status:finished + expect 声明完成，但 expect 命令 exit!=0。请根据以上证据修正后再回复。".to_string(),
             ));
             self.append_delta(slices);
             self.append_in_turn_shrink_review_if_needed();
@@ -879,13 +887,7 @@ impl AgentCore {
                 ),
             ));
         }
-        if parsed.continue_was_implicit {
-            slices.push((
-                "runtime_note".to_string(),
-                "Note: 上轮回复没有写 continue，runtime 已默认按 continue=true 处理。以后最好明确给出 continue。"
-                    .to_string(),
-            ));
-        }
+        // Omitted status is an intentional shorthand for status:working.
 
         if !parsed.next_actions.is_empty() {
             let mut result_lines = Vec::new();
@@ -924,13 +926,13 @@ impl AgentCore {
                 rounds_remaining: self.remaining_rounds(),
             };
         }
-        for candidate in parsed.memory_candidates {
-            if self.memory.write(&candidate).is_ok() {
+        for candidate in &parsed.memory_candidates {
+            if self.memory.write(candidate).is_ok() {
                 self.current_stats.tool_calls += 1;
                 self.current_stats.mem_writes += 1;
             }
         }
-        let final_text = parsed.report_job_progress.trim().to_string();
+        let final_text = parsed.final_text();
         let final_text = if final_text.is_empty() {
             response.content
         } else {
@@ -1224,7 +1226,7 @@ impl AgentCore {
             })
             .collect::<Vec<_>>();
         rows.sort_by(|a, b| b.time_ms.cmp(&a.time_ms));
-        rows.truncate(limit.max(1).min(50));
+        rows.truncate(limit.clamp(1, 50));
         rows
     }
 
@@ -2070,7 +2072,7 @@ impl FileMemoryStore {
             }
         }
         rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
-        rows.truncate(limit.max(1).min(50));
+        rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
     fn recent(&self, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
@@ -2078,7 +2080,7 @@ impl FileMemoryStore {
             .with_read(|| {
                 let mut rows = self.read_all_unlocked()?;
                 rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
-                rows.truncate(limit.max(1).min(50));
+                rows.truncate(limit.clamp(1, 50));
                 Ok(rows)
             })
             .map_err(std::io::Error::other)?
@@ -2420,6 +2422,7 @@ impl FileMemoryStore {
         let mut out = Vec::new();
         while let Some(row) = rows.next().map_err(|_| "sql_row_failed".to_string())? {
             let mut cells = Vec::new();
+            #[allow(clippy::needless_range_loop)]
             for idx in 0..column_count {
                 let value = match row
                     .get_ref(idx)
@@ -2434,7 +2437,7 @@ impl FileMemoryStore {
                 cells.push((column_names[idx].clone(), value));
             }
             out.push(cells);
-            if out.len() >= limit.max(1).min(200) {
+            if out.len() >= limit.clamp(1, 200) {
                 break;
             }
         }
@@ -2567,7 +2570,7 @@ impl FileScratchStore {
             });
         }
         rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
-        rows.truncate(limit.max(1).min(50));
+        rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
 
@@ -2670,7 +2673,7 @@ impl FileChatHistoryStore {
             rows.retain(|record| chat_record_matches(record, &terms));
         }
         rows.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
-        rows.truncate(limit.max(1).min(50));
+        rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
 
@@ -3115,10 +3118,10 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
         Err(_) => {
             return ParsedEnvelope {
                 report_job_progress: String::new(),
+                final_answer: String::new(),
                 continue_work: true,
-                continue_was_implicit: false,
                 thought: String::new(),
-                thought_durable: false,
+                thought_keep_in_context: false,
                 next_actions: vec![],
                 memory_candidates: vec![],
                 repair_issue: Some("invalid_json".to_string()),
@@ -3128,10 +3131,10 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
     if !value.is_object() {
         return ParsedEnvelope {
             report_job_progress: String::new(),
+            final_answer: String::new(),
             continue_work: true,
-            continue_was_implicit: false,
             thought: String::new(),
-            thought_durable: false,
+            thought_keep_in_context: false,
             next_actions: vec![],
             memory_candidates: vec![],
             repair_issue: Some("root_must_be_json_object".to_string()),
@@ -3146,18 +3149,39 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let (continue_work, continue_was_implicit) = match value.get("continue") {
-        Some(value) => match value.as_bool() {
-            Some(value) => (value, false),
-            None => {
-                repair_issue =
-                    repair_issue.or_else(|| Some("continue_must_be_boolean".to_string()));
-                (true, false)
-            }
+    let mut final_answer = value
+        .get("final_answer")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let status = value.get("status").and_then(Value::as_str);
+    let continue_work = match status {
+        Some("working") => true,
+        Some("finished") => false,
+        Some(_) => {
+            repair_issue =
+                repair_issue.or_else(|| Some("status_must_be_working_or_finished".to_string()));
+            true
+        }
+        None => match value.get("continue") {
+            Some(value) => match value.as_bool() {
+                Some(value) => value,
+                None => {
+                    repair_issue =
+                        repair_issue.or_else(|| Some("continue_must_be_boolean".to_string()));
+                    true
+                }
+            },
+            None => true,
         },
-        None => (true, true),
     };
-    let (thought, thought_durable) = {
+    if value.get("status").is_none()
+        && value.get("continue").and_then(Value::as_bool) == Some(false)
+        && final_answer.trim().is_empty()
+    {
+        final_answer = report_job_progress.trim().to_string();
+    }
+    let (thought, thought_keep_in_context) = {
         let v = value.get("thought");
         if let Some(obj) = v.and_then(Value::as_object) {
             let content = obj
@@ -3167,239 +3191,240 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
                 .filter(|t| !t.is_empty())
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            let durable = obj.get("durable").and_then(Value::as_bool).unwrap_or(false);
-            (content, durable)
+            let keep_in_context = obj
+                .get("keep_in_context")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            (content, keep_in_context)
         } else {
-            // backward compat: plain string thought is always durable
+            // Plain string thought predates the explicit object form; keep it
+            // in context because the model had no separate retention flag.
             let s = v
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            let durable = !s.is_empty();
-            (s, durable)
+            let keep_in_context = !s.is_empty();
+            (s, keep_in_context)
         }
     };
 
     let mut next_actions = Vec::new();
-    if let Some(next_actions_value) = value.get("next_actions") {
+    let bare_action = value.get("action").and_then(Value::as_str).is_some();
+    let action_values = if let Some(next_actions_value) = value.get("next_actions") {
         if let Some(actions) = next_actions_value.as_array() {
-            for (idx, action) in actions.iter().enumerate() {
-                let name = action
-                    .get("action")
+            Some(actions.iter().collect::<Vec<_>>())
+        } else if !next_actions_value.is_null() {
+            repair_issue = Some("next_actions_must_be_array".to_string());
+            None
+        } else {
+            None
+        }
+    } else if bare_action {
+        Some(vec![&value])
+    } else {
+        None
+    };
+    if let Some(actions) = action_values {
+        for (idx, action) in actions.iter().enumerate() {
+            let name = action
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                repair_issue = Some(format!("next_actions[{idx}].action_missing"));
+                break;
+            }
+            let input = action.get("input").unwrap_or(action);
+            let mem_type = input
+                .get("type")
+                .or_else(|| action.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            let op = input
+                .get("op")
+                .or_else(|| input.get("operation"))
+                .or_else(|| action.get("op"))
+                .or_else(|| action.get("operation"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            let intent = action
+                .get("intent")
+                .or_else(|| input.get("intent"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if intent.is_empty() {
+                repair_issue = Some(format!("next_actions[{idx}].intent_required"));
+                break;
+            }
+            let query = input
+                .get("query")
+                .or_else(|| action.get("query"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let content = input
+                .get("content")
+                .or_else(|| action.get("content"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let scratch_type = input
+                .get("kind")
+                .or_else(|| input.get("scratch_type"))
+                .or_else(|| {
+                    if name == "scratch_write" {
+                        input.get("type")
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| action.get("type"))
+                .or_else(|| action.get("scratch_type"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let label = input
+                .get("label")
+                .or_else(|| action.get("label"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let sql = input
+                .get("sql")
+                .or_else(|| action.get("sql"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let params = input
+                .get("params")
+                .or_else(|| action.get("params"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(json_sql_param_to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let operation = input
+                .get("operation")
+                .or_else(|| input.get("op"))
+                .or_else(|| action.get("operation"))
+                .or_else(|| action.get("op"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_lowercase()
+                .to_string();
+            let expected_version = input
+                .get("expected_version")
+                .or_else(|| input.get("version"))
+                .or_else(|| action.get("expected_version"))
+                .or_else(|| action.get("version"))
+                .and_then(json_u64);
+            let id = input
+                .get("id")
+                .or_else(|| action.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let command = input
+                .get("command")
+                .or_else(|| action.get("command"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let read_back_command = input
+                .get("read_back_command")
+                .or_else(|| action.get("read_back_command"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let large_readback_opt_in = input
+                .get("large_readback_opt_in")
+                .or_else(|| action.get("large_readback_opt_in"))
+                .is_some();
+            let background = input
+                .get("background")
+                .or_else(|| action.get("background"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || input
+                    .get("mode")
+                    .or_else(|| action.get("mode"))
                     .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if name.is_empty() {
-                    repair_issue = Some(format!("next_actions[{idx}].action_missing"));
+                    .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("background"));
+            let job_id = input
+                .get("job_id")
+                .or_else(|| action.get("job_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let delta_ids = input
+                .get("delta_ids")
+                .or_else(|| action.get("delta_ids"))
+                .and_then(Value::as_array)
+                .map(|items| json_string_array(items))
+                .unwrap_or_default();
+            let slice_ids = input
+                .get("slice_ids")
+                .or_else(|| action.get("slice_ids"))
+                .and_then(Value::as_array)
+                .map(|items| json_string_array(items))
+                .unwrap_or_default();
+            let timeout_ms_raw = input
+                .get("timeout_ms")
+                .or_else(|| action.get("timeout_ms"))
+                .and_then(Value::as_u64);
+            let timeout_sec_raw = input
+                .get("timeout_sec")
+                .or_else(|| action.get("timeout_sec"))
+                .and_then(Value::as_u64);
+            let after_ms = input
+                .get("after_ms")
+                .or_else(|| action.get("after_ms"))
+                .and_then(json_i64);
+            let before_ms = input
+                .get("before_ms")
+                .or_else(|| action.get("before_ms"))
+                .and_then(json_i64);
+            let normalized_name = name.as_str();
+            if capabilities.contains_tool(normalized_name) {
+                if let Err(issue) = capabilities.validate_action_input(normalized_name, input) {
+                    repair_issue = Some(format!("next_actions[{idx}].{issue}"));
                     break;
                 }
-                let input = action.get("input").unwrap_or(action);
-                let mem_type = input
-                    .get("type")
-                    .or_else(|| action.get("type"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_lowercase();
-                let op = input
-                    .get("op")
-                    .or_else(|| input.get("operation"))
-                    .or_else(|| action.get("op"))
-                    .or_else(|| action.get("operation"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_lowercase();
-                let intent = action
-                    .get("intent")
-                    .or_else(|| input.get("intent"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                if intent.is_empty() {
-                    repair_issue = Some(format!("next_actions[{idx}].intent_required"));
-                    break;
-                }
-                let query = input
-                    .get("query")
-                    .or_else(|| action.get("query"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let content = input
-                    .get("content")
-                    .or_else(|| action.get("content"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let scratch_type = input
-                    .get("kind")
-                    .or_else(|| input.get("scratch_type"))
-                    .or_else(|| {
-                        if name == "scratch_write" {
-                            input.get("type")
-                        } else {
-                            None
-                        }
-                    })
-                    .or_else(|| action.get("type"))
-                    .or_else(|| action.get("scratch_type"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let label = input
-                    .get("label")
-                    .or_else(|| action.get("label"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let sql = input
-                    .get("sql")
-                    .or_else(|| action.get("sql"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let params = input
-                    .get("params")
-                    .or_else(|| action.get("params"))
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(json_sql_param_to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let operation = input
-                    .get("operation")
-                    .or_else(|| input.get("op"))
-                    .or_else(|| action.get("operation"))
-                    .or_else(|| action.get("op"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_lowercase()
-                    .to_string();
-                let expected_version = input
-                    .get("expected_version")
-                    .or_else(|| input.get("version"))
-                    .or_else(|| action.get("expected_version"))
-                    .or_else(|| action.get("version"))
-                    .and_then(json_u64);
-                let id = input
-                    .get("id")
-                    .or_else(|| action.get("id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let command = input
-                    .get("command")
-                    .or_else(|| action.get("command"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let read_back_command = input
-                    .get("read_back_command")
-                    .or_else(|| action.get("read_back_command"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let large_readback_opt_in = input
-                    .get("large_readback_opt_in")
-                    .or_else(|| action.get("large_readback_opt_in"))
-                    .is_some();
-                let background = input
-                    .get("background")
-                    .or_else(|| action.get("background"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                    || input
-                        .get("mode")
-                        .or_else(|| action.get("mode"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("background"));
-                let job_id = input
-                    .get("job_id")
-                    .or_else(|| action.get("job_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let delta_ids = input
-                    .get("delta_ids")
-                    .or_else(|| action.get("delta_ids"))
-                    .and_then(Value::as_array)
-                    .map(|items| json_string_array(items))
-                    .unwrap_or_default();
-                let slice_ids = input
-                    .get("slice_ids")
-                    .or_else(|| action.get("slice_ids"))
-                    .and_then(Value::as_array)
-                    .map(|items| json_string_array(items))
-                    .unwrap_or_default();
-                let timeout_ms_raw = input
-                    .get("timeout_ms")
-                    .or_else(|| action.get("timeout_ms"))
-                    .and_then(Value::as_u64);
-                let timeout_sec_raw = input
-                    .get("timeout_sec")
-                    .or_else(|| action.get("timeout_sec"))
-                    .and_then(Value::as_u64);
-                let after_ms = input
-                    .get("after_ms")
-                    .or_else(|| action.get("after_ms"))
-                    .and_then(json_i64);
-                let before_ms = input
-                    .get("before_ms")
-                    .or_else(|| action.get("before_ms"))
-                    .and_then(json_i64);
-                let normalized_name = name.as_str();
-                if capabilities.contains_tool(normalized_name) {
-                    if let Err(issue) = capabilities.validate_action_input(normalized_name, input) {
-                        repair_issue = Some(format!("next_actions[{idx}].{issue}"));
-                        break;
-                    }
-                }
-                if capabilities.contains_tool(normalized_name) {
-                    if let Err(issue) = validate_manifest_backed_action_extra(
-                        idx,
-                        normalized_name,
-                        &mem_type,
-                        &op,
-                        &query,
-                        &content,
-                        &scratch_type,
-                        &label,
-                        &sql,
-                        &params,
-                        &id,
-                        &delta_ids,
-                        &slice_ids,
-                    ) {
-                        repair_issue = Some(issue);
-                        break;
-                    }
-                } else if let Err(issue) = validate_legacy_action_shape(
+            }
+            if capabilities.contains_tool(normalized_name) {
+                if let Err(issue) = validate_manifest_backed_action_extra(
                     idx,
                     normalized_name,
+                    &mem_type,
+                    &op,
                     &query,
                     &content,
                     &scratch_type,
                     &label,
                     &sql,
                     &params,
-                    &operation,
                     &id,
                     &delta_ids,
                     &slice_ids,
@@ -3407,61 +3432,75 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
                     repair_issue = Some(issue);
                     break;
                 }
-                let parsed_timeout_ms = timeout_ms_raw
-                    .or_else(|| timeout_sec_raw.map(|seconds| seconds.saturating_mul(1000)));
-                let timeout_ms = if normalized_name == "shell_job_status" {
-                    parsed_timeout_ms.unwrap_or(0).min(15000)
-                } else {
-                    parsed_timeout_ms.unwrap_or(5000).clamp(1000, 15000)
-                };
-                let expect = input
-                    .get("expect")
-                    .or_else(|| action.get("expect"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let expect_timeout_ms = input
-                    .get("expect_timeout_ms")
-                    .or_else(|| action.get("expect_timeout_ms"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                next_actions.push(ParsedAction {
-                    action: name,
-                    intent: intent.to_string(),
-                    raw_input: input.clone(),
-                    mem_type,
-                    op,
-                    query,
-                    content,
-                    scratch_type,
-                    label,
-                    sql,
-                    params,
-                    operation,
-                    expected_version,
-                    id,
-                    command,
-                    read_back_command,
-                    large_readback_opt_in,
-                    background,
-                    job_id,
-                    delta_ids,
-                    slice_ids,
-                    timeout_ms,
-                    limit: input
-                        .get("limit")
-                        .or_else(|| action.get("limit"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(5) as usize,
-                    after_ms,
-                    before_ms,
-                    expect,
-                    expect_timeout_ms,
-                });
+            } else if let Err(issue) = validate_legacy_action_shape(
+                idx,
+                normalized_name,
+                &query,
+                &content,
+                &scratch_type,
+                &label,
+                &sql,
+                &params,
+                &operation,
+                &id,
+                &delta_ids,
+                &slice_ids,
+            ) {
+                repair_issue = Some(issue);
+                break;
             }
-        } else if !next_actions_value.is_null() {
-            repair_issue = Some("next_actions_must_be_array".to_string());
+            let parsed_timeout_ms = timeout_ms_raw
+                .or_else(|| timeout_sec_raw.map(|seconds| seconds.saturating_mul(1000)));
+            let timeout_ms = if normalized_name == "shell_job_status" {
+                parsed_timeout_ms.unwrap_or(0).min(15000)
+            } else {
+                parsed_timeout_ms.unwrap_or(5000).clamp(1000, 15000)
+            };
+            let expect = input
+                .get("expect")
+                .or_else(|| action.get("expect"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let expect_timeout_ms = input
+                .get("expect_timeout_ms")
+                .or_else(|| action.get("expect_timeout_ms"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            next_actions.push(ParsedAction {
+                action: name,
+                intent: intent.to_string(),
+                raw_input: input.clone(),
+                mem_type,
+                op,
+                query,
+                content,
+                scratch_type,
+                label,
+                sql,
+                params,
+                operation,
+                expected_version,
+                id,
+                command,
+                read_back_command,
+                large_readback_opt_in,
+                background,
+                job_id,
+                delta_ids,
+                slice_ids,
+                timeout_ms,
+                limit: input
+                    .get("limit")
+                    .or_else(|| action.get("limit"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(5) as usize,
+                after_ms,
+                before_ms,
+                expect,
+                expect_timeout_ms,
+            });
         }
     }
     let mut memory_candidates = Vec::new();
@@ -3489,14 +3528,27 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
                 repair_issue.or_else(|| Some("memory_candidates_must_be_array".to_string()));
         }
     }
-    if repair_issue.is_none() && !continue_work && report_job_progress.trim().is_empty() {
-        repair_issue = Some("report_job_progress_required_when_continue_false".to_string());
+    if repair_issue.is_none() && !continue_work && final_answer.trim().is_empty() {
+        repair_issue = Some("final_answer_required_when_status_finished".to_string());
     }
-    // guarded finalize validation: continue:false + next_actions requires expect on last action
+    if repair_issue.is_none()
+        && continue_work
+        && status != Some("finished")
+        && !final_answer.trim().is_empty()
+    {
+        repair_issue = Some("final_answer_requires_status_finished".to_string());
+    }
+    if repair_issue.is_none()
+        && !continue_work
+        && starts_with_runtime_progress_marker(&final_answer)
+    {
+        repair_issue = Some("final_answer_must_not_start_with_runtime_progress_marker".to_string());
+    }
+    // guarded finalize validation: status:finished + next_actions requires expect on last action
     if repair_issue.is_none() && continue_work {
         for (i, a) in next_actions.iter().enumerate() {
             if !a.expect.is_empty() {
-                repair_issue = Some(format!("next_actions[{i}].expect_requires_continue_false"));
+                repair_issue = Some(format!("next_actions[{i}].expect_requires_status_finished"));
                 break;
             }
         }
@@ -3515,7 +3567,7 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
             let last = &next_actions[last_idx];
             if last.expect.is_empty() {
                 repair_issue =
-                    Some("continue_false_next_actions_require_expect_on_last_action".to_string());
+                    Some("status_finished_next_actions_require_expect_on_last_action".to_string());
             } else if last.expect_timeout_ms == 0 {
                 repair_issue = Some(format!(
                     "next_actions[{last_idx}].expect_timeout_ms_required"
@@ -3524,17 +3576,36 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
         }
     }
     if repair_issue.is_none() && continue_work && next_actions.is_empty() {
-        repair_issue = Some("next_actions_required_when_continue_true".to_string());
+        repair_issue = Some("next_actions_required_when_status_working".to_string());
     }
     ParsedEnvelope {
         report_job_progress,
+        final_answer,
         continue_work,
-        continue_was_implicit,
         thought,
-        thought_durable,
+        thought_keep_in_context,
         next_actions,
         memory_candidates,
         repair_issue,
+    }
+}
+
+fn starts_with_runtime_progress_marker(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with('◉') || trimmed.starts_with("▰▱")
+}
+
+fn protocol_repair_instruction(issue: &str) -> &'static str {
+    match issue {
+        "final_answer_requires_status_finished" => {
+            "检查到刚刚的输出格式有点问题：你提供了 final_answer，但缺少 status:\"finished\"。如果 job 确实已经 finished，请同时提供 status:\"finished\" 和 final_answer；如果仍在工作中，请去掉 final_answer，并提供 next_actions。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        "final_answer_required_when_status_finished" => {
+            "检查到刚刚的输出格式有点问题：你提供了 status:\"finished\"，但缺少 final_answer。如果 job 确实已经 finished，请同时提供 status:\"finished\" 和 final_answer；如果仍在工作中，请不要使用 status:\"finished\"，并提供 next_actions。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        _ => {
+            "Return exactly one valid JSON object. Omitted status defaults to working; include next_actions when working. Use status:\"finished\" together with final_answer only when the job is complete. Do not use markdown fences."
+        }
     }
 }
 
@@ -3872,6 +3943,7 @@ fn json_sql_param_to_string(value: &Value) -> Option<String> {
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
+#[allow(clippy::too_many_arguments)]
 fn execute_guarded_bash(
     command: &str,
     read_back_command: &str,
@@ -4218,7 +4290,9 @@ pub extern "C" fn timem_core_continue_after_round_limit(
 }
 
 #[no_mangle]
-pub extern "C" fn timem_core_free(handle: *mut AgentCoreHandle) {
+/// # Safety
+/// The caller must ensure that the pointer is valid and was obtained from a corresponding allocation function, or is null.
+pub unsafe extern "C" fn timem_core_free(handle: *mut AgentCoreHandle) {
     if !handle.is_null() {
         unsafe {
             drop(Box::from_raw(handle));
@@ -4227,7 +4301,9 @@ pub extern "C" fn timem_core_free(handle: *mut AgentCoreHandle) {
 }
 
 #[no_mangle]
-pub extern "C" fn timem_core_free_string(value: *mut c_char) {
+/// # Safety
+/// The caller must ensure that `value` is a valid pointer obtained from a previous call to a function that returns a C string, or is null.
+pub unsafe extern "C" fn timem_core_free_string(value: *mut c_char) {
     if !value.is_null() {
         unsafe {
             drop(CString::from_raw(value));

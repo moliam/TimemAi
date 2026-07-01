@@ -8,10 +8,11 @@ pub fn response_v1_summary_value() -> Value {
 }
 
 pub fn enrich_static_prompt_with_response_schema(static_prompt: &str) -> String {
-    if let Some(enriched) = replace_json_string_field_with_value(
+    let _ = response_v1_summary_value();
+    if let Some(enriched) = replace_json_string_field_with_raw_json(
         static_prompt,
         "json_schema_summary",
-        &response_v1_summary_value(),
+        RESPONSE_V1_SUMMARY,
     ) {
         return enriched;
     }
@@ -36,6 +37,19 @@ pub(crate) fn replace_json_string_field_with_value(
     field: &str,
     replacement: &Value,
 ) -> Option<String> {
+    replace_json_string_field_with_raw_json(
+        source,
+        field,
+        &serde_json::to_string_pretty(replacement).ok()?,
+    )
+}
+
+pub(crate) fn replace_json_string_field_with_raw_json(
+    source: &str,
+    field: &str,
+    replacement_json: &str,
+) -> Option<String> {
+    serde_json::from_str::<Value>(replacement_json).ok()?;
     let needle = format!("\"{field}\"");
     let field_start = source.find(&needle)?;
     let after_field = field_start + needle.len();
@@ -78,7 +92,7 @@ pub(crate) fn replace_json_string_field_with_value(
         .take_while(|ch| ch.is_ascii_whitespace())
         .map(char::len_utf8)
         .sum();
-    let replacement_text = indent_pretty_json(replacement, base_indent);
+    let replacement_text = indent_raw_json(replacement_json, base_indent);
 
     let mut output = String::with_capacity(source.len() + replacement_text.len());
     output.push_str(&source[..value_start]);
@@ -87,8 +101,7 @@ pub(crate) fn replace_json_string_field_with_value(
     Some(output)
 }
 
-fn indent_pretty_json(value: &Value, base_indent: usize) -> String {
-    let rendered = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+fn indent_raw_json(rendered: &str, base_indent: usize) -> String {
     let indent = " ".repeat(base_indent);
     rendered
         .lines()
@@ -122,8 +135,22 @@ mod tests {
             .is_some());
         assert!(summary
             .get("fields")
-            .and_then(|value| value.get("continue"))
+            .and_then(|value| value.get("status?"))
             .is_some());
+        assert!(summary
+            .get("fields")
+            .and_then(|value| value.get("final_answer?"))
+            .is_some());
+        assert!(summary
+            .get("fields")
+            .and_then(|value| value.get("thought?"))
+            .and_then(|value| value.get("keep_in_context"))
+            .is_some());
+        assert!(summary
+            .get("fields")
+            .and_then(|value| value.get("thought?"))
+            .and_then(|value| value.get("durable"))
+            .is_none());
         assert!(summary
             .get("action_object_spec")
             .and_then(|value| value.get("intent"))
@@ -157,7 +184,10 @@ mod tests {
             enriched.contains("\"$id\": \"https://timem.local/schemas/response_v1.schema.json\"")
         );
         assert!(enriched.contains("\"fields\""));
+        assert!(enriched.contains("\"status?\""));
         assert!(enriched.contains("\"report_job_progress?\""));
+        assert!(enriched.contains("\"final_answer?\""));
+        assert!(enriched.find("\"status?\"").unwrap() < enriched.find("\"thought?\"").unwrap());
         assert!(!enriched.contains("stale"));
     }
 

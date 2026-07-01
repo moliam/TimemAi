@@ -3088,6 +3088,10 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("memmgr next_actions"));
         assert!(STATIC_PROMPT.contains("memmgr type=scratch op=write kind=context_offload"));
         assert!(STATIC_PROMPT.contains("memmgr type=context op=shrink"));
+        assert!(STATIC_PROMPT.contains("Do not include runtime UI markers"));
+        assert!(STATIC_PROMPT.contains("Omitted status defaults to working"));
+        assert!(STATIC_PROMPT.contains("Use status:\\\"finished\\\" and final_answer together"));
+        assert!(STATIC_PROMPT.contains("final_answer"));
         assert!(STATIC_PROMPT.contains("\"json_protocol\""));
         assert!(STATIC_PROMPT.contains("\"evidence_guard\""));
         assert!(STATIC_PROMPT.contains("\"action_result_guard\""));
@@ -3100,6 +3104,7 @@ mod static_prompt_tests {
         assert!(!STATIC_PROMPT.contains("theme_workflow"));
         assert!(!STATIC_PROMPT.contains("rounds_guard"));
         assert!(!STATIC_PROMPT.contains("perspective_rewrite"));
+        assert!(!STATIC_PROMPT.contains("continue:false"));
         assert!(STATIC_PROMPT.len() > 3_000);
     }
 

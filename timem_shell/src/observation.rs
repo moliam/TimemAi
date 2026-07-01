@@ -71,11 +71,14 @@ impl ObservationPanel {
 
     pub fn apply(&mut self, event: ObservationEvent) {
         match event {
-            ObservationEvent::Persistent(text) => self.push_line(
-                text,
-                ObservationLineStyle::Normal,
-                OBSERVATION_LINE_PREFIX.to_string(),
-            ),
+            ObservationEvent::Persistent(text) => {
+                let prefix = if text.starts_with("◉ ") {
+                    String::new()
+                } else {
+                    OBSERVATION_LINE_PREFIX.to_string()
+                };
+                self.push_line(text, ObservationLineStyle::Normal, prefix);
+            }
             ObservationEvent::Active(text) => self.push_line(
                 text,
                 ObservationLineStyle::ActiveBlink,
@@ -288,10 +291,14 @@ pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationE
         return Vec::new();
     };
     let mut events = Vec::new();
-    let should_continue = value
-        .get("continue")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let should_continue = match value.get("status").and_then(Value::as_str) {
+        Some("working") => true,
+        Some("finished") => false,
+        _ => value
+            .get("continue")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    };
     if should_continue {
         if let Some(progress) = value
             .get("report_job_progress")
@@ -299,7 +306,7 @@ pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationE
             .map(str::trim)
             .filter(|text| !text.is_empty())
         {
-            events.push(ObservationEvent::Persistent(format!("▰▱ {progress}")));
+            events.push(ObservationEvent::Persistent(format!("◉ {progress}")));
         }
     }
     if let Some(actions) = value.get("next_actions").and_then(Value::as_array) {
@@ -713,7 +720,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("▰▱ 已经完成备份，继续写文件。".to_string()),
+                ObservationEvent::Persistent("◉ 已经完成备份，继续写文件。".to_string()),
                 ObservationEvent::Persistent("写入文件".to_string()),
                 ObservationEvent::ActiveChild {
                     text: "Bash: printf ok".to_string(),
@@ -748,7 +755,7 @@ mod tests {
 {
   "thought": {
     "content": "内部推理，不应该显示",
-    "durable": false
+    "keep_in_context": false
   },
   "next_actions": [
     {
@@ -941,7 +948,7 @@ mod tests {
     #[test]
     fn model_thought_is_hidden_from_observation_panel() {
         let events = observation_events_from_model_response(
-            r#"{"thought":{"content":"内部推理，不给用户看","durable":true},"report_job_progress":"ok","continue":false}"#,
+            r#"{"thought":{"content":"内部推理，不给用户看","keep_in_context":true},"report_job_progress":"ok","continue":false}"#,
         );
         assert!(events.is_empty());
     }

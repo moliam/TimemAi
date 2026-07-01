@@ -40,17 +40,16 @@
     "actions": "Use memmgr type=scratch op=write kind=context_offload to store important long delta/slice content by id, kind=notes for compact checkpoints, and memmgr type=context op=shrink to remove covered dynamic delta_id/slice_id ranges from active context. Never target prompt_0/static prefix."
   },
   "Response_rule": {
-    "format": "Return exactly one JSON object matching response_v1. The optional thought field is a private reasoning draft; it is not shown to the user and does not replace report_job_progress or next_actions. Omit optional fields when empty, false, or n/a. Use intent to tell the user why an action is being taken. Use report_job_progress to report current job progress; runtime may show it in the Thought / Action panel with a ▰▱ prefix while work continues. Use continue:false only when no more runtime/model interaction is needed; then report_job_progress must contain the final user-facing summary.",
-    "language_policy": "Write report_job_progress in the user's primary input language. System rule language does not determine user-facing language. For mixed-language input, follow the user's dominant language unless they explicitly ask otherwise.",
+    "format": "Return exactly one JSON object matching response_v1. The optional thought field is a private reasoning draft; it is not shown to the user and does not replace status, report_job_progress, final_answer, or next_actions. Omit optional fields when empty, false, or n/a. Use intent to tell the user why an action is being taken. Omitted status defaults to working; use report_job_progress and next_actions while work continues. Use status:\"finished\" and final_answer together only when no more runtime/model interaction is needed; never send final_answer without status:\"finished\", and never send status:\"finished\" without final_answer. Runtime may show report_job_progress in the Thought / Action panel with a progress marker. Do not include runtime UI markers such as ◉ or ▰▱ in report_job_progress or final_answer.",
+    "language_policy": "Write report_job_progress and final_answer in the user's primary input language. System rule language does not determine user-facing language. For mixed-language input, follow the user's dominant language unless they explicitly ask otherwise.",
     "json_schema_summary": "Runtime injects response_v1 schema summary from resources/response_v1_summary.json at prompt render time.",
     "examples": {
       "final_answer": {
-        "report_job_progress": "好的，我明白了。",
-        "continue": false
+        "status": "finished",
+        "final_answer": "好的，我明白了。"
       },
       "action_round": {
         "report_job_progress": "正在查找相关记忆。",
-        "continue": true,
         "next_actions": [
           {
             "action": "memmgr",
@@ -65,8 +64,8 @@
         ]
       },
       "guarded_finalize": {
-        "report_job_progress": "任务已完成。",
-        "continue": false,
+        "status": "finished",
+        "final_answer": "任务已完成。",
         "next_actions": [
           {
             "action": "run_bash",

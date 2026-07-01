@@ -356,16 +356,19 @@ Important invariants:
 ## Action Protocol
 
 The model does not call Rust functions directly. It sends a response envelope.
-The envelope contains optional `report_job_progress`, optional `next_actions`,
-and an optional `continue` flag. Missing `continue` defaults to `true`.
-`report_job_progress` is progress text while work continues; it becomes the
-final user-visible answer only when `continue:false`.
+The envelope contains an optional `status`, optional `report_job_progress`,
+optional `next_actions`, and optional `final_answer`.
+`report_job_progress` is progress text for the Thought/Action panel while
+the job is working. Missing `status` defaults to `working`. `final_answer` is
+the final user-visible answer when `status:"finished"`. `final_answer` and
+`status:"finished"` must appear together; if one appears without the other,
+runtime returns a protocol-repair slice.
 
 ```mermaid
 stateDiagram-v2
     [*] --> ModelResponse
-    ModelResponse --> Final: continue:false + report_job_progress
-    ModelResponse --> ValidateActions: continue:true + next_actions
+    ModelResponse --> Final: status:finished + final_answer
+    ModelResponse --> ValidateActions: working/default + next_actions
     ValidateActions --> Repair: invalid JSON or invalid action shape
     Repair --> ModelResponse: one repair prompt_delta
     ValidateActions --> ExecuteActions: valid action protocol
@@ -388,7 +391,6 @@ The top-level JSON object has this shape:
 {
   "thought": "optional private planning note",
   "report_job_progress": "Checking the project files.",
-  "continue": true,
   "next_actions": [
     {
       "action": "run_bash",
@@ -398,24 +400,19 @@ The top-level JSON object has this shape:
         "timeout_ms": 5000
       }
     }
-  ],
-  "acceptance_check": {
-    "is_satisfied": false,
-    "missing_info": ["line count"]
-  }
+  ]
 }
 ```
 
-When `continue` is omitted, runtime treats it as `true` and adds a note to the
-next prompt asking the model to be explicit next time. With `continue:true`,
-`next_actions` is required and `report_job_progress` is shown in the
-Thought/Action panel with a `▰▱` prefix. With `continue:false`,
-`report_job_progress` is required. Usually `next_actions` is absent and the text
-is shown as the final answer. The guarded finalize exception allows
-`continue:false + next_actions` only when the last action carries `expect` and
-`expect_timeout_ms`; runtime executes the actions, then runs `expect` through
-the same controlled Bash approval/safety path as `run_bash`. Only a passing
-expect check can show `report_job_progress` as the final answer. Every action
+With omitted `status` or `status:"working"`, `next_actions` is required and
+`report_job_progress` is shown in the Thought/Action panel with a runtime
+progress marker. With `status:"finished"`, `final_answer` is required and is
+shown as the final answer; `final_answer` without `status:"finished"` is also
+rejected for repair. The guarded finalize exception allows
+`status:"finished" + next_actions` only when the last action carries `expect`
+and `expect_timeout_ms`; runtime executes the actions, then runs `expect`
+through the same controlled Bash approval/safety path as `run_bash`. Only a
+passing expect check can show `final_answer` as the final answer. Every action
 needs a top-level `intent`; the shell displays it while the action runs. The
 parser also tolerates common provider drift such as a valid JSON envelope
 embedded in Markdown text, but it never shows raw protocol fragments to the
@@ -608,8 +605,8 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
 ```json
 {
   "thought": "Compact dynamic context before continuing.",
-  "report_job_progress": "",
-  "continue": true,
+  "status": "working",
+  "report_job_progress": "Preparing to compact dynamic context.",
   "next_actions": [
     {
       "action": "memmgr",

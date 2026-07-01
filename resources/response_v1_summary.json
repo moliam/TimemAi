@@ -2,13 +2,14 @@
   "$id": "https://timem.local/schemas/response_v1.schema.json",
   "notation": "A key ending with '?' in this summary means optional and should be omitted when empty/false/n/a. The actual JSON key name must not include '?'.",
   "fields": {
+    "status?": "string; optional. Omit it while more model/runtime work is needed. Use \"finished\" only when the job is complete, and then final_answer is required.",
+    "report_job_progress?": "string; progress text shown in the Thought / Action panel while status is working. Do not include runtime UI markers such as ◉ or ▰▱.",
+    "final_answer?": "string; final user-facing answer. If you include final_answer, you must also include status:\"finished\". Do not include runtime UI markers such as ◉ or ▰▱.",
+    "next_actions?": "array<object>; required when status is working. With status finished, allowed only for guarded finalize: the last action must include expect and expect_timeout_ms, and final_answer is shown only after the expect check passes.",
     "thought?": {
       "content": "string; optional private reasoning draft. Not shown to the user; useful for complex multi-step tasks; omit for simple Q&A.",
-      "durable": "boolean; optional. Default false. Set true only when this reasoning draft should remain visible to you in later prompt context."
-    },
-    "continue": "boolean; required. Use true while more model/runtime work is needed. Use false only for the final answer.",
-    "next_actions?": "array<object>; required when continue is true. With continue false, allowed only for guarded finalize: the last action must include expect and expect_timeout_ms.",
-    "report_job_progress?": "string; progress or final answer text. With continue true, it is progress shown in the Thought / Action panel and next_actions must continue the work. With continue false and no next_actions, it is the final answer. With continue false plus guarded finalize next_actions, this final answer is shown only after the last action's expect check passes."
+      "keep_in_context": "boolean; optional. Default false. Set true only when this reasoning draft should remain visible to you in later prompt context."
+    }
   },
   "additional_properties": "Do not add extra top-level fields beyond this summary.",
   "action_object_spec": {

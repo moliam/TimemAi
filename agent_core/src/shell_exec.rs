@@ -193,7 +193,7 @@ pub fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
         }
     };
     let started = Instant::now();
-    let timeout = Duration::from_millis(timeout_ms.max(1000).min(15000));
+    let timeout = Duration::from_millis(timeout_ms.clamp(1000, 15000));
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,

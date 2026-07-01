@@ -809,6 +809,166 @@ fn plain_text_after_repair_failure_is_shown_as_final_answer() {
 }
 
 #[test]
+fn status_finished_uses_final_answer_as_user_response() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("status_finished_final_answer"),
+    );
+    let _ = core.begin_turn("总结", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"finished","final_answer":"这是最终结论。"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final, got {other:?}"),
+    };
+    assert_eq!(final_turn.response_to_user, "这是最终结论。");
+}
+
+#[test]
+fn final_answer_without_finished_status_requests_protocol_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("final_answer_without_status"),
+    );
+    let _ = core.begin_turn("总结", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"final_answer":"这是最终结论。"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel repair, got {other:?}"),
+    };
+    assert!(prompt.contains("issue: final_answer_requires_status_finished"));
+    assert!(prompt.contains("缺少 status:\"finished\""));
+    assert!(prompt.contains("同时提供 status:\"finished\" 和 final_answer"));
+}
+
+#[test]
+fn finished_status_without_final_answer_requests_protocol_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("finished_without_final_answer"),
+    );
+    let _ = core.begin_turn("总结", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"finished","report_job_progress":"完成了"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel repair, got {other:?}"),
+    };
+    assert!(prompt.contains("issue: final_answer_required_when_status_finished"));
+    assert!(prompt.contains("缺少 final_answer"));
+    assert!(prompt.contains("同时提供 status:\"finished\" 和 final_answer"));
+}
+
+#[test]
+fn status_working_requires_next_actions_and_keeps_progress_separate() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("status_working_progress"),
+    );
+    let _ = core.begin_turn("查一下", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"working","report_job_progress":"正在查询。","next_actions":[{"action":"query_memory","intent":"Find evidence.","input":{"query":"x","limit":1}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(prompt.contains("Job progress shown to user:\n正在查询。"));
+    assert!(prompt.contains("Action result: query_memory"));
+}
+
+#[test]
+fn omitted_status_bare_action_defaults_to_working_next_action() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bare_action_defaults_working"),
+    );
+    let _ = core.begin_turn("继续修复", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"action":"run_bash","intent":"Check repository status.","input":{"command":"git status --short","timeout_ms":1000}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let request = match step {
+        CoreStep::NeedsUserApproval { request } => request,
+        other => panic!("expected NeedsUserApproval, got {other:?}"),
+    };
+    assert_eq!(request.action, "run_bash");
+    assert_eq!(request.command, "git status --short");
+}
+
+#[test]
+fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("final_progress_marker_repair"),
+    );
+    let _ = core.begin_turn("继续汇报", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"finished","final_answer":"◉ 分析完成，汇报结果..."}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected protocol repair, got {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("final_answer_must_not_start_with_runtime_progress_marker"));
+}
+
+#[test]
+fn guarded_finalize_with_runtime_progress_marker_requests_protocol_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("guarded_final_progress_marker_repair"),
+    );
+    let _ = core.begin_turn("测试并汇报", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"▰▱ 准备汇报结果...","next_actions":[{"action":"run_bash","intent":"Verify result before finalizing.","input":{"command":"echo done","timeout_ms":1000,"expect":"echo done","expect_timeout_ms":1000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected protocol repair, got {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("final_answer_must_not_start_with_runtime_progress_marker"));
+    assert!(!prompt.contains("Expect check:"));
+}
+
+#[test]
 fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
     let mut core = AgentCore::new(
         "STATIC",
@@ -1211,7 +1371,7 @@ fn progress_and_next_actions_continue_with_implicit_continue_note() {
     };
     assert!(prompt.contains("prompt_type: llm_progress"));
     assert!(prompt.contains("备份完成。现在继续查证。"));
-    assert!(prompt.contains("上轮回复没有写 continue"));
+    assert!(!prompt.contains("上轮回复没有写 status"));
     assert!(prompt.contains("Action result: query_memory"));
 }
 
@@ -3418,15 +3578,15 @@ fn thought_field_optional_does_not_trigger_repair() {
 }
 
 #[test]
-fn thought_object_durable_true_is_persisted_as_llm_thought_slice() {
+fn thought_object_keep_in_context_true_is_persisted_as_llm_thought_slice() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("thought_obj_durable"),
+        tmp_dir("thought_obj_keep_in_context"),
     );
     let _ = core.begin_turn("需要推理", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"thought":{"content":"对象形式的思考","durable":true},"report_job_progress":"好的","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"thought":{"content":"对象形式的思考","keep_in_context":true},"report_job_progress":"好的","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3438,15 +3598,15 @@ fn thought_object_durable_true_is_persisted_as_llm_thought_slice() {
 }
 
 #[test]
-fn thought_object_durable_false_is_not_persisted() {
+fn thought_object_keep_in_context_false_is_not_persisted() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("thought_obj_not_durable"),
+        tmp_dir("thought_obj_not_kept"),
     );
     let _ = core.begin_turn("需要推理", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"thought":{"content":"临时思考不保留","durable":false},"report_job_progress":"好的","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"thought":{"content":"临时思考不保留","keep_in_context":false},"report_job_progress":"好的","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3462,12 +3622,15 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(static_prompt.contains("\"json_protocol\""));
     assert!(static_prompt.contains("\"evidence_guard\""));
     assert!(static_prompt.contains("\"action_result_guard\""));
-    assert!(static_prompt.contains("Use report_job_progress to report current job progress"));
+    assert!(static_prompt.contains("Omitted status defaults to working"));
+    assert!(static_prompt.contains("Use status:\\\"finished\\\""));
+    assert!(static_prompt.contains("final_answer"));
     assert!(static_prompt.contains("Runtime injects response_v1 schema summary"));
     assert!(static_prompt.contains("\"Context_maintenance\""));
     assert!(static_prompt.contains("memmgr next_actions"));
     assert!(static_prompt.contains("memmgr type=scratch op=write kind=context_offload"));
     assert!(static_prompt.contains("memmgr type=context op=shrink"));
+    assert!(static_prompt.contains("Do not include runtime UI markers"));
     assert!(
         !static_prompt.contains("\"$id\": \"https://timem.local/schemas/response_v1.schema.json\"")
     );
@@ -3487,6 +3650,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(!static_prompt.contains("\"diagnostics.intent_inference?\""));
     assert!(!static_prompt.contains("\"diagnostics.self_audit?\""));
     assert!(!static_prompt.contains("\"Self_audit\""));
+    assert!(!static_prompt.contains("continue:false"));
 }
 
 #[test]
@@ -3502,7 +3666,12 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     };
 
     assert!(prompt.contains("\"$id\": \"https://timem.local/schemas/response_v1.schema.json\""));
+    assert!(prompt.find("\"status?\"").unwrap() < prompt.find("\"thought?\"").unwrap());
     assert!(prompt.contains("\"report_job_progress?\""));
+    assert!(prompt.contains("\"keep_in_context\""));
+    assert!(!prompt.contains(
+        "\"durable\": \"boolean; optional. Default false. Set true only when this reasoning draft"
+    ));
     assert!(prompt.contains("\"intent\""));
     assert!(!prompt.contains("\"json_schema_summary\": \"stale\""));
 }

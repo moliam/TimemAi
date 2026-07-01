@@ -135,36 +135,36 @@ Runtime prompt generation still uses `resources/static_v1.json`, capability mani
     "actions": "Use memmgr type=scratch op=write kind=context_offload to store important long delta/slice content by id, kind=notes for compact checkpoints, and memmgr type=context op=shrink to remove covered dynamic delta_id/slice_id ranges from active context. Never target prompt_0/static prefix."
   },
   "Response_rule": {
-    "format": "Return exactly one JSON object matching response_v1. The optional thought field is a private reasoning draft; it is not shown to the user and does not replace report_job_progress or next_actions. Omit optional fields when empty, false, or n/a. Use intent to tell the user why an action is being taken. Use report_job_progress to report current job progress; runtime may show it in the Thought / Action panel with a ▰▱ prefix while work continues. Use continue:false only when no more runtime/model interaction is needed; then report_job_progress must contain the final user-facing summary.",
-    "language_policy": "Write report_job_progress in the user's primary input language. System rule language does not determine user-facing language. For mixed-language input, follow the user's dominant language unless they explicitly ask otherwise.",
+    "format": "Return exactly one JSON object matching response_v1. The optional thought field is a private reasoning draft; it is not shown to the user and does not replace status, report_job_progress, final_answer, or next_actions. Omit optional fields when empty, false, or n/a. Use intent to tell the user why an action is being taken. Omitted status defaults to working; use report_job_progress and next_actions while work continues. Use status:\"finished\" and final_answer together only when no more runtime/model interaction is needed; never send final_answer without status:\"finished\", and never send status:\"finished\" without final_answer. Runtime may show report_job_progress in the Thought / Action panel with a progress marker. Do not include runtime UI markers such as ◉ or ▰▱ in report_job_progress or final_answer.",
+    "language_policy": "Write report_job_progress and final_answer in the user's primary input language. System rule language does not determine user-facing language. For mixed-language input, follow the user's dominant language unless they explicitly ask otherwise.",
     "json_schema_summary": {
       "$id": "https://timem.local/schemas/response_v1.schema.json",
-      "action_object_spec": {
-        "action": "string; required. Canonical tool name from Tool_capability.tool_catalog. Do not invent names.",
-        "description": "Each item in next_actions must be an object with these fields:",
-        "input": "object; required. Tool-specific input fields as defined in tool_catalog. For guarded finalize only, the last action input may include expect and expect_timeout_ms as a final verification shell command.",
-        "intent": "string; required. Concise user-visible reason for the action."
-      },
-      "additional_properties": "Do not add extra top-level fields beyond this summary.",
+      "notation": "A key ending with '?' in this summary means optional and should be omitted when empty/false/n/a. The actual JSON key name must not include '?'.",
       "fields": {
-        "continue": "boolean; required. Use true while more model/runtime work is needed. Use false only for the final answer.",
-        "next_actions?": "array<object>; required when continue is true. With continue false, allowed only for guarded finalize: the last action must include expect and expect_timeout_ms.",
-        "report_job_progress?": "string; progress or final answer text. With continue true, it is progress shown in the Thought / Action panel and next_actions must continue the work. With continue false and no next_actions, it is the final answer. With continue false plus guarded finalize next_actions, this final answer is shown only after the last action's expect check passes.",
+        "status?": "string; optional. Omit it while more model/runtime work is needed. Use \"finished\" only when the job is complete, and then final_answer is required.",
+        "report_job_progress?": "string; progress text shown in the Thought / Action panel while status is working. Do not include runtime UI markers such as ◉ or ▰▱.",
+        "final_answer?": "string; final user-facing answer. If you include final_answer, you must also include status:\"finished\". Do not include runtime UI markers such as ◉ or ▰▱.",
+        "next_actions?": "array<object>; required when status is working. With status finished, allowed only for guarded finalize: the last action must include expect and expect_timeout_ms, and final_answer is shown only after the expect check passes.",
         "thought?": {
           "content": "string; optional private reasoning draft. Not shown to the user; useful for complex multi-step tasks; omit for simple Q&A.",
-          "durable": "boolean; optional. Default false. Set true only when this reasoning draft should remain visible to you in later prompt context."
+          "keep_in_context": "boolean; optional. Default false. Set true only when this reasoning draft should remain visible to you in later prompt context."
         }
       },
-      "notation": "A key ending with '?' in this summary means optional and should be omitted when empty/false/n/a. The actual JSON key name must not include '?'."
+      "additional_properties": "Do not add extra top-level fields beyond this summary.",
+      "action_object_spec": {
+        "description": "Each item in next_actions must be an object with these fields:",
+        "action": "string; required. Canonical tool name from Tool_capability.tool_catalog. Do not invent names.",
+        "intent": "string; required. Concise user-visible reason for the action.",
+        "input": "object; required. Tool-specific input fields as defined in tool_catalog. For guarded finalize only, the last action input may include expect and expect_timeout_ms as a final verification shell command."
+      }
     },
     "examples": {
       "final_answer": {
-        "report_job_progress": "好的，我明白了。",
-        "continue": false
+        "status": "finished",
+        "final_answer": "好的，我明白了。"
       },
       "action_round": {
         "report_job_progress": "正在查找相关记忆。",
-        "continue": true,
         "next_actions": [
           {
             "action": "memmgr",
@@ -179,8 +179,8 @@ Runtime prompt generation still uses `resources/static_v1.json`, capability mani
         ]
       },
       "guarded_finalize": {
-        "report_job_progress": "任务已完成。",
-        "continue": false,
+        "status": "finished",
+        "final_answer": "任务已完成。",
         "next_actions": [
           {
             "action": "run_bash",
