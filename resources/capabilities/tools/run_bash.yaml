@@ -1,0 +1,47 @@
+kind: tool
+id: run_bash
+binding_type: builtin
+binding_name: run_bash
+description: Run local shell commands.
+prompt_when: |
+  Run a shell command on the local machine when local evidence or local changes
+  are needed. Supports foreground and background execution. Provide
+  read_back_command when stdout needs verification. Opt-in via
+  large_readback_opt_in if output is truncated.
+input_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "command": {"type": "string", "description": "Shell command to execute."},
+      "read_back_command": {"type": "string", "description": "Follow-up command used to verify stdout or file results."},
+      "timeout_ms": {"type": "integer", "description": "Foreground wait budget in milliseconds."},
+      "background": {"type": "boolean", "description": "When true, return a job_id instead of blocking."},
+      "mode": {"type": "string", "enum": ["foreground", "background"], "description": "Execution mode alias."},
+      "large_readback_opt_in": {"type": "object", "description": "Explicit opt-in when large output readback is needed."}
+    },
+    "x-required-any": [["command", "read_back_command"]]
+  }
+output_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "command": {"type": "string", "description": "Command actually executed."},
+      "status": {"type": "integer", "description": "Process exit code for foreground success."},
+      "output": {"type": "string", "description": "Bounded stdout/stderr text for foreground execution."},
+      "job_id": {"type": "string", "description": "Background job id when background=true."},
+      "pid": {"type": "integer", "description": "Background process id."},
+      "output_file": {"type": "string", "description": "Path where background output is stored."},
+      "status_file": {"type": "string", "description": "Path where background exit status is stored."},
+      "approval_status": {"type": "string", "enum": ["approved_by_user", "denied_by_user"], "description": "Approval result."},
+      "error": {"type": "string", "description": "command_required|command_too_long|timeout|command_failed|background_spawn_failed"}
+    }
+  }
+example_json: |
+  {
+    "action": "run_bash",
+    "intent": "Count files in the current folder.",
+    "input": {
+      "command": "rg --files | wc -l",
+      "timeout_ms": 5000
+    }
+  }

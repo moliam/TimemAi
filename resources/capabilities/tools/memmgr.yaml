@@ -1,0 +1,64 @@
+kind: tool
+id: memmgr
+binding_type: builtin
+binding_name: memmgr
+description: Unified local memory manager.
+prompt_when: |
+  Unified local memory manager. Use type=durable for long-lived user facts,
+  type=raw_chat for UI-visible chat transcript, type=scratch for notes/context
+  offload, and type=context for dynamic prompt context maintenance.
+input_schema: |
+  {
+    "type": "object",
+    "required": ["type", "op"],
+    "properties": {
+      "type": {
+        "type": "string",
+        "enum": ["durable", "raw_chat", "scratch", "context"],
+        "description": "Memory surface: durable user facts, UI-visible raw chat, scratch notes/offload, or dynamic context maintenance."
+      },
+      "op": {
+        "type": "string",
+        "description": "Operation. durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink."
+      },
+      "query": {"type": "string", "description": "Search query; empty is allowed for raw_chat/scratch recent listing."},
+      "sql": {"type": "string", "description": "SELECT/WITH SELECT/PRAGMA table_info(memories|chat_messages) only."},
+      "params": {"type": "array", "description": "Array matching SQL ? placeholders exactly."},
+      "id": {"type": "string", "description": "Memory id, chat turn_id, or scratch id depending on type/op."},
+      "expected_version": {"type": "integer", "description": "Durable row version from query/sql results; required when modifying/deleting an existing durable row."},
+      "content": {"type": "string", "description": "Required for durable insert/update/upsert and scratch kind=notes."},
+      "kind": {"type": "string", "enum": ["notes", "context_offload"], "description": "Scratch write mode."},
+      "label": {"type": "string", "description": "Short retrieval label for scratch write."},
+      "delta_ids": {"type": "array", "items": {"type": "string"}, "description": "Prompt delta ids for scratch context_offload or context shrink."},
+      "slice_ids": {"type": "array", "items": {"type": "string"}, "description": "Prompt slice ids for scratch context_offload or context shrink."},
+      "after_ms": {"type": "integer", "description": "Inclusive lower created_at_ms bound for raw_chat."},
+      "before_ms": {"type": "integer", "description": "Exclusive upper created_at_ms bound for raw_chat."},
+      "limit": {"type": "integer", "description": "Result cap."}
+    }
+  }
+output_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "type": {"type": "string", "description": "Echoed memory type."},
+      "op": {"type": "string", "description": "Echoed operation when relevant."},
+      "results": {"type": "string", "description": "Query/sql rows or none."},
+      "id": {"type": "string", "description": "Durable memory id, chat turn id, or scratch id."},
+      "version": {"type": "integer", "description": "Durable memory version after write/update/delete."},
+      "deleted": {"type": "boolean", "description": "Delete result."},
+      "hidden_slices": {"type": "integer", "description": "Context shrink hidden slice count."},
+      "removed_deltas": {"type": "integer", "description": "Context shrink removed delta count."},
+      "error": {"type": "string", "description": "Validation/storage/conflict message."}
+    }
+  }
+example_json: |
+  {
+    "action": "memmgr",
+    "intent": "Find confirmed durable memory before answering.",
+    "input": {
+      "type": "durable",
+      "op": "query",
+      "query": "son birthday",
+      "limit": 5
+    }
+  }

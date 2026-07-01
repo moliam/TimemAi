@@ -6,6 +6,12 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- Capability tool manifests now use JSON Schema style `input_schema` and
+  `output_schema` blocks as the shared IDL for prompt rendering, `capmgr`
+  inspection, and generic runtime validation.
+
 ## [0.6.0] - 2026-07-01
 
 ### Added

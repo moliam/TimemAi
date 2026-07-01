@@ -1,3 +1,4 @@
+use agent_core::capability::CapabilityRegistry;
 use agent_core::{
     AgentCore, BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard, UsageStats,
 };
@@ -552,9 +553,11 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
     assert!(prompt.contains("target_dynamic_context_ratio=10%-20%"));
     assert!(prompt.contains("summarize all dynamic prompt deltas into about 10%-20%"));
-    assert!(prompt.contains("scratch_write type=context_offload"));
-    assert!(prompt.contains("type=notes"));
-    assert!(prompt.contains("prompt_shrink"));
+    assert!(prompt.contains("memmgr type=scratch op=write kind=context_offload"));
+    assert!(prompt.contains("kind=notes"));
+    assert!(prompt.contains("memmgr type=context op=shrink"));
+    assert!(!prompt.contains("use scratch_write"));
+    assert!(!prompt.contains("use prompt_shrink"));
     assert!(!prompt.contains("shrink_review_threshold_tokens"));
     assert!(!prompt.contains("first_shrink_review_threshold_tokens"));
     assert!(!prompt.contains("next_shrink_review_step_tokens"));
@@ -591,7 +594,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!delta_ids.is_empty());
 
     let shrink_response = format!(
-        r#"{{"report_job_progress":"","next_actions":[{{"action":"prompt_shrink","intent":"Remove visible dynamic context after checkpointing.","input":{{"delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
         serde_json::to_string(&delta_ids).unwrap()
     );
     let step = core.apply_model_response(LlmResponse {
@@ -605,7 +608,9 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(next_prompt.contains("Action result: prompt_shrink"));
+    assert!(next_prompt.contains("Action result: memmgr"));
+    assert!(next_prompt.contains("type: context"));
+    assert!(next_prompt.contains("op: shrink"));
     assert!(!next_prompt.contains("mode=force_shrink_required"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -3125,7 +3130,7 @@ fn run_bash_requires_command_for_repair() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("input.command_required"));
+    assert!(prompt.contains("input.any_required:command|read_back_command"));
 }
 
 #[test]
@@ -3435,8 +3440,12 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(static_prompt.contains("\"action_result_guard\""));
     assert!(static_prompt.contains("memory_conflict"));
     assert!(static_prompt.contains("row version changed"));
-    assert!(static_prompt.contains("Default true when absent"));
     assert!(static_prompt.contains("Use report_job_progress to report current job progress"));
+    assert!(static_prompt.contains("Runtime injects response_v1 schema summary"));
+    assert!(
+        !static_prompt.contains("\"$id\": \"https://timem.local/schemas/response_v1.schema.json\"")
+    );
+    assert!(!static_prompt.contains("\"report_job_progress?\""));
     assert!(!static_prompt.contains("durable_ctx_score"));
     assert!(!static_prompt.contains("delta_scores"));
     assert!(!static_prompt.contains("no_result_terminate"));
@@ -3444,6 +3453,271 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(!static_prompt.contains("lang_retry"));
     assert!(!static_prompt.contains("theme_workflow"));
     assert!(!static_prompt.contains("rounds_guard"));
+}
+
+#[test]
+fn rendered_prompt_response_schema_is_injected_from_resource() {
+    let mut core = AgentCore::new(
+        r#"{"Response_rule":{"json_schema_summary":"stale"}}"#,
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("response_schema_prompt_injection"),
+    );
+    let prompt = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+
+    assert!(prompt.contains("\"$id\": \"https://timem.local/schemas/response_v1.schema.json\""));
+    assert!(prompt.contains("\"report_job_progress?\""));
+    assert!(prompt.contains("\"intent\""));
+    assert!(!prompt.contains("\"json_schema_summary\": \"stale\""));
+}
+
+#[test]
+fn static_prompt_does_not_handwrite_tool_catalog() {
+    let static_prompt = include_str!("../../resources/static_v1.json");
+    let value: serde_json::Value = serde_json::from_str(static_prompt).unwrap();
+    let tool_catalog = value
+        .get("Tool_capability")
+        .and_then(|v| v.get("tool_catalog"))
+        .unwrap();
+
+    assert!(
+        !tool_catalog.is_object(),
+        "static prompt must not hand-maintain tool specs; registry injects tool_catalog"
+    );
+    assert!(tool_catalog
+        .as_str()
+        .unwrap_or_default()
+        .contains("Runtime injects"));
+}
+
+#[test]
+fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
+    let mut core = AgentCore::new(
+        r#"{"Tool_capability":{"tool_catalog":{"stale_tool":{"when":"old"}}}}"#,
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("capability_prompt_catalog"),
+    );
+    let prompt = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+
+    assert!(prompt.contains("\"memmgr\""));
+    assert!(prompt.contains("\"capmgr\""));
+    assert!(prompt.contains("\"run_bash\""));
+    assert!(prompt.contains("\"shell_job_status\""));
+    assert!(prompt.contains("\"skill_headers\""));
+    assert!(prompt.contains("\"release_quality_gate\""));
+    assert!(prompt.contains("Unified local memory manager"));
+    assert!(!prompt.contains("stale_tool"));
+}
+
+#[test]
+fn canonical_tool_action_is_validated_through_capability_registry() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("capability_registry_action_parse"),
+    );
+    let _ = core.begin_turn("查记忆", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"report_job_progress":"正在查询记忆。","continue":true,"next_actions":[{"action":"memmgr","intent":"Query durable memory through manifest-backed tool.","input":{"type":"durable","op":"query","query":"名字","limit":5}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel after action, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("type: durable"));
+    assert!(prompt.contains("op: query"));
+    assert!(!prompt.contains("Protocol repair request"));
+}
+
+#[test]
+fn legacy_action_fallback_is_not_part_of_manifest_catalog() {
+    let mut core = AgentCore::new(
+        include_str!("../../resources/static_v1.json"),
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("legacy_action_fallback_boundary"),
+    );
+    let prompt = match core.begin_turn("查旧动作", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(prompt.contains("\"memmgr\""));
+    assert!(!prompt.contains("\"query_memory\""));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"report_job_progress":"兼容旧动作。","continue":true,"next_actions":[{"action":"query_memory","intent":"Legacy fallback check.","input":{"query":"名字","limit":1}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected legacy action result, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Action result: query_memory"));
+}
+
+#[test]
+fn capmgr_load_skill_adds_skill_body_as_action_result() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("capmgr_load_skill"),
+    );
+    let _ = core.begin_turn("准备发布", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"report_job_progress":"加载发布检查 skill。","continue":true,"next_actions":[{"action":"capmgr","intent":"Load release quality instructions before auditing.","input":{"op":"load","kind":"skill","id":"release_quality_gate"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel after capmgr load, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Action result: capmgr"));
+    assert!(prompt.contains("kind: skill"));
+    assert!(prompt.contains("id: release_quality_gate"));
+    assert!(prompt.contains("# Release Quality Gate"));
+}
+
+#[test]
+fn capmgr_load_requires_kind_and_id_for_protocol_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("capmgr_missing_fields"),
+    );
+    let _ = core.begin_turn("准备发布", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"report_job_progress":"加载 skill。","continue":true,"next_actions":[{"action":"capmgr","intent":"Load missing skill.","input":{"op":"load"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected protocol repair, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("kind_required"));
+}
+
+#[test]
+fn capmgr_rejects_manifest_enum_violations_before_execution() {
+    for (case, payload, expected_issue) in [
+        (
+            "bad_op",
+            r#"{"report_job_progress":"检查 capability。","continue":true,"next_actions":[{"action":"capmgr","intent":"Use an unsupported capability operation.","input":{"op":"remove","kind":"skill","id":"release_quality_gate"}}]}"#,
+            "input.op_unsupported:remove",
+        ),
+        (
+            "bad_kind",
+            r#"{"report_job_progress":"检查 capability。","continue":true,"next_actions":[{"action":"capmgr","intent":"Use an unsupported capability kind.","input":{"op":"load","kind":"resource","id":"release_quality_gate"}}]}"#,
+            "input.kind_unsupported:resource",
+        ),
+    ] {
+        let mut core = AgentCore::new(
+            "STATIC",
+            profile("aliyun", "qwen-plus"),
+            tmp_dir(&format!("capmgr_enum_fields_{case}")),
+        );
+        let _ = core.begin_turn("检查能力", None);
+        let step = core.apply_model_response(LlmResponse {
+            content: scored(payload),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        let prompt = match step {
+            CoreStep::NeedModel { prompt, .. } => prompt,
+            other => panic!("expected protocol repair for {case}, got {other:?}"),
+        };
+
+        assert!(prompt.contains("Protocol repair request"));
+        assert!(prompt.contains(expected_issue));
+        assert!(!prompt.contains("Action result: capmgr"));
+    }
+}
+
+#[test]
+fn runtime_overlay_command_tool_executes_with_json_input() {
+    let memory_dir = tmp_dir("overlay_command_memory");
+    let overlay_dir = tmp_dir("overlay_command_capabilities");
+    let tools_dir = overlay_dir.join("tools");
+    let scripts_dir = overlay_dir.join("scripts");
+    fs::create_dir_all(&tools_dir).unwrap();
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::write(
+        tools_dir.join("echo_payload.yaml"),
+        r#"kind: tool
+id: echo_payload
+binding_type: command
+binding_name: scripts/echo_payload.sh
+description: Echo the action JSON payload.
+prompt_when: |
+  Use to echo a bounded payload during capability tests.
+input_properties:
+  text: string
+required:
+  - text
+example_json: |
+  {
+    "action": "echo_payload",
+    "intent": "Echo payload.",
+    "input": {
+      "text": "hello"
+    }
+  }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        scripts_dir.join("echo_payload.sh"),
+        "payload=$(cat)\nprintf 'overlay_command_ok %s\\n' \"$payload\"\n",
+    )
+    .unwrap();
+    let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    core.set_capability_registry(registry);
+    let _ = core.begin_turn("echo", None);
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"report_job_progress":"运行 overlay command。","continue":true,"next_actions":[{"action":"echo_payload","intent":"Echo runtime payload.","input":{"text":"hello"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected command action result, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Action result: echo_payload"));
+    assert!(prompt.contains("overlay_command_ok"));
+    assert!(prompt.contains("\"text\":\"hello\""));
 }
 
 #[test]

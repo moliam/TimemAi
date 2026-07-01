@@ -46,6 +46,11 @@
 # Maximum LLM input context window. Accepts plain numbers or K suffix, such as 100K.
 # export TIMEM_MAX_LLM_INPUT=100K
 
+# Optional runtime capability overlay directory. Directory layout:
+#   capabilities/tools/*.yaml
+#   capabilities/skills/<skill_id>/skill.yaml
+# export TIMEM_CAPABILITIES_DIR=capabilities
+
 # Bash approval policy.
 # ask: prompt before bash execution.
 # approve: execute requested bash actions directly.

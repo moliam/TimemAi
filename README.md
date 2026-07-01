@@ -214,6 +214,58 @@ Override the default URL only when needed:
 TIMEM_BASE_URL=https://your-gateway.example/v1
 ```
 
+## Runtime Capabilities
+
+Timem ships with built-in tool manifests, but you can overlay prompt/IDL
+capabilities at startup without recompiling:
+
+```bash
+export TIMEM_CAPABILITIES_DIR=/path/to/capabilities
+timem
+```
+
+Directory layout:
+
+```text
+capabilities/
+  tools/*.yaml
+  skills/<skill_id>/skill.yaml
+  skills/<skill_id>/instructions.md
+```
+
+Runtime tool manifests may add or override canonical tool names only when they
+bind to an existing builtin executor such as `run_bash`, `memmgr`,
+`shell_job_status`, or `capmgr`, or to a command script inside the overlay
+directory.
+
+Command-bound tools use this manifest shape:
+
+```yaml
+kind: tool
+id: my_tool
+binding_type: command
+binding_name: scripts/my_tool.sh
+description: My runtime tool.
+prompt_when: |
+  Use when this local runtime tool is appropriate.
+input_properties:
+  query: string
+required:
+  - query
+example_json: |
+  {
+    "action": "my_tool",
+    "intent": "Run my runtime tool.",
+    "input": {
+      "query": "hello"
+    }
+  }
+```
+
+Runtime invokes `/bin/sh scripts/my_tool.sh` and writes one JSON object to
+stdin: `{"action":"my_tool","intent":"...","input":{...}}`. Output is captured
+as an action result with bounded size and timeout.
+
 ## Runtime Data
 
 By default, runtime data is written under the directory where you start

@@ -1,0 +1,56 @@
+kind: tool
+id: capmgr
+binding_type: builtin
+binding_name: capmgr
+description: Manage capability tools and skills.
+prompt_when: |
+  Capability manager. Use op=list to inspect available capability headers.
+  Use op=load when a specific skill body or tool detail is needed.
+input_schema: |
+  {
+    "type": "object",
+    "required": ["op"],
+    "properties": {
+      "op": {
+        "type": "string",
+        "enum": ["list", "load", "inspect"],
+        "description": "Capability manager operation."
+      },
+      "kind": {
+        "type": "string",
+        "enum": ["tool", "skill"],
+        "description": "Capability kind."
+      },
+      "id": {
+        "type": "string",
+        "description": "Capability id; required for load/inspect."
+      }
+    },
+    "x-required-when": [
+      {"field": "op", "values": ["load", "inspect"], "required": ["kind", "id"]}
+    ]
+  }
+output_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "op": {"type": "string", "description": "Echoed operation."},
+      "kind": {"type": "string", "description": "Echoed kind when provided."},
+      "results": {"type": "string", "description": "List text for list operations."},
+      "description": {"type": "string", "description": "Tool description for loaded tools."},
+      "input": {"type": "object", "description": "Input schema summary for loaded tools."},
+      "output": {"type": "object", "description": "Output schema summary for loaded tools."},
+      "body": {"type": "string", "description": "Skill body for loaded skills."},
+      "error": {"type": "string", "description": "not_found|unsupported_kind|unsupported_op"}
+    }
+  }
+example_json: |
+  {
+    "action": "capmgr",
+    "intent": "Load the release quality skill details before checking a release.",
+    "input": {
+      "op": "load",
+      "kind": "skill",
+      "id": "release_quality_gate"
+    }
+  }

@@ -433,6 +433,23 @@ fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
             let detail = memory_action_detail(mem_type, op, default);
             action_observation_pair(intent, ObservationLineStyle::Normal, detail)
         }
+        "capmgr" => {
+            let op = input.get("op").and_then(Value::as_str).unwrap_or("");
+            let kind = input.get("kind").and_then(Value::as_str).unwrap_or("");
+            let id = input.get("id").and_then(Value::as_str).unwrap_or("");
+            let detail = match (op, kind, id) {
+                ("load", "", _) => "能力: 加载".to_string(),
+                ("load", kind, "") => format!("能力: 加载 {kind}"),
+                ("load", kind, id) => format!("能力: 加载 {kind}/{id}"),
+                ("list", "", _) => "能力: 列出".to_string(),
+                ("list", kind, _) => format!("能力: 列出 {kind}"),
+                ("inspect", kind, id) if !kind.is_empty() && !id.is_empty() => {
+                    format!("能力: 查看 {kind}/{id}")
+                }
+                _ => "能力: 管理".to_string(),
+            };
+            action_observation_pair(intent, ObservationLineStyle::Normal, detail)
+        }
         "query_memory" | "memory_query" | "memory_sql_query" | "sql_read" | "memory_schema" => {
             action_observation_pair(
                 intent,
@@ -809,6 +826,25 @@ mod tests {
                 ObservationEvent::Persistent("移除过期上下文".to_string()),
                 ObservationEvent::PersistentChild {
                     text: "上下文: 压缩".to_string(),
+                    is_last: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn capmgr_action_maps_to_user_readable_observation_events() {
+        let events = observation_events_from_model_response(
+            r#"{"next_actions":[
+                {"action":"capmgr","intent":"加载发布检查能力","input":{"op":"load","kind":"skill","id":"release_quality_gate"}}
+            ]}"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("加载发布检查能力".to_string()),
+                ObservationEvent::PersistentChild {
+                    text: "能力: 加载 skill/release_quality_gate".to_string(),
                     is_last: true
                 }
             ]

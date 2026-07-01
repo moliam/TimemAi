@@ -33,72 +33,8 @@
     "storage_style_policy": "Store durable facts in neutral user-centric wording when possible. Do not treat raw first-person memory text as the assistant's own identity or family."
   },
   "Tool_capability": {
-    "tool_catalog": {
-      "memmgr": {
-        "when": "Unified local memory manager. Use type=durable for long-lived user facts, type=raw_chat for UI-visible chat transcript, type=scratch for notes/context offload, and type=context for dynamic prompt context maintenance.",
-        "input": {
-          "type": "durable|raw_chat|scratch|context",
-          "op": "durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink",
-          "query?": "string; empty is allowed for raw_chat/scratch recent listing",
-          "sql?": "SELECT/WITH SELECT/PRAGMA table_info(memories|chat_messages) only",
-          "params?": "array matching SQL ? placeholders exactly",
-          "id?": "memory id, chat turn_id, or scratch id depending on type/op",
-          "expected_version?": "integer from durable query/sql results; required by runtime when modifying/deleting an existing durable row",
-          "content?": "string required for durable insert/update/upsert and scratch kind=notes",
-          "kind?": "notes|context_offload; required for scratch op=write",
-          "label?": "short retrieval label for scratch write",
-          "delta_ids?": "array of prompt delta ids; for scratch context_offload or context shrink",
-          "slice_ids?": "array of prompt slice ids; for scratch context_offload or context shrink",
-          "after_ms?": "integer inclusive lower created_at_ms bound for raw_chat",
-          "before_ms?": "integer exclusive upper created_at_ms bound for raw_chat",
-          "limit?": "integer result cap"
-        },
-        "example": {
-          "action": "memmgr",
-          "intent": "Find confirmed durable memory before answering.",
-          "input": {
-            "type": "durable",
-            "op": "query",
-            "query": "son birthday",
-            "limit": 5
-          }
-        }
-      },
-      "run_bash": {
-        "when": "Run a shell command on the local machine when local evidence or local changes are needed. Supports foreground and background execution. Provide read_back_command when stdout needs verification. Opt-in via large_readback_opt_in if output is truncated.",
-        "input": {
-          "command?": "string",
-          "read_back_command?": "string",
-          "timeout_ms?": "integer",
-          "background?": "boolean; true returns a job_id instead of blocking",
-          "mode?": "string; foreground|background",
-          "large_readback_opt_in?": "object"
-        },
-        "example": {
-          "action": "run_bash",
-          "intent": "Count files in the current folder.",
-          "input": {
-            "command": "rg --files | wc -l",
-            "timeout_ms": 5000
-          }
-        }
-      },
-      "shell_job_status": {
-        "when": "Check a background shell job previously started by run_bash.",
-        "input": {
-          "job_id": "string returned by the background run_bash result",
-          "timeout_ms": "integer wait budget for this status check; 0 means immediate check, max 15000"
-        },
-        "example": {
-          "action": "shell_job_status",
-          "intent": "Check whether the background build finished.",
-          "input": {
-            "job_id": "job_1782200000000_1",
-            "timeout_ms": 10000
-          }
-        }
-      }
-    },
+    "tool_catalog": "Runtime injects this object from capability manifests at prompt render time. Do not maintain tool specs in static prompt.",
+    "skill_headers": "Runtime injects this object from skill manifests at prompt render time.",
     "tool_policy": {
       "ui_status": "Use ui_label for visibility; set ui_visible=false for raw technical actions.",
       "run_bash_readback": "Provide read_back_command when stdout needs verification. Opt-in via large_readback_opt_in if output truncated.",
@@ -113,36 +49,7 @@
   "Response_rule": {
     "format": "Return exactly one JSON object. The optional thought field, when present, is written before report_job_progress / next_actions inside the same object as a private reasoning draft; it is not shown to the user and does not participate in the schema's required-field check. The object is validated by runtime against response_v1 JSON Schema; schema errors trigger one repair retry. Omit optional fields when empty, false, or n/a. Use intent to tell the user why an action is being taken. Use report_job_progress to report current job progress; runtime may show it in the Thought / Action panel with a ▰▱ prefix while work continues. Use continue:false only when no more runtime/model interaction is needed; then report_job_progress must contain the final user-facing summary.",
     "language_policy": "Write report_job_progress in the user's primary input language. System rule language does not determine user-facing language. For mixed-language input, follow the user's dominant language unless they explicitly ask otherwise.",
-    "json_schema_summary": {
-      "$id": "https://timem.local/schemas/response_v1.schema.json",
-      "notation": "A key ending with '?' in this summary means optional and should be omitted when empty/false/n/a. The actual JSON key name must not include '?'.",
-      "optional": {
-        "thought?": {
-          "content": "string; optional. You can record your internal reasoning draft here. Not shown to the user; Recommended for complex multi-step tasks; omit for simple Q&A.",
-          "durable": "boolean; optional. Default false. Tell the runtime whether to include the thought for you in future round's prompt text."
-        },
-        "continue?": "boolean; optional. Default true when absent. When absent, runtime treats it as true and adds a note in the next prompt saying continue was omitted. Set false only for final answer.",
-        "next_actions?": "array<string|object>; required when continue is true. With continue false, allowed only for guarded finalize: the last action must include expect and expect_timeout_ms.",
-        "continuation?": {
-          "carryover_needed?": "boolean",
-          "next_turn_summary?": "string",
-          "scratch_action_required?": "boolean"
-        },
-        "memory_candidates?": "array; emit only for new/corrected durable facts",
-        "diagnostics.intent_inference?": "string; enum one_of: time_constrained|exact_date|created_axis|none. Output only for time-related questions; omit for normal Q&A.",
-        "diagnostics.self_audit?": "string; enum one_of: memory_write_worthy|fact_correction|context_shrink_recommended|scratch_checkpoint_needed|evidence_insufficient|none. Output the matching enum value when the corresponding situation is triggered; otherwise omit.",
-        "diagnostics.note?": "string",
-        "acceptance_check?": "object; optional metadata. acceptance_check.missing_info array may describe what the model is waiting for.",
-        "report_job_progress?": "string; optional progress text. With continue true, it is progress shown in the Thought / Action panel and next_actions must continue the work. With continue false and no next_actions, it is shown as the final answer immediately. With continue false plus guarded finalize next_actions, runtime runs the actions and a controlled expect check; only if expect passes is this text shown as the final answer."
-      },
-      "additional_properties": "allowed for forward compatibility; keep them sparse",
-      "action_object_spec": {
-        "description": "Each item in next_actions must be an object with these fields:",
-        "action": "string; required. Canonical tool name from Tool_capability.tool_catalog. Do not invent names.",
-        "intent": "string; required. Concise description of why this action is being taken. Runtime rejects missing intent.",
-        "input": "object; required. Tool-specific input fields as defined in tool_catalog. For guarded finalize only, the last action input may include expect and expect_timeout_ms; expect is executed through the same controlled Bash approval/safety path as run_bash."
-      }
-    },
+    "json_schema_summary": "Runtime injects response_v1 schema summary from resources/response_v1_summary.json at prompt render time.",
     "examples": {
       "final_answer": {
         "report_job_progress": "好的，我明白了。",

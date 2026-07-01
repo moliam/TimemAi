@@ -1,3 +1,4 @@
+use agent_core::capability::CapabilityRegistry;
 use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, UsageStats};
 use crossterm::event::Event;
 use reedline::{
@@ -81,6 +82,15 @@ fn main() {
     let mut bash_approval_mode = bash_approval_mode_from_options(&options, &env);
     let mut profiler = RuntimeProfiler::default();
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
+    if let Some(capabilities_dir) = capabilities_dir_from_options(&options, &env) {
+        match CapabilityRegistry::builtin_with_overlay_dir(&capabilities_dir) {
+            Ok(registry) => core.set_capability_registry(registry),
+            Err(err) => {
+                eprintln!("[config_error] capability_overlay_failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
     core.set_bash_approval_mode(bash_approval_mode);
     core.set_max_llm_input_tokens(config.max_llm_input_tokens);
     let session = session_id();
@@ -2939,7 +2949,7 @@ fn print_help() {
 }
 
 fn help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn bash_approval_mode_from_options(
@@ -2958,6 +2968,17 @@ fn bash_approval_mode_from_options(
         "ask" => BashApprovalMode::Ask,
         _ => BashApprovalMode::Ask,
     }
+}
+
+fn capabilities_dir_from_options(
+    options: &timem_shell::CliOptions,
+    env: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    options
+        .capabilities_dir
+        .clone()
+        .or_else(|| env.get("TIMEM_CAPABILITIES_DIR").cloned())
+        .map(PathBuf::from)
 }
 
 fn bash_approval_mode_label(mode: BashApprovalMode) -> &'static str {
@@ -2986,25 +3007,26 @@ fn time_label() -> String {
 mod static_prompt_tests {
     use super::{
         active_elapsed_secs, apply_config_value, bash_approval_mode_from_options,
-        boxed_config_table_at_width, config_field_value, consume_turn_cancel_request,
-        display_width, epoch_millis, help_text, merge_queued_input, next_paste_recovery_choice,
-        normalize_newlines, normalize_workspace_dir, paste_marker_ranges, paste_marker_segments,
-        paste_recovery_return_edit_clear_lines, paste_recovery_summary_from_markers,
-        pasted_line_count, prev_paste_recovery_choice, queued_input_drain_from_bytes,
-        random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
-        read_approval_key, read_menu_key, read_paste_recovery_key,
-        reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
-        render_approval_choices, render_config_menu, render_expand_output_choices,
-        render_expand_output_prompt, render_note_box_at_width, render_paste_recovery_choices,
-        render_paste_recovery_prompt, render_raw_multiline_paste_submit_choices,
-        render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
-        render_round_limit_prompt, render_stale_context_choices, render_stale_context_prompt,
-        render_startup_banner, render_submitted_user_line_rewrite, render_user_approval_prompt,
-        render_user_input_prompt, render_workspace_delete_choices, render_workspace_menu,
-        resolve_paste_markers, sanitize_user_input, stale_context_prompt_needed,
-        strip_paste_markers, submitted_input_rows, timem_reedline_keybindings, utf8_expected_len,
-        workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
-        ConfigRow, ConfigTableItem, MenuKey, PasteRecord, PasteRecoveryChoice, PasteRecoveryKey,
+        boxed_config_table_at_width, capabilities_dir_from_options, config_field_value,
+        consume_turn_cancel_request, display_width, epoch_millis, help_text, merge_queued_input,
+        next_paste_recovery_choice, normalize_newlines, normalize_workspace_dir,
+        paste_marker_ranges, paste_marker_segments, paste_recovery_return_edit_clear_lines,
+        paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
+        queued_input_drain_from_bytes, random_spinner_tick, raw_multiline_paste_display,
+        raw_multiline_paste_needs_confirmation, read_approval_key, read_menu_key,
+        read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
+        reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_menu,
+        render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
+        render_paste_recovery_choices, render_paste_recovery_prompt,
+        render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
+        render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
+        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
+        render_user_approval_prompt, render_user_input_prompt, render_workspace_delete_choices,
+        render_workspace_menu, resolve_paste_markers, sanitize_user_input,
+        stale_context_prompt_needed, strip_paste_markers, submitted_input_rows,
+        timem_reedline_keybindings, utf8_expected_len, workspace_menu_line_count,
+        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField, ConfigRow,
+        ConfigTableItem, MenuKey, PasteRecord, PasteRecoveryChoice, PasteRecoveryKey,
         PasteRecoverySummary, QueuedInputDrain, SharedPasteRecords, SharedPrefillInput,
         TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
         PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
@@ -3020,6 +3042,7 @@ mod static_prompt_tests {
     use std::collections::HashMap;
     use std::fs;
     use std::io::Cursor;
+    use std::path::Path;
     use std::process::Command;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
@@ -3036,15 +3059,17 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("\"Response_rule\""));
         assert!(STATIC_PROMPT.contains("\"Self_audit\""));
         assert!(STATIC_PROMPT.contains("\"json_schema_summary\""));
-        assert!(STATIC_PROMPT.contains("\"acceptance_check?\""));
+        assert!(STATIC_PROMPT.contains("Runtime injects response_v1 schema summary"));
+        assert!(!STATIC_PROMPT.contains("\"acceptance_check?\""));
         assert!(STATIC_PROMPT.contains("\"perspective_policy\""));
         assert!(STATIC_PROMPT.contains("\"tool_claim_policy\""));
         assert!(STATIC_PROMPT.contains("\"storage_style_policy\""));
         assert!(STATIC_PROMPT.contains("\"tool_catalog\""));
+        assert!(STATIC_PROMPT.contains("Runtime injects this object from capability manifests"));
         assert!(STATIC_PROMPT.contains("\"memmgr\""));
-        assert!(STATIC_PROMPT.contains("\"durable|raw_chat|scratch|context\""));
-        assert!(STATIC_PROMPT.contains("\"durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink\""));
         assert!(STATIC_PROMPT.contains("persisted user/assistant chat records"));
+        assert!(!STATIC_PROMPT.contains("\"durable|raw_chat|scratch|context\""));
+        assert!(!STATIC_PROMPT.contains("\"durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink\""));
         assert!(!STATIC_PROMPT.contains("\"query_memory\""));
         assert!(!STATIC_PROMPT.contains("\"memory_schema\""));
         assert!(!STATIC_PROMPT.contains("\"memory_sql_query\""));
@@ -3056,19 +3081,16 @@ mod static_prompt_tests {
         assert!(!STATIC_PROMPT.contains("\"scratch_query\""));
         assert!(!STATIC_PROMPT.contains("\"scratch_delete\""));
         assert!(!STATIC_PROMPT.contains("\"prompt_shrink\""));
-        assert!(STATIC_PROMPT.contains("\"run_bash\""));
-        assert!(STATIC_PROMPT.contains("\"shell_job_status\""));
-        assert!(STATIC_PROMPT.contains("foreground|background"));
-        assert!(STATIC_PROMPT.contains("read_back_command"));
+        assert!(!STATIC_PROMPT.contains("\"shell_job_status\""));
+        assert!(!STATIC_PROMPT.contains("foreground|background"));
         assert!(STATIC_PROMPT.contains("Never invent a read-only limitation for run_bash"));
         assert!(!STATIC_PROMPT.contains("\"durable_ctx_score\""));
         assert!(!STATIC_PROMPT.contains("Every model response must score"));
-        assert!(STATIC_PROMPT.contains("local machine"));
         assert!(STATIC_PROMPT.contains("\"intent_required\""));
         assert!(STATIC_PROMPT.contains("\"json_protocol\""));
         assert!(STATIC_PROMPT.contains("\"evidence_guard\""));
         assert!(STATIC_PROMPT.contains("\"action_result_guard\""));
-        assert!(STATIC_PROMPT.contains("\"thought?\""));
+        assert!(!STATIC_PROMPT.contains("\"thought?\""));
         assert!(STATIC_PROMPT.contains("self_audit"));
         assert!(!STATIC_PROMPT.contains("no_result_terminate"));
         assert!(!STATIC_PROMPT.contains("long_running_shell"));
@@ -3660,6 +3682,8 @@ mod static_prompt_tests {
             "TIMEM_MAX_LLM_OUTPUT",
             "--max-llm-input",
             "TIMEM_MAX_LLM_INPUT",
+            "--capabilities-dir",
+            "TIMEM_CAPABILITIES_DIR",
             "--bash-approval",
             "TIMEM_BASH_APPROVAL",
             "Interactive commands:",
@@ -3680,6 +3704,9 @@ mod static_prompt_tests {
         assert!(help.contains(
             "  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K"
         ));
+        assert!(help.contains(
+            "  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay"
+        ));
     }
 
     #[test]
@@ -3696,6 +3723,7 @@ mod static_prompt_tests {
             "TIMEM_TIMEOUT",
             "TIMEM_MAX_LLM_OUTPUT",
             "TIMEM_MAX_LLM_INPUT",
+            "TIMEM_CAPABILITIES_DIR",
             "TIMEM_BASH_APPROVAL",
             "DASHSCOPE_API_KEY",
             "OPENAI_API_KEY",
@@ -3711,6 +3739,28 @@ mod static_prompt_tests {
                 "env_template must not use non-exported assignments for {key}"
             );
         }
+    }
+
+    #[test]
+    fn capabilities_dir_option_overrides_env() {
+        let mut env = HashMap::new();
+        env.insert(
+            "TIMEM_CAPABILITIES_DIR".to_string(),
+            "/env/capabilities".to_string(),
+        );
+        let options = timem_shell::CliOptions {
+            capabilities_dir: Some("/cli/capabilities".to_string()),
+            ..timem_shell::CliOptions::default()
+        };
+
+        assert_eq!(
+            capabilities_dir_from_options(&options, &env).as_deref(),
+            Some(Path::new("/cli/capabilities"))
+        );
+        assert_eq!(
+            capabilities_dir_from_options(&timem_shell::CliOptions::default(), &env).as_deref(),
+            Some(Path::new("/env/capabilities"))
+        );
     }
 
     #[test]

@@ -13,6 +13,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod capability;
+pub mod capmgr;
+use capability::CapabilityRegistry;
+pub mod executor;
+pub mod memmgr;
+pub mod prompt_spec;
+pub mod shell_exec;
+use shell_exec::FileShellJobStore;
+pub use shell_exec::ShellJobRecord;
+
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,20 +172,11 @@ pub struct ChatHistoryRecord {
     pub assistant_output: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ShellJobRecord {
-    pub id: String,
-    pub created_at_ms: i64,
-    pub pid: u32,
-    pub command: String,
-    pub output_file: String,
-    pub status_file: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedAction {
     action: String,
     intent: String,
+    raw_input: Value,
     mem_type: String,
     op: String,
     query: String,
@@ -204,6 +205,11 @@ struct ParsedAction {
 impl ParsedAction {
     fn audit_input(&self) -> Value {
         let mut input = match self.action.as_str() {
+            "capmgr" => json!({
+                "op": self.op,
+                "kind": self.scratch_type,
+                "id": self.id,
+            }),
             "memmgr" => json!({
                 "type": self.mem_type,
                 "op": self.op,
@@ -565,6 +571,7 @@ fn space_dir_for_memory_dir(memory_dir: &Path) -> &Path {
 pub struct AgentCore {
     static_prompt: String,
     profile: CoreProfile,
+    capabilities: CapabilityRegistry,
     memory: FileMemoryStore,
     scratch: FileScratchStore,
     chat_history: FileChatHistoryStore,
@@ -594,6 +601,7 @@ impl AgentCore {
         Self {
             static_prompt: static_prompt.into(),
             profile,
+            capabilities: CapabilityRegistry::builtin(),
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
@@ -623,6 +631,9 @@ impl AgentCore {
     pub fn set_max_rounds(&mut self, max_rounds: u32) {
         self.configured_round_budget = max_rounds.max(1);
         self.round_budget = self.configured_round_budget;
+    }
+    pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
+        self.capabilities = capabilities;
     }
     pub fn profile(&self) -> &CoreProfile {
         &self.profile
@@ -708,7 +719,7 @@ impl AgentCore {
                 "The previous model output was cut off by the max output token limit before a complete JSON object was produced. Return one short valid JSON object only. If the task needs a long report, use run_bash to write the full report to a file and keep report_job_progress concise.",
             );
         }
-        let parsed = parse_envelope(&response.content);
+        let parsed = parse_envelope(&response.content, &self.capabilities);
         let mut slices = Vec::new();
         if !parsed.thought.is_empty() && parsed.thought_durable {
             slices.push((
@@ -1000,9 +1011,12 @@ impl AgentCore {
         }
     }
     pub fn render_prompt(&self) -> String {
+        let static_prompt = prompt_spec::enrich_static_prompt_with_response_schema(
+            &self.capabilities.enrich_static_prompt(&self.static_prompt),
+        );
         let mut out = format!(
             "[BEGIN SEGMENT 0: prompt_0]\n{}\n[END SEGMENT 0: prompt_0]",
-            self.static_prompt
+            static_prompt
         );
         let slices = self.render_prompt_slices();
         for (idx, slice) in slices.iter().enumerate() {
@@ -1155,7 +1169,7 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, preserve only active work-relevant state, use scratch_write type=context_offload for important but lengthy existing delta/slice content or type=notes for compact checkpoints, then use prompt_shrink on covered delta_id/slice_id ranges. Do not target prompt_0.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, preserve only active work-relevant state, use memmgr type=scratch op=write kind=context_offload for important but lengthy existing delta/slice content or kind=notes for compact checkpoints, then use memmgr type=context op=shrink on covered delta_id/slice_id ranges. Do not target prompt_0.";
         Some(format!(
             "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
             self.max_llm_input_tokens
@@ -1239,282 +1253,38 @@ impl AgentCore {
 
     fn execute_action(&mut self, action: ParsedAction) -> ActionExecution {
         let action_for_audit = action.clone();
-        let result = match action.action.as_str() {
+        let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
+            Ok(target) => target,
+            Err(err) => {
+                let result = format!("Action result: {}\nerror: {}", action.action, err);
+                self.record_action_audit(&action_for_audit, "completed", Some(&result));
+                return ActionExecution::Completed(result);
+            }
+        };
+        if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
+            let result = self.execute_command_capability(&action, path);
+            self.record_action_audit(&action_for_audit, "completed", Some(&result));
+            return ActionExecution::Completed(result);
+        }
+        let dispatch_name = match &executor_target {
+            executor::ExecutorTarget::Builtin { binding_name } => binding_name.as_str(),
+            executor::ExecutorTarget::Legacy { action } => action.as_str(),
+            executor::ExecutorTarget::Command { .. } => {
+                unreachable!("command target returned early")
+            }
+        };
+        if !matches!(
+            dispatch_name,
+            "capmgr" | "memmgr" | "run_bash" | "shell_job_status"
+        ) {
+            if let Some(result) = self.execute_legacy_memmgr_action(&action, dispatch_name) {
+                self.record_action_audit(&action_for_audit, "completed", Some(&result));
+                return ActionExecution::Completed(result);
+            }
+        }
+        let result = match dispatch_name {
+            "capmgr" => self.execute_capmgr_action(&action),
             "memmgr" => self.execute_memmgr_action(&action),
-            "chat_history_query" => {
-                self.current_stats.tool_calls += 1;
-                let rows = self
-                    .chat_history
-                    .query(
-                        &action.query,
-                        action.limit,
-                        action.after_ms,
-                        action.before_ms,
-                    )
-                    .unwrap_or_default();
-                let delta_rows = self.query_prompt_slices(
-                    &action.query,
-                    action.limit,
-                    action.after_ms,
-                    action.before_ms,
-                );
-                if rows.is_empty() && delta_rows.is_empty() {
-                    format!(
-                        "Action result: chat_history_query\nquery: {}\nresults: none",
-                        action.query
-                    )
-                } else {
-                    let mut sections = Vec::new();
-                    if !rows.is_empty() {
-                        let lines = rows
-                            .into_iter()
-                            .map(|record| {
-                                format!(
-                                    "- source=chat_record time_ms={} session={} turn_id={} user={} assistant={}",
-                                    record.started_at_ms,
-                                    record.session,
-                                    record.turn_id,
-                                    compact_text(&record.user_input, 160),
-                                    compact_text(&record.assistant_output, 220)
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        sections.push(format!("chat_records:\n{}", lines));
-                    }
-                    if !delta_rows.is_empty() {
-                        let lines = delta_rows
-                            .into_iter()
-                            .map(|slice| {
-                                format!(
-                                    "- source=prompt_delta delta_id={} slice_id={} slice={}/{} prompt_type={} time_ms={} text={}",
-                                    slice.delta_id,
-                                    slice.slice_id,
-                                    slice.slice_index,
-                                    slice.slice_count,
-                                    slice.prompt_type,
-                                    slice.time_ms,
-                                    compact_text(&slice.text, 240)
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        sections.push(format!("current_prompt_deltas:\n{}", lines));
-                    }
-                    format!(
-                        "Action result: chat_history_query\nquery: {}\nresults:\n{}",
-                        action.query,
-                        sections.join("\n")
-                    )
-                }
-            }
-            "chat_history_delete" => {
-                self.current_stats.tool_calls += 1;
-                match self.chat_history.delete(
-                    &action.id,
-                    &action.query,
-                    action.limit,
-                    action.after_ms,
-                    action.before_ms,
-                ) {
-                    Ok(deleted) => format!(
-                        "Action result: chat_history_delete\nid: {}\nquery: {}\ndeleted_count: {}",
-                        action.id, action.query, deleted
-                    ),
-                    Err(err) => format!("Action result: chat_history_delete\nerror: {}", err),
-                }
-            }
-            "query_memory" | "memory_query" => {
-                self.current_stats.tool_calls += 1;
-                self.current_stats.mem_reads += 1;
-                let rows = self
-                    .memory
-                    .query(&action.query, action.limit)
-                    .unwrap_or_default();
-                if rows.is_empty() {
-                    format!(
-                        "Action result: query_memory\nquery: {}\nresults: none",
-                        action.query
-                    )
-                } else {
-                    let lines = rows
-                        .into_iter()
-                        .map(|r| {
-                            format!(
-                                "- id={} version={} created_at_ms={} updated_at_ms={} content={}",
-                                r.id, r.version, r.created_at_ms, r.updated_at_ms, r.content
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!(
-                        "Action result: query_memory\nquery: {}\nresults:\n{}",
-                        action.query, lines
-                    )
-                }
-            }
-            "memory_schema" => {
-                self.current_stats.tool_calls += 1;
-                self.current_stats.mem_reads += 1;
-                self.memory.schema_text(&self.chat_history)
-            }
-            "sql_read" | "memory_sql_query" => {
-                self.current_stats.tool_calls += 1;
-                self.current_stats.mem_reads += 1;
-                match self.memory.sql_read(
-                    &self.chat_history,
-                    &action.sql,
-                    &action.params,
-                    action.limit,
-                ) {
-                    Ok(rows) if rows.is_empty() => {
-                        format!(
-                            "Action result: {}\nsql: {}\nresults: none",
-                            action.action, action.sql
-                        )
-                    }
-                    Ok(rows) => {
-                        let lines = rows
-                            .into_iter()
-                            .map(|row| {
-                                let cells = row
-                                    .into_iter()
-                                    .map(|(column, value)| format!("{}={}", column, value))
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                                format!("- {}", cells)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!(
-                            "Action result: {}\nsql: {}\nresults:\n{}",
-                            action.action, action.sql, lines
-                        )
-                    }
-                    Err(err) => format!(
-                        "Action result: {}\nsql: {}\nerror: {}",
-                        action.action, action.sql, err
-                    ),
-                }
-            }
-            "memory_write" | "write_memory" => {
-                self.current_stats.tool_calls += 1;
-                let content = if action.content.trim().is_empty() {
-                    action.query
-                } else {
-                    action.content
-                };
-                if content.trim().is_empty() {
-                    "Action result: memory_write\nskipped: empty content".to_string()
-                } else if self.memory.write(&content).is_ok() {
-                    self.current_stats.mem_writes += 1;
-                    format!("Action result: memory_write\nstored: {}", content)
-                } else {
-                    "Action result: memory_write\nerror: write_failed".to_string()
-                }
-            }
-            "memory_update" => {
-                self.current_stats.tool_calls += 1;
-                match self.memory.update(
-                    &action.operation,
-                    &action.id,
-                    &action.content,
-                    action.expected_version,
-                ) {
-                    Ok(result) => {
-                        self.current_stats.mem_writes += 1;
-                        result
-                    }
-                    Err(err) => format!("Action result: memory_update\nerror: {}", err),
-                }
-            }
-            "scratch_write" => {
-                self.current_stats.tool_calls += 1;
-                let scratch_type = normalized_scratch_type(&action.scratch_type);
-                let write_result = if scratch_type == "context_offload" {
-                    self.collect_prompt_context_for_scratch(&action.delta_ids, &action.slice_ids)
-                        .and_then(|offload| {
-                            self.scratch.write_record(
-                                &scratch_type,
-                                &action.label,
-                                &offload.content,
-                                &offload.delta_ids,
-                                &offload.slice_ids,
-                            )
-                        })
-                } else {
-                    self.scratch.write_record(
-                        &scratch_type,
-                        &action.label,
-                        &action.content,
-                        &[],
-                        &[],
-                    )
-                };
-                match write_result {
-                    Ok(record) => format_scratch_write_result(&record),
-                    Err(err) => format!("Action result: scratch_write\nerror: {}", err),
-                }
-            }
-            "scratch_read" => {
-                self.current_stats.tool_calls += 1;
-                match self.scratch.read(&action.id) {
-                    Ok(Some(record)) => format_scratch_read_result(&record),
-                    Ok(None) => format!(
-                        "Action result: scratch_read\nid: {}\nfound: false",
-                        action.id
-                    ),
-                    Err(err) => format!("Action result: scratch_read\nerror: {}", err),
-                }
-            }
-            "scratch_query" => {
-                self.current_stats.tool_calls += 1;
-                match self.scratch.query(&action.query, action.limit) {
-                    Ok(rows) if rows.is_empty() => format!(
-                        "Action result: scratch_query\nquery: {}\nresults: none",
-                        action.query
-                    ),
-                    Ok(rows) => {
-                        let lines = rows
-                            .into_iter()
-                            .map(|row| {
-                                format!(
-                                    "- id={} label={} type={} time_ms={} content_preview={}",
-                                    row.id,
-                                    scratch_label_for_display(&row),
-                                    normalized_scratch_type(&row.scratch_type),
-                                    row.created_at_ms,
-                                    compact_text(&row.content, 240)
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!(
-                            "Action result: scratch_query\nquery: {}\nresults:\n{}",
-                            action.query, lines
-                        )
-                    }
-                    Err(err) => format!("Action result: scratch_query\nerror: {}", err),
-                }
-            }
-            "scratch_delete" => {
-                self.current_stats.tool_calls += 1;
-                match self.scratch.delete(&action.id) {
-                    Ok(true) => format!(
-                        "Action result: scratch_delete\nid: {}\ndeleted: true",
-                        action.id
-                    ),
-                    Ok(false) => format!(
-                        "Action result: scratch_delete\nid: {}\ndeleted: false",
-                        action.id
-                    ),
-                    Err(err) => format!("Action result: scratch_delete\nerror: {}", err),
-                }
-            }
-            "prompt_shrink" => {
-                self.current_stats.tool_calls += 1;
-                self.apply_prompt_shrink(&action.delta_ids, &action.slice_ids)
-            }
             "shell_job_status" => {
                 self.current_stats.tool_calls += 1;
                 self.shell_jobs.status(&action.job_id, action.timeout_ms)
@@ -1556,6 +1326,131 @@ impl AgentCore {
         };
         self.record_action_audit(&action_for_audit, "completed", Some(&result));
         ActionExecution::Completed(result)
+    }
+
+    fn execute_legacy_memmgr_action(
+        &mut self,
+        action: &ParsedAction,
+        dispatch_name: &str,
+    ) -> Option<String> {
+        let mut canonical = action.clone();
+        canonical.action = "memmgr".to_string();
+        match dispatch_name {
+            "chat_history_query" => {
+                canonical.mem_type = "raw_chat".to_string();
+                canonical.op = "query".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "chat_history_query",
+                ))
+            }
+            "chat_history_delete" => {
+                canonical.mem_type = "raw_chat".to_string();
+                canonical.op = "delete".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "chat_history_delete",
+                ))
+            }
+            "query_memory" | "memory_query" => {
+                canonical.mem_type = "durable".to_string();
+                canonical.op = "query".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "query_memory",
+                ))
+            }
+            "memory_schema" => {
+                canonical.mem_type = "durable".to_string();
+                canonical.op = "schema".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "memory_schema",
+                ))
+            }
+            "memory_write" | "write_memory" => {
+                self.current_stats.tool_calls += 1;
+                let content = if action.content.trim().is_empty() {
+                    action.query.clone()
+                } else {
+                    action.content.clone()
+                };
+                if content.trim().is_empty() {
+                    Some("Action result: memory_write\nskipped: empty content".to_string())
+                } else if self.memory.write(&content).is_ok() {
+                    self.current_stats.mem_writes += 1;
+                    Some(format!("Action result: memory_write\nstored: {}", content))
+                } else {
+                    Some("Action result: memory_write\nerror: write_failed".to_string())
+                }
+            }
+            "memory_update" => {
+                self.current_stats.tool_calls += 1;
+                Some(
+                    match self.memory.update(
+                        &action.operation,
+                        &action.id,
+                        &action.content,
+                        action.expected_version,
+                    ) {
+                        Ok(result) => {
+                            self.current_stats.mem_writes += 1;
+                            result
+                        }
+                        Err(err) => format!("Action result: memory_update\nerror: {}", err),
+                    },
+                )
+            }
+            "sql_read" | "memory_sql_query" => {
+                canonical.mem_type = "durable".to_string();
+                canonical.op = "sql".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    dispatch_name,
+                ))
+            }
+            "scratch_write" => {
+                canonical.mem_type = "scratch".to_string();
+                canonical.op = "write".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "scratch_write",
+                ))
+            }
+            "scratch_read" => {
+                canonical.mem_type = "scratch".to_string();
+                canonical.op = "read".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "scratch_read",
+                ))
+            }
+            "scratch_query" => {
+                canonical.mem_type = "scratch".to_string();
+                canonical.op = "query".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "scratch_query",
+                ))
+            }
+            "scratch_delete" => {
+                canonical.mem_type = "scratch".to_string();
+                canonical.op = "delete".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "scratch_delete",
+                ))
+            }
+            "prompt_shrink" => {
+                canonical.mem_type = "context".to_string();
+                canonical.op = "shrink".to_string();
+                Some(rewrite_memmgr_result_header(
+                    self.execute_memmgr_action(&canonical),
+                    "prompt_shrink",
+                ))
+            }
+            _ => None,
+        }
     }
 
     fn execute_memmgr_action(&mut self, action: &ParsedAction) -> String {
@@ -1727,7 +1622,7 @@ impl AgentCore {
                 Err(err) => format!("Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}", err),
             },
             ("scratch", "write") => {
-                let scratch_type = normalized_scratch_type(&action.scratch_type);
+                let scratch_type = memmgr::normalize_scratch_kind(&action.scratch_type);
                 let write_result = if scratch_type == "context_offload" {
                     self.collect_prompt_context_for_scratch(&action.delta_ids, &action.slice_ids)
                         .and_then(|offload| {
@@ -1776,7 +1671,7 @@ impl AgentCore {
                                 "- id={} label={} type={} time_ms={} content_preview={}",
                                 row.id,
                                 scratch_label_for_display(&row),
-                                normalized_scratch_type(&row.scratch_type),
+                                memmgr::normalize_scratch_kind(&row.scratch_type),
                                 row.created_at_ms,
                                 compact_text(&row.content, 240)
                             )
@@ -1809,6 +1704,28 @@ impl AgentCore {
                 action.mem_type, action.op
             ),
         }
+    }
+
+    fn execute_capmgr_action(&mut self, action: &ParsedAction) -> String {
+        self.current_stats.tool_calls += 1;
+        capmgr::execute(
+            &self.capabilities,
+            capmgr::CapmgrActionInput {
+                op: &action.op,
+                kind: &action.scratch_type,
+                id: &action.id,
+            },
+        )
+    }
+
+    fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> String {
+        self.current_stats.tool_calls += 1;
+        let payload = json!({
+            "action": action.action,
+            "intent": action.intent,
+            "input": action.raw_input,
+        });
+        executor::execute_command_action(&action.action, path, &payload, action.timeout_ms)
     }
 
     fn record_action_audit(&self, action: &ParsedAction, status: &str, result: Option<&str>) {
@@ -2571,7 +2488,7 @@ impl FileScratchStore {
         prompt_delta_ids: &[String],
         prompt_slice_ids: &[String],
     ) -> Result<ScratchNoteRecord, String> {
-        let clean_type = normalized_scratch_type(scratch_type);
+        let clean_type = memmgr::normalize_scratch_kind(scratch_type);
         let clean_label = label.trim();
         let clean_content = content.trim();
         if !matches!(clean_type.as_str(), "notes" | "context_offload") {
@@ -2721,151 +2638,6 @@ impl FileScratchStore {
                 .map_err(|_| "scratch_write_failed".to_string())?;
         }
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-struct FileShellJobStore {
-    dir: PathBuf,
-    index_file: PathBuf,
-    guard: MemGuard,
-}
-
-impl FileShellJobStore {
-    fn new(memory_dir: &Path) -> Self {
-        let dir = memory_dir.join("shell_jobs");
-        let _ = fs::create_dir_all(&dir);
-        Self {
-            index_file: dir.join("jobs.jsonl"),
-            dir,
-            guard: MemGuard::for_memory_dir(memory_dir),
-        }
-    }
-
-    fn spawn(&self, command: &str) -> String {
-        let clean = command.trim();
-        if clean.is_empty() {
-            return "Action result: run_bash\nerror: command_required".to_string();
-        }
-        let _ = fs::create_dir_all(&self.dir);
-        let id = unique_id("job");
-        let output_file = self.dir.join(format!("{id}.out"));
-        let status_file = self.dir.join(format!("{id}.status"));
-        let script = format!(
-            "({}) > {} 2>&1; printf '%s' \"$?\" > {}",
-            clean,
-            shell_quote_path(&output_file),
-            shell_quote_path(&status_file)
-        );
-        let spawn = Command::new("/bin/sh")
-            .arg("-lc")
-            .arg(script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        let child = match spawn {
-            Ok(child) => child,
-            Err(_) => {
-                return format!(
-                    "Action result: run_bash\ncommand: {}\nerror: background_spawn_failed",
-                    clean
-                )
-            }
-        };
-        let record = ShellJobRecord {
-            id: id.clone(),
-            created_at_ms: now_ms(),
-            pid: child.id(),
-            command: clean.to_string(),
-            output_file: output_file.to_string_lossy().to_string(),
-            status_file: status_file.to_string_lossy().to_string(),
-        };
-        let _ = self.append(&record);
-        format!(
-            "Action result: run_bash\ncommand: {}\nstatus: background_started\njob_id: {}\npid: {}\noutput_file: {}\nstatus_file: {}\nnext_action: shell_job_status",
-            clean, record.id, record.pid, record.output_file, record.status_file
-        )
-    }
-
-    fn status(&self, job_id: &str, wait_ms: u64) -> String {
-        let clean_id = job_id.trim();
-        if clean_id.is_empty() {
-            return "Action result: shell_job_status\nerror: job_id_required".to_string();
-        }
-        let Some(record) = self.find(clean_id) else {
-            return format!(
-                "Action result: shell_job_status\njob_id: {}\nerror: job_not_found",
-                clean_id
-            );
-        };
-        let wait = Duration::from_millis(wait_ms.min(15000));
-        let started = Instant::now();
-        loop {
-            if let Some(code) = fs::read_to_string(&record.status_file)
-                .ok()
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty())
-            {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-                return format!(
-                    "Action result: shell_job_status\njob_id: {}\nstate: finished\nexit_code: {}\nwaited_ms: {}\noutput_file: {}\noutput:\n{}",
-                    record.id,
-                    code,
-                    started.elapsed().as_millis(),
-                    record.output_file,
-                    compact_text(&output, 4000)
-                );
-            }
-            if started.elapsed() >= wait {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-                return format!(
-                    "Action result: shell_job_status\njob_id: {}\nstate: running\npid: {}\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
-                    record.id,
-                    record.pid,
-                    started.elapsed().as_millis(),
-                    record.output_file,
-                    compact_text(&output, 2000)
-                );
-            }
-            thread::sleep(Duration::from_millis(200));
-        }
-    }
-
-    fn append(&self, record: &ShellJobRecord) -> std::io::Result<()> {
-        self.guard
-            .with_write(|| self.append_unlocked(record))
-            .map_err(std::io::Error::other)?
-    }
-
-    fn append_unlocked(&self, record: &ShellJobRecord) -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.index_file)?;
-        writeln!(
-            file,
-            "{}",
-            serde_json::to_string(record).unwrap_or_default()
-        )
-    }
-
-    fn find(&self, job_id: &str) -> Option<ShellJobRecord> {
-        self.guard.with_read(|| self.find_unlocked(job_id)).ok()?
-    }
-
-    fn find_unlocked(&self, job_id: &str) -> Option<ShellJobRecord> {
-        let file = OpenOptions::new().read(true).open(&self.index_file).ok()?;
-        let mut found = None;
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let Ok(record) = serde_json::from_str::<ShellJobRecord>(&line) else {
-                continue;
-            };
-            if record.id == job_id {
-                found = Some(record);
-            }
-        }
-        found
     }
 }
 
@@ -3221,58 +2993,113 @@ fn validate_memmgr_action(
     delta_ids: &[String],
     slice_ids: &[String],
 ) -> Result<(), String> {
-    if mem_type.is_empty() {
-        return Err(format!("next_actions[{idx}].input.type_required"));
+    memmgr::validate_action(memmgr::MemmgrActionInput {
+        idx,
+        mem_type,
+        op,
+        query,
+        content,
+        scratch_type,
+        label,
+        sql,
+        params,
+        id,
+        delta_ids,
+        slice_ids,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_manifest_backed_action_extra(
+    idx: usize,
+    action: &str,
+    mem_type: &str,
+    op: &str,
+    query: &str,
+    content: &str,
+    scratch_type: &str,
+    label: &str,
+    sql: &str,
+    params: &[String],
+    id: &str,
+    delta_ids: &[String],
+    slice_ids: &[String],
+) -> Result<(), String> {
+    match action {
+        "capmgr" => {}
+        "memmgr" => validate_memmgr_action(
+            idx,
+            mem_type,
+            op,
+            query,
+            content,
+            scratch_type,
+            label,
+            sql,
+            params,
+            id,
+            delta_ids,
+            slice_ids,
+        )?,
+        "run_bash" => {}
+        "shell_job_status" => {}
+        _ => {}
     }
-    if op.is_empty() {
-        return Err(format!("next_actions[{idx}].input.op_required"));
-    }
-    match (mem_type, op) {
-        ("durable", "query") => {
-            if query.is_empty() {
-                return Err(format!("next_actions[{idx}].input.query_required"));
-            }
-        }
-        ("durable", "schema") => {}
-        ("durable" | "raw_chat", "sql") => {
-            if sql.is_empty() {
-                return Err(format!("next_actions[{idx}].input.sql_required"));
-            }
-            let placeholder_count = sql.matches('?').count();
-            if params.len() != placeholder_count {
-                return Err(format!(
-                    "next_actions[{idx}].input.params_count_mismatch expected={placeholder_count} actual={}",
-                    params.len()
-                ));
-            }
-        }
-        ("durable", "insert" | "update" | "upsert") => {
-            if content.is_empty() {
-                return Err(format!("next_actions[{idx}].input.content_required"));
-            }
-            if matches!(op, "update") && id.is_empty() {
-                return Err(format!("next_actions[{idx}].input.id_required"));
-            }
-        }
-        ("durable", "delete") => {
-            if id.is_empty() {
-                return Err(format!("next_actions[{idx}].input.id_required"));
-            }
-        }
-        ("raw_chat", "query") => {}
-        ("raw_chat", "delete") => {
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_legacy_action_shape(
+    idx: usize,
+    action: &str,
+    query: &str,
+    content: &str,
+    scratch_type: &str,
+    label: &str,
+    sql: &str,
+    params: &[String],
+    operation: &str,
+    id: &str,
+    delta_ids: &[String],
+    slice_ids: &[String],
+) -> Result<(), String> {
+    match action {
+        "chat_history_query" => {}
+        "chat_history_delete" => {
             if id.is_empty() && query.is_empty() {
                 return Err(format!("next_actions[{idx}].input.id_or_query_required"));
             }
         }
-        ("scratch", "write") => {
-            let normalized_type = normalized_scratch_type(scratch_type);
+        "query_memory" | "memory_query" => {
+            if query.is_empty() {
+                return Err(format!("next_actions[{idx}].input.query_required"));
+            }
+        }
+        "memory_schema" => {}
+        "memory_write" | "write_memory" => {
+            if content.is_empty() && query.is_empty() {
+                return Err(format!("next_actions[{idx}].input.content_required"));
+            }
+        }
+        "memory_update" => {
+            if operation.trim().is_empty() {
+                return Err(format!("next_actions[{idx}].input.operation_required"));
+            }
+            if matches!(operation, "insert" | "upsert" | "update") && content.is_empty() {
+                return Err(format!("next_actions[{idx}].input.content_required"));
+            }
+            if matches!(operation, "delete" | "update") && id.is_empty() {
+                return Err(format!("next_actions[{idx}].input.id_required"));
+            }
+        }
+        "scratch_write" => {
+            let normalized_type = memmgr::normalize_scratch_kind(scratch_type);
             if scratch_type.trim().is_empty() {
-                return Err(format!("next_actions[{idx}].input.kind_required"));
+                return Err(format!("next_actions[{idx}].input.type_required"));
             }
             if !matches!(normalized_type.as_str(), "notes" | "context_offload") {
                 return Err(format!(
-                    "next_actions[{idx}].input.kind_unsupported:{scratch_type}"
+                    "next_actions[{idx}].input.type_unsupported:{scratch_type}"
                 ));
             }
             if label.is_empty() {
@@ -3286,32 +3113,35 @@ fn validate_memmgr_action(
                 return Err(format!("next_actions[{idx}].input.prompt_refs_required"));
             }
         }
-        ("scratch", "read" | "delete") => {
+        "scratch_read" | "scratch_delete" => {
             if id.is_empty() {
                 return Err(format!("next_actions[{idx}].input.id_required"));
             }
         }
-        ("scratch", "query") => {}
-        ("context", "shrink") => {
+        "scratch_query" => {}
+        "prompt_shrink" => {
             if delta_ids.is_empty() && slice_ids.is_empty() {
                 return Err(format!("next_actions[{idx}].input.ids_required"));
             }
         }
-        _ => {
-            return Err(format!(
-                "next_actions[{idx}].input.unsupported_memmgr_type_or_op:{mem_type}/{op}"
-            ));
+        "sql_read" | "memory_sql_query" => {
+            if sql.is_empty() {
+                return Err(format!("next_actions[{idx}].input.sql_required"));
+            }
+            let placeholder_count = sql.matches('?').count();
+            if params.len() != placeholder_count {
+                return Err(format!(
+                    "next_actions[{idx}].input.params_count_mismatch expected={placeholder_count} actual={}",
+                    params.len()
+                ));
+            }
         }
+        _ => return Err(format!("next_actions[{idx}].unsupported_action:{action}")),
     }
     Ok(())
 }
 
-fn shell_quote_path(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    format!("'{}'", raw.replace('\'', "'\\''"))
-}
-
-fn parse_envelope(content: &str) -> ParsedEnvelope {
+fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let value: Value = match parse_json_value_from_model_text(content) {
         Ok(value) => value,
         Err(_) => {
@@ -3558,7 +3388,6 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .get("timeout_sec")
                     .or_else(|| action.get("timeout_sec"))
                     .and_then(Value::as_u64);
-                let timeout_ms_provided = timeout_ms_raw.is_some() || timeout_sec_raw.is_some();
                 let after_ms = input
                     .get("after_ms")
                     .or_else(|| action.get("after_ms"))
@@ -3568,159 +3397,47 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .or_else(|| action.get("before_ms"))
                     .and_then(json_i64);
                 let normalized_name = name.as_str();
-                match normalized_name {
-                    "memmgr" => {
-                        validate_memmgr_action(
-                            idx,
-                            &mem_type,
-                            &op,
-                            &query,
-                            &content,
-                            &scratch_type,
-                            &label,
-                            &sql,
-                            &params,
-                            &id,
-                            &delta_ids,
-                            &slice_ids,
-                        )
-                        .map_err(|issue| {
-                            repair_issue = Some(issue);
-                        })
-                        .ok();
-                        if repair_issue.is_some() {
-                            break;
-                        }
-                    }
-                    "chat_history_query" => {}
-                    "chat_history_delete" => {
-                        if id.is_empty() && query.is_empty() {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.id_or_query_required"));
-                            break;
-                        }
-                    }
-                    "query_memory" | "memory_query" => {
-                        if query.is_empty() {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.query_required"));
-                            break;
-                        }
-                    }
-                    "memory_schema" => {}
-                    "memory_write" | "write_memory" => {
-                        if content.is_empty() && query.is_empty() {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.content_required"));
-                            break;
-                        }
-                    }
-                    "memory_update" => {
-                        if operation.trim().is_empty() {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.operation_required"));
-                            break;
-                        }
-                        if matches!(operation.as_str(), "insert" | "upsert" | "update")
-                            && content.is_empty()
-                        {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.content_required"));
-                            break;
-                        }
-                        if matches!(operation.as_str(), "delete" | "update") && id.is_empty() {
-                            repair_issue = Some(format!("next_actions[{idx}].input.id_required"));
-                            break;
-                        }
-                    }
-                    "scratch_write" => {
-                        let normalized_type = normalized_scratch_type(&scratch_type);
-                        if scratch_type.trim().is_empty() {
-                            repair_issue = Some(format!("next_actions[{idx}].input.type_required"));
-                            break;
-                        }
-                        if !matches!(normalized_type.as_str(), "notes" | "context_offload") {
-                            repair_issue = Some(format!(
-                                "next_actions[{idx}].input.type_unsupported:{scratch_type}"
-                            ));
-                            break;
-                        }
-                        if label.is_empty() {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.label_required"));
-                            break;
-                        }
-                        if normalized_type == "notes" && content.is_empty() {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.content_required"));
-                            break;
-                        }
-                        if normalized_type == "context_offload"
-                            && delta_ids.is_empty()
-                            && slice_ids.is_empty()
-                        {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.prompt_refs_required"));
-                            break;
-                        }
-                    }
-                    "scratch_read" => {
-                        if id.is_empty() {
-                            repair_issue = Some(format!("next_actions[{idx}].input.id_required"));
-                            break;
-                        }
-                    }
-                    "scratch_query" => {}
-                    "scratch_delete" => {
-                        if id.is_empty() {
-                            repair_issue = Some(format!("next_actions[{idx}].input.id_required"));
-                            break;
-                        }
-                    }
-                    "prompt_shrink" => {
-                        if delta_ids.is_empty() && slice_ids.is_empty() {
-                            repair_issue = Some(format!("next_actions[{idx}].input.ids_required"));
-                            break;
-                        }
-                    }
-                    "shell_job_status" => {
-                        if job_id.is_empty() {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.job_id_required"));
-                            break;
-                        }
-                        if !timeout_ms_provided {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.timeout_ms_required"));
-                            break;
-                        }
-                    }
-                    "run_bash" => {
-                        if command.is_empty() && read_back_command.is_empty() {
-                            repair_issue =
-                                Some(format!("next_actions[{idx}].input.command_required"));
-                            break;
-                        }
-                    }
-                    "sql_read" | "memory_sql_query" => {
-                        if sql.is_empty() {
-                            repair_issue = Some(format!("next_actions[{idx}].input.sql_required"));
-                            break;
-                        }
-                        let placeholder_count = sql.matches('?').count();
-                        if params.len() != placeholder_count {
-                            repair_issue = Some(format!(
-                                "next_actions[{idx}].input.params_count_mismatch expected={placeholder_count} actual={}",
-                                params.len()
-                            ));
-                            break;
-                        }
-                    }
-                    _ => {
-                        repair_issue =
-                            Some(format!("next_actions[{idx}].unsupported_action:{name}"));
+                if capabilities.contains_tool(normalized_name) {
+                    if let Err(issue) = capabilities.validate_action_input(normalized_name, input) {
+                        repair_issue = Some(format!("next_actions[{idx}].{issue}"));
                         break;
                     }
+                }
+                if capabilities.contains_tool(normalized_name) {
+                    if let Err(issue) = validate_manifest_backed_action_extra(
+                        idx,
+                        normalized_name,
+                        &mem_type,
+                        &op,
+                        &query,
+                        &content,
+                        &scratch_type,
+                        &label,
+                        &sql,
+                        &params,
+                        &id,
+                        &delta_ids,
+                        &slice_ids,
+                    ) {
+                        repair_issue = Some(issue);
+                        break;
+                    }
+                } else if let Err(issue) = validate_legacy_action_shape(
+                    idx,
+                    normalized_name,
+                    &query,
+                    &content,
+                    &scratch_type,
+                    &label,
+                    &sql,
+                    &params,
+                    &operation,
+                    &id,
+                    &delta_ids,
+                    &slice_ids,
+                ) {
+                    repair_issue = Some(issue);
+                    break;
                 }
                 let parsed_timeout_ms = timeout_ms_raw
                     .or_else(|| timeout_sec_raw.map(|seconds| seconds.saturating_mul(1000)));
@@ -3744,6 +3461,7 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 next_actions.push(ParsedAction {
                     action: name,
                     intent: intent.to_string(),
+                    raw_input: input.clone(),
                     mem_type,
                     op,
                     query,
@@ -4203,14 +3921,14 @@ fn execute_guarded_bash(
     } else {
         primary_command
     };
-    if let Err(reason) = validate_bash_request(command_to_run) {
+    if let Err(reason) = shell_exec::validate_bash_request(command_to_run) {
         return ActionExecution::Completed(format!(
             "Action result: run_bash\ncommand: {}\nerror: {}",
             command_to_run, reason
         ));
     }
     if !background && !read_back.is_empty() && read_back != command_to_run {
-        if let Err(reason) = validate_bash_request(read_back) {
+        if let Err(reason) = shell_exec::validate_bash_request(read_back) {
             return ActionExecution::Completed(format!(
                 "Action result: run_bash\ncommand: {}\nerror: {}",
                 read_back, reason
@@ -4239,11 +3957,11 @@ fn execute_guarded_bash(
     if background {
         return ActionExecution::Completed(shell_jobs.spawn(command_to_run));
     }
-    let mut result = execute_one_bash(command_to_run, timeout_ms);
+    let mut result = shell_exec::execute_one_bash(command_to_run, timeout_ms);
     if !background && !read_back.is_empty() && read_back != command_to_run {
         result.push_str("\n\n");
         result.push_str("Read-back result:\n");
-        result.push_str(&execute_one_bash(read_back, timeout_ms));
+        result.push_str(&shell_exec::execute_one_bash(read_back, timeout_ms));
     }
     if large_readback_opt_in {
         result.push_str(
@@ -4272,12 +3990,12 @@ fn execute_approved_bash(
     let mut result = if background {
         shell_jobs.spawn(command_to_run)
     } else {
-        execute_one_bash(command_to_run, timeout_ms)
+        shell_exec::execute_one_bash(command_to_run, timeout_ms)
     };
     if !read_back.is_empty() && read_back != command_to_run {
         result.push_str("\n\n");
         result.push_str("Read-back result:\n");
-        result.push_str(&execute_one_bash(read_back, timeout_ms));
+        result.push_str(&shell_exec::execute_one_bash(read_back, timeout_ms));
     }
     if large_readback_opt_in {
         result.push_str(
@@ -4291,75 +4009,6 @@ fn execute_approved_bash(
     result
 }
 
-fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
-    let spawn = Command::new("/bin/sh")
-        .arg("-lc")
-        .arg(command)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match spawn {
-        Ok(child) => child,
-        Err(_) => {
-            return format!(
-                "Action result: run_bash\ncommand: {}\nerror: command_failed",
-                command
-            )
-        }
-    };
-    let started = std::time::Instant::now();
-    let timeout = Duration::from_millis(timeout_ms.max(1000).min(15000));
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return format!(
-                    "Action result: run_bash\ncommand: {}\nerror: timeout",
-                    command
-                );
-            }
-            Ok(None) => thread::sleep(Duration::from_millis(50)),
-            Err(_) => {
-                return format!(
-                    "Action result: run_bash\ncommand: {}\nerror: command_failed",
-                    command
-                )
-            }
-        }
-    }
-    match child.wait_with_output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let mut combined = String::new();
-            if !stdout.trim().is_empty() {
-                combined.push_str(stdout.trim_end());
-            }
-            if !stderr.trim().is_empty() {
-                if !combined.is_empty() {
-                    combined.push('\n');
-                }
-                combined.push_str("stderr: ");
-                combined.push_str(stderr.trim_end());
-            }
-            if combined.is_empty() {
-                combined = "<no output>".to_string();
-            }
-            format!(
-                "Action result: run_bash\ncommand: {}\nstatus: {}\noutput:\n{}",
-                command,
-                output.status.code().unwrap_or(-1),
-                compact_text(&combined, 4000)
-            )
-        }
-        Err(_) => format!(
-            "Action result: run_bash\ncommand: {}\nerror: command_failed",
-            command
-        ),
-    }
-}
 fn format_expect_check_result(command: &str, bash_result: &str) -> String {
     let verdict = if bash_result_status(bash_result) == Some(0) {
         "PASS"
@@ -4370,6 +4019,23 @@ fn format_expect_check_result(command: &str, bash_result: &str) -> String {
         "Expect check:\ncommand: {}\ncontrolled_bash_result:\n{}\nverdict: {}",
         command, bash_result, verdict
     )
+}
+
+fn rewrite_memmgr_result_header(result: String, legacy_action: &str) -> String {
+    let mut lines = result.lines();
+    if lines.next() != Some("Action result: memmgr") {
+        return result;
+    }
+    let mut rewritten = vec![format!("Action result: {legacy_action}")];
+    let mut skipping_envelope = true;
+    for line in lines {
+        if skipping_envelope && (line.starts_with("type: ") || line.starts_with("op: ")) {
+            continue;
+        }
+        skipping_envelope = false;
+        rewritten.push(line.to_string());
+    }
+    rewritten.join("\n")
 }
 
 fn expect_check_passed(expect_body: &str) -> bool {
@@ -4386,17 +4052,6 @@ fn bash_result_status(result: &str) -> Option<i32> {
     })
 }
 
-fn validate_bash_request(command: &str) -> Result<(), String> {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return Err("command_required".to_string());
-    }
-    if trimmed.len() > 2000 {
-        return Err("command_too_long".to_string());
-    }
-    Ok(())
-}
-
 fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {
@@ -4404,14 +4059,6 @@ fn compact_text(text: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
-}
-
-fn normalized_scratch_type(scratch_type: &str) -> String {
-    match scratch_type.trim() {
-        "context_offload" => "context_offload".to_string(),
-        "notes" => "notes".to_string(),
-        other => other.to_string(),
-    }
 }
 
 fn scratch_label_for_display(record: &ScratchNoteRecord) -> String {
@@ -4427,7 +4074,7 @@ fn format_scratch_write_result(record: &ScratchNoteRecord) -> String {
         "Action result: scratch_write\nid: {}\nlabel: {}\ntype: {}\nprompt_delta_ids: {}\nprompt_slice_ids: {}\ncontent_preview: {}",
         record.id,
         scratch_label_for_display(record),
-        normalized_scratch_type(&record.scratch_type),
+        memmgr::normalize_scratch_kind(&record.scratch_type),
         comma_or_none(&record.prompt_delta_ids),
         comma_or_none(&record.prompt_slice_ids),
         compact_text(&record.content, 320)
@@ -4439,7 +4086,7 @@ fn format_scratch_read_result(record: &ScratchNoteRecord) -> String {
         "Action result: scratch_read\nid: {}\nfound: true\nlabel: {}\ntype: {}\nprompt_delta_ids: {}\nprompt_slice_ids: {}\ncontent:\n{}",
         record.id,
         scratch_label_for_display(record),
-        normalized_scratch_type(&record.scratch_type),
+        memmgr::normalize_scratch_kind(&record.scratch_type),
         comma_or_none(&record.prompt_delta_ids),
         comma_or_none(&record.prompt_slice_ids),
         record.content

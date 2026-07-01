@@ -1,0 +1,7 @@
+kind: skill
+id: release_quality_gate
+title: Release quality gate
+summary: Verify tests, CI, release notes, sensitive information, and version state before publishing a release.
+when_to_use: |
+  Use when preparing, auditing, or deciding whether to publish a Timem release.
+entry: instructions.md

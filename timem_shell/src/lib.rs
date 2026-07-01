@@ -644,6 +644,7 @@ pub struct CliOptions {
     pub timeout_secs: Option<u64>,
     pub max_llm_output_tokens: Option<u32>,
     pub max_llm_input_tokens: Option<u32>,
+    pub capabilities_dir: Option<String>,
     pub once_json_input: Option<String>,
     pub supporting_context: Option<String>,
     pub bash_approval: Option<String>,
@@ -694,6 +695,10 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
             }
             ("--max-llm-input", Some(v)) => {
                 options.max_llm_input_tokens = parse_token_count(&v);
+                idx += 2;
+            }
+            ("--capabilities-dir", Some(v)) => {
+                options.capabilities_dir = Some(v);
                 idx += 2;
             }
             ("--once-json", Some(v)) => {
@@ -1745,6 +1750,8 @@ mod tests {
             "10K",
             "--max-llm-input",
             "100K",
+            "--capabilities-dir",
+            "/tmp/timem-capabilities",
             "--once-json",
             "你好",
             "--supporting-context",
@@ -1766,6 +1773,10 @@ mod tests {
         assert_eq!(options.timeout_secs, Some(33));
         assert_eq!(options.max_llm_output_tokens, Some(10_000));
         assert_eq!(options.max_llm_input_tokens, Some(100_000));
+        assert_eq!(
+            options.capabilities_dir.as_deref(),
+            Some("/tmp/timem-capabilities")
+        );
         assert_eq!(options.once_json_input.as_deref(), Some("你好"));
         assert_eq!(
             options.supporting_context.as_deref(),
