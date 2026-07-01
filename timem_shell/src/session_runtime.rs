@@ -786,6 +786,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn session_turn_guarded_finalize_pass_skips_extra_model_round() {
+        let dir = tmp_dir("guarded_finalize_session_pass");
+        let audit = dir.join("audit.jsonl");
+        let output_file = dir.join("guarded.txt");
+        let command = format!("printf guarded > {}", output_file.display());
+        let expect = format!("test -s {}", output_file.display());
+        let response = format!(
+            r#"{{"report_job_progress":"文件已生成并验证。","continue":false,"next_actions":[{{"action":"run_bash","intent":"Write and verify guarded output.","input":{{"command":{},"timeout_ms":5000,"expect":{},"expect_timeout_ms":5000}}}}]}}"#,
+            serde_json::to_string(&command).unwrap(),
+            serde_json::to_string(&expect).unwrap()
+        );
+
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut model = ReplayModel::new([Ok(llm(response, 3_000, false))]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "生成并验证文件",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "文件已生成并验证。");
+        assert_eq!(std::fs::read_to_string(&output_file).unwrap(), "guarded");
+        assert_eq!(model.prompts.len(), 1);
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert!(audit_text.contains("\"turn_final\""));
+        let action_audit =
+            std::fs::read_to_string(dir.join("audit").join("action_audit.json")).unwrap();
+        assert!(action_audit.contains("guarded_finalize_expect_pass"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     struct ScratchOffloadReplayModel {
         prompts: Vec<String>,
     }

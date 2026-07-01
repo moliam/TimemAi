@@ -393,11 +393,16 @@ When `continue` is omitted, runtime treats it as `true` and adds a note to the
 next prompt asking the model to be explicit next time. With `continue:true`,
 `next_actions` is required and `report_job_progress` is shown in the
 Thought/Action panel with a `▰▱` prefix. With `continue:false`,
-`report_job_progress` is required, `next_actions` must be absent, and the text
-is shown as the final answer. Every action needs a top-level `intent`; the shell
-displays it while the action runs. The parser also tolerates common provider
-drift such as a valid JSON envelope embedded in Markdown text, but it never
-shows raw protocol fragments to the user.
+`report_job_progress` is required. Usually `next_actions` is absent and the text
+is shown as the final answer. The guarded finalize exception allows
+`continue:false + next_actions` only when the last action carries `expect` and
+`expect_timeout_ms`; runtime executes the actions, then runs `expect` through
+the same controlled Bash approval/safety path as `run_bash`. Only a passing
+expect check can show `report_job_progress` as the final answer. Every action
+needs a top-level `intent`; the shell displays it while the action runs. The
+parser also tolerates common provider drift such as a valid JSON envelope
+embedded in Markdown text, but it never shows raw protocol fragments to the
+user.
 
 ### Action Object
 

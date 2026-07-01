@@ -198,10 +198,12 @@ struct ParsedAction {
     limit: usize,
     after_ms: Option<i64>,
     before_ms: Option<i64>,
+    expect: String,
+    expect_timeout_ms: u64,
 }
 impl ParsedAction {
     fn audit_input(&self) -> Value {
-        match self.action.as_str() {
+        let mut input = match self.action.as_str() {
             "memmgr" => json!({
                 "type": self.mem_type,
                 "op": self.op,
@@ -277,7 +279,17 @@ impl ParsedAction {
                 "after_ms": self.after_ms,
                 "before_ms": self.before_ms,
             }),
+        };
+        if !self.expect.is_empty() {
+            if let Some(object) = input.as_object_mut() {
+                object.insert("expect".to_string(), json!(self.expect));
+                object.insert(
+                    "expect_timeout_ms".to_string(),
+                    json!(self.expect_timeout_ms),
+                );
+            }
         }
+        input
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,24 +757,105 @@ impl AgentCore {
             });
         }
         if !parsed.continue_work {
-            for candidate in parsed.memory_candidates {
-                if self.memory.write(&candidate).is_ok() {
-                    self.current_stats.tool_calls += 1;
-                    self.current_stats.mem_writes += 1;
+            if parsed.next_actions.is_empty() {
+                for candidate in parsed.memory_candidates {
+                    if self.memory.write(&candidate).is_ok() {
+                        self.current_stats.tool_calls += 1;
+                        self.current_stats.mem_writes += 1;
+                    }
+                }
+                let final_text = parsed.report_job_progress.trim().to_string();
+                slices.push((
+                    "llm_response".to_string(),
+                    format!("Response shown to user:\n{}", final_text),
+                ));
+                self.append_delta(slices);
+                return CoreStep::Final(TurnFinal {
+                    response_to_user: final_text,
+                    stats: self.current_stats.clone(),
+                    profile_label: self.profile.label(),
+                    repair_issue: None,
+                });
+            }
+            let pending_final_text = parsed.report_job_progress.trim().to_string();
+            let last_idx = parsed.next_actions.len() - 1;
+            let expect_cmd = parsed.next_actions[last_idx].expect.clone();
+            let expect_timeout = parsed.next_actions[last_idx].expect_timeout_ms;
+            if !pending_final_text.is_empty() {
+                slices.push((
+                    "llm_progress".to_string(),
+                    format!("Job progress shown to user:\n{}", pending_final_text),
+                ));
+            }
+            let mut result_lines: Vec<String> = Vec::new();
+            for action in parsed.next_actions {
+                match self.execute_action(action) {
+                    ActionExecution::Completed(result) => result_lines.push(result),
+                    ActionExecution::NeedsApproval(pending) => {
+                        if !result_lines.is_empty() {
+                            slices.push((
+                                "result_of_llm_action".to_string(),
+                                result_lines.join("\n\n"),
+                            ));
+                        }
+                        self.append_delta(slices);
+                        let request = pending.request.clone();
+                        self.pending_approval = Some(pending);
+                        return CoreStep::NeedsUserApproval { request };
+                    }
                 }
             }
-            let final_text = parsed.report_job_progress.trim().to_string();
+            if !result_lines.is_empty() {
+                slices.push((
+                    "result_of_llm_action".to_string(),
+                    result_lines.join("\n\n"),
+                ));
+            }
+            let expect_body = match self.run_guarded_finalize_expect(&expect_cmd, expect_timeout) {
+                ActionExecution::Completed(result) => result,
+                ActionExecution::NeedsApproval(pending) => {
+                    self.append_delta(slices);
+                    let request = pending.request.clone();
+                    self.pending_approval = Some(pending);
+                    return CoreStep::NeedsUserApproval { request };
+                }
+            };
+            let pass = expect_check_passed(&expect_body);
+            slices.push(("result_of_llm_action".to_string(), expect_body));
+            if pass {
+                for candidate in parsed.memory_candidates {
+                    if self.memory.write(&candidate).is_ok() {
+                        self.current_stats.tool_calls += 1;
+                        self.current_stats.mem_writes += 1;
+                    }
+                }
+                slices.push((
+                    "llm_response".to_string(),
+                    format!("Response shown to user:\n{}", pending_final_text),
+                ));
+                self.append_delta(slices);
+                return CoreStep::Final(TurnFinal {
+                    response_to_user: pending_final_text,
+                    stats: self.current_stats.clone(),
+                    profile_label: self.profile.label(),
+                    repair_issue: None,
+                });
+            }
             slices.push((
-                "llm_response".to_string(),
-                format!("Response shown to user:\n{}", final_text),
+                "runtime_note".to_string(),
+                "Note: 你上轮用 continue:false + expect 声明完成，但 expect 命令 exit!=0。请根据以上证据修正后再回复。".to_string(),
             ));
             self.append_delta(slices);
-            return CoreStep::Final(TurnFinal {
-                response_to_user: final_text,
-                stats: self.current_stats.clone(),
-                profile_label: self.profile.label(),
-                repair_issue: None,
-            });
+            self.append_in_turn_shrink_review_if_needed();
+            if self.remaining_rounds() == 0 {
+                return CoreStep::RoundLimitReached {
+                    max_rounds: self.round_budget,
+                };
+            }
+            return CoreStep::NeedModel {
+                prompt: self.render_prompt(),
+                rounds_remaining: self.remaining_rounds(),
+            };
         }
 
         if !parsed.report_job_progress.trim().is_empty() {
@@ -1769,6 +1862,74 @@ impl AgentCore {
                     "reason": pending.request.reason,
                 }),
                 result_summary: Some(compact_text(result, 2_000)),
+            },
+            turn_id,
+            &self.current_action_user_question,
+        );
+    }
+
+    fn run_guarded_finalize_expect(&mut self, command: &str, timeout_ms: u64) -> ActionExecution {
+        let timeout_ms = timeout_ms.clamp(1000, 15_000);
+        let execution = execute_guarded_bash(
+            command,
+            "",
+            false,
+            false,
+            timeout_ms,
+            self.bash_approval_mode,
+            "Verify final answer before showing it.",
+            &self.shell_jobs,
+        );
+        match execution {
+            ActionExecution::Completed(result) => {
+                let body = format_expect_check_result(command, &result);
+                let status = if expect_check_passed(&body) {
+                    "guarded_finalize_expect_pass"
+                } else {
+                    "guarded_finalize_expect_fail"
+                };
+                self.record_guarded_finalize_audit(command, timeout_ms, status, Some(&body));
+                ActionExecution::Completed(body)
+            }
+            ActionExecution::NeedsApproval(pending) => {
+                let summary = format!(
+                    "Expect check:\ncommand: {}\nstatus: needs_user_approval\napproval_id: {}\nverdict: PENDING",
+                    command, pending.request.approval_id
+                );
+                self.record_guarded_finalize_audit(
+                    command,
+                    timeout_ms,
+                    "guarded_finalize_expect_needs_user_approval",
+                    Some(&summary),
+                );
+                ActionExecution::NeedsApproval(pending)
+            }
+        }
+    }
+
+    fn record_guarded_finalize_audit(
+        &self,
+        command: &str,
+        timeout_ms: u64,
+        status: &str,
+        result: Option<&str>,
+    ) {
+        let turn_id = self
+            .current_action_turn_id
+            .as_deref()
+            .unwrap_or("unknown_turn");
+        self.action_audit.record_action(
+            ActionAuditEntry {
+                time_ms: now_ms(),
+                round: self.current_round.max(1),
+                action: "guarded_finalize_expect".to_string(),
+                intent: "Verify final answer before showing it.".to_string(),
+                status: status.to_string(),
+                input: json!({
+                    "command": command,
+                    "timeout_ms": timeout_ms,
+                }),
+                result_summary: result.map(|text| compact_text(text, 2_000)),
             },
             turn_id,
             &self.current_action_user_question,
@@ -3568,6 +3729,18 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 } else {
                     parsed_timeout_ms.unwrap_or(5000).clamp(1000, 15000)
                 };
+                let expect = input
+                    .get("expect")
+                    .or_else(|| action.get("expect"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let expect_timeout_ms = input
+                    .get("expect_timeout_ms")
+                    .or_else(|| action.get("expect_timeout_ms"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 next_actions.push(ParsedAction {
                     action: name,
                     intent: intent.to_string(),
@@ -3597,6 +3770,8 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                         .unwrap_or(5) as usize,
                     after_ms,
                     before_ms,
+                    expect,
+                    expect_timeout_ms,
                 });
             }
         } else if !next_actions_value.is_null() {
@@ -3631,8 +3806,36 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
     if repair_issue.is_none() && !continue_work && report_job_progress.trim().is_empty() {
         repair_issue = Some("report_job_progress_required_when_continue_false".to_string());
     }
+    // guarded finalize validation: continue:false + next_actions requires expect on last action
+    if repair_issue.is_none() && continue_work {
+        for (i, a) in next_actions.iter().enumerate() {
+            if !a.expect.is_empty() {
+                repair_issue = Some(format!("next_actions[{i}].expect_requires_continue_false"));
+                break;
+            }
+        }
+    }
     if repair_issue.is_none() && !continue_work && !next_actions.is_empty() {
-        repair_issue = Some("continue_false_must_not_include_next_actions".to_string());
+        let last_idx = next_actions.len() - 1;
+        for (i, a) in next_actions.iter().enumerate() {
+            if i != last_idx && !a.expect.is_empty() {
+                repair_issue = Some(format!(
+                    "next_actions[{i}].expect_only_allowed_on_last_action"
+                ));
+                break;
+            }
+        }
+        if repair_issue.is_none() {
+            let last = &next_actions[last_idx];
+            if last.expect.is_empty() {
+                repair_issue =
+                    Some("continue_false_next_actions_require_expect_on_last_action".to_string());
+            } else if last.expect_timeout_ms == 0 {
+                repair_issue = Some(format!(
+                    "next_actions[{last_idx}].expect_timeout_ms_required"
+                ));
+            }
+        }
     }
     if repair_issue.is_none() && continue_work && next_actions.is_empty() {
         repair_issue = Some("next_actions_required_when_continue_true".to_string());
@@ -4157,6 +4360,32 @@ fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
         ),
     }
 }
+fn format_expect_check_result(command: &str, bash_result: &str) -> String {
+    let verdict = if bash_result_status(bash_result) == Some(0) {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    format!(
+        "Expect check:\ncommand: {}\ncontrolled_bash_result:\n{}\nverdict: {}",
+        command, bash_result, verdict
+    )
+}
+
+fn expect_check_passed(expect_body: &str) -> bool {
+    expect_body
+        .lines()
+        .any(|line| line.trim() == "verdict: PASS")
+}
+
+fn bash_result_status(result: &str) -> Option<i32> {
+    result.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("status: ")
+            .and_then(|raw| raw.trim().parse().ok())
+    })
+}
+
 fn validate_bash_request(command: &str) -> Result<(), String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {

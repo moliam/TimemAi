@@ -3445,3 +3445,125 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(!static_prompt.contains("theme_workflow"));
     assert!(!static_prompt.contains("rounds_guard"));
 }
+
+#[test]
+fn guarded_finalize_success_finalizes_when_expect_exits_zero() {
+    let memory_dir = tmp_dir("guarded_finalize_ok");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("完成任务", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"query_memory","intent":"Verify.","input":{"query":"x","limit":1,"expect":"true","expect_timeout_ms":2000}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_ = match step {
+        CoreStep::Final(f) => f,
+        other => panic!("expected Final, got {other:?}"),
+    };
+    assert_eq!(final_.response_to_user, "任务已完成");
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("prompt_type: llm_response"));
+    assert!(prompt.contains("Expect check:"));
+    assert!(prompt.contains("verdict: PASS") || prompt.contains("status: 0"));
+    let audit = fs::read_to_string(memory_dir.join("audit").join("action_audit.json")).unwrap();
+    assert!(audit.contains("guarded_finalize_expect"));
+    assert!(audit.contains("guarded_finalize_expect_pass"));
+    assert!(audit.contains("\"expect\""));
+    assert!(audit.contains("\"true\""));
+}
+
+#[test]
+fn guarded_finalize_blocks_final_when_expect_nonzero() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("guarded_finalize_fail"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("完成任务", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"query_memory","intent":"Verify.","input":{"query":"x","limit":1,"expect":"false","expect_timeout_ms":2000}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(
+        !matches!(step, CoreStep::Final(_)),
+        "expect!=0 must not finalize, got {step:?}"
+    );
+    let prompt = core.render_prompt();
+    assert!(
+        prompt.contains("expect 命令 exit!=0"),
+        "missing runtime_note about expect failure"
+    );
+    assert!(
+        !prompt.contains("prompt_type: llm_response"),
+        "must not emit llm_response slice on expect failure"
+    );
+}
+
+#[test]
+fn guarded_finalize_expect_respects_bash_approval_mode() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("guarded_finalize_approval"),
+    );
+    let _ = core.begin_turn("完成任务", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"query_memory","intent":"Verify.","input":{"query":"x","limit":1,"expect":"true","expect_timeout_ms":2000}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let request = match step {
+        CoreStep::NeedsUserApproval { request } => request,
+        other => panic!("expected approval before expect bash, got {other:?}"),
+    };
+    assert_eq!(request.command, "true");
+    assert_eq!(request.intent, "Verify final answer before showing it.");
+}
+
+#[test]
+fn guarded_finalize_requires_expect_timeout() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("guarded_finalize_missing_timeout"),
+    );
+    let _ = core.begin_turn("完成任务", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"query_memory","intent":"Verify.","input":{"query":"x","limit":1,"expect":"true"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected protocol repair, got {other:?}"),
+    };
+    assert!(prompt.contains("expect_timeout_ms_required"));
+}
+
+#[test]
+fn guarded_finalize_rejects_expect_on_non_last_action() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("guarded_finalize_non_last"),
+    );
+    let _ = core.begin_turn("完成任务", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"query_memory","intent":"First.","input":{"query":"x","limit":1,"expect":"true","expect_timeout_ms":2000}},{"action":"query_memory","intent":"Last.","input":{"query":"y","limit":1,"expect":"true","expect_timeout_ms":2000}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected protocol repair, got {other:?}"),
+    };
+    assert!(prompt.contains("expect_only_allowed_on_last_action"));
+}

@@ -11,6 +11,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Model response protocol now uses `report_job_progress` plus `continue`.
   Progress can be shown in the Thought/Action panel while actions continue,
   and `continue:false` marks the final user-facing summary.
+- Guarded finalize allows `continue:false` plus a final `expect` check to skip
+  an extra model round only after runtime-controlled verification passes.
 - Unified model-facing memory protocol: `memmgr` now covers durable memory,
   raw chat history, scratch memory, and prompt-context shrink through
   `type`/`op` fields.

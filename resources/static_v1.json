@@ -122,7 +122,7 @@
           "durable": "boolean; optional. Default false. Tell the runtime whether to include the thought for you in future round's prompt text."
         },
         "continue?": "boolean; optional. Default true when absent. When absent, runtime treats it as true and adds a note in the next prompt saying continue was omitted. Set false only for final answer.",
-        "next_actions?": "array<string|object>; required when continue is true",
+        "next_actions?": "array<string|object>; required when continue is true. With continue false, allowed only for guarded finalize: the last action must include expect and expect_timeout_ms.",
         "continuation?": {
           "carryover_needed?": "boolean",
           "next_turn_summary?": "string",
@@ -133,14 +133,14 @@
         "diagnostics.self_audit?": "string; enum one_of: memory_write_worthy|fact_correction|context_shrink_recommended|scratch_checkpoint_needed|evidence_insufficient|none. Output the matching enum value when the corresponding situation is triggered; otherwise omit.",
         "diagnostics.note?": "string",
         "acceptance_check?": "object; optional metadata. acceptance_check.missing_info array may describe what the model is waiting for.",
-        "report_job_progress?": "string; optional progress text. With continue true, it is progress shown in the Thought / Action panel and next_actions must continue the work. With continue false, it is the final answer shown to the user and next_actions must be absent."
+        "report_job_progress?": "string; optional progress text. With continue true, it is progress shown in the Thought / Action panel and next_actions must continue the work. With continue false and no next_actions, it is shown as the final answer immediately. With continue false plus guarded finalize next_actions, runtime runs the actions and a controlled expect check; only if expect passes is this text shown as the final answer."
       },
       "additional_properties": "allowed for forward compatibility; keep them sparse",
       "action_object_spec": {
         "description": "Each item in next_actions must be an object with these fields:",
         "action": "string; required. Canonical tool name from Tool_capability.tool_catalog. Do not invent names.",
         "intent": "string; required. Concise description of why this action is being taken. Runtime rejects missing intent.",
-        "input": "object; required. Tool-specific input fields as defined in tool_catalog."
+        "input": "object; required. Tool-specific input fields as defined in tool_catalog. For guarded finalize only, the last action input may include expect and expect_timeout_ms; expect is executed through the same controlled Bash approval/safety path as run_bash."
       }
     },
     "examples": {
@@ -160,6 +160,21 @@
               "op": "query",
               "query": "son birthday",
               "limit": 5
+            }
+          }
+        ]
+      },
+      "guarded_finalize": {
+        "report_job_progress": "任务已完成。",
+        "continue": false,
+        "next_actions": [
+          {
+            "action": "run_bash",
+            "intent": "Verify the generated file exists before finalizing.",
+            "input": {
+              "command": "test -s output.txt",
+              "expect": "test -s output.txt",
+              "expect_timeout_ms": 5000
             }
           }
         ]
