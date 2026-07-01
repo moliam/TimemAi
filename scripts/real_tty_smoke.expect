@@ -92,6 +92,31 @@ proc assert_contains {scenario output needle} {
     }
 }
 
+proc wait_for_text {scenario needle timeout_message eof_message} {
+    set output ""
+    expect {
+        -re "\033\\\[6n" {
+            append output $expect_out(buffer)
+            send "\033\[24;1R"
+            if {[string first $needle $output] >= 0} {
+                return $output
+            }
+            exp_continue
+        }
+        -re $needle {
+            append output $expect_out(buffer)
+            return $output
+        }
+        timeout {
+            error $timeout_message
+        }
+        eof {
+            error $eof_message
+        }
+    }
+    return $output
+}
+
 proc assert_cancelled {scenario output} {
     assert_contains $scenario $output "已取消当前输入"
 }
@@ -432,19 +457,11 @@ proc run_config_value_cancel_smoke {} {
         }
     }
     send "\003"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "已取消配置修改" {}
-        timeout {
-            error "timeout waiting for Ctrl+C config cancellation"
-        }
-        eof {
-            error "Ctrl+C exited Timem while editing config value"
-        }
-    }
+    wait_for_text \
+        "config value Ctrl+C cancel" \
+        "已取消配置修改" \
+        "timeout waiting for Ctrl+C config cancellation" \
+        "Ctrl+C exited Timem while editing config value"
     wait_prompt
 
     send "/config\r"
@@ -476,19 +493,11 @@ proc run_config_value_cancel_smoke {} {
         }
     }
     send "\033"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "已取消配置修改" {}
-        timeout {
-            error "timeout waiting for Esc config cancellation"
-        }
-        eof {
-            error "Esc exited Timem while editing config value"
-        }
-    }
+    wait_for_text \
+        "config value Esc cancel" \
+        "已取消配置修改" \
+        "timeout waiting for Esc config cancellation" \
+        "Esc exited Timem while editing config value"
     wait_prompt
     exit_timem
 }
@@ -510,19 +519,11 @@ proc run_config_menu_cancel_smoke {} {
         }
     }
     send "\003"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "已取消配置修改" {}
-        timeout {
-            error "timeout waiting for Ctrl+C config menu cancellation"
-        }
-        eof {
-            error "Ctrl+C exited Timem while selecting config field"
-        }
-    }
+    wait_for_text \
+        "config menu Ctrl+C cancel" \
+        "已取消配置修改" \
+        "timeout waiting for Ctrl+C config menu cancellation" \
+        "Ctrl+C exited Timem while selecting config field"
     wait_prompt
 
     send "/config\r"
@@ -540,19 +541,11 @@ proc run_config_menu_cancel_smoke {} {
         }
     }
     send "\033"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "已取消配置修改" {}
-        timeout {
-            error "timeout waiting for Esc config menu cancellation"
-        }
-        eof {
-            error "Esc exited Timem while selecting config field"
-        }
-    }
+    wait_for_text \
+        "config menu Esc cancel" \
+        "已取消配置修改" \
+        "timeout waiting for Esc config menu cancellation" \
+        "Esc exited Timem while selecting config field"
     wait_prompt
     exit_timem
 }
@@ -731,19 +724,11 @@ proc run_workspace_add_cancel_smoke {} {
         }
     }
     send "\003"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "已取消 workspace 修改" {}
-        timeout {
-            error "timeout waiting for Ctrl+C workspace cancellation"
-        }
-        eof {
-            error "Ctrl+C exited Timem while editing workspace value"
-        }
-    }
+    wait_for_text \
+        "workspace add Ctrl+C cancel" \
+        "已取消 workspace 修改" \
+        "timeout waiting for Ctrl+C workspace cancellation" \
+        "Ctrl+C exited Timem while editing workspace value"
     wait_prompt
     exit_timem
 }
