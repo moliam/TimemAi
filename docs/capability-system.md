@@ -123,7 +123,7 @@ teaches the model how to perform a class of work. Small skills may be one file;
 large skills should be folders with a manifest and resources:
 
 ```text
-skills/release_quality_gate/
+skills/<skill_id>/
   skill.yaml
   instructions.md
   checklist.md
@@ -150,11 +150,11 @@ Expected shape:
 ```json
 {
   "action": "capmgr",
-  "intent": "Load the release quality skill checklist.",
+  "intent": "Load the needed skill body before using it.",
   "input": {
     "op": "load",
     "kind": "skill",
-    "id": "release_quality_gate"
+    "id": "skill_id"
   }
 }
 ```
@@ -175,6 +175,11 @@ Planned operations:
 
 `capmgr` must not expose a capability id unless the backing executor or
 loadable resource exists.
+
+Concrete skills are loaded through overlays or examples, not compiled into
+`agent_core` by default. For example, `examples/capabilities/skills` contains a
+release-quality skill that can be loaded by pointing `TIMEM_CAPABILITIES_DIR` at
+the example capability root.
 
 ## Iteration Rule
 

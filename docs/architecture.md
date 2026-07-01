@@ -39,6 +39,9 @@ flowchart LR
 - Parses and repairs model response envelopes.
 - Loads capability manifests and renders the model-facing tool catalog from the
   same JSON Schema style IDL used to validate canonical tool actions.
+- Renders `prompt_0` and dynamic prompt delta/slice segments through
+  `agent_core::prompt_render`, so prompt generation is a module boundary rather
+  than ad hoc string assembly in the turn loop.
 - Executes structured actions: memory reads/writes, chat-history reads,
   read-only SQL, and bounded `run_bash`.
 - Routes memory-space file access through `MemGuard` so multiple CLI processes

@@ -5,13 +5,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "== shell scripts syntax =="
-bash -n install.sh uninstall.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/ci.sh
+bash -n install.sh uninstall.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/ci.sh
 
 echo "== install script logic =="
 scripts/install_logic_test.sh
 
 echo "== test contract check =="
 scripts/test_contract_check.sh
+
+echo "== static prompt snapshot =="
+scripts/update_static_prompt_snapshot.sh --check
 
 echo "== sensitive scan: current tree =="
 scripts/sensitive_scan.sh --current

@@ -11,6 +11,17 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Capability tool manifests now use JSON Schema style `input_schema` and
   `output_schema` blocks as the shared IDL for prompt rendering, `capmgr`
   inspection, and generic runtime validation.
+- Prompt segment rendering now lives in `agent_core::prompt_render`, keeping
+  static prompt enrichment and visible delta/slice rendering behind a single
+  module boundary.
+- A generated read-only static prompt snapshot documents the fully expanded
+  `prompt_0` after schema and capability injection; CI checks that it stays
+  current.
+- Model-facing tool catalog is now a concise natural-language capability guide
+  instead of a verbose JSON Schema dump; runtime validation still uses the full
+  manifest schemas internally.
+- The release-quality skill is now an optional capability overlay example
+  instead of a built-in skill compiled into `agent_core`.
 
 ## [0.6.0] - 2026-07-01
 

@@ -28,6 +28,30 @@ fn tmp_dir(name: &str) -> PathBuf {
     path
 }
 
+fn release_quality_skill_overlay(name: &str) -> PathBuf {
+    let dir = tmp_dir(name);
+    let skill_dir = dir.join("skills").join("release_quality_gate");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("skill.yaml"),
+        r#"kind: skill
+id: release_quality_gate
+title: Release quality gate
+summary: Verify tests, CI, release notes, sensitive information, and version state before publishing a release.
+entry: instructions.md
+when_to_use: |
+  Use when preparing, auditing, or deciding whether to publish a Timem release.
+"#,
+    )
+    .unwrap();
+    fs::write(
+        skill_dir.join("instructions.md"),
+        "# Release Quality Gate\n\nRun the relevant local tests.\n",
+    )
+    .unwrap();
+    dir
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1192,7 +1216,7 @@ fn progress_and_next_actions_continue_with_implicit_continue_note() {
 }
 
 #[test]
-fn next_action_requires_intent_for_ui_status() {
+fn next_action_requires_intent_for_user_visible_action_status() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -3438,10 +3462,12 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(static_prompt.contains("\"json_protocol\""));
     assert!(static_prompt.contains("\"evidence_guard\""));
     assert!(static_prompt.contains("\"action_result_guard\""));
-    assert!(static_prompt.contains("memory_conflict"));
-    assert!(static_prompt.contains("row version changed"));
     assert!(static_prompt.contains("Use report_job_progress to report current job progress"));
     assert!(static_prompt.contains("Runtime injects response_v1 schema summary"));
+    assert!(static_prompt.contains("\"Context_maintenance\""));
+    assert!(static_prompt.contains("memmgr next_actions"));
+    assert!(static_prompt.contains("memmgr type=scratch op=write kind=context_offload"));
+    assert!(static_prompt.contains("memmgr type=context op=shrink"));
     assert!(
         !static_prompt.contains("\"$id\": \"https://timem.local/schemas/response_v1.schema.json\"")
     );
@@ -3453,6 +3479,14 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(!static_prompt.contains("lang_retry"));
     assert!(!static_prompt.contains("theme_workflow"));
     assert!(!static_prompt.contains("rounds_guard"));
+    assert!(!static_prompt.contains("\"tool_policy\""));
+    assert!(!static_prompt.contains("row version changed"));
+    assert!(!static_prompt.contains("\"memory_candidates?\""));
+    assert!(!static_prompt.contains("\"acceptance_check?\""));
+    assert!(!static_prompt.contains("\"continuation?\""));
+    assert!(!static_prompt.contains("\"diagnostics.intent_inference?\""));
+    assert!(!static_prompt.contains("\"diagnostics.self_audit?\""));
+    assert!(!static_prompt.contains("\"Self_audit\""));
 }
 
 #[test]
@@ -3471,6 +3505,30 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(prompt.contains("\"report_job_progress?\""));
     assert!(prompt.contains("\"intent\""));
     assert!(!prompt.contains("\"json_schema_summary\": \"stale\""));
+}
+
+#[test]
+fn rendered_static_prompt_preserves_source_rule_order() {
+    let mut core = AgentCore::new(
+        include_str!("../../resources/static_v1.json"),
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("static_prompt_order"),
+    );
+    let prompt = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+
+    let role_pos = prompt.find("\"role\"").expect("role should render");
+    let rule_pos = prompt.find("\"rule\"").expect("rule should render");
+    let app_context_pos = prompt
+        .find("\"app_context_policy\"")
+        .expect("app_context_policy should render");
+
+    assert!(
+        role_pos < rule_pos && rule_pos < app_context_pos,
+        "General_rule should keep source order so role/rule remain first"
+    );
 }
 
 #[test]
@@ -3509,7 +3567,7 @@ fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
     assert!(prompt.contains("\"run_bash\""));
     assert!(prompt.contains("\"shell_job_status\""));
     assert!(prompt.contains("\"skill_headers\""));
-    assert!(prompt.contains("\"release_quality_gate\""));
+    assert!(!prompt.contains("\"release_quality_gate\""));
     assert!(prompt.contains("Unified local memory manager"));
     assert!(!prompt.contains("stale_tool"));
 }
@@ -3573,11 +3631,15 @@ fn legacy_action_fallback_is_not_part_of_manifest_catalog() {
 
 #[test]
 fn capmgr_load_skill_adds_skill_body_as_action_result() {
+    let registry =
+        CapabilityRegistry::builtin_with_overlay_dir(release_quality_skill_overlay("capmgr_skill"))
+            .unwrap();
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("capmgr_load_skill"),
     );
+    core.set_capability_registry(registry);
     let _ = core.begin_turn("准备发布", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(

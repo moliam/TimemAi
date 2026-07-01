@@ -5,6 +5,12 @@ binding_name: shell_job_status
 description: Check a background shell job.
 prompt_when: |
   Check a background shell job previously started by run_bash.
+prompt_input: |
+  Requires input.job_id from run_bash and input.timeout_ms chosen by you for
+  this check; 0 means immediate check, max 15000.
+prompt_result: |
+  Returns running with partial output, or finished with exit code and bounded
+  output. job_not_found means the job id is unknown.
 input_schema: |
   {
     "type": "object",

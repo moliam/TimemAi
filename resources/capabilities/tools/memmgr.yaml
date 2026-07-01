@@ -7,6 +7,17 @@ prompt_when: |
   Unified local memory manager. Use type=durable for long-lived user facts,
   type=raw_chat for UI-visible chat transcript, type=scratch for notes/context
   offload, and type=context for dynamic prompt context maintenance.
+prompt_input: |
+  Always include type and op. durable supports query/schema/sql/insert/update/
+  upsert/delete; raw_chat supports query/sql/delete; scratch supports query/
+  write/read/delete; context supports shrink. Use expected_version when
+  modifying an existing durable row. SQL ops are read-only and limited to
+  memories/chat_messages table inspection/query.
+prompt_result: |
+  Returns matching records, ids/versions for writes, conflict/error strings for
+  unsafe writes, scratch ids for notes/offload, or shrink counts for context.
+  memory_conflict means the durable row version changed; usually re-query
+  before deciding whether to retry, merge, or report the conflict.
 input_schema: |
   {
     "type": "object",

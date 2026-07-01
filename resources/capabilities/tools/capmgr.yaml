@@ -6,6 +6,12 @@ description: Manage capability tools and skills.
 prompt_when: |
   Capability manager. Use op=list to inspect available capability headers.
   Use op=load when a specific skill body or tool detail is needed.
+prompt_input: |
+  Requires op. Use op=list for headers. For op=load or op=inspect, also provide
+  kind=tool|skill and id.
+prompt_result: |
+  list returns available capability headers. load returns a skill body or tool
+  detail when you need more than the static catalog.
 input_schema: |
   {
     "type": "object",
@@ -47,10 +53,10 @@ output_schema: |
 example_json: |
   {
     "action": "capmgr",
-    "intent": "Load the release quality skill details before checking a release.",
+    "intent": "Load a needed skill body before using it.",
     "input": {
       "op": "load",
       "kind": "skill",
-      "id": "release_quality_gate"
+      "id": "skill_id"
     }
   }

@@ -8,6 +8,14 @@ prompt_when: |
   are needed. Supports foreground and background execution. Provide
   read_back_command when stdout needs verification. Opt-in via
   large_readback_opt_in if output is truncated.
+prompt_input: |
+  Use input.command for the shell command, or input.read_back_command for a
+  verification/readback command. Optional: timeout_ms, background=true or
+  mode=background, large_readback_opt_in.
+prompt_result: |
+  Foreground returns status and bounded output. Background returns job_id; use
+  shell_job_status with that job_id and your chosen timeout_ms to wait/check.
+  Errors are short machine-readable strings such as timeout or command_failed.
 input_schema: |
   {
     "type": "object",

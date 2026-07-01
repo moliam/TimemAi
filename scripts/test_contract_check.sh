@@ -63,6 +63,7 @@ ci_required=(
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
   "scripts/sensitive_scan.sh --current"
+  "scripts/update_static_prompt_snapshot.sh --check"
 )
 
 for pattern in "${ci_required[@]}"; do
@@ -146,6 +147,54 @@ changelog_required=(
 for pattern in "${changelog_required[@]}"; do
   if ! search_fixed "$pattern" CHANGELOG.md; then
     echo "missing required changelog item: $pattern" >&2
+    exit 1
+  fi
+done
+
+static_prompt_snapshot="docs/static-prompt-expanded.md"
+if [ ! -f "$static_prompt_snapshot" ]; then
+  echo "missing expanded static prompt snapshot: $static_prompt_snapshot" >&2
+  exit 1
+fi
+
+static_prompt_snapshot_required=(
+  "Expanded Static Prompt Snapshot"
+  "read-only audit snapshot"
+  "not read by Timem at runtime"
+  "[BEGIN SEGMENT 0: prompt_0]"
+  "\"tool_catalog\""
+  "\"result\""
+  "\"json_schema_summary\""
+)
+
+for pattern in "${static_prompt_snapshot_required[@]}"; do
+  if ! search_fixed "$pattern" "$static_prompt_snapshot"; then
+    echo "missing required static prompt snapshot item: $pattern" >&2
+    exit 1
+  fi
+done
+
+static_prompt_snapshot_forbidden=(
+  "\"output\": {"
+  "Shell command to execute."
+  "Background job id when background=true."
+  "\"output_file\""
+  "\"status_file\""
+  "\"approval_status\""
+  "\"static_prefix_policy\""
+  "static prefix is immutable global guidance"
+  "\"ui_status\""
+  "ui_label"
+  "ui_visible"
+  "\"tool_policy\""
+  "\"run_bash_readback\""
+  "\"sql_tables\""
+  "\"bash_safety\""
+)
+
+for pattern in "${static_prompt_snapshot_forbidden[@]}"; do
+  if search_fixed "$pattern" "$static_prompt_snapshot"; then
+    echo "forbidden verbose schema dump in static prompt snapshot: $pattern" >&2
     exit 1
   fi
 done

@@ -18,6 +18,7 @@ pub mod capmgr;
 use capability::CapabilityRegistry;
 pub mod executor;
 pub mod memmgr;
+pub mod prompt_render;
 pub mod prompt_spec;
 pub mod shell_exec;
 use shell_exec::FileShellJobStore;
@@ -123,19 +124,19 @@ pub enum CoreStep {
 pub struct PromptDelta {
     pub delta_id: String,
     pub time_ms: i64,
-    slices: Vec<PromptSlice>,
+    pub(crate) slices: Vec<PromptSlice>,
     #[serde(default)]
     pub hidden_slice_ids: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct PromptSlice {
-    delta_id: String,
-    slice_id: String,
-    prompt_type: String,
-    time_ms: i64,
-    text: String,
-    slice_index: usize,
-    slice_count: usize,
+pub(crate) struct PromptSlice {
+    pub(crate) delta_id: String,
+    pub(crate) slice_id: String,
+    pub(crate) prompt_type: String,
+    pub(crate) time_ms: i64,
+    pub(crate) text: String,
+    pub(crate) slice_index: usize,
+    pub(crate) slice_count: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryRecord {
@@ -1011,34 +1012,10 @@ impl AgentCore {
         }
     }
     pub fn render_prompt(&self) -> String {
-        let static_prompt = prompt_spec::enrich_static_prompt_with_response_schema(
-            &self.capabilities.enrich_static_prompt(&self.static_prompt),
-        );
-        let mut out = format!(
-            "[BEGIN SEGMENT 0: prompt_0]\n{}\n[END SEGMENT 0: prompt_0]",
-            static_prompt
-        );
-        let slices = self.render_prompt_slices();
-        for (idx, slice) in slices.iter().enumerate() {
-            out.push('\n');
-            out.push_str(&format!("[BEGIN SEGMENT {}: prompt_delta]\n", idx + 1));
-            out.push_str(&format!(
-                "delta_id: {}\nslice_id: {}\nslice: {}/{}\n",
-                slice.delta_id, slice.slice_id, slice.slice_index, slice.slice_count
-            ));
-            out.push_str(&format!(
-                "prompt_type: {}\n{}\ntime: {}\n",
-                slice.prompt_type, slice.text, slice.time_ms
-            ));
-            out.push_str(&format!("[END SEGMENT {}: prompt_delta]", idx + 1));
-        }
-        out
+        prompt_render::render_prompt(&self.static_prompt, &self.capabilities, &self.deltas)
     }
     fn render_prompt_slices(&self) -> Vec<PromptSlice> {
-        self.deltas
-            .iter()
-            .flat_map(render_delta_slices)
-            .collect::<Vec<_>>()
+        prompt_render::render_prompt_slices(&self.deltas)
     }
     fn remaining_rounds(&self) -> u32 {
         self.round_budget.saturating_sub(self.current_round)
@@ -1134,11 +1111,11 @@ impl AgentCore {
         let delta_refs = self
             .deltas
             .iter()
-            .filter(|delta| !render_delta_slices(delta).is_empty())
+            .filter(|delta| !prompt_render::render_delta_slices(delta).is_empty())
             .rev()
             .take(12)
             .map(|delta| {
-                let token_estimate = render_delta_slices(delta)
+                let token_estimate = prompt_render::render_delta_slices(delta)
                     .iter()
                     .map(|slice| estimate_prompt_tokens(&slice.text))
                     .sum::<u32>();
@@ -1146,7 +1123,7 @@ impl AgentCore {
                     "- delta_id={} time_ms={} visible_slices={} estimated_tokens={}",
                     delta.delta_id,
                     delta.time_ms,
-                    render_delta_slices(delta).len(),
+                    prompt_render::render_delta_slices(delta).len(),
                     token_estimate
                 )
             })
@@ -1884,7 +1861,7 @@ impl AgentCore {
         let mut matched_slice_ids = HashSet::new();
         let mut sections = Vec::new();
         for delta in &self.deltas {
-            let rendered = render_delta_slices(delta);
+            let rendered = prompt_render::render_delta_slices(delta);
             if delta_id_set.contains(&delta.delta_id) {
                 matched_delta_ids.insert(delta.delta_id.clone());
                 sections.push(format!(
@@ -1957,7 +1934,7 @@ impl AgentCore {
         let mut shrunk_tokens_estimate = 0u32;
         for delta in &self.deltas {
             if delta_id_set.contains(&delta.delta_id) {
-                for slice in render_delta_slices(delta) {
+                for slice in prompt_render::render_delta_slices(delta) {
                     shrunk_tokens_estimate =
                         shrunk_tokens_estimate.saturating_add(estimate_prompt_tokens(&slice.text));
                 }
@@ -1974,7 +1951,7 @@ impl AgentCore {
         let mut matched_slice_ids = HashSet::new();
         if !slice_id_set.is_empty() {
             for delta in &mut self.deltas {
-                let slices = render_delta_slices(delta);
+                let slices = prompt_render::render_delta_slices(delta);
                 for slice in slices {
                     if slice_id_set.contains(&slice.slice_id) {
                         matched_slice_ids.insert(slice.slice_id.clone());
@@ -2903,15 +2880,6 @@ fn validate_memory_sql(sql: &str) -> Result<(), String> {
         return Err("only_declared_tables_are_allowed".to_string());
     }
     Ok(())
-}
-
-fn render_delta_slices(delta: &PromptDelta) -> Vec<PromptSlice> {
-    delta
-        .slices
-        .iter()
-        .filter(|slice| !delta.hidden_slice_ids.contains(&slice.slice_id))
-        .cloned()
-        .collect()
 }
 
 fn split_text_for_prompt_slices(text: &str, limit: usize) -> Vec<String> {

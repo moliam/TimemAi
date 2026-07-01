@@ -3,15 +3,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::prompt_spec::replace_json_string_field_with_value;
+
 const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
 const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
 const SHELL_JOB_STATUS_MANIFEST: &str =
     include_str!("../../resources/capabilities/tools/shell_job_status.yaml");
-const RELEASE_QUALITY_GATE_SKILL: &str =
-    include_str!("../../resources/capabilities/skills/release_quality_gate/skill.yaml");
-const RELEASE_QUALITY_GATE_INSTRUCTIONS: &str =
-    include_str!("../../resources/capabilities/skills/release_quality_gate/instructions.md");
 const BUILTIN_BINDINGS: &[&str] = &["memmgr", "capmgr", "run_bash", "shell_job_status"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +22,8 @@ pub struct CapabilityBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityPrompt {
     pub when: String,
+    pub input: String,
+    pub result: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,10 +110,7 @@ impl CapabilityRegistry {
                 RUN_BASH_MANIFEST,
                 SHELL_JOB_STATUS_MANIFEST,
             ],
-            &[(
-                RELEASE_QUALITY_GATE_SKILL,
-                RELEASE_QUALITY_GATE_INSTRUCTIONS,
-            )],
+            &[],
         )
         .expect("builtin capability manifests must be valid")
     }
@@ -329,7 +326,14 @@ impl CapabilityRegistry {
                 "when".to_string(),
                 Value::String(manifest.prompt.when.clone()),
             );
-            item.insert("input".to_string(), input_properties_value(manifest));
+            item.insert(
+                "input".to_string(),
+                Value::String(manifest.prompt.input.clone()),
+            );
+            item.insert(
+                "result".to_string(),
+                Value::String(manifest.prompt.result.clone()),
+            );
             if !manifest.input_schema.required.is_empty() {
                 item.insert(
                     "required".to_string(),
@@ -372,15 +376,6 @@ impl CapabilityRegistry {
                     ),
                 );
             }
-            if !manifest.input_schema.enum_fields.is_empty() {
-                item.insert(
-                    "enum_fields".to_string(),
-                    enum_fields_value(&manifest.input_schema.enum_fields),
-                );
-            }
-            if !manifest.output_schema.properties.is_empty() {
-                item.insert("output".to_string(), output_properties_value(manifest));
-            }
             item.insert("example".to_string(), manifest.example.clone());
             catalog.insert(id.clone(), Value::Object(item));
         }
@@ -393,6 +388,20 @@ impl CapabilityRegistry {
     }
 
     pub fn enrich_static_prompt(&self, static_prompt: &str) -> String {
+        if let Some(with_catalog) = replace_json_string_field_with_value(
+            static_prompt,
+            "tool_catalog",
+            &self.tool_catalog_value(),
+        ) {
+            if let Some(with_skills) = replace_json_string_field_with_value(
+                &with_catalog,
+                "skill_headers",
+                &self.skill_headers_value(),
+            ) {
+                return with_skills;
+            }
+        }
+
         let Ok(mut value) = serde_json::from_str::<Value>(static_prompt) else {
             return static_prompt.to_string();
         };
@@ -416,6 +425,8 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let mut required_when = Vec::<CapabilityRequiredWhen>::new();
     let mut enum_fields = BTreeMap::<String, Vec<String>>::new();
     let mut prompt_when = String::new();
+    let mut prompt_input = String::new();
+    let mut prompt_result = String::new();
     let mut input_schema_json = String::new();
     let mut output_schema_json = String::new();
     let mut example_json = String::new();
@@ -427,6 +438,14 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
         }
         if line == "prompt_when: |" {
             section = Some("prompt_when");
+            continue;
+        }
+        if line == "prompt_input: |" {
+            section = Some("prompt_input");
+            continue;
+        }
+        if line == "prompt_result: |" {
+            section = Some("prompt_result");
             continue;
         }
         if line == "input_properties:" {
@@ -471,6 +490,18 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
                     prompt_when.push('\n');
                 }
                 prompt_when.push_str(line.trim());
+            }
+            Some("prompt_input") if line.starts_with("  ") => {
+                if !prompt_input.is_empty() {
+                    prompt_input.push('\n');
+                }
+                prompt_input.push_str(line.trim());
+            }
+            Some("prompt_result") if line.starts_with("  ") => {
+                if !prompt_result.is_empty() {
+                    prompt_result.push('\n');
+                }
+                prompt_result.push_str(line.trim());
             }
             Some("example_json") if line.starts_with("  ") => {
                 example_json.push_str(line.strip_prefix("  ").unwrap_or(line));
@@ -612,6 +643,18 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     } else {
         parse_output_schema_json(&id, output_schema_json.trim())?
     };
+    let prompt_input = if prompt_input.trim().is_empty() {
+        "Use the fields shown in the example; load this tool with capmgr if full details are needed."
+            .to_string()
+    } else {
+        prompt_input
+    };
+    let prompt_result = if prompt_result.trim().is_empty() {
+        "Runtime returns an action result with either useful output or a short error string."
+            .to_string()
+    } else {
+        prompt_result
+    };
     Ok(ToolManifest {
         kind: required_top(&top, "kind")?,
         id,
@@ -621,7 +664,11 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             command_path: None,
         },
         description: required_top(&top, "description")?,
-        prompt: CapabilityPrompt { when: prompt_when },
+        prompt: CapabilityPrompt {
+            when: prompt_when,
+            input: prompt_input,
+            result: prompt_result,
+        },
         input_schema,
         output_schema,
         example,
@@ -887,17 +934,6 @@ fn output_properties_value(manifest: &ToolManifest) -> Value {
     let mut object = Map::new();
     for (key, value) in &manifest.output_schema.properties {
         object.insert(key.clone(), value.clone());
-    }
-    Value::Object(object)
-}
-
-fn enum_fields_value(enum_fields: &BTreeMap<String, Vec<String>>) -> Value {
-    let mut object = Map::new();
-    for (key, allowed_values) in enum_fields {
-        object.insert(
-            key.clone(),
-            Value::Array(allowed_values.iter().cloned().map(Value::String).collect()),
-        );
     }
     Value::Object(object)
 }
@@ -1183,16 +1219,20 @@ mod tests {
         assert!(rendered.contains("\"run_bash\""));
         assert!(rendered.contains("\"shell_job_status\""));
         assert!(rendered.contains("Unified local memory manager"));
-        assert!(rendered.contains("\"enum_fields\""));
         assert!(rendered.contains("\"required_any\""));
         assert!(rendered.contains("\"required_when\""));
-        assert!(rendered.contains("\"output\""));
+        assert!(rendered.contains("\"result\""));
         assert!(rendered.contains("\"command\""));
         assert!(rendered.contains("\"read_back_command\""));
-        assert!(rendered.contains("\"approval_status\""));
-        assert!(rendered.contains("\"approved_by_user\""));
+        assert!(rendered.contains("background=true"));
+        assert!(rendered.contains("Foreground returns status and bounded output"));
         assert!(rendered.contains("\"op\""));
         assert!(rendered.contains("\"inspect\""));
+        assert!(rendered.contains("memory_conflict"));
+        assert!(!rendered.contains("\"output\": {"));
+        assert!(!rendered.contains("\"description\""));
+        assert!(!rendered.contains("Shell command to execute."));
+        assert!(!rendered.contains("Background job id when background=true."));
     }
 
     #[test]
@@ -1294,14 +1334,19 @@ mod tests {
 
         assert!(capmgr
             .get("input")
-            .and_then(|input| input.get("op"))
-            .and_then(|op| op.get("enum"))
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.contains(&Value::String("load".to_string()))));
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains("op=list") && text.contains("op=load")));
         assert!(capmgr
             .get("required_when")
             .and_then(Value::as_array)
             .is_some_and(|rules| !rules.is_empty()));
+        assert!(registry
+            .validate_action_input(
+                "capmgr",
+                &json_object([("op", Value::String("load".to_string()))])
+            )
+            .unwrap_err()
+            .contains("input.kind_required_when_op=load"));
         assert!(registry
             .validate_action_input(
                 "capmgr",
@@ -1330,14 +1375,15 @@ mod tests {
 
         assert!(enriched.contains("\"memmgr\""));
         assert!(enriched.contains("\"skill_headers\""));
-        assert!(enriched.contains("\"release_quality_gate\""));
+        assert!(!enriched.contains("\"release_quality_gate\""));
         assert!(enriched.contains("\"run_bash\""));
         assert!(!enriched.contains("stale_tool"));
     }
 
     #[test]
     fn capmgr_can_list_and_load_skill_content() {
-        let registry = CapabilityRegistry::builtin();
+        let dir = temp_release_quality_skill_overlay("capmgr_skill_load");
+        let registry = CapabilityRegistry::builtin_with_overlay_dir(&dir).unwrap();
 
         let list = registry.list_text("skill");
         assert!(list.contains("Action result: capmgr"));
@@ -1464,5 +1510,29 @@ example_json: |
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("timem_capability_test_{name}_{nanos}"))
+    }
+
+    fn temp_release_quality_skill_overlay(name: &str) -> PathBuf {
+        let dir = temp_capability_dir(name);
+        let skill_dir = dir.join("skills").join("release_quality_gate");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("skill.yaml"),
+            r#"kind: skill
+id: release_quality_gate
+title: Release quality gate
+summary: Verify tests, CI, release notes, sensitive information, and version state before publishing a release.
+entry: instructions.md
+when_to_use: |
+  Use when preparing, auditing, or deciding whether to publish a Timem release.
+"#,
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("instructions.md"),
+            "# Release Quality Gate\n\nRun the relevant local tests.\n",
+        )
+        .unwrap();
+        dir
     }
 }
