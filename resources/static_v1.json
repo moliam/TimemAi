@@ -11,7 +11,8 @@
         "user_question": "Runtime-created logical prompt delta from the new user input plus compact dynamic context; it may render as one or more prompt_delta slices.",
         "result_of_llm_action": "Runtime-created logical prompt delta from executed model-requested actions; it may render as one or more prompt_delta slices.",
         "llm_response": "Runtime-created logical prompt delta from a model response or final answer already shown to the user; it may render as one or more prompt_delta slices.",
-        "llm_thought": "Runtime-created logical prompt delta from the model's private reasoning draft, optional and not shown to the user; it may render as one or more prompt_delta slices."
+        "llm_thought": "Runtime-created logical prompt delta from the model's private reasoning draft, optional and not shown to the user; it may render as one or more prompt_delta slices.",
+        "response_repair": "Runtime-created low-retention repair slice after an invalid model response. It includes the previous model response, issue, and instruction. Use it only to fix the next response; during context shrink prefer discarding it before task evidence."
       },
       "dynamic_fields": {
         "rounds_remaining": "Number of additional reasoning/action rounds available after the current model response. If 0, do not request new actions; return the best user-facing answer or progress summary.",

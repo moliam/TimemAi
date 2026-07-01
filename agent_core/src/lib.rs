@@ -41,6 +41,7 @@ impl CoreProfile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageStats {
     pub llm_calls: u32,
+    pub repair_calls: u32,
     pub tool_calls: u32,
     pub mem_reads: u32,
     pub mem_writes: u32,
@@ -54,6 +55,7 @@ impl UsageStats {
     pub fn zero() -> Self {
         Self {
             llm_calls: 0,
+            repair_calls: 0,
             tool_calls: 0,
             mem_reads: 0,
             mem_writes: 0,
@@ -66,6 +68,7 @@ impl UsageStats {
     }
     pub fn add(&mut self, other: &UsageStats) {
         self.llm_calls += other.llm_calls;
+        self.repair_calls += other.repair_calls;
         self.tool_calls += other.tool_calls;
         self.mem_reads += other.mem_reads;
         self.mem_writes += other.mem_writes;
@@ -659,6 +662,9 @@ impl AgentCore {
     pub fn current_stats(&self) -> &UsageStats {
         &self.current_stats
     }
+    pub fn last_repair_issue(&self) -> Option<&str> {
+        self.last_repair_issue.as_deref()
+    }
     pub fn dynamic_context_estimated_tokens(&self) -> u32 {
         self.render_prompt_slices()
             .iter()
@@ -729,6 +735,7 @@ impl AgentCore {
             return self.request_protocol_repair(
                 "truncated_model_output",
                 "The previous model output was cut off by the max output token limit before a complete JSON object was produced. Return one short valid JSON object only. If the task needs a long report, use run_bash to write the full report to a file and keep report_job_progress concise.",
+                &response.content,
             );
         }
         let parsed = parse_envelope(&response.content, &self.capabilities);
@@ -741,7 +748,11 @@ impl AgentCore {
         }
         if let Some(issue) = parsed.repair_issue.clone() {
             if !self.repair_attempted {
-                return self.request_protocol_repair(&issue, protocol_repair_instruction(&issue));
+                return self.request_protocol_repair(
+                    &issue,
+                    protocol_repair_instruction(&issue),
+                    &response.content,
+                );
             }
             if issue == "invalid_json"
                 && can_show_plain_text_after_repair_failure(&response.content)
@@ -1023,12 +1034,24 @@ impl AgentCore {
         self.round_budget.saturating_sub(self.current_round)
     }
 
-    fn request_protocol_repair(&mut self, issue: &str, instruction: &str) -> CoreStep {
+    fn request_protocol_repair(
+        &mut self,
+        issue: &str,
+        instruction: &str,
+        raw_response: &str,
+    ) -> CoreStep {
         self.repair_attempted = true;
         self.last_repair_issue = Some(issue.to_string());
+        self.current_stats.repair_calls = self.current_stats.repair_calls.saturating_add(1);
         self.append_delta(vec![(
-            "result_of_llm_action".to_string(),
-            format!("Protocol repair request\nissue: {}\n{}", issue, instruction),
+            "response_repair".to_string(),
+            format!(
+                "Protocol repair request\nshrink_priority: discard_first\nissue: {}\nreason: {}\ninstruction:\n{}\n\nPrevious model response to repair:\n[BEGIN PREVIOUS_LLM_RESPONSE]\n{}\n[END PREVIOUS_LLM_RESPONSE]",
+                issue,
+                protocol_repair_reason(issue),
+                instruction,
+                focused_repair_response_text(issue, raw_response),
+            ),
         )]);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
@@ -3607,6 +3630,108 @@ fn protocol_repair_instruction(issue: &str) -> &'static str {
             "Return exactly one valid JSON object. Omitted status defaults to working; include next_actions when working. Use status:\"finished\" together with final_answer only when the job is complete. Do not use markdown fences."
         }
     }
+}
+
+fn protocol_repair_reason(issue: &str) -> &'static str {
+    match issue {
+        "truncated_model_output" => {
+            "The provider stopped the model output before a complete response_v1 JSON object was produced."
+        }
+        "invalid_json" => "The previous model response could not be parsed as one JSON object.",
+        "root_must_be_json_object" => {
+            "The previous model response parsed as JSON, but the root value was not an object."
+        }
+        "final_answer_requires_status_finished" => {
+            "The previous model response included final_answer without status:\"finished\"."
+        }
+        "final_answer_required_when_status_finished" => {
+            "The previous model response included status:\"finished\" without final_answer."
+        }
+        "final_answer_must_not_start_with_runtime_progress_marker" => {
+            "The final_answer started with a runtime UI progress marker instead of user-facing content."
+        }
+        _ => "The previous model response did not match the local response_v1 protocol.",
+    }
+}
+
+fn focused_repair_response_text(issue: &str, text: &str) -> String {
+    const REPAIR_CONTEXT_CHARS: usize = 6_000;
+    let trimmed = text.trim();
+    let char_count = trimmed.chars().count();
+    if char_count <= REPAIR_CONTEXT_CHARS * 2 {
+        return trimmed.to_string();
+    }
+    if let Some(focus) = repair_focus_char_index(issue, trimmed) {
+        return char_window_around_focus(trimmed, focus, REPAIR_CONTEXT_CHARS);
+    }
+    let head: String = trimmed.chars().take(REPAIR_CONTEXT_CHARS).collect();
+    let tail_start = char_count.saturating_sub(REPAIR_CONTEXT_CHARS);
+    let tail: String = trimmed.chars().skip(tail_start).collect();
+    format!(
+        "{head}\n[TRUNCATED previous response: omitted middle chars {}..{} of {} chars; no precise repair focus found]\n{tail}",
+        REPAIR_CONTEXT_CHARS, tail_start, char_count
+    )
+}
+
+fn repair_focus_char_index(issue: &str, text: &str) -> Option<usize> {
+    if matches!(issue, "invalid_json" | "truncated_model_output") {
+        let json_start_byte = text.find('{').unwrap_or(0);
+        let json_text = &text[json_start_byte..];
+        if let Err(err) = serde_json::from_str::<Value>(json_text) {
+            if let Some(relative_idx) =
+                line_column_to_char_index(json_text, err.line(), err.column())
+            {
+                return Some(text[..json_start_byte].chars().count() + relative_idx);
+            }
+        }
+    }
+    let marker = match issue {
+        "final_answer_requires_status_finished"
+        | "final_answer_must_not_start_with_runtime_progress_marker" => "final_answer",
+        "final_answer_required_when_status_finished" | "status_must_be_working_or_finished" => {
+            "status"
+        }
+        issue if issue.starts_with("next_actions") => "next_actions",
+        issue if issue.contains("memmgr") => "memmgr",
+        issue if issue.contains("capmgr") => "capmgr",
+        _ => "",
+    };
+    if marker.is_empty() {
+        return None;
+    }
+    text.find(marker)
+        .map(|byte_idx| text[..byte_idx].chars().count())
+}
+
+fn line_column_to_char_index(text: &str, line: usize, column: usize) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    let mut current_line = 1usize;
+    let mut current_column = 1usize;
+    for (char_idx, ch) in text.chars().enumerate() {
+        if current_line == line && current_column >= column.max(1) {
+            return Some(char_idx);
+        }
+        if ch == '\n' {
+            current_line += 1;
+            current_column = 1;
+        } else {
+            current_column += 1;
+        }
+    }
+    Some(text.chars().count())
+}
+
+fn char_window_around_focus(text: &str, focus: usize, context_chars: usize) -> String {
+    let char_count = text.chars().count();
+    let start = focus.saturating_sub(context_chars);
+    let end = focus.saturating_add(context_chars).min(char_count);
+    let window: String = text.chars().skip(start).take(end - start).collect();
+    format!(
+        "[FOCUSED previous response: chars {}..{} of {} chars; focus char {}]\n{}",
+        start, end, char_count, focus, window
+    )
 }
 
 fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::Error> {

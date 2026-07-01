@@ -23,6 +23,19 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - The release-quality skill is now an optional capability overlay example
   instead of a built-in skill compiled into `agent_core`.
 
+### Fixed
+
+- Transient provider/network failures now retry up to five times with a
+  user-visible status line before failing the turn.
+- Protocol repair slices now include a focused window around the malformed
+  model output, so the model can repair the concrete error without copying an
+  oversized response into context.
+- Thinking and final status lines now show repair round overhead as
+  `⇌N (⚠M)` when protocol repair consumed model calls.
+- Protocol repair requests now write structured `model_repair_request` audit
+  events with issue, usage, truncation, and repair-count metadata for later
+  diagnosis without storing raw malformed responses.
+
 ## [0.6.0] - 2026-07-01
 
 ### Added

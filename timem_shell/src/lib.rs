@@ -62,6 +62,7 @@ pub struct ShellStatusSnapshot {
     pub tick: usize,
     pub elapsed_secs: u64,
     pub max_llm_input_tokens: u32,
+    pub retry_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,7 +210,7 @@ fn thinking_status_lines(snapshot: &ShellStatusSnapshot) -> Vec<String> {
         "{}:{} ⇌{} ║ {}",
         snapshot.provider,
         snapshot.model,
-        snapshot.model_round,
+        model_round_with_repairs(snapshot.model_round, snapshot.usage.repair_calls),
         compact_token_totals(&snapshot.usage)
     ));
     let context_tokens = latest
@@ -217,13 +218,26 @@ fn thinking_status_lines(snapshot: &ShellStatusSnapshot) -> Vec<String> {
         .filter(|tokens| *tokens > 0)
         .unwrap_or(snapshot.usage.prompt_tokens);
     lines.push(format!(
-        "  ├─ context : {}",
+        "  {} context : {}",
+        if snapshot.retry_notice.is_some() || latest.is_some() {
+            "├─"
+        } else {
+            "└─"
+        },
         context_bar(context_tokens, snapshot.max_llm_input_tokens)
     ));
-    if let Some(usage) = latest {
-        lines.push(format!("  └─ {}", compact_token_latest(usage)));
+    let latest_prefix = if snapshot.retry_notice.is_some() {
+        "├─"
     } else {
-        lines.push("  └─ △0  ▽0".to_string());
+        "└─"
+    };
+    if let Some(usage) = latest {
+        lines.push(format!("  {latest_prefix} {}", compact_token_latest(usage)));
+    } else if snapshot.retry_notice.is_some() {
+        lines.push(format!("  {latest_prefix} △0  ▽0"));
+    }
+    if let Some(retry_notice) = snapshot.retry_notice.as_deref() {
+        lines.push(format!("  └─ {}", retry_notice));
     }
     lines
 }
@@ -253,9 +267,17 @@ fn final_status_line(
         elapsed_secs,
         provider,
         model,
-        stats.llm_calls,
+        model_round_with_repairs(stats.llm_calls, stats.repair_calls),
         parts.join("  ")
     )
+}
+
+fn model_round_with_repairs(rounds: u32, repairs: u32) -> String {
+    if repairs == 0 {
+        rounds.to_string()
+    } else {
+        format!("{rounds} (⚠{repairs})")
+    }
 }
 
 fn compact_token_totals(stats: &UsageStats) -> String {
@@ -2241,6 +2263,33 @@ mod tests {
     }
 
     #[test]
+    fn final_status_shows_repair_call_count_when_present() {
+        let rendered = render_final_response_at(
+            "ok",
+            &UsageStats {
+                llm_calls: 13,
+                repair_calls: 3,
+                prompt_tokens: 85_000,
+                completion_tokens: 3_500,
+                cached_tokens: 53_900,
+                ..UsageStats::zero()
+            },
+            Some(&UsageStats {
+                prompt_tokens: 80_000,
+                completion_tokens: 321,
+                ..UsageStats::zero()
+            }),
+            "custom",
+            "aws-claude-opus-4-7",
+            6,
+            100_000,
+            "22:29:07",
+        );
+        assert!(rendered
+            .contains("custom:aws-claude-opus-4-7 ⇌13 (⚠3) ║ ctx[80%]  ▲85K  ▼3.5K  ⌁53.9K"));
+    }
+
+    #[test]
     fn token_status_omits_zero_cache_and_shrink_annotations() {
         assert_eq!(
             token_status(&UsageStats {
@@ -2812,6 +2861,7 @@ mod tests {
                 tick: 0,
                 elapsed_secs: 7,
                 max_llm_input_tokens: 100_000,
+                retry_notice: None,
             },
             "08:56:33",
         );
@@ -2844,6 +2894,7 @@ mod tests {
                 tick: 8,
                 elapsed_secs: 65,
                 max_llm_input_tokens: 100_000,
+                retry_notice: None,
             },
             "23:33:05",
         );
@@ -2883,6 +2934,7 @@ mod tests {
                     tick: 0,
                     elapsed_secs: 12,
                     max_llm_input_tokens: 100_000,
+                    retry_notice: None,
                 },
                 observations,
             },
@@ -2899,6 +2951,69 @@ mod tests {
         assert!(view.contains("└─ △800  ▽12"));
         assert!(!view.contains("已用 12s"));
         assert!(!view.contains("ignored in panel mode"));
+    }
+
+    #[test]
+    fn thinking_status_line_shows_retry_notice() {
+        let view = render_thinking_view_at(
+            &ThinkingViewSnapshot {
+                status: ShellStatusSnapshot {
+                    provider: "aliyun".into(),
+                    model: "qwen-plus".into(),
+                    intent: "ignored in panel mode".into(),
+                    memory_marker: String::new(),
+                    model_round: 1,
+                    direction: ModelDirection::Upstream,
+                    usage: UsageStats::zero(),
+                    latest_usage: None,
+                    tick: 0,
+                    elapsed_secs: 3,
+                    max_llm_input_tokens: 100_000,
+                    retry_notice: Some("系统/HTTP 错误，10s 后重试 1/5：provider_http_500".into()),
+                },
+                observations: ObservationPanel::default(),
+            },
+            "12:00:00",
+        );
+
+        assert!(view.contains("├─ context : ▱▱▱▱▱▱▱▱▱▱"));
+        assert!(view.contains("├─ △0  ▽0"));
+        assert!(view.contains("└─ 系统/HTTP 错误，10s 后重试 1/5：provider_http_500"));
+    }
+
+    #[test]
+    fn thinking_status_line_shows_repair_call_count_when_present() {
+        let view = render_thinking_view_at(
+            &ThinkingViewSnapshot {
+                status: ShellStatusSnapshot {
+                    provider: "custom".into(),
+                    model: "aws-claude-sonnet-4-6".into(),
+                    intent: "ignored in panel mode".into(),
+                    memory_marker: String::new(),
+                    model_round: 13,
+                    direction: ModelDirection::Upstream,
+                    usage: UsageStats {
+                        repair_calls: 3,
+                        prompt_tokens: 85_000,
+                        completion_tokens: 3_500,
+                        cached_tokens: 53_900,
+                        ..UsageStats::zero()
+                    },
+                    latest_usage: Some(UsageStats {
+                        prompt_tokens: 5_800,
+                        ..UsageStats::zero()
+                    }),
+                    tick: 0,
+                    elapsed_secs: 80,
+                    max_llm_input_tokens: 100_000,
+                    retry_notice: None,
+                },
+                observations: ObservationPanel::default(),
+            },
+            "12:00:00",
+        );
+
+        assert!(view.contains("custom:aws-claude-sonnet-4-6 ⇌13 (⚠3) ║ ▲85K | ▼3.5K | ⌁53.9K"));
     }
 
     #[test]

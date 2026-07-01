@@ -289,6 +289,11 @@ Examples of prompt slices inside a logical prompt delta:
 - `llm_response`: a final assistant answer already shown to the user.
 - `llm_thought`: an optional private planning note emitted by the model's
   `thought` field. It is kept for continuity but never rendered to the user.
+- `response_repair`: a low-retention repair slice created after an invalid
+  model response. It includes the previous raw model response, the protocol
+  issue, and the repair instruction so the next model call can fix the concrete
+  mistake. Shrink should discard these slices before task evidence once the
+  repair round has passed.
 
 For example, one model response may add both an `llm_thought` slice and an
 `llm_response` slice. They are one prompt delta with two rendered slices, not

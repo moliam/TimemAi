@@ -7,6 +7,12 @@ use serde_json::json;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const MODEL_SYSTEM_ERROR_RETRIES: u32 = 5;
+#[cfg(not(test))]
+const MODEL_SYSTEM_ERROR_RETRY_DELAY: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const MODEL_SYSTEM_ERROR_RETRY_DELAY: Duration = Duration::ZERO;
+
 pub struct TurnRequest<'a> {
     pub input: &'a str,
     pub session: &'a str,
@@ -37,6 +43,15 @@ pub trait TurnUi {
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
 
     fn on_model_error(&mut self, _error: &str) {}
+
+    fn on_model_retry(
+        &mut self,
+        _attempt: u32,
+        _max_attempts: u32,
+        _delay: Duration,
+        _error: &str,
+    ) {
+    }
 
     fn pause_for_user_decision(&mut self) {}
 
@@ -135,25 +150,24 @@ fn run_session_turn_with_model_client(
             CoreStep::NeedModel { ref prompt, .. } => {
                 rounds += 1;
                 ui.on_model_request(rounds, prompt);
-                let model_wait_start = Instant::now();
-                match model_client.call_model(config, prompt, request.audit_file, &mut || {
-                    ui.is_cancel_requested()
-                }) {
+                match call_model_with_system_retries(
+                    model_client,
+                    config,
+                    prompt,
+                    request.audit_file,
+                    ui,
+                    &mut profiler,
+                    request.session,
+                    &turn_id,
+                ) {
                     Ok(response) => {
-                        let model_wait = model_wait_start.elapsed();
-                        model_wait_this_turn = model_wait_this_turn.saturating_add(model_wait);
-                        if let Some(profiler) = profiler.as_deref_mut() {
-                            profiler.record_model_wait(
-                                &config.provider,
-                                &response.model_name,
-                                &response.usage,
-                                model_wait,
-                            );
-                        }
+                        model_wait_this_turn = model_wait_this_turn.saturating_add(
+                            response.model_wait.saturating_add(response.retry_wait),
+                        );
                         if ui.take_cancel_request() {
                             break cancelled_turn_result();
                         }
-                        if response.truncated && ui.can_request_output_expansion() {
+                        if response.response.truncated && ui.can_request_output_expansion() {
                             ui.pause_for_user_decision();
                             let user_wait_start = Instant::now();
                             let should_expand =
@@ -180,26 +194,41 @@ fn run_session_turn_with_model_client(
                                     "模型输出达到当前上限 {}，已按你的选择停止本轮。可用 /config 调大 TIMEM_MAX_LLM_OUTPUT 后重试。",
                                     format_token_count(config.max_llm_output_tokens)
                                 ),
-                                response.usage.clone(),
-                                Some(response.usage),
+                                response.response.usage.clone(),
+                                Some(response.response.usage),
                                 Some("truncated_output_stopped_by_user".to_string()),
                             );
                         }
-                        latest_usage = Some(response.usage.clone());
-                        ui.on_model_response(rounds, &response.usage, &response.content);
-                        step = core.apply_model_response(response);
-                    }
-                    Err(err) => {
-                        let model_wait = model_wait_start.elapsed();
-                        model_wait_this_turn = model_wait_this_turn.saturating_add(model_wait);
-                        if let Some(profiler) = profiler.as_deref_mut() {
-                            profiler.record_model_wait(
-                                &config.provider,
-                                &config.model,
-                                &UsageStats::zero(),
-                                model_wait,
+                        latest_usage = Some(response.response.usage.clone());
+                        ui.on_model_response(
+                            rounds,
+                            &response.response.usage,
+                            &response.response.content,
+                        );
+                        let repair_calls_before = core.current_stats().repair_calls;
+                        let response_model = response.response.model_name.clone();
+                        let response_usage = response.response.usage.clone();
+                        let response_truncated = response.response.truncated;
+                        step = core.apply_model_response(response.response);
+                        let repair_calls_after = core.current_stats().repair_calls;
+                        if repair_calls_after > repair_calls_before {
+                            let _ = append_audit(
+                                request.audit_file,
+                                &json!({
+                                    "type":"model_repair_request",
+                                    "session":request.session,
+                                    "turn_id":turn_id,
+                                    "issue":core.last_repair_issue(),
+                                    "model":response_model,
+                                    "usage":response_usage,
+                                    "truncated":response_truncated,
+                                    "repair_calls":repair_calls_after,
+                                    "repair_calls_delta":repair_calls_after.saturating_sub(repair_calls_before)
+                                }),
                             );
                         }
+                    }
+                    Err(err) => {
                         if ui.take_cancel_request() {
                             break cancelled_turn_result();
                         }
@@ -307,6 +336,131 @@ fn run_session_turn_with_model_client(
         elapsed,
         repair_issue,
     }
+}
+
+struct ModelCallOutcome {
+    response: LlmResponse,
+    model_wait: Duration,
+    retry_wait: Duration,
+}
+
+fn call_model_with_system_retries(
+    model_client: &mut dyn ModelClient,
+    config: &ProviderConfig,
+    prompt: &str,
+    audit_file: &Path,
+    ui: &mut dyn TurnUi,
+    profiler: &mut Option<&mut RuntimeProfiler>,
+    session: &str,
+    turn_id: &str,
+) -> Result<ModelCallOutcome, String> {
+    let mut total_model_wait = Duration::ZERO;
+    let mut total_retry_wait = Duration::ZERO;
+    for attempt in 0..=MODEL_SYSTEM_ERROR_RETRIES {
+        let model_wait_start = Instant::now();
+        let result =
+            model_client.call_model(config, prompt, audit_file, &mut || ui.is_cancel_requested());
+        let model_wait = model_wait_start.elapsed();
+        total_model_wait = total_model_wait.saturating_add(model_wait);
+        match result {
+            Ok(response) => {
+                if let Some(profiler) = profiler.as_deref_mut() {
+                    profiler.record_model_wait(
+                        &config.provider,
+                        &response.model_name,
+                        &response.usage,
+                        model_wait,
+                    );
+                }
+                return Ok(ModelCallOutcome {
+                    response,
+                    model_wait: total_model_wait,
+                    retry_wait: total_retry_wait,
+                });
+            }
+            Err(err) => {
+                if let Some(profiler) = profiler.as_deref_mut() {
+                    profiler.record_model_wait(
+                        &config.provider,
+                        &config.model,
+                        &UsageStats::zero(),
+                        model_wait,
+                    );
+                }
+                if ui.is_cancel_requested()
+                    || !is_retryable_model_system_error(&err)
+                    || attempt >= MODEL_SYSTEM_ERROR_RETRIES
+                {
+                    return Err(err);
+                }
+                let retry_attempt = attempt + 1;
+                ui.on_model_retry(
+                    retry_attempt,
+                    MODEL_SYSTEM_ERROR_RETRIES,
+                    MODEL_SYSTEM_ERROR_RETRY_DELAY,
+                    &err,
+                );
+                let _ = append_audit(
+                    audit_file,
+                    &json!({
+                        "type":"model_retry",
+                        "session":session,
+                        "turn_id":turn_id,
+                        "attempt":retry_attempt,
+                        "max_attempts":MODEL_SYSTEM_ERROR_RETRIES,
+                        "delay_ms":MODEL_SYSTEM_ERROR_RETRY_DELAY.as_millis(),
+                        "error":err
+                    }),
+                );
+                let waited = wait_retry_delay(ui, MODEL_SYSTEM_ERROR_RETRY_DELAY);
+                total_retry_wait = total_retry_wait.saturating_add(waited);
+                if ui.is_cancel_requested() {
+                    return Err("cancelled_by_user".to_string());
+                }
+            }
+        }
+    }
+    Err("provider_network_error: retry loop exhausted".to_string())
+}
+
+fn wait_retry_delay(ui: &mut dyn TurnUi, delay: Duration) -> Duration {
+    let start = Instant::now();
+    while start.elapsed() < delay {
+        if ui.is_cancel_requested() {
+            break;
+        }
+        let remaining = delay.saturating_sub(start.elapsed());
+        std::thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+    start.elapsed().min(delay)
+}
+
+fn is_retryable_model_system_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    if lower == "cancelled_by_user" {
+        return false;
+    }
+    if lower.starts_with("provider_network_error")
+        || lower.starts_with("provider_timeout")
+        || lower.starts_with("curl_failed")
+        || lower.contains("curl:")
+        || lower.contains("http2 framing")
+        || lower.contains("operation timed out")
+        || lower.contains("connection reset")
+        || lower.contains("could not resolve host")
+    {
+        return true;
+    }
+    if let Some(status_text) = lower.strip_prefix("provider_http_") {
+        let status: u16 = status_text
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
+        return matches!(status, 408 | 409 | 425 | 429) || status >= 500;
+    }
+    false
 }
 
 pub fn cancelled_turn_result() -> (String, UsageStats, Option<UsageStats>, Option<String>) {
@@ -429,6 +583,98 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RetryRecordingUi {
+        retries: Vec<(u32, u32, Duration, String)>,
+    }
+
+    impl TurnUi for RetryRecordingUi {
+        fn on_model_retry(
+            &mut self,
+            attempt: u32,
+            max_attempts: u32,
+            delay: Duration,
+            error: &str,
+        ) {
+            self.retries
+                .push((attempt, max_attempts, delay, error.to_string()));
+        }
+    }
+
+    #[test]
+    fn session_turn_retries_transient_provider_errors_and_reports_status() {
+        let dir = tmp_dir("retry_transient_provider_error");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([
+            Err("provider_http_500: upstream overloaded".to_string()),
+            Err("provider_network_error: curl: (16) Error in the HTTP2 framing layer".to_string()),
+            Ok(llm(
+                r#"{"status":"finished","final_answer":"重试后成功。"}"#,
+                1_000,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "hello",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "重试后成功。");
+        assert_eq!(model.prompts.len(), 3);
+        assert_eq!(ui.retries.len(), 2);
+        assert_eq!(ui.retries[0].0, 1);
+        assert_eq!(ui.retries[0].1, 5);
+        assert_eq!(ui.retries[0].2, Duration::ZERO);
+        assert!(ui.retries[0].3.contains("provider_http_500"));
+        let audit_text = std::fs::read_to_string(&audit).unwrap();
+        assert_eq!(audit_text.matches("\"type\":\"model_retry\"").count(), 2);
+    }
+
+    #[test]
+    fn session_turn_does_not_retry_non_transient_provider_errors() {
+        let dir = tmp_dir("no_retry_provider_400");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        let mut ui = RetryRecordingUi::default();
+        let mut model =
+            ReplayModel::new([Err("provider_http_400: model name is invalid".to_string())]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "hello",
+                session: "test_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(
+            outcome.text,
+            "模型调用失败：provider_http_400: model name is invalid"
+        );
+        assert_eq!(model.prompts.len(), 1);
+        assert!(ui.retries.is_empty());
+    }
+
     struct ShrinkReplayModel {
         prompts: Vec<String>,
     }
@@ -548,6 +794,11 @@ mod tests {
         assert!(model.prompts[1].contains("Protocol repair request"));
         let audit_text = std::fs::read_to_string(&audit).unwrap();
         assert!(audit_text.contains("\"turn_final\""));
+        assert!(audit_text.contains("\"type\":\"model_repair_request\""));
+        assert!(audit_text.contains("\"issue\":\"invalid_json\""));
+        assert!(audit_text.contains("\"repair_calls\":1"));
+        assert!(audit_text.contains("\"repair_calls_delta\":1"));
+        assert!(audit_text.contains("\"truncated\":false"));
         assert!(audit_text.contains("提交成功"));
         assert!(!audit_text.contains("模型的回复不符合本地协议"));
         let _ = std::fs::remove_dir_all(dir);

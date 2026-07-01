@@ -847,9 +847,14 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
+    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("shrink_priority: discard_first"));
     assert!(prompt.contains("issue: final_answer_requires_status_finished"));
     assert!(prompt.contains("缺少 status:\"finished\""));
     assert!(prompt.contains("同时提供 status:\"finished\" 和 final_answer"));
+    assert!(prompt.contains("Previous model response to repair:"));
+    assert!(prompt.contains(r#"{"final_answer":"这是最终结论。"}"#));
+    assert_eq!(core.current_stats().repair_calls, 1);
 }
 
 #[test]
@@ -870,9 +875,45 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
+    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("shrink_priority: discard_first"));
     assert!(prompt.contains("issue: final_answer_required_when_status_finished"));
     assert!(prompt.contains("缺少 final_answer"));
     assert!(prompt.contains("同时提供 status:\"finished\" 和 final_answer"));
+    assert!(prompt.contains(r#"{"status":"finished","report_job_progress":"完成了"}"#));
+}
+
+#[test]
+fn protocol_repair_slice_focuses_previous_response_around_error() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("repair_focus_previous_response"),
+    );
+    let _ = core.begin_turn("总结", None);
+    let raw = format!(
+        "BEGIN_SHOULD_NOT_APPEAR{}{{\"report_job_progress\":\"BAD_JSON_FOCUS\nTAIL_NEAR_FOCUS\"}}{}END_SHOULD_NOT_APPEAR",
+        "x".repeat(8_000),
+        "y".repeat(8_000)
+    );
+    let step = core.apply_model_response(LlmResponse {
+        content: raw,
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel repair, got {other:?}"),
+    };
+    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("[BEGIN PREVIOUS_LLM_RESPONSE]"));
+    assert!(prompt.contains("[FOCUSED previous response: chars"));
+    assert!(prompt.contains("BAD_JSON_FOCUS"));
+    assert!(prompt.contains("TAIL_NEAR_FOCUS"));
+    assert!(!prompt.contains("BEGIN_SHOULD_NOT_APPEAR"));
+    assert!(!prompt.contains("END_SHOULD_NOT_APPEAR"));
+    assert!(prompt.contains("[END PREVIOUS_LLM_RESPONSE]"));
 }
 
 #[test]
@@ -939,6 +980,7 @@ fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected protocol repair, got {other:?}"),
     };
+    assert!(prompt.contains("prompt_type: response_repair"));
     assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("final_answer_must_not_start_with_runtime_progress_marker"));
 }
@@ -963,6 +1005,7 @@ fn guarded_finalize_with_runtime_progress_marker_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected protocol repair, got {other:?}"),
     };
+    assert!(prompt.contains("prompt_type: response_repair"));
     assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("final_answer_must_not_start_with_runtime_progress_marker"));
     assert!(!prompt.contains("Expect check:"));
@@ -1020,9 +1063,11 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
+    assert!(prompt.contains("prompt_type: response_repair"));
     assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("truncated_model_output"));
     assert!(prompt.contains("max output token limit"));
+    assert!(prompt.contains(r#"{"report_job_progress":"partial"#));
 }
 
 #[test]

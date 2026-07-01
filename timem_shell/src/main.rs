@@ -349,6 +349,16 @@ impl TurnUi for CliTurnUi<'_> {
         }
     }
 
+    fn on_model_retry(&mut self, attempt: u32, max_attempts: u32, delay: Duration, error: &str) {
+        if let Some(status) = self.status.as_deref_mut() {
+            let delay_secs = delay.as_secs().max(1);
+            status.set_retry_notice(format!(
+                "系统/HTTP 错误，{}s 后重试 {}/{}：{}",
+                delay_secs, attempt, max_attempts, error
+            ));
+        }
+    }
+
     fn pause_for_user_decision(&mut self) {
         if let Some(status) = self.status.as_deref_mut() {
             status.pause_for_user_approval();
@@ -405,6 +415,7 @@ impl ThinkingStatus {
                 tick: random_spinner_tick(),
                 elapsed_secs: 0,
                 max_llm_input_tokens,
+                retry_notice: None,
             },
             observations: ObservationPanel::default(),
         }));
@@ -441,6 +452,7 @@ impl ThinkingStatus {
         if let Ok(mut state) = self.state.lock() {
             state.status.model_round = round;
             state.status.direction = direction;
+            state.status.retry_notice = None;
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -488,6 +500,13 @@ impl ThinkingStatus {
             state
                 .observations
                 .apply(ObservationEvent::FinishTransient("思考中...".to_string()));
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn set_retry_notice(&mut self, text: String) {
+        if let Ok(mut state) = self.state.lock() {
+            state.status.retry_notice = Some(text);
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
