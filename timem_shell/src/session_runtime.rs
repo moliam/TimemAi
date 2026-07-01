@@ -675,6 +675,130 @@ mod tests {
         assert!(ui.retries.is_empty());
     }
 
+    #[test]
+    fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
+        let dir = tmp_dir("session_cache_plan");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"{"status":"working","report_job_progress":"查询 scratch 后继续。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","input":{"type":"scratch","op":"query","query":"","limit":3}}]}"#,
+                5_000,
+                false,
+            )),
+            Ok(llm(
+                r#"{"status":"finished","final_answer":"没有找到相关 scratch。"}"#,
+                5_800,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "帮我看看最近 scratch 里有什么",
+                session: "cache_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "没有找到相关 scratch。");
+        assert_eq!(model.prompts.len(), 2);
+
+        let first_blocks = crate::prompt_cache::plan_prompt_cache(&model.prompts[0]);
+        assert_eq!(first_blocks.len(), 2);
+        assert_eq!(
+            first_blocks[0].cache,
+            crate::prompt_cache::CacheControl::Ephemeral
+        );
+        assert_eq!(
+            first_blocks[1].cache,
+            crate::prompt_cache::CacheControl::None
+        );
+
+        let second_parts =
+            crate::prompt_cache::prompt_parts_from_rendered_prompt(&model.prompts[1]);
+        assert!(second_parts.static_prompt.contains("test static prompt"));
+        assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
+        assert!(second_parts.new_delta.contains("Action result: memmgr"));
+        let second_blocks = crate::prompt_cache::plan_incremental_cache(second_parts);
+        assert_eq!(second_blocks.len(), 3);
+        assert_eq!(
+            second_blocks[0].cache,
+            crate::prompt_cache::CacheControl::Ephemeral
+        );
+        assert_eq!(
+            second_blocks[1].cache,
+            crate::prompt_cache::CacheControl::Ephemeral
+        );
+        assert_eq!(
+            second_blocks[2].cache,
+            crate::prompt_cache::CacheControl::None
+        );
+    }
+
+    #[test]
+    fn session_turn_records_cached_tokens_in_profiler_and_latest_usage() {
+        let dir = tmp_dir("session_profiler_cache");
+        let audit = dir.join("audit.jsonl");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut profiler = RuntimeProfiler::default();
+        let mut first_usage = usage(7_000, 120);
+        first_usage.cached_tokens = 4_000;
+        let mut second_usage = usage(8_500, 240);
+        second_usage.cached_tokens = 6_500;
+        let mut model = ReplayModel::new([
+            Ok(LlmResponse {
+                content: r#"{"status":"working","report_job_progress":"先查询 scratch。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","input":{"type":"scratch","op":"query","query":"","limit":3}}]}"#.to_string(),
+                model_name: "test-model".to_string(),
+                usage: first_usage.clone(),
+                truncated: false,
+            }),
+            Ok(LlmResponse {
+                content: r#"{"status":"finished","final_answer":"完成。"}"#.to_string(),
+                model_name: "test-model".to_string(),
+                usage: second_usage.clone(),
+                truncated: false,
+            }),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnRequest {
+                input: "跑一轮带 cache usage 的任务",
+                session: "profiler_session",
+                audit_file: &audit,
+                additional_context: None,
+            },
+            &mut ui,
+            Some(&mut profiler),
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "完成。");
+        assert_eq!(outcome.latest_usage, Some(second_usage));
+        let profile = profiler.models().get("test:test-model").unwrap();
+        assert_eq!(profile.llm_calls, 2);
+        assert_eq!(profile.input_tokens, 15_500);
+        assert_eq!(profile.output_tokens, 360);
+        assert_eq!(profile.cached_tokens, 10_500);
+        let report =
+            crate::render_prof_report(&profiler, &dir, &audit, &dir.join("action_audit.json"));
+        assert!(report.contains("test:test-model"));
+        assert!(report.contains("kvc hit rate(⌁): 67.7%"));
+        assert!(report.contains("⌁10.5K"));
+    }
+
     struct ShrinkReplayModel {
         prompts: Vec<String>,
     }

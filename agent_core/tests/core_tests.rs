@@ -3580,6 +3580,191 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 }
 
 #[test]
+fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
+    let dir = tmp_dir("scenario_coding");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+
+    let _ = core.begin_turn(
+        "检查这个 Rust 项目的代码入口和测试数量，然后告诉我下一步。",
+        None,
+    );
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"先查看项目结构和测试入口。","next_actions":[{"action":"run_bash","intent":"Inspect Rust project files and test definitions.","input":{"command":"mkdir -p target; printf 'src/lib.rs\nsrc/main.rs\ntests/core_tests.rs\n' > target/timem_scenario_files.txt; printf '#[test]\nfn smoke() {}\n#[test]\nfn regression() {}\n' > target/timem_scenario_tests.rs; wc -l target/timem_scenario_files.txt target/timem_scenario_tests.rs","timeout_ms":5000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected shell evidence prompt, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("target/timem_scenario_files.txt"));
+    assert!(prompt.contains("target/timem_scenario_tests.rs"));
+    assert!(prompt.contains("status: 0"));
+
+    let final_turn = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"根据本地检查结果，项目入口和测试文件已定位；下一步应针对失败点补小范围测试并运行相关 cargo test。"}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final coding answer, got {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("本地检查结果"));
+    let _ = fs::remove_file("target/timem_scenario_files.txt");
+    let _ = fs::remove_file("target/timem_scenario_tests.rs");
+}
+
+#[test]
+fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
+    let dir = tmp_dir("scenario_memory_qa");
+    let memory_dir = dir.join("memory");
+    fs::create_dir_all(&memory_dir).unwrap();
+    fs::write(
+        memory_dir.join("memory.jsonl"),
+        r#"{"id":"mem_name","content":"用户的名字是默默","created_at_ms":1780000000000,"updated_at_ms":1780000000000,"version":1}
+"#,
+    )
+    .unwrap();
+    let audit_dir = dir.join("audit");
+    fs::create_dir_all(&audit_dir).unwrap();
+    fs::write(
+        audit_dir.join("api_audit.jsonl"),
+        r#"{"type":"turn_start","session":"scenario_memory","turn_id":"turn_1780000010000_1","created_at":1780000010000,"user_input":"今天上午我们聊了 v0.6 发布检查"}
+{"type":"turn_final","session":"scenario_memory","turn_id":"turn_1780000010000_1","created_at":1780000015000,"assistant_output":"我建议先跑完整 CI 和真实 TTY smoke。"}
+"#,
+    )
+    .unwrap();
+
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let _ = core.begin_turn("我叫什么？今天上午我们聊了什么？", None);
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"查询长期记忆和聊天记录后再回答。","next_actions":[{"action":"memmgr","intent":"查询用户姓名长期记忆。","input":{"type":"durable","op":"query","query":"用户 名字","limit":5}},{"action":"memmgr","intent":"查询今天上午聊天记录。","input":{"type":"raw_chat","op":"query","query":"今天上午 发布检查 CI TTY","limit":5}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected memory evidence prompt, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("用户的名字是默默"));
+    assert!(prompt.contains("v0.6 发布检查"));
+    assert!(prompt.contains("完整 CI 和真实 TTY smoke"));
+
+    let final_turn = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"你叫默默。今天上午我们聊的是 v0.6 发布检查，重点是完整 CI 和真实 TTY smoke。"}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final memory answer, got {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("你叫默默"));
+}
+
+#[test]
+fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scenario_self_qa"),
+    );
+    let _ = core.begin_turn("你是谁？把本轮调试标记设成 enabled，再确认你的路径。", None);
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"查询 Timem 自身信息并设置非敏感运行期标记。","next_actions":[{"action":"self_tool","intent":"查看 Timem 身份和进程。","input":{"type":"about_me","op":"read"}},{"action":"self_tool","intent":"设置非敏感调试标记。","input":{"type":"env","op":"write","key":"TIMEM_SCENARIO_DEBUG","value":"enabled"}},{"action":"self_tool","intent":"查看当前记忆和审计路径。","input":{"type":"mem_path","op":"read"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected self_tool evidence prompt, got {other:?}"),
+    };
+    assert!(prompt.contains("type: about_me"));
+    assert!(prompt.contains("name: TimemAi"));
+    assert!(prompt.contains("project: https://github.com/moliam/TimemAi"));
+    assert!(prompt.contains("star_message: Please star https://github.com/moliam/TimemAi"));
+    assert!(prompt.contains("status: updated_current_process_env"));
+    assert!(prompt.contains("key: TIMEM_SCENARIO_DEBUG"));
+    assert!(prompt.contains("type: mem_path"));
+    assert!(prompt.contains("api_audit_file:"));
+
+    let final_turn = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"我是 TimemAi，当前调试标记已在本进程设置为 enabled；记忆和审计路径也已通过 self_tool 确认。"}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final self answer, got {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("TimemAi"));
+    assert!(final_turn.response_to_user.contains("enabled"));
+}
+
+#[test]
+fn scenario_file_writing_outputs_artifact_and_verifies_readback() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("scenario_file_writing"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+
+    let _ = core.begin_turn("帮我写一份简短发布检查 md，并确认文件内容。", None);
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"写入发布检查文档并读回验证。","next_actions":[{"action":"run_bash","intent":"Create and verify a release checklist markdown file.","input":{"command":"mkdir -p target/timem_scenario_output; printf '# Release Check\n\n- CI passed\n- Sensitive scan passed\n- Real TTY smoke passed\n' > target/timem_scenario_output/release_check.md; sed -n '1,20p' target/timem_scenario_output/release_check.md","timeout_ms":5000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected file evidence prompt, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("# Release Check"));
+    assert!(prompt.contains("- CI passed"));
+    assert!(prompt.contains("- Sensitive scan passed"));
+    assert!(prompt.contains("status: 0"));
+    assert!(
+        fs::read_to_string("target/timem_scenario_output/release_check.md")
+            .unwrap()
+            .contains("Real TTY smoke passed")
+    );
+
+    let final_turn = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"已生成并读回验证 `target/timem_scenario_output/release_check.md`，内容包含 CI、敏感扫描和真实 TTY smoke 检查项。"}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final file-writing answer, got {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("release_check.md"));
+    let _ = fs::remove_dir_all("target/timem_scenario_output");
+}
+
+#[test]
 fn thought_field_is_persisted_as_llm_thought_slice() {
     let mut core = AgentCore::new(
         "STATIC",

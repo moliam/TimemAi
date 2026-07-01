@@ -26,6 +26,10 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   non-secret runtime env read/write, memory/audit path reporting, and software
   about/version/process metadata. Memory path env variables such as
   `TIMEM_DATA_DIR` and `TIMEM_SPACE` are protected as startup-only settings.
+- Added focused core scenario replay tests for coding inspection, memory QA,
+  Timem self QA/env update, and file-writing output workflows.
+- Added session-level regression tests for incremental KV-cache prompt planning
+  and profiler cached-token accounting.
 
 ### Fixed
 

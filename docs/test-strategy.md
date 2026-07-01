@@ -70,7 +70,7 @@ checks. If a dimension is not applicable, record that residual decision in
 |---|---|---|---|
 | Provider config, protocol, URL, output/input limits | `provider_config_from_env`, `parse_cli_args`, provider switch default-reset tests, protocol adapter tests | startup banner and `/config` real TTY smoke including provider switch/default URL validation | full CI |
 | Provider response parsing and errors | OpenAI-compatible, OpenAI Responses, Anthropic usage/error tests | truncated output expansion session test; transient provider error retry session test; protocol repair session test with audit assertions | edge regression session group |
-| Prompt cache planning | `prompt_cache_strategy_*`, provider request cache-control tests | request audit redaction/hash tests | full CI |
+| Prompt cache planning | `prompt_cache_strategy_*`, provider request cache-control tests | `session_turn_preserves_incremental_prompt_cache_plan_across_rounds`, request audit redaction/hash tests | full CI |
 | Prompt delta/slice rendering | prompt segmentation, multi-slice core tests, focused response-repair slice tests | shrink session E2E | edge regression shrink group |
 | Forced shrink | core shrink threshold, stale observed-token invalidation, static-dominant guard | `session_turn_forced_shrink_runs_to_final_without_repeated_shrink` | edge regression shrink + session groups |
 | Scratch notes and context offload | scratch write/read/query/delete, invalid refs, missing fields | `session_turn_scratch_context_offload_records_id_and_continues` | session group |
@@ -79,13 +79,14 @@ checks. If a dimension is not applicable, record that residual decision in
 | Chat history | persisted query, delete, SQL time-window, current prompt fallback | realistic story | full CI |
 | Bash actions | approval risk, foreground shell, readback, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
 | Runtime self tool | `self_tool::tests::*`, manifest/registry/executor tests, sensitive/protected env denial tests | core action replay for env/path/about/process plus UI observation tests | full CI |
+| User scenario replay | focused core replay tests for coding, memory QA, self QA/env update, and file-writing output | `scenario_coding_inspects_project_and_reports_from_shell_evidence`, `scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering`, `scenario_self_qa_and_runtime_env_update_stays_bounded`, `scenario_file_writing_outputs_artifact_and_verifies_readback` | full CI |
 | Shell jobs | background start/poll/status timeout tests | realistic story where applicable | shell job group |
 | Multi-turn replay story | protocol parsing, memory/scratch/shrink primitives | `session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering` | full CI |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |
 | Cancellation | cancel before provider call, command cancellation tests | real TTY Ctrl+C smoke | real TTY smoke |
 | Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts | real TTY multiline/paste/config/workspace smokes | real TTY smoke in CI |
 | Observation panel | observation event/rendering tests | thinking view tests including retry and repair-count status | full CI |
-| Profiling | profiler aggregation and storage tests | `/prof` real TTY smoke | real TTY smoke |
+| Profiling | profiler aggregation and storage tests | `session_turn_records_cached_tokens_in_profiler_and_latest_usage`, `/prof` real TTY smoke | real TTY smoke |
 | Audit and secrets | append audit, action grouping, redaction tests, sensitive scan | session tests assert turn/action/retry/repair audit records | sensitive scan + full CI |
 | Install/update scripts | install logic tests, install run-hint contract | CI script syntax and install logic | full CI |
 
