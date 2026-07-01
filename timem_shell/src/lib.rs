@@ -16,8 +16,9 @@ mod session_runtime;
 mod structured_output;
 
 pub use observation::{
-    observation_events_from_model_response, render_observation_panel, render_observation_panel_at,
-    ObservationEvent, ObservationLine, ObservationLineStyle, ObservationPanel,
+    observation_events_from_model_response, observation_panel_width_for_terminal,
+    render_observation_panel, render_observation_panel_at, ObservationEvent, ObservationLine,
+    ObservationLineStyle, ObservationPanel,
 };
 pub use profiler::{collect_storage_profile, render_prof_report, RuntimeProfiler, StorageProfile};
 pub use prompt_cache::{

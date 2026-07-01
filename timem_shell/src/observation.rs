@@ -55,8 +55,12 @@ impl ObservationPanel {
             lines: VecDeque::new(),
             transients: Vec::new(),
             max_lines: max_lines.max(1),
-            max_width: max_width.max(32),
+            max_width: max_width.max(10),
         }
+    }
+
+    pub fn set_max_width(&mut self, max_width: usize) {
+        self.max_width = max_width.max(10);
     }
 
     pub fn apply(&mut self, event: ObservationEvent) {
@@ -170,7 +174,7 @@ pub fn render_observation_panel_at(panel: &ObservationPanel, tick: usize) -> Str
         return String::new();
     }
     let active_color = ACTIVE_TEXT_COLORS[tick % ACTIVE_TEXT_COLORS.len()];
-    let content_width = panel.max_width.saturating_sub(4).max(24);
+    let content_width = panel.max_width.saturating_sub(2).max(8);
     let title = " Thought / Action ";
     let mut out = String::new();
     out.push_str(ANSI_BOLD);
@@ -184,22 +188,31 @@ pub fn render_observation_panel_at(panel: &ObservationPanel, tick: usize) -> Str
     for line in panel.visible_lines() {
         let line_width = content_width.saturating_sub(2);
         let text_width = line_width.saturating_sub(display_width(OBSERVATION_LINE_PREFIX));
-        let fitted = fit_display_width(&line.text, text_width);
-        let content = format!("{OBSERVATION_LINE_PREFIX}{fitted}");
-        let padded = pad_display_width(&content, line_width);
-        out.push('┃');
-        out.push(' ');
-        match line.style {
-            ObservationLineStyle::Normal => out.push_str(&padded),
-            ObservationLineStyle::ActiveBlink => {
-                out.push_str(active_color);
-                out.push_str(&padded);
-                out.push_str(ANSI_RESET);
+        for (idx, wrapped) in wrap_display_width(&line.text, text_width)
+            .into_iter()
+            .enumerate()
+        {
+            let prefix = if idx == 0 {
+                OBSERVATION_LINE_PREFIX.to_string()
+            } else {
+                " ".repeat(display_width(OBSERVATION_LINE_PREFIX))
+            };
+            let content = format!("{prefix}{wrapped}");
+            let padded = pad_display_width(&content, line_width);
+            out.push('┃');
+            out.push(' ');
+            match line.style {
+                ObservationLineStyle::Normal => out.push_str(&padded),
+                ObservationLineStyle::ActiveBlink => {
+                    out.push_str(active_color);
+                    out.push_str(&padded);
+                    out.push_str(ANSI_RESET);
+                }
             }
+            out.push(' ');
+            out.push('┃');
+            out.push('\n');
         }
-        out.push(' ');
-        out.push('┃');
-        out.push('\n');
     }
     out.push_str(ANSI_BOLD);
     out.push('┗');
@@ -208,6 +221,18 @@ pub fn render_observation_panel_at(panel: &ObservationPanel, tick: usize) -> Str
     out.push_str(ANSI_RESET);
     out.push('\n');
     out
+}
+
+pub fn observation_panel_width_for_terminal(terminal_width: usize) -> usize {
+    let window = terminal_width.max(1);
+    let eighty_percent = window.saturating_mul(80) / 100;
+    if eighty_percent >= 80 {
+        eighty_percent
+    } else if window > 80 {
+        80
+    } else {
+        window
+    }
 }
 
 pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationEvent> {
@@ -354,25 +379,28 @@ fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
     }
 }
 
-fn fit_display_width(text: &str, width: usize) -> String {
-    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if display_width(&one_line) <= width {
-        return one_line;
-    }
-    let ellipsis = "…";
-    let content_width = width.saturating_sub(display_width(ellipsis));
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in one_line.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + ch_width > content_width {
-            break;
+fn wrap_display_width(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for source_line in text.lines() {
+        let mut current = String::new();
+        let mut used = 0usize;
+        for ch in source_line.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used > 0 && used + ch_width > width {
+                lines.push(current);
+                current = String::new();
+                used = 0;
+            }
+            current.push(ch);
+            used += ch_width;
         }
-        out.push(ch);
-        used += ch_width;
+        lines.push(current);
     }
-    out.push_str(ellipsis);
-    out
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn pad_display_width(text: &str, width: usize) -> String {
@@ -677,14 +705,39 @@ mod tests {
     }
 
     #[test]
-    fn panel_truncates_long_command_to_width() {
+    fn panel_wraps_long_command_without_truncating() {
         let mut panel = ObservationPanel::new(8, 44);
         panel.apply(ObservationEvent::Active(format!(
             "Bash: {}",
             "rg --files -g '*.rs' | xargs wc -l && echo very-long-tail"
         )));
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains('…'));
-        assert!(!rendered.contains("very-long-tail"));
+        assert!(!rendered.contains('…'));
+        assert!(rendered.contains("very-long-tail"));
+        assert!(rendered.lines().count() > 3);
+    }
+
+    #[test]
+    fn observation_width_follows_terminal_width_policy() {
+        assert_eq!(observation_panel_width_for_terminal(120), 96);
+        assert_eq!(observation_panel_width_for_terminal(100), 80);
+        assert_eq!(observation_panel_width_for_terminal(90), 80);
+        assert_eq!(observation_panel_width_for_terminal(70), 70);
+    }
+
+    #[test]
+    fn panel_width_can_be_updated_for_current_terminal() {
+        let mut panel = ObservationPanel::new(8, 44);
+        panel.set_max_width(observation_panel_width_for_terminal(120));
+        panel.apply(ObservationEvent::Persistent("宽度检查".to_string()));
+        let rendered = render_observation_panel(&panel);
+        let first_line = rendered
+            .lines()
+            .next()
+            .unwrap()
+            .replace(ANSI_BOLD, "")
+            .replace(ANSI_RESET, "");
+        let first_line_width = display_width(&first_line);
+        assert_eq!(first_line_width, 96);
     }
 }

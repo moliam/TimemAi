@@ -21,11 +21,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
     action_audit_path, action_status_hint, append_audit, audit_path, data_root,
     estimate_prompt_context_tokens, format_token_count, load_workspace_dirs, local_time_label,
-    memory_path, observation_events_from_model_response, parse_cli_args, provider_config_from_env,
-    render_final_response_at, render_prof_report, render_shell_status_bar, render_thinking_view_at,
-    run_session_turn, save_workspace_dirs, ApiProtocol, ModelDirection, NoopTurnUi,
-    ObservationEvent, ObservationPanel, RuntimeProfiler, ShellStatusMessage, ShellStatusSnapshot,
-    ShellStatusTone, ThinkingViewSnapshot, TurnRequest, TurnUi, SPINNER_ICONS, TIMEM_LOGO,
+    memory_path, observation_events_from_model_response, observation_panel_width_for_terminal,
+    parse_cli_args, provider_config_from_env, render_final_response_at, render_prof_report,
+    render_shell_status_bar, render_thinking_view_at, run_session_turn, save_workspace_dirs,
+    ApiProtocol, ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, RuntimeProfiler,
+    ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, TurnRequest,
+    TurnUi, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -2395,7 +2396,11 @@ impl Prompt for TimemReedlinePrompt {
 }
 
 fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
-    let rendered = render_thinking_view_at(snapshot, &time_label());
+    let mut snapshot = snapshot.clone();
+    snapshot
+        .observations
+        .set_max_width(observation_panel_width_for_terminal(terminal_width()));
+    let rendered = render_thinking_view_at(&snapshot, &time_label());
     let line_count = rendered.lines().count();
     print!("{rendered}");
     if let Ok(mut previous) = rendered_lines.lock() {
