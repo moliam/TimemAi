@@ -553,48 +553,24 @@ proc run_config_menu_cancel_smoke {} {
 proc run_config_base_url_update_after_idle_smoke {} {
     spawn_timem
     send "/config\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "选择要修改的配置" {}
-        timeout {
-            error "timeout waiting for /config menu before base-url update"
-        }
-        eof {
-            error "unexpected EOF waiting for /config menu before base-url update"
-        }
-    }
+    wait_for_text \
+        "config menu before base-url update" \
+        "选择要修改的配置" \
+        "timeout waiting for /config menu before base-url update" \
+        "unexpected EOF waiting for /config menu before base-url update"
     send "\033\[B\033\[B\033\[B\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "TIMEM_BASE_URL 当前值" {}
-        timeout {
-            error "timeout waiting for TIMEM_BASE_URL value prompt"
-        }
-        eof {
-            error "unexpected EOF waiting for TIMEM_BASE_URL value prompt"
-        }
-    }
+    wait_for_text \
+        "TIMEM_BASE_URL value prompt" \
+        "TIMEM_BASE_URL 当前值" \
+        "timeout waiting for TIMEM_BASE_URL value prompt" \
+        "unexpected EOF waiting for TIMEM_BASE_URL value prompt"
     after 1000
     send "https://example.com/v1\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "已更新 TIMEM_BASE_URL" {}
-        timeout {
-            error "timeout waiting for TIMEM_BASE_URL update after idle"
-        }
-        eof {
-            error "unexpected EOF during TIMEM_BASE_URL update after idle"
-        }
-    }
+    wait_for_text \
+        "TIMEM_BASE_URL update after idle" \
+        "已更新 TIMEM_BASE_URL" \
+        "timeout waiting for TIMEM_BASE_URL update after idle" \
+        "unexpected EOF during TIMEM_BASE_URL update after idle"
     wait_prompt
     exit_timem
 }
@@ -602,93 +578,45 @@ proc run_config_base_url_update_after_idle_smoke {} {
 proc run_config_provider_switch_smoke {} {
     spawn_timem
     send "/config\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "选择要修改的配置" {}
-        timeout {
-            error "timeout waiting for /config menu before provider switch"
-        }
-        eof {
-            error "unexpected EOF waiting for /config menu before provider switch"
-        }
-    }
+    wait_for_text \
+        "config menu before provider switch" \
+        "选择要修改的配置" \
+        "timeout waiting for /config menu before provider switch" \
+        "unexpected EOF waiting for /config menu before provider switch"
     send "\033\[B\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "TIMEM_GATEWAY_PROVIDER 当前值" {}
-        timeout {
-            error "timeout waiting for TIMEM_GATEWAY_PROVIDER value prompt"
-        }
-        eof {
-            error "unexpected EOF waiting for TIMEM_GATEWAY_PROVIDER value prompt"
-        }
-    }
+    wait_for_text \
+        "TIMEM_GATEWAY_PROVIDER value prompt" \
+        "TIMEM_GATEWAY_PROVIDER 当前值" \
+        "timeout waiting for TIMEM_GATEWAY_PROVIDER value prompt" \
+        "unexpected EOF waiting for TIMEM_GATEWAY_PROVIDER value prompt"
     send "anthropic\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "https://api.anthropic.com" {}
-        timeout {
-            error "timeout waiting for anthropic default URL after provider switch"
-        }
-        eof {
-            error "unexpected EOF during provider switch"
-        }
-    }
+    wait_for_text \
+        "anthropic default URL after provider switch" \
+        "https://api.anthropic.com" \
+        "timeout waiting for anthropic default URL after provider switch" \
+        "unexpected EOF during provider switch"
     wait_prompt
     exit_timem
 
     spawn_timem
     send "/config\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "选择要修改的配置" {}
-        timeout {
-            error "timeout waiting for /config menu before private provider rejection"
-        }
-        eof {
-            error "unexpected EOF waiting for /config menu before private provider rejection"
-        }
-    }
+    wait_for_text \
+        "config menu before private provider rejection" \
+        "选择要修改的配置" \
+        "timeout waiting for /config menu before private provider rejection" \
+        "unexpected EOF waiting for /config menu before private provider rejection"
     send "\033\[B\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "TIMEM_GATEWAY_PROVIDER 当前值" {}
-        timeout {
-            error "timeout waiting for provider value prompt before private rejection"
-        }
-        eof {
-            error "unexpected EOF waiting for provider value prompt before private rejection"
-        }
-    }
+    wait_for_text \
+        "provider value prompt before private rejection" \
+        "TIMEM_GATEWAY_PROVIDER 当前值" \
+        "timeout waiting for provider value prompt before private rejection" \
+        "unexpected EOF waiting for provider value prompt before private rejection"
     send "private\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "TIMEM_BASE_URL" {}
-        timeout {
-            error "timeout waiting for private provider base-url validation"
-        }
-        eof {
-            error "unexpected EOF during private provider rejection"
-        }
-    }
+    wait_for_text \
+        "private provider base-url validation" \
+        "TIMEM_BASE_URL" \
+        "timeout waiting for private provider base-url validation" \
+        "unexpected EOF during private provider rejection"
     wait_prompt
     exit_timem
 }
