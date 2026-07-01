@@ -358,6 +358,24 @@ pub fn action_status_hint(content: &str) -> Option<ActionStatusHint> {
         .filter(|text| !text.is_empty())
         .map(ToString::to_string);
     match action {
+        "memmgr" => {
+            let input = first.get("input").unwrap_or(first);
+            let mem_type = input.get("type").and_then(Value::as_str).unwrap_or("");
+            let op = input.get("op").and_then(Value::as_str).unwrap_or("");
+            let (fallback, marker) = match (mem_type, op) {
+                ("durable", "query" | "schema" | "sql") => ("查询记忆", "◂⛃"),
+                ("durable", _) => ("写入记忆", "▸⛃"),
+                ("raw_chat", "query" | "sql") => ("查询聊天记录", ""),
+                ("raw_chat", "delete") => ("删除聊天记录", ""),
+                ("scratch", _) => ("处理草稿区", ""),
+                ("context", "shrink") => ("整理上下文", ""),
+                _ => ("处理记忆", ""),
+            };
+            Some(ActionStatusHint {
+                intent: intent.unwrap_or_else(|| fallback.to_string()),
+                memory_marker: marker.to_string(),
+            })
+        }
         "chat_history_query" => Some(ActionStatusHint {
             intent: intent.unwrap_or_else(|| "查询聊天记录".to_string()),
             memory_marker: String::new(),
@@ -2579,6 +2597,24 @@ mod tests {
         let hint = action_status_hint(r#"{"next_actions":[{"action":"query_memory","intent":"确认用户姓名","input":{"query":"名字"}}]}"#).unwrap();
         assert_eq!(hint.intent, "确认用户姓名");
         assert_eq!(hint.memory_marker, "◂⛃");
+    }
+
+    #[test]
+    fn action_status_hint_marks_memmgr_durable_read_and_write() {
+        let read_hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"确认用户姓名","input":{"type":"durable","op":"query","query":"名字"}}]}"#).unwrap();
+        assert_eq!(read_hint.intent, "确认用户姓名");
+        assert_eq!(read_hint.memory_marker, "◂⛃");
+
+        let write_hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"更新用户姓名","input":{"type":"durable","op":"upsert","id":"user_name","content":"用户叫默默"}}]}"#).unwrap();
+        assert_eq!(write_hint.intent, "更新用户姓名");
+        assert_eq!(write_hint.memory_marker, "▸⛃");
+    }
+
+    #[test]
+    fn action_status_hint_marks_memmgr_raw_chat_without_durable_marker() {
+        let hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"查询刚才说法","input":{"type":"raw_chat","op":"query","query":"刚才"}}]}"#).unwrap();
+        assert_eq!(hint.intent, "查询刚才说法");
+        assert_eq!(hint.memory_marker, "");
     }
 
     #[test]

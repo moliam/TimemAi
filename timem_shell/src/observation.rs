@@ -353,6 +353,24 @@ fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
         ))],
+        "memmgr" => {
+            let mem_type = input.get("type").and_then(Value::as_str).unwrap_or("");
+            let op = input.get("op").and_then(Value::as_str).unwrap_or("");
+            let default = match (mem_type, op) {
+                ("durable", "query" | "schema" | "sql") => "查询记忆",
+                ("durable", _) => "更新记忆",
+                ("raw_chat", "query" | "sql") => "查询聊天记录",
+                ("raw_chat", "delete") => "删除聊天记录",
+                ("scratch", _) => "处理草稿区",
+                ("context", "shrink") => "整理上下文",
+                _ => "处理记忆",
+            };
+            vec![ObservationEvent::Persistent(format!(
+                "{}: {}",
+                default,
+                intent.unwrap_or(default)
+            ))]
+        }
         "query_memory" | "memory_query" | "memory_sql_query" | "sql_read" | "memory_schema" => {
             vec![ObservationEvent::Persistent(format!(
                 "查询记忆: {}",
@@ -584,6 +602,23 @@ mod tests {
             vec![ObservationEvent::Persistent(
                 "查询记忆: 查询用户姓名记忆".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn memmgr_actions_map_to_user_readable_observation_events() {
+        let events = observation_events_from_model_response(
+            r#"{"next_actions":[
+                {"action":"memmgr","intent":"查询用户姓名记忆","input":{"type":"durable","op":"query","query":"名字"}},
+                {"action":"memmgr","intent":"移除过期上下文","input":{"type":"context","op":"shrink","delta_ids":["pd_1"]}}
+            ]}"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("查询记忆: 查询用户姓名记忆".to_string()),
+                ObservationEvent::Persistent("整理上下文: 移除过期上下文".to_string())
+            ]
         );
     }
 

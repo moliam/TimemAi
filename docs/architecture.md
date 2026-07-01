@@ -181,9 +181,9 @@ The guard has two responsibilities:
   JSONL/audit files are not truncated or interleaved by multiple CLI processes.
 - Semantic conflict detection: durable memory rows carry `version` and
   `updated_at_ms`. Updating or deleting an existing row requires
-  `memory_update.expected_version`, obtained from `query_memory` or
-  `memory_sql_query`. If another CLI changes the row first, runtime returns a
-  `memory_conflict` action result and leaves the current row untouched.
+  `expected_version`, obtained from `memmgr type=durable op=query|sql`. If
+  another CLI changes the row first, runtime returns a `memory_conflict` action
+  result and leaves the current row untouched.
 
 Guarded operations include:
 
@@ -257,8 +257,8 @@ Runtime shrink review and future shrink actions should use these ids:
 - At that 90% threshold, runtime marks shrink as required. The model should
   compact before continuing: summarize useful dynamic prompt deltas to about
   10%-20% of their current token footprint, discard stale details, put important
-  but lengthy state into scratch memory, and then use `prompt_shrink` on covered
-  `delta_id` / `slice_id` ranges.
+  but lengthy state into scratch memory, and then use `memmgr type=context
+  op=shrink` on covered `delta_id` / `slice_id` ranges.
 
 ### Prompt Delta
 
@@ -395,9 +395,11 @@ Each `next_actions` item is a structured command:
 
 ```json
 {
-  "action": "memory_sql_query",
+  "action": "memmgr",
   "intent": "Find recent chat messages by created time",
   "input": {
+    "type": "raw_chat",
+    "op": "sql",
     "sql": "SELECT created_at_ms, role, content FROM chat_messages ORDER BY created_at_ms DESC",
     "limit": 20
   }
@@ -406,9 +408,9 @@ Each `next_actions` item is a structured command:
 
 Fields:
 
-- `action`: canonical tool name, such as `run_bash`, `chat_history_query`,
-  `query_memory`, `memory_sql_query`, `memory_update`, `memory_schema`,
-  `scratch_write`, `scratch_read`, or `prompt_shrink`.
+- `action`: canonical tool name, such as `memmgr`, `run_bash`, or
+  `shell_job_status`. `memmgr` is the single model-facing interface for durable
+  memory, raw chat history, scratch memory, and dynamic context shrink.
 - `intent`: concise human-readable reason. It is required because shell UI uses
   it as action status.
 - `input`: action-specific structured parameters. Runtime validates this shape
@@ -431,7 +433,9 @@ delta_id: pd_1782200001000_4
 slice_id: ps_1782200001000_4_s001
 slice: 1/1
 prompt_type: result_of_llm_action
-Action result: memory_sql_query
+Action result: memmgr
+type: raw_chat
+op: sql
 rows:
 - created_at_ms: 1782200000000
   role: user
@@ -471,12 +475,12 @@ fails, the shell blocks raw model text and shows a safe fallback instead.
 ```mermaid
 flowchart TB
     Model["Model envelope"] --> Core["agent_core validator"]
-    Core --> Chat["chat_history_query / chat_history_delete\nUI-visible chat records"]
-    Core --> Memory["query_memory / memory_update\ndurable facts"]
-    Core --> SQL["memory_sql_query\nread-only SQLite snapshot"]
-    Core --> Scratch["scratch_write/read/query/delete\ntyped notes and context offload"]
+    Core --> Memmgr["memmgr\ntype=durable/raw_chat/scratch/context"]
+    Memmgr --> Chat["raw_chat query/sql/delete\nUI-visible chat records"]
+    Memmgr --> Memory["durable query/schema/sql/write/delete\nlong-lived facts"]
+    Memmgr --> Scratch["scratch query/write/read/delete\ntyped notes and context offload"]
+    Memmgr --> Shrink["context shrink\nremove delta/slice context"]
     Core --> Bash["run_bash\nlocal command"]
-    Core --> Shrink["prompt_shrink\nremove delta/slice context"]
 ```
 
 ### Memory and Chat History
@@ -492,21 +496,22 @@ durable memory does not prove that a visible chat transcript exists.
 
 Current implemented surface:
 
-- Chat history search: `chat_history_query` and `memory_sql_query` over
+- Chat history search: `memmgr` with `type=raw_chat, op=query|sql` over
   `chat_messages`.
-- Chat history deletion: `chat_history_delete`. The SQL surface remains
+- Chat history deletion: `memmgr` with `type=raw_chat, op=delete`. The SQL surface remains
   read-only and cannot delete `chat_messages`.
-- Durable memory search: `query_memory` and `memory_sql_query` over `memories`.
-- Durable memory insert/update/delete: `memory_update`. Existing-row
+- Durable memory search: `memmgr` with `type=durable, op=query|schema|sql`.
+- Durable memory insert/update/delete: `memmgr` with
+  `type=durable, op=insert|update|upsert|delete`. Existing-row
   update/delete requires `expected_version` to avoid stale multi-CLI writes.
-- Durable memory versioning: `memory_update` snapshots `memory.jsonl` in a local
+- Durable memory versioning: durable writes snapshot `memory.jsonl` in a local
   git repository under the selected memory directory when git is available.
-- Scratch memory: `scratch_write`, `scratch_read`, `scratch_query`, and
-  `scratch_delete` over `scratch_notes.jsonl`.
+- Scratch memory: `memmgr` with `type=scratch, op=query|write|read|delete` over
+  `scratch_notes.jsonl`.
 
 ### Read-only SQL
 
-`memory_sql_query` reads a restricted SQLite surface:
+`memmgr` SQL ops read a restricted SQLite surface:
 
 - `memories(id, created_at_ms, updated_at_ms, version, content)`
 - `chat_messages(id, session_id, turn_id, role, content, created_at_ms, source,
@@ -535,16 +540,19 @@ Short commands run in the foreground. Long-running commands should use
 `job_id`, output file, and status file; the model then uses `shell_job_status`
 to poll the job instead of repeating the long command.
 
-### Prompt Shrink Action
+### Context Shrink Action
 
-`prompt_shrink` is the structured action that actually removes dynamic prompt
-context. It accepts ids that came from rendered prompt slices:
+`memmgr` with `type=context, op=shrink` is the structured action that actually
+removes dynamic prompt context. It accepts ids that came from rendered prompt
+slices:
 
 ```json
 {
-  "action": "prompt_shrink",
+  "action": "memmgr",
   "intent": "Remove stale context by id.",
   "input": {
+    "type": "context",
+    "op": "shrink",
     "delta_ids": ["pd_1782200000000_2"],
     "slice_ids": ["ps_1782200001000_4_s001"]
   }
@@ -571,18 +579,22 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
   "response_to_user": "",
   "next_actions": [
     {
-      "action": "scratch_write",
+      "action": "memmgr",
       "intent": "Offload dynamic prompt context before shrinking.",
       "input": {
-        "type": "context_offload",
+        "type": "scratch",
+        "op": "write",
+        "kind": "context_offload",
         "label": "release validation context",
         "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
       }
     },
     {
-      "action": "prompt_shrink",
+      "action": "memmgr",
       "intent": "Remove dynamic prompt deltas covered by the compact summary.",
       "input": {
+        "type": "context",
+        "op": "shrink",
         "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
       }
     }
@@ -594,15 +606,15 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
 }
 ```
 
-`scratch_write` has two modes:
+Scratch write has two modes under `memmgr type=scratch op=write`:
 
-- `type=notes`: model provides `label` and `content`; runtime stores the note and
+- `kind=notes`: model provides `label` and `content`; runtime stores the note and
   returns `id`, `label`, `type`, and a short preview.
-- `type=context_offload`: model provides `label` and `delta_ids`/`slice_ids`;
+- `kind=context_offload`: model provides `label` and `delta_ids`/`slice_ids`;
   runtime verifies the ids are visible dynamic prompt context, rejects `prompt_0`,
   copies the real content into scratch, and returns only index metadata plus a
-  preview. The model later uses `scratch_read` with the returned id to retrieve
-  full details when needed.
+  preview. The model later uses `memmgr type=scratch op=read` with the returned
+  id to retrieve full details when needed.
 
 This keeps the boundary explicit: the model reasons over labels and ids, while
 runtime performs trusted prompt-context transfer.

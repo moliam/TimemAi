@@ -341,6 +341,40 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
 }
 
 #[test]
+fn memmgr_context_shrink_removes_whole_delta_by_delta_id() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("memmgr_context_shrink"),
+    );
+    let prompt = match core.begin_turn("REMOVE_THIS_MEMMGR_DELTA", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_id = first_field_value(&prompt, "delta_id");
+    assert!(!delta_id.is_empty());
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"Remove stale user question delta.","input":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+            delta_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("type: context"));
+    assert!(prompt.contains("op: shrink"));
+    assert!(prompt.contains("removed_delta_count: 1"));
+    assert!(!prompt.contains("REMOVE_THIS_MEMMGR_DELTA"));
+}
+
+#[test]
 fn prompt_shrink_can_hide_specific_slice_by_slice_id() {
     let mut core = AgentCore::new(
         "STATIC",
@@ -648,6 +682,64 @@ fn query_memory_action_returns_action_result_delta() {
     };
     assert!(prompt.contains("Action result: query_memory"));
     assert!(prompt.contains("6月12日"));
+}
+
+#[test]
+fn memmgr_durable_query_returns_action_result_delta() {
+    let dir = tmp_dir("memmgr_durable_query");
+    fs::write(
+        dir.join("memory.jsonl"),
+        r#"{"id":"m1","created_at_ms":1,"updated_at_ms":1,"version":1,"content":"用户儿子的生日是6月12日"}
+"#,
+    )
+    .unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("我儿子的生日是什么", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"test durable query","input":{"type":"durable","op":"query","query":"儿子 生日","limit":5}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("type: durable"));
+    assert!(prompt.contains("op: query"));
+    assert!(prompt.contains("6月12日"));
+}
+
+#[test]
+fn memmgr_raw_chat_query_reads_persisted_chat_records() {
+    let root = tmp_dir("memmgr_raw_chat");
+    let dir = root.join("memory");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        root.join("api_audit.jsonl"),
+        r#"{"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"我昨天提到了蓝色雨伞"}
+{"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了蓝色雨伞这个说法。"}
+"#,
+    )
+    .unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("我之前说过什么物品", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"test raw chat query","input":{"type":"raw_chat","op":"query","query":"蓝色雨伞","limit":5}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("type: raw_chat"));
+    assert!(prompt.contains("op: query"));
+    assert!(prompt.contains("chat_records"));
+    assert!(prompt.contains("蓝色雨伞"));
 }
 
 #[test]
@@ -1175,6 +1267,57 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
     assert!(!fs::read_to_string(core.scratch_file())
         .unwrap()
         .contains("continue this task later"));
+}
+
+#[test]
+fn memmgr_scratch_write_and_read_notes() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("memmgr_scratch_notes"),
+    );
+    let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"Create a task checkpoint.","input":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("type: scratch"));
+    assert!(prompt.contains("op: write"));
+    assert!(prompt.contains("label: release checkpoint"));
+    assert!(prompt.contains("content_preview: continue this task later"));
+    let stored = fs::read_to_string(core.scratch_file()).unwrap();
+    let scratch_id = stored
+        .lines()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .and_then(|value| {
+            value
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
+        .expect("scratch id should exist");
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"Read saved checkpoint by id.","input":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("op: read"));
+    assert!(prompt.contains("found: true"));
+    assert!(prompt.contains("continue this task later"));
 }
 
 #[test]
@@ -1707,7 +1850,8 @@ fn memory_schema_action_returns_native_schema_contract() {
         "memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)"
     ));
     assert!(prompt.contains("expected_version"));
-    assert!(prompt.contains("memory_sql_query"));
+    assert!(prompt.contains("safe_interface: memmgr"));
+    assert!(prompt.contains("durable: query|schema|sql|insert|update|upsert|delete"));
 }
 
 #[test]

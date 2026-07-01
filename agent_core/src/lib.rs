@@ -176,6 +176,8 @@ pub struct ShellJobRecord {
 struct ParsedAction {
     action: String,
     intent: String,
+    mem_type: String,
+    op: String,
     query: String,
     content: String,
     scratch_type: String,
@@ -200,6 +202,24 @@ struct ParsedAction {
 impl ParsedAction {
     fn audit_input(&self) -> Value {
         match self.action.as_str() {
+            "memmgr" => json!({
+                "type": self.mem_type,
+                "op": self.op,
+                "query": self.query,
+                "content": self.content,
+                "kind": self.scratch_type,
+                "label": self.label,
+                "sql": self.sql,
+                "params": self.params,
+                "operation": self.operation,
+                "expected_version": self.expected_version,
+                "id": self.id,
+                "delta_ids": self.delta_ids,
+                "slice_ids": self.slice_ids,
+                "limit": self.limit,
+                "after_ms": self.after_ms,
+                "before_ms": self.before_ms,
+            }),
             "run_bash" => json!({
                 "command": self.command,
                 "read_back_command": self.read_back_command,
@@ -1109,6 +1129,7 @@ impl AgentCore {
     fn execute_action(&mut self, action: ParsedAction) -> ActionExecution {
         let action_for_audit = action.clone();
         let result = match action.action.as_str() {
+            "memmgr" => self.execute_memmgr_action(&action),
             "chat_history_query" => {
                 self.current_stats.tool_calls += 1;
                 let rows = self
@@ -1424,6 +1445,259 @@ impl AgentCore {
         };
         self.record_action_audit(&action_for_audit, "completed", Some(&result));
         ActionExecution::Completed(result)
+    }
+
+    fn execute_memmgr_action(&mut self, action: &ParsedAction) -> String {
+        self.current_stats.tool_calls += 1;
+        match (action.mem_type.as_str(), action.op.as_str()) {
+            ("durable", "query") => {
+                self.current_stats.mem_reads += 1;
+                let rows = self
+                    .memory
+                    .query(&action.query, action.limit)
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    format!(
+                        "Action result: memmgr\ntype: durable\nop: query\nquery: {}\nresults: none",
+                        action.query
+                    )
+                } else {
+                    let lines = rows
+                        .into_iter()
+                        .map(|r| {
+                            format!(
+                                "- id={} version={} created_at_ms={} updated_at_ms={} content={}",
+                                r.id, r.version, r.created_at_ms, r.updated_at_ms, r.content
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!(
+                        "Action result: memmgr\ntype: durable\nop: query\nquery: {}\nresults:\n{}",
+                        action.query, lines
+                    )
+                }
+            }
+            ("durable", "schema") => {
+                self.current_stats.mem_reads += 1;
+                self.memory.schema_text(&self.chat_history)
+                    .replacen("Action result: memory_schema", "Action result: memmgr\ntype: durable\nop: schema", 1)
+            }
+            ("durable", "sql") | ("raw_chat", "sql") => {
+                self.current_stats.mem_reads += 1;
+                match self.memory.sql_read(
+                    &self.chat_history,
+                    &action.sql,
+                    &action.params,
+                    action.limit,
+                ) {
+                    Ok(rows) if rows.is_empty() => {
+                        format!(
+                            "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults: none",
+                            action.mem_type, action.sql
+                        )
+                    }
+                    Ok(rows) => {
+                        let lines = rows
+                            .into_iter()
+                            .map(|row| {
+                                let cells = row
+                                    .into_iter()
+                                    .map(|(column, value)| format!("{}={}", column, value))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!("- {}", cells)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!(
+                            "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults:\n{}",
+                            action.mem_type, action.sql, lines
+                        )
+                    }
+                    Err(err) => format!(
+                        "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nerror: {}",
+                        action.mem_type, action.sql, err
+                    ),
+                }
+            }
+            ("durable", "insert" | "update" | "upsert" | "delete") => {
+                match self.memory.update(
+                    &action.op,
+                    &action.id,
+                    &action.content,
+                    action.expected_version,
+                ) {
+                    Ok(result) => {
+                        self.current_stats.mem_writes += 1;
+                        result
+                            .replacen("Action result: memory_update", "Action result: memmgr\ntype: durable", 1)
+                    }
+                    Err(err) => format!("Action result: memmgr\ntype: durable\nop: {}\nerror: {}", action.op, err),
+                }
+            }
+            ("raw_chat", "query") => {
+                let rows = self
+                    .chat_history
+                    .query(
+                        &action.query,
+                        action.limit,
+                        action.after_ms,
+                        action.before_ms,
+                    )
+                    .unwrap_or_default();
+                let delta_rows = self.query_prompt_slices(
+                    &action.query,
+                    action.limit,
+                    action.after_ms,
+                    action.before_ms,
+                );
+                if rows.is_empty() && delta_rows.is_empty() {
+                    format!(
+                        "Action result: memmgr\ntype: raw_chat\nop: query\nquery: {}\nresults: none",
+                        action.query
+                    )
+                } else {
+                    let mut sections = Vec::new();
+                    if !rows.is_empty() {
+                        let lines = rows
+                            .into_iter()
+                            .map(|record| {
+                                format!(
+                                    "- source=chat_record time_ms={} session={} turn_id={} user={} assistant={}",
+                                    record.started_at_ms,
+                                    record.session,
+                                    record.turn_id,
+                                    compact_text(&record.user_input, 160),
+                                    compact_text(&record.assistant_output, 220)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        sections.push(format!("chat_records:\n{}", lines));
+                    }
+                    if !delta_rows.is_empty() {
+                        let lines = delta_rows
+                            .into_iter()
+                            .map(|slice| {
+                                format!(
+                                    "- source=prompt_delta delta_id={} slice_id={} slice={}/{} prompt_type={} time_ms={} text={}",
+                                    slice.delta_id,
+                                    slice.slice_id,
+                                    slice.slice_index,
+                                    slice.slice_count,
+                                    slice.prompt_type,
+                                    slice.time_ms,
+                                    compact_text(&slice.text, 240)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        sections.push(format!("current_prompt_deltas:\n{}", lines));
+                    }
+                    format!(
+                        "Action result: memmgr\ntype: raw_chat\nop: query\nquery: {}\nresults:\n{}",
+                        action.query,
+                        sections.join("\n")
+                    )
+                }
+            }
+            ("raw_chat", "delete") => match self.chat_history.delete(
+                &action.id,
+                &action.query,
+                action.limit,
+                action.after_ms,
+                action.before_ms,
+            ) {
+                Ok(deleted) => format!(
+                    "Action result: memmgr\ntype: raw_chat\nop: delete\nid: {}\nquery: {}\ndeleted_count: {}",
+                    action.id, action.query, deleted
+                ),
+                Err(err) => format!("Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}", err),
+            },
+            ("scratch", "write") => {
+                let scratch_type = normalized_scratch_type(&action.scratch_type);
+                let write_result = if scratch_type == "context_offload" {
+                    self.collect_prompt_context_for_scratch(&action.delta_ids, &action.slice_ids)
+                        .and_then(|offload| {
+                            self.scratch.write_record(
+                                &scratch_type,
+                                &action.label,
+                                &offload.content,
+                                &offload.delta_ids,
+                                &offload.slice_ids,
+                            )
+                        })
+                } else {
+                    self.scratch.write_record(
+                        &scratch_type,
+                        &action.label,
+                        &action.content,
+                        &[],
+                        &[],
+                    )
+                };
+                match write_result {
+                    Ok(record) => format_scratch_write_result(&record)
+                        .replacen("Action result: scratch_write", "Action result: memmgr\ntype: scratch\nop: write", 1),
+                    Err(err) => format!("Action result: memmgr\ntype: scratch\nop: write\nerror: {}", err),
+                }
+            }
+            ("scratch", "read") => match self.scratch.read(&action.id) {
+                Ok(Some(record)) => format_scratch_read_result(&record)
+                    .replacen("Action result: scratch_read", "Action result: memmgr\ntype: scratch\nop: read", 1),
+                Ok(None) => format!(
+                    "Action result: memmgr\ntype: scratch\nop: read\nid: {}\nfound: false",
+                    action.id
+                ),
+                Err(err) => format!("Action result: memmgr\ntype: scratch\nop: read\nerror: {}", err),
+            },
+            ("scratch", "query") => match self.scratch.query(&action.query, action.limit) {
+                Ok(rows) if rows.is_empty() => format!(
+                    "Action result: memmgr\ntype: scratch\nop: query\nquery: {}\nresults: none",
+                    action.query
+                ),
+                Ok(rows) => {
+                    let lines = rows
+                        .into_iter()
+                        .map(|row| {
+                            format!(
+                                "- id={} label={} type={} time_ms={} content_preview={}",
+                                row.id,
+                                scratch_label_for_display(&row),
+                                normalized_scratch_type(&row.scratch_type),
+                                row.created_at_ms,
+                                compact_text(&row.content, 240)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!(
+                        "Action result: memmgr\ntype: scratch\nop: query\nquery: {}\nresults:\n{}",
+                        action.query, lines
+                    )
+                }
+                Err(err) => format!("Action result: memmgr\ntype: scratch\nop: query\nerror: {}", err),
+            },
+            ("scratch", "delete") => match self.scratch.delete(&action.id) {
+                Ok(true) => format!(
+                    "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: true",
+                    action.id
+                ),
+                Ok(false) => format!(
+                    "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: false",
+                    action.id
+                ),
+                Err(err) => format!("Action result: memmgr\ntype: scratch\nop: delete\nerror: {}", err),
+            },
+            ("context", "shrink") => self
+                .apply_prompt_shrink(&action.delta_ids, &action.slice_ids)
+                .replacen("Action result: prompt_shrink", "Action result: memmgr\ntype: context\nop: shrink", 1),
+            _ => format!(
+                "Action result: memmgr\ntype: {}\nop: {}\nerror: unsupported_type_or_op",
+                action.mem_type, action.op
+            ),
+        }
     }
 
     fn record_action_audit(&self, action: &ParsedAction, status: &str, result: Option<&str>) {
@@ -1975,7 +2249,7 @@ impl FileMemoryStore {
 
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interfaces: memory_schema, memory_sql_query, memory_update, memory_write, chat_history_query, chat_history_delete, scratch_write, scratch_read, scratch_query, scratch_delete\nrules: memory_sql_query accepts SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memory_update for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use chat_history_delete for explicit chat transcript deletion; scratch_write requires type=notes with content or type=context_offload with delta_ids/slice_ids plus label; scratch_read requires id and returns full scratch content. Empty chat_history_query.query lists recent chat records. loaded_chat_records={}.",
+            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: query|schema|sql|insert|update|upsert|delete\n- raw_chat: query|sql|delete\n- scratch: query|write|read|delete\n- context: shrink\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids/slice_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat query lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -2753,6 +3027,106 @@ fn can_show_plain_text_after_repair_failure(content: &str) -> bool {
     .any(|needle| lowered.contains(needle))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_memmgr_action(
+    idx: usize,
+    mem_type: &str,
+    op: &str,
+    query: &str,
+    content: &str,
+    scratch_type: &str,
+    label: &str,
+    sql: &str,
+    params: &[String],
+    id: &str,
+    delta_ids: &[String],
+    slice_ids: &[String],
+) -> Result<(), String> {
+    if mem_type.is_empty() {
+        return Err(format!("next_actions[{idx}].input.type_required"));
+    }
+    if op.is_empty() {
+        return Err(format!("next_actions[{idx}].input.op_required"));
+    }
+    match (mem_type, op) {
+        ("durable", "query") => {
+            if query.is_empty() {
+                return Err(format!("next_actions[{idx}].input.query_required"));
+            }
+        }
+        ("durable", "schema") => {}
+        ("durable" | "raw_chat", "sql") => {
+            if sql.is_empty() {
+                return Err(format!("next_actions[{idx}].input.sql_required"));
+            }
+            let placeholder_count = sql.matches('?').count();
+            if params.len() != placeholder_count {
+                return Err(format!(
+                    "next_actions[{idx}].input.params_count_mismatch expected={placeholder_count} actual={}",
+                    params.len()
+                ));
+            }
+        }
+        ("durable", "insert" | "update" | "upsert") => {
+            if content.is_empty() {
+                return Err(format!("next_actions[{idx}].input.content_required"));
+            }
+            if matches!(op, "update") && id.is_empty() {
+                return Err(format!("next_actions[{idx}].input.id_required"));
+            }
+        }
+        ("durable", "delete") => {
+            if id.is_empty() {
+                return Err(format!("next_actions[{idx}].input.id_required"));
+            }
+        }
+        ("raw_chat", "query") => {}
+        ("raw_chat", "delete") => {
+            if id.is_empty() && query.is_empty() {
+                return Err(format!("next_actions[{idx}].input.id_or_query_required"));
+            }
+        }
+        ("scratch", "write") => {
+            let normalized_type = normalized_scratch_type(scratch_type);
+            if scratch_type.trim().is_empty() {
+                return Err(format!("next_actions[{idx}].input.kind_required"));
+            }
+            if !matches!(normalized_type.as_str(), "notes" | "context_offload") {
+                return Err(format!(
+                    "next_actions[{idx}].input.kind_unsupported:{scratch_type}"
+                ));
+            }
+            if label.is_empty() {
+                return Err(format!("next_actions[{idx}].input.label_required"));
+            }
+            if normalized_type == "notes" && content.is_empty() {
+                return Err(format!("next_actions[{idx}].input.content_required"));
+            }
+            if normalized_type == "context_offload" && delta_ids.is_empty() && slice_ids.is_empty()
+            {
+                return Err(format!("next_actions[{idx}].input.prompt_refs_required"));
+            }
+        }
+        ("scratch", "read" | "delete") => {
+            if id.is_empty() {
+                return Err(format!("next_actions[{idx}].input.id_required"));
+            }
+        }
+        ("scratch", "query") => {}
+        ("context", "shrink") => {
+            if delta_ids.is_empty() && slice_ids.is_empty() {
+                return Err(format!("next_actions[{idx}].input.ids_required"));
+            }
+        }
+        _ => {
+            return Err(format!(
+                "next_actions[{idx}].input.unsupported_memmgr_type_or_op:{mem_type}/{op}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
@@ -2828,6 +3202,22 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     break;
                 }
                 let input = action.get("input").unwrap_or(action);
+                let mem_type = input
+                    .get("type")
+                    .or_else(|| action.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_lowercase();
+                let op = input
+                    .get("op")
+                    .or_else(|| input.get("operation"))
+                    .or_else(|| action.get("op"))
+                    .or_else(|| action.get("operation"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_lowercase();
                 let intent = action
                     .get("intent")
                     .or_else(|| input.get("intent"))
@@ -2853,8 +3243,15 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .trim()
                     .to_string();
                 let scratch_type = input
-                    .get("type")
+                    .get("kind")
                     .or_else(|| input.get("scratch_type"))
+                    .or_else(|| {
+                        if name == "scratch_write" {
+                            input.get("type")
+                        } else {
+                            None
+                        }
+                    })
                     .or_else(|| action.get("type"))
                     .or_else(|| action.get("scratch_type"))
                     .and_then(Value::as_str)
@@ -2888,10 +3285,13 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .unwrap_or_default();
                 let operation = input
                     .get("operation")
+                    .or_else(|| input.get("op"))
                     .or_else(|| action.get("operation"))
+                    .or_else(|| action.get("op"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .trim()
+                    .to_lowercase()
                     .to_string();
                 let expected_version = input
                     .get("expected_version")
@@ -2972,6 +3372,29 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                     .and_then(json_i64);
                 let normalized_name = name.as_str();
                 match normalized_name {
+                    "memmgr" => {
+                        validate_memmgr_action(
+                            idx,
+                            &mem_type,
+                            &op,
+                            &query,
+                            &content,
+                            &scratch_type,
+                            &label,
+                            &sql,
+                            &params,
+                            &id,
+                            &delta_ids,
+                            &slice_ids,
+                        )
+                        .map_err(|issue| {
+                            repair_issue = Some(issue);
+                        })
+                        .ok();
+                        if repair_issue.is_some() {
+                            break;
+                        }
+                    }
                     "chat_history_query" => {}
                     "chat_history_delete" => {
                         if id.is_empty() && query.is_empty() {
@@ -3112,6 +3535,8 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 next_actions.push(ParsedAction {
                     action: name,
                     intent: intent.to_string(),
+                    mem_type,
+                    op,
                     query,
                     content,
                     scratch_type,

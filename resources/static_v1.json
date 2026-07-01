@@ -24,187 +24,43 @@
   },
   "Mem_rule": {
     "schema": {
-      "chat_history": "persisted user/assistant chat records shown in the conversation UI; SQL table chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id); use memory_sql_query for precise SQL/time-window reads or chat_history_query for a simple lexical/recent wrapper; normal app restarts and build updates should preserve it, while reinstall/reset/cleared app data may remove it; not durable memory",
-      "memories": "durable local memory; SQL table memories(id, created_at_ms, updated_at_ms, version, content); query through query_memory or memory_sql_query; update/delete existing rows with memory_update.expected_version to avoid multi-CLI conflicts",
+      "raw_chat": "persisted user/assistant chat records shown in the conversation UI; SQL table chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id); use memmgr type=raw_chat for prior conversations and exact wording; normal app restarts and build updates should preserve it, while reinstall/reset/cleared app data may remove it; not durable memory",
+      "durable": "durable local memory; SQL table memories(id, created_at_ms, updated_at_ms, version, content); use memmgr type=durable; update/delete existing rows with expected_version to avoid multi-CLI conflicts",
       "scratch_notes": "typed temporary working memory records: notes for model-written checkpoints, context_offload for runtime-copied prompt delta/slice content"
     },
-    "evidence_policy": "Use chat_history for prior conversations and exact wording; use durable memory for long-lived user facts; use created_at_ms when time of storage or conversation matters.",
+    "evidence_policy": "Use raw_chat for prior conversations and exact wording; use durable memory for long-lived user facts; use created_at_ms when time of storage or conversation matters.",
     "retrieval_policy": "Runtime does not infer semantic intent for the model. When evidence is needed, choose an explicit tool action and include a concise intent. Do not say you are checking unless the same response includes the corresponding next_actions entry.",
     "storage_style_policy": "Store durable facts in neutral user-centric wording when possible. Do not treat raw first-person memory text as the assistant's own identity or family."
   },
   "Tool_capability": {
     "tool_catalog": {
-      "chat_history_query": {
-        "when": "Simple wrapper to search persisted user/assistant chat records shown in the conversation UI, plus current prompt deltas as fallback. Use an empty query to list recent chat records when no content keyword exists. For precise time windows, exclusion of today, grouping, ordering, or session filters, prefer memory_sql_query over chat_messages. This is not durable memory.",
+      "memmgr": {
+        "when": "Unified local memory manager. Use type=durable for long-lived user facts, type=raw_chat for UI-visible chat transcript, type=scratch for notes/context offload, and type=context for dynamic prompt context maintenance.",
         "input": {
-          "query?": "string; empty means list recent chat records",
-          "after_ms?": "integer inclusive lower created_at_ms bound",
-          "before_ms?": "integer exclusive upper created_at_ms bound",
-          "limit?": "integer <= 50"
+          "type": "durable|raw_chat|scratch|context",
+          "op": "durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink",
+          "query?": "string; empty is allowed for raw_chat/scratch recent listing",
+          "sql?": "SELECT/WITH SELECT/PRAGMA table_info(memories|chat_messages) only",
+          "params?": "array matching SQL ? placeholders exactly",
+          "id?": "memory id, chat turn_id, or scratch id depending on type/op",
+          "expected_version?": "integer from durable query/sql results; required by runtime when modifying/deleting an existing durable row",
+          "content?": "string required for durable insert/update/upsert and scratch kind=notes",
+          "kind?": "notes|context_offload; required for scratch op=write",
+          "label?": "short retrieval label for scratch write",
+          "delta_ids?": "array of prompt delta ids; for scratch context_offload or context shrink",
+          "slice_ids?": "array of prompt slice ids; for scratch context_offload or context shrink",
+          "after_ms?": "integer inclusive lower created_at_ms bound for raw_chat",
+          "before_ms?": "integer exclusive upper created_at_ms bound for raw_chat",
+          "limit?": "integer result cap"
         },
         "example": {
-          "action": "chat_history_query",
-          "intent": "Find prior wording in this conversation.",
-          "input": {
-            "query": "blue umbrella",
-            "limit": 5
-          }
-        }
-      },
-      "chat_history_delete": {
-        "when": "Delete UI-visible chat records from local chat history when the user explicitly asks to delete chat transcript records. Use id/turn_id when known, otherwise use a narrow query and time window. This does not delete durable memory.",
-        "input": {
-          "id?": "turn_id string when known",
-          "query?": "string; used to select matching chat records when id is not known",
-          "after_ms?": "integer inclusive lower created_at_ms bound",
-          "before_ms?": "integer exclusive upper created_at_ms bound",
-          "limit?": "integer <= 50"
-        },
-        "example": {
-          "action": "chat_history_delete",
-          "intent": "Delete the chat transcript record the user explicitly selected.",
-          "input": {
-            "query": "blue umbrella",
-            "limit": 5
-          }
-        }
-      },
-      "query_memory": {
-        "when": "Lexical search over durable local memory when the answer depends on stored user facts.",
-        "input": {
-          "query": "string",
-          "limit?": "integer <= 50"
-        },
-        "example": {
-          "action": "query_memory",
+          "action": "memmgr",
           "intent": "Find confirmed durable memory before answering.",
           "input": {
+            "type": "durable",
+            "op": "query",
             "query": "son birthday",
             "limit": 5
-          }
-        }
-      },
-      "memory_schema": {
-        "when": "Inspect the native memory read surface before writing precise SQL.",
-        "input": {},
-        "example": {
-          "action": "memory_schema",
-          "intent": "Inspect durable memory schema."
-        }
-      },
-      "memory_sql_query": {
-        "when": "Precise read-only SQL over model-searchable local evidence: durable memories and UI chat history. Use for ordering, created-time questions, recent-N-day chat windows, excluding today, joins, or weak keyword lookup.",
-        "input": {
-          "sql": "SELECT/WITH SELECT/PRAGMA table_info(memories|chat_messages) only",
-          "params?": "array",
-          "limit?": "integer <= 200"
-        },
-        "example": {
-          "action": "memory_sql_query",
-          "intent": "Find earliest stored name memory by created time.",
-          "input": {
-            "sql": "SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC",
-            "params": [
-              "%名字%"
-            ],
-            "limit": 20
-          }
-        }
-      },
-      "memory_update": {
-        "when": "Only supported structured surface for durable memory insert/update/upsert/delete. Use after the user states or confirms a fact, or corrects a prior fact.",
-        "input": {
-          "operation": "insert|update|upsert|delete",
-          "id?": "string required for update/delete/upsert identity when known",
-          "content?": "string required except delete",
-          "expected_version?": "integer from query_memory or memory_sql_query; required by runtime when modifying/deleting an existing id"
-        },
-        "example": {
-          "action": "memory_update",
-          "intent": "Store confirmed user name.",
-          "input": {
-            "operation": "upsert",
-            "id": "user_name",
-            "content": "用户的名字是默默"
-          }
-        }
-      },
-      "scratch_write": {
-        "when": "Write task-local scratch memory. Use type=notes for a model-written checkpoint. Use type=context_offload to ask runtime to copy existing prompt delta/slice content by id; do not rewrite that content yourself.",
-        "input": {
-          "type": "notes|context_offload",
-          "label": "short retrieval label shown in later context with the runtime-generated scratch id",
-          "content?": "string; required for type=notes",
-          "delta_ids?": "array of prompt delta ids; for type=context_offload",
-          "slice_ids?": "array of prompt slice ids; for type=context_offload"
-        },
-        "example": {
-          "action": "scratch_write",
-          "intent": "Save a checkpoint before stopping.",
-          "input": {
-            "type": "notes",
-            "label": "release validation checkpoint",
-            "content": "Task: continue release validation. Tried: tests passed. Next: verify install script."
-          }
-        }
-      },
-      "scratch_read": {
-        "when": "Read full scratch memory content when a visible scratch id and label indicate the details are needed.",
-        "input": {
-          "id": "scratch id returned by scratch_write or scratch_query"
-        },
-        "example": {
-          "action": "scratch_read",
-          "intent": "Read offloaded context details.",
-          "input": {
-            "id": "scratch_0123456789abcdef"
-          }
-        }
-      },
-      "scratch_query": {
-        "when": "Search or list scratch memory metadata when the needed scratch id is not already visible.",
-        "input": {
-          "query?": "string over labels and content previews; empty means list recent scratch records",
-          "limit?": "integer <= 50"
-        },
-        "example": {
-          "action": "scratch_query",
-          "intent": "Find the previous task checkpoint.",
-          "input": {
-            "query": "release validation",
-            "limit": 5
-          }
-        }
-      },
-      "scratch_delete": {
-        "when": "Delete a scratch memory record after it is obsolete or the user explicitly asks to remove it.",
-        "input": {
-          "id": "scratch id returned by scratch_write or scratch_query"
-        },
-        "example": {
-          "action": "scratch_delete",
-          "intent": "Remove completed checkpoint.",
-          "input": {
-            "id": "scratch_1782200000000"
-          }
-        }
-      },
-      "prompt_shrink": {
-        "when": "Long-context maintenance only: remove stale dynamic prompt deltas or exact rendered prompt_delta slices when runtime provides delta_id/slice_id references. Never target prompt_0.",
-        "input": {
-          "delta_ids?": "array of delta_id strings; removes whole logical prompt deltas",
-          "slice_ids?": "array of slice_id strings; hides exact rendered slices inside a delta"
-        },
-        "example": {
-          "action": "prompt_shrink",
-          "intent": "Remove stale prompt context by runtime-provided ids.",
-          "input": {
-            "delta_ids": [
-              "pd_1782200000000_2"
-            ],
-            "slice_ids": [
-              "ps_1782200001000_4_s001"
-            ]
           }
         }
       },
@@ -246,9 +102,9 @@
     "tool_policy": {
       "ui_status": "Use ui_label for visibility; set ui_visible=false for raw technical actions.",
       "run_bash_readback": "Provide read_back_command when stdout needs verification. Opt-in via large_readback_opt_in if output truncated.",
-      "canonical_names": "Use canonical action names from tool_catalog. Do not invent tool names. query_memory is the canonical lexical durable memory search action.",
+      "canonical_names": "Use canonical action names from tool_catalog. Do not invent tool names. memmgr is the canonical interface for durable memory, raw chat history, scratch memory, and context shrink.",
       "intent_required": "Every next_actions item must include a concise top-level intent string; runtime displays it in UI and rejects missing intent once for repair.",
-      "sql_safety": "memory_sql_query is read-only; writes must use memory_update. SQL params must match placeholders exactly.",
+      "sql_safety": "memmgr sql ops are read-only; durable writes must use memmgr type=durable op=insert|update|upsert|delete. SQL params must match placeholders exactly.",
       "sql_tables": "memories(id, created_at_ms, updated_at_ms, version, content) stores durable facts. chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) stores UI-visible user/assistant chat transcript. Use chat_messages for questions about prior chats, exact wording, dates, last conversation, or recent N-day logs. Use memories.version as expected_version when updating/deleting existing durable rows.",
       "memory_conflict": "memory_conflict means the row version changed since it was read; missing_expected_version means an existing row needs a version check. Usually re-query the row/version before deciding whether to retry, merge, or tell the user.",
       "bash_safety": "Use only returned shell results as evidence. Write-capable shell commands are allowed when the user asks for local project changes; approval behavior is runtime config. Never invent a read-only limitation for run_bash."
@@ -273,7 +129,7 @@
         },
         "memory_candidates?": "array; emit only for new/corrected durable facts",
         "diagnostics.intent_inference?": "string; enum one_of: time_constrained|exact_date|created_axis|none. Output only for time-related questions; omit for normal Q&A.",
-        "diagnostics.self_audit?": "string; enum one_of: memory_write_worthy|fact_correction|prompt_shrink_recommended|scratch_checkpoint_needed|evidence_insufficient|none. Output the matching enum value when the corresponding situation is triggered; otherwise omit.",
+        "diagnostics.self_audit?": "string; enum one_of: memory_write_worthy|fact_correction|context_shrink_recommended|scratch_checkpoint_needed|evidence_insufficient|none. Output the matching enum value when the corresponding situation is triggered; otherwise omit.",
         "diagnostics.note?": "string",
         "acceptance_check?": "object; optional metadata. acceptance_check.missing_info array may describe what the model is waiting for.",
         "response_to_user?": "string; optional, but must be present if next_actions is absent or empty. Non-empty string = final answer shown to user (turn ends immediately, next_actions ignored). Absent or empty = action round (next_actions must be present)."
@@ -293,9 +149,11 @@
       "action_round": {
         "next_actions": [
           {
-            "action": "query_memory",
+            "action": "memmgr",
             "intent": "Find confirmed memory evidence before answering.",
             "input": {
+              "type": "durable",
+              "op": "query",
               "query": "son birthday",
               "limit": 5
             }
