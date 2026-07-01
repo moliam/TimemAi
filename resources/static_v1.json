@@ -111,7 +111,7 @@
     }
   },
   "Response_rule": {
-    "format": "Return exactly one JSON object. The optional thought field, when present, is written before response_to_user / next_actions inside the same object as a private reasoning draft; it is not shown to the user and does not participate in the schema's required-field check. The object is validated by runtime against response_v1 JSON Schema; schema errors trigger one repair retry. Omit optional fields when empty, false, or n/a.",
+    "format": "Return exactly one JSON object. The optional thought field, when present, is written before response_to_user / next_actions inside the same object as a private reasoning draft; it is not shown to the user and does not participate in the schema's required-field check. The object is validated by runtime against response_v1 JSON Schema; schema errors trigger one repair retry. Omit optional fields when empty, false, or n/a. Choose exactly one path: final response_to_user or next_actions. Do not put progress narration in response_to_user when more actions remain.",
     "language_policy": "Write response_to_user in the user's primary input language. System rule language does not determine user-facing language. For mixed-language input, follow the user's dominant language unless they explicitly ask otherwise.",
     "json_schema_summary": {
       "$id": "https://timem.local/schemas/response_v1.schema.json",
@@ -132,7 +132,7 @@
         "diagnostics.self_audit?": "string; enum one_of: memory_write_worthy|fact_correction|context_shrink_recommended|scratch_checkpoint_needed|evidence_insufficient|none. Output the matching enum value when the corresponding situation is triggered; otherwise omit.",
         "diagnostics.note?": "string",
         "acceptance_check?": "object; optional metadata. acceptance_check.missing_info array may describe what the model is waiting for.",
-        "response_to_user?": "string; optional, but must be present if next_actions is absent or empty. Non-empty string = final answer shown to user (turn ends immediately, next_actions ignored). Absent or empty = action round (next_actions must be present)."
+        "response_to_user?": "string; optional, but must be present if next_actions is absent or empty. Non-empty string = final answer shown to user and turn ends immediately. Absent or empty = action round, and next_actions must be present. response_to_user and next_actions are mutually exclusive."
       },
       "additional_properties": "allowed for forward compatibility; keep them sparse",
       "action_object_spec": {

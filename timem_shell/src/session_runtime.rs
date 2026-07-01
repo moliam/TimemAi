@@ -1069,10 +1069,14 @@ mod tests {
         assert!(scratch_text.contains(r#""label":"story replay context offload""#));
 
         let rendered = ui.renders.join("\n");
-        assert!(rendered.contains("更新记忆: 记录项目代号。"));
-        assert!(rendered.contains("查询记忆: 查询项目代号记忆。"));
-        assert!(rendered.contains("处理草稿区: 先把长上下文转存到 scratch。"));
-        assert!(rendered.contains("整理上下文: 删除已转存的动态上下文。"));
+        assert!(rendered.contains("· 记录项目代号。"));
+        assert!(rendered.contains("└─ 长期记忆: 更新"));
+        assert!(rendered.contains("· 查询项目代号记忆。"));
+        assert!(rendered.contains("└─ 长期记忆: 查询"));
+        assert!(rendered.contains("· 先把长上下文转存到 scratch。"));
+        assert!(rendered.contains("└─ 草稿区: 更新"));
+        assert!(rendered.contains("· 删除已转存的动态上下文。"));
+        assert!(rendered.contains("└─ 上下文: 压缩"));
         assert!(!rendered.contains("memmgr"));
 
         let audit_text = std::fs::read_to_string(&audit).unwrap();

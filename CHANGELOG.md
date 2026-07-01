@@ -24,6 +24,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 ### Fixed
 
 - Observation panel wraps long intent/action lines instead of truncating them.
+- Observation panel renders action details as child rows under the user-facing
+  intent, using tree prefixes for Bash and memory/context activity.
 - Observation panel hides model-private `thought` content while still showing
   user-facing action intent and Bash commands.
 - Model responses wrapped in prose or fenced JSON are parsed for observation

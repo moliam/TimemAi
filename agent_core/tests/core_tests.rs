@@ -1161,6 +1161,31 @@ fn invalid_action_shape_requests_protocol_repair() {
 }
 
 #[test]
+fn final_response_and_next_actions_conflict_requests_protocol_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "claude-opus-test"),
+        tmp_dir("mixed_final_action"),
+    );
+    let _ = core.begin_turn("请一直完成任务，不要停止", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"response_to_user":"备份完成。现在开始写入新版本。","next_actions":[{"action":"run_bash","intent":"写入文件前半部分。","input":{"command":"printf ok","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["write result"]}}"#,
+        ),
+        model_name: "claude-opus-test".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response_to_user_next_actions_conflict"));
+    assert!(!prompt.contains("Action result: run_bash"));
+}
+
+#[test]
 fn next_action_requires_intent_for_ui_status() {
     let mut core = AgentCore::new(
         "STATIC",
@@ -3409,6 +3434,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(static_prompt.contains("\"action_result_guard\""));
     assert!(static_prompt.contains("memory_conflict"));
     assert!(static_prompt.contains("row version changed"));
+    assert!(static_prompt.contains("response_to_user and next_actions are mutually exclusive"));
     assert!(!static_prompt.contains("durable_ctx_score"));
     assert!(!static_prompt.contains("delta_scores"));
     assert!(!static_prompt.contains("no_result_terminate"));

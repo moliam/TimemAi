@@ -71,6 +71,9 @@ Key shell-side modules:
   retained dynamic deltas.
 - `structured_output.rs`: protocol-specific structured-output options.
 - `observation.rs`: modular Thought / Action observation events and rendering.
+  It hides model-private `thought`, renders user-facing intent as top-level
+  `·` rows, and renders concrete Bash/memory/context activity as wrapped child
+  rows using `├─`/`└─` prefixes.
 - `profiler.rs`: `/prof` token, latency, and storage reporting.
 
 ### `resources/static_v1.json`

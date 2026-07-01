@@ -6,11 +6,15 @@ const ANSI_BOLD: &str = "\x1b[1m";
 const ANSI_RESET: &str = "\x1b[0m";
 const ACTIVE_TEXT_COLORS: [&str; 3] = ["\x1b[38;5;245m", "\x1b[38;5;250m", "\x1b[38;5;255m"];
 const OBSERVATION_LINE_PREFIX: &str = "· ";
+const OBSERVATION_CHILD_MID_PREFIX: &str = "  ├─ ";
+const OBSERVATION_CHILD_LAST_PREFIX: &str = "  └─ ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationEvent {
     Persistent(String),
     Active(String),
+    PersistentChild { text: String, is_last: bool },
+    ActiveChild { text: String, is_last: bool },
     Transient(String),
     FinishTransient(String),
     ClearTransient,
@@ -27,6 +31,7 @@ pub enum ObservationLineStyle {
 pub struct ObservationLine {
     pub text: String,
     pub style: ObservationLineStyle,
+    pub prefix: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,12 +70,26 @@ impl ObservationPanel {
 
     pub fn apply(&mut self, event: ObservationEvent) {
         match event {
-            ObservationEvent::Persistent(text) => {
-                self.push_line(text, ObservationLineStyle::Normal)
-            }
-            ObservationEvent::Active(text) => {
-                self.push_line(text, ObservationLineStyle::ActiveBlink)
-            }
+            ObservationEvent::Persistent(text) => self.push_line(
+                text,
+                ObservationLineStyle::Normal,
+                OBSERVATION_LINE_PREFIX.to_string(),
+            ),
+            ObservationEvent::Active(text) => self.push_line(
+                text,
+                ObservationLineStyle::ActiveBlink,
+                OBSERVATION_LINE_PREFIX.to_string(),
+            ),
+            ObservationEvent::PersistentChild { text, is_last } => self.push_line(
+                text,
+                ObservationLineStyle::Normal,
+                child_prefix(is_last).to_string(),
+            ),
+            ObservationEvent::ActiveChild { text, is_last } => self.push_line(
+                text,
+                ObservationLineStyle::ActiveBlink,
+                child_prefix(is_last).to_string(),
+            ),
             ObservationEvent::Transient(text) => self.increment_transient(text),
             ObservationEvent::FinishTransient(text) => self.decrement_transient(&text),
             ObservationEvent::ClearTransient => self.transients.clear(),
@@ -94,11 +113,15 @@ impl ObservationPanel {
         self.lines.is_empty() && self.transients.is_empty()
     }
 
-    fn push_line(&mut self, text: String, style: ObservationLineStyle) {
+    fn push_line(&mut self, text: String, style: ObservationLineStyle, prefix: String) {
         if text.trim().is_empty() {
             return;
         }
-        self.lines.push_back(ObservationLine { text, style });
+        self.lines.push_back(ObservationLine {
+            text,
+            style,
+            prefix,
+        });
         while self.lines.len() > self.max_lines {
             self.lines.pop_front();
         }
@@ -110,6 +133,7 @@ impl ObservationPanel {
             lines.push(ObservationLine {
                 text: transient_label(transient),
                 style: ObservationLineStyle::ActiveBlink,
+                prefix: OBSERVATION_LINE_PREFIX.to_string(),
             });
         }
         while lines.len() > self.max_lines {
@@ -157,6 +181,14 @@ impl ObservationPanel {
     }
 }
 
+fn child_prefix(is_last: bool) -> &'static str {
+    if is_last {
+        OBSERVATION_CHILD_LAST_PREFIX
+    } else {
+        OBSERVATION_CHILD_MID_PREFIX
+    }
+}
+
 fn transient_label(transient: &TransientObservation) -> String {
     if transient.count <= 1 {
         transient.text.clone()
@@ -187,15 +219,15 @@ pub fn render_observation_panel_at(panel: &ObservationPanel, tick: usize) -> Str
     out.push('\n');
     for line in panel.visible_lines() {
         let line_width = content_width.saturating_sub(2);
-        let text_width = line_width.saturating_sub(display_width(OBSERVATION_LINE_PREFIX));
+        let text_width = line_width.saturating_sub(display_width(&line.prefix));
         for (idx, wrapped) in wrap_display_width(&line.text, text_width)
             .into_iter()
             .enumerate()
         {
             let prefix = if idx == 0 {
-                OBSERVATION_LINE_PREFIX.to_string()
+                line.prefix.clone()
             } else {
-                " ".repeat(display_width(OBSERVATION_LINE_PREFIX))
+                " ".repeat(display_width(&line.prefix))
             };
             let content = format!("{prefix}{wrapped}");
             let padded = pad_display_width(&content, line_width);
@@ -339,20 +371,23 @@ fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
             else {
                 return Vec::new();
             };
-            let mut events = Vec::new();
-            if let Some(text) = intent {
-                events.push(ObservationEvent::Persistent(text.to_string()));
-            }
-            events.push(ObservationEvent::Active(format!("Bash: {command}")));
-            events
+            action_observation_pair(
+                intent,
+                ObservationLineStyle::ActiveBlink,
+                format!("Bash: {command}"),
+            )
         }
-        "shell_job_status" => vec![ObservationEvent::Active(format!(
-            "检查后台任务: {}",
-            input
-                .get("job_id")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        ))],
+        "shell_job_status" => action_observation_pair(
+            intent,
+            ObservationLineStyle::ActiveBlink,
+            format!(
+                "后台任务: {}",
+                input
+                    .get("job_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ),
+        ),
         "memmgr" => {
             let mem_type = input.get("type").and_then(Value::as_str).unwrap_or("");
             let op = input.get("op").and_then(Value::as_str).unwrap_or("");
@@ -365,36 +400,81 @@ fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
                 ("context", "shrink") => "整理上下文",
                 _ => "处理记忆",
             };
-            vec![ObservationEvent::Persistent(format!(
-                "{}: {}",
-                default,
-                intent.unwrap_or(default)
-            ))]
+            let detail = memory_action_detail(mem_type, op, default);
+            action_observation_pair(intent, ObservationLineStyle::Normal, detail)
         }
         "query_memory" | "memory_query" | "memory_sql_query" | "sql_read" | "memory_schema" => {
-            vec![ObservationEvent::Persistent(format!(
-                "查询记忆: {}",
-                intent.unwrap_or("读取相关记忆")
-            ))]
+            action_observation_pair(
+                intent,
+                ObservationLineStyle::Normal,
+                "记忆: 查询".to_string(),
+            )
         }
-        "chat_history_query" => vec![ObservationEvent::Persistent(format!(
-            "查询聊天记录: {}",
-            intent.unwrap_or("读取聊天记录")
-        ))],
-        "memory_write" | "write_memory" | "memory_update" => vec![ObservationEvent::Persistent(
-            format!("更新记忆: {}", intent.unwrap_or("写入记忆")),
-        )],
+        "chat_history_query" => action_observation_pair(
+            intent,
+            ObservationLineStyle::Normal,
+            "聊天记录: 查询".to_string(),
+        ),
+        "memory_write" | "write_memory" | "memory_update" => action_observation_pair(
+            intent,
+            ObservationLineStyle::Normal,
+            "记忆: 更新".to_string(),
+        ),
         "scratch_write" | "scratch_read" | "scratch_query" | "scratch_delete" => {
-            vec![ObservationEvent::Persistent(format!(
-                "处理草稿区: {}",
-                intent.unwrap_or("更新草稿")
-            ))]
+            action_observation_pair(
+                intent,
+                ObservationLineStyle::Normal,
+                "草稿区: 处理".to_string(),
+            )
         }
         _ => match intent {
             Some(text) => vec![ObservationEvent::Persistent(text.to_string())],
             None => Vec::new(),
         },
     }
+}
+
+fn action_observation_pair(
+    intent: Option<&str>,
+    child_style: ObservationLineStyle,
+    child_text: String,
+) -> Vec<ObservationEvent> {
+    let Some(intent) = intent else {
+        return match child_style {
+            ObservationLineStyle::Normal => vec![ObservationEvent::Persistent(child_text)],
+            ObservationLineStyle::ActiveBlink => vec![ObservationEvent::Active(child_text)],
+        };
+    };
+    let mut events = vec![ObservationEvent::Persistent(intent.to_string())];
+    events.push(match child_style {
+        ObservationLineStyle::Normal => ObservationEvent::PersistentChild {
+            text: child_text,
+            is_last: true,
+        },
+        ObservationLineStyle::ActiveBlink => ObservationEvent::ActiveChild {
+            text: child_text,
+            is_last: true,
+        },
+    });
+    events
+}
+
+fn memory_action_detail(mem_type: &str, op: &str, fallback: &str) -> String {
+    let target = match mem_type {
+        "durable" => "长期记忆",
+        "raw_chat" => "聊天记录",
+        "scratch" => "草稿区",
+        "context" => "上下文",
+        _ => "记忆",
+    };
+    let action = match op {
+        "query" | "sql" | "schema" | "read" => "查询",
+        "write" | "insert" | "update" | "upsert" => "更新",
+        "delete" => "删除",
+        "shrink" => "压缩",
+        _ => fallback,
+    };
+    format!("{target}: {action}")
 }
 
 fn wrap_display_width(text: &str, width: usize) -> Vec<String> {
@@ -540,7 +620,10 @@ mod tests {
             events,
             vec![
                 ObservationEvent::Persistent("统计当前代码量".to_string()),
-                ObservationEvent::Active("Bash: rg --files | wc -l".to_string())
+                ObservationEvent::ActiveChild {
+                    text: "Bash: rg --files | wc -l".to_string(),
+                    is_last: true
+                }
             ]
         );
     }
@@ -572,7 +655,10 @@ mod tests {
             events,
             vec![
                 ObservationEvent::Persistent("整理 v0.5.2 之后的提交".to_string()),
-                ObservationEvent::Active("Bash: git log --oneline v0.5.2..HEAD".to_string())
+                ObservationEvent::ActiveChild {
+                    text: "Bash: git log --oneline v0.5.2..HEAD".to_string(),
+                    is_last: true
+                }
             ]
         );
     }
@@ -599,9 +685,13 @@ mod tests {
         );
         assert_eq!(
             events,
-            vec![ObservationEvent::Persistent(
-                "查询记忆: 查询用户姓名记忆".to_string()
-            )]
+            vec![
+                ObservationEvent::Persistent("查询用户姓名记忆".to_string()),
+                ObservationEvent::PersistentChild {
+                    text: "记忆: 查询".to_string(),
+                    is_last: true
+                }
+            ]
         );
     }
 
@@ -616,8 +706,16 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("查询记忆: 查询用户姓名记忆".to_string()),
-                ObservationEvent::Persistent("整理上下文: 移除过期上下文".to_string())
+                ObservationEvent::Persistent("查询用户姓名记忆".to_string()),
+                ObservationEvent::PersistentChild {
+                    text: "长期记忆: 查询".to_string(),
+                    is_last: true
+                },
+                ObservationEvent::Persistent("移除过期上下文".to_string()),
+                ObservationEvent::PersistentChild {
+                    text: "上下文: 压缩".to_string(),
+                    is_last: true
+                }
             ]
         );
     }
@@ -645,9 +743,10 @@ mod tests {
             events,
             vec![
                 ObservationEvent::Persistent("写入包含 JSON 的示例".to_string()),
-                ObservationEvent::Active(
-                    "Bash: printf '{\"ok\":true}' > target/example.json".to_string()
-                )
+                ObservationEvent::ActiveChild {
+                    text: "Bash: printf '{\"ok\":true}' > target/example.json".to_string(),
+                    is_last: true
+                }
             ]
         );
     }
@@ -664,9 +763,16 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("查询记忆: 查名字".to_string()),
+                ObservationEvent::Persistent("查名字".to_string()),
+                ObservationEvent::PersistentChild {
+                    text: "记忆: 查询".to_string(),
+                    is_last: true
+                },
                 ObservationEvent::Persistent("看状态".to_string()),
-                ObservationEvent::Active("Bash: git status --short".to_string())
+                ObservationEvent::ActiveChild {
+                    text: "Bash: git status --short".to_string(),
+                    is_last: true
+                }
             ]
         );
     }
@@ -716,8 +822,25 @@ mod tests {
             r#"{"next_actions":[{"action":"run_bash","intent":"统计","input":{"command":"rg --files | wc -l"}}]}"#,
         ));
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains("· Bash:"));
+        assert!(rendered.contains("· 统计"));
+        assert!(rendered.contains("└─ Bash:"));
         assert!(!rendered.contains("run_bash"));
+    }
+
+    #[test]
+    fn tree_child_lines_render_under_intent_and_wrap_without_repeating_branch() {
+        let mut panel = ObservationPanel::new(8, 44);
+        panel.apply(ObservationEvent::Persistent("统计当前代码量".to_string()));
+        panel.apply(ObservationEvent::ActiveChild {
+            text: "Bash: 123456789012345678901234567890 tail".to_string(),
+            is_last: true,
+        });
+
+        let rendered = render_observation_panel(&panel);
+        assert!(rendered.contains("· 统计当前代码量"));
+        assert!(rendered.contains("└─ Bash: 123456789012345678901234"));
+        assert_eq!(rendered.matches("└─").count(), 1);
+        assert!(rendered.contains("tail"));
     }
 
     #[test]

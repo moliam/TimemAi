@@ -742,7 +742,8 @@ impl AgentCore {
                 repair_issue: Some(issue),
             });
         }
-        // Plan A: non-empty response_to_user → immediate final (next_actions ignored)
+        // A model response must choose exactly one path: final answer or next actions.
+        // Treating a mixed response as final silently drops work the model already requested.
         if !parsed.response_to_user.trim().is_empty() {
             for candidate in parsed.memory_candidates {
                 if self.memory.write(&candidate).is_ok() {
@@ -3594,6 +3595,9 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
     }
     if repair_issue.is_none() && response_to_user.trim().is_empty() && next_actions.is_empty() {
         repair_issue = Some("next_actions_required".to_string());
+    }
+    if repair_issue.is_none() && !response_to_user.trim().is_empty() && !next_actions.is_empty() {
+        repair_issue = Some("response_to_user_next_actions_conflict".to_string());
     }
     ParsedEnvelope {
         response_to_user,
