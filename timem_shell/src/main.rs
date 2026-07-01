@@ -260,7 +260,8 @@ fn main() {
         } else {
             None
         };
-        let mut status = ThinkingStatus::start(&config.provider, &config.model);
+        let mut status =
+            ThinkingStatus::start(&config.provider, &config.model, config.max_llm_input_tokens);
         TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
         let _sigint_guard = SigintGuard::install();
         let mut turn_ui = CliTurnUi {
@@ -287,6 +288,7 @@ fn main() {
             &config.provider,
             &config.model,
             outcome.elapsed,
+            config.max_llm_input_tokens,
         );
         last_dialog_activity = Instant::now();
     }
@@ -377,7 +379,7 @@ struct ThinkingStatus {
 }
 
 impl ThinkingStatus {
-    fn start(provider: &str, model: &str) -> Self {
+    fn start(provider: &str, model: &str, max_llm_input_tokens: u32) -> Self {
         let started_at = Instant::now();
         let paused_total = Arc::new(Mutex::new(Duration::ZERO));
         let state = Arc::new(Mutex::new(ThinkingViewSnapshot {
@@ -392,6 +394,7 @@ impl ThinkingStatus {
                 latest_usage: None,
                 tick: random_spinner_tick(),
                 elapsed_secs: 0,
+                max_llm_input_tokens,
             },
             observations: ObservationPanel::default(),
         }));
@@ -640,7 +643,7 @@ fn render_approval_choices(selected: ApprovalChoice) -> String {
 
 fn render_round_limit_prompt(max_rounds: u32) -> String {
     format!(
-        "\n本轮已达到最大交互次数 {max_rounds}。\n继续后会为模型重新充值 rounds_remaining 为 20，当前任务上下文保持不变。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n"
+        "\n本轮已达到最大交互次数 {max_rounds}。\n继续后会为模型重新充值 rounds_remaining 为 {max_rounds}，当前任务上下文保持不变。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n"
     )
 }
 
@@ -2595,6 +2598,7 @@ fn print_final_response(
     provider: &str,
     model: &str,
     elapsed: Duration,
+    max_llm_input_tokens: u32,
 ) {
     let rendered = render_final_response_at(
         text,
@@ -2603,6 +2607,7 @@ fn print_final_response(
         provider,
         model,
         elapsed.as_secs(),
+        max_llm_input_tokens,
         &time_label(),
     );
     print!("{rendered}");
@@ -3797,9 +3802,9 @@ mod static_prompt_tests {
 
     #[test]
     fn round_limit_prompt_uses_keyboard_choices_and_defaults_to_continue() {
-        let prompt = render_round_limit_prompt(20);
-        assert!(prompt.contains("本轮已达到最大交互次数 20"));
-        assert!(prompt.contains("重新充值 rounds_remaining 为 20"));
+        let prompt = render_round_limit_prompt(50);
+        assert!(prompt.contains("本轮已达到最大交互次数 50"));
+        assert!(prompt.contains("重新充值 rounds_remaining 为 50"));
         assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
         assert!(!prompt.contains("输入 yes"));
         assert_eq!(

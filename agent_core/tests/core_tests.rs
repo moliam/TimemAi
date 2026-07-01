@@ -95,7 +95,7 @@ fn prompt_is_append_only_and_segmented() {
             prompt,
             rounds_remaining,
         } => {
-            assert_eq!(rounds_remaining, 20);
+            assert_eq!(rounds_remaining, 50);
             prompt
         }
         other => panic!("unexpected step: {other:?}"),
@@ -126,7 +126,7 @@ fn prompt_is_append_only_and_segmented() {
 }
 
 #[test]
-fn default_max_rounds_is_twenty() {
+fn default_max_rounds_is_fifty() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -140,8 +140,8 @@ fn default_max_rounds_is_twenty() {
     else {
         panic!("unexpected step: {step:?}");
     };
-    assert_eq!(rounds_remaining, 20);
-    assert!(prompt.contains("rounds_remaining: 20"));
+    assert_eq!(rounds_remaining, 50);
+    assert!(prompt.contains("rounds_remaining: 50"));
 }
 
 #[test]
@@ -174,11 +174,11 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     else {
         panic!("unexpected step: {step:?}");
     };
-    assert_eq!(rounds_remaining, 20);
+    assert_eq!(rounds_remaining, 50);
     assert!(prompt.contains("User question:\n需要两步完成"));
     assert!(prompt.contains("Action result: query_memory"));
     assert!(prompt.contains("Runtime round budget continued by user."));
-    assert!(prompt.contains("rounds_remaining: 20"));
+    assert!(prompt.contains("rounds_remaining: 50"));
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"query_memory","intent":"Need evidence after continuation.","input":{"query":"x","limit":1}}]}"#),
@@ -193,7 +193,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     else {
         panic!("unexpected step: {step:?}");
     };
-    assert_eq!(rounds_remaining, 19);
+    assert_eq!(rounds_remaining, 49);
     assert!(prompt.contains("Action result: query_memory"));
 }
 

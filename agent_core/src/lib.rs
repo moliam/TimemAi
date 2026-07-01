@@ -316,7 +316,7 @@ struct PendingApproval {
 }
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
-const DEFAULT_ROUND_BUDGET: u32 = 20;
+const DEFAULT_ROUND_BUDGET: u32 = 50;
 const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
 const MEM_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
 const MEM_GUARD_STALE_AFTER: Duration = Duration::from_secs(60 * 60 * 6);

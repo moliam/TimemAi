@@ -203,18 +203,28 @@ pub fn render_observation_panel(panel: &ObservationPanel) -> String {
 }
 
 pub fn render_observation_panel_at(panel: &ObservationPanel, tick: usize) -> String {
+    render_observation_panel_at_with_elapsed(panel, tick, None)
+}
+
+pub fn render_observation_panel_at_with_elapsed(
+    panel: &ObservationPanel,
+    tick: usize,
+    elapsed_label: Option<&str>,
+) -> String {
     if panel.is_empty() {
         return String::new();
     }
     let active_color = ACTIVE_TEXT_COLORS[tick % ACTIVE_TEXT_COLORS.len()];
     let content_width = panel.max_width.saturating_sub(2).max(8);
-    let title = " Thought / Action ";
+    let title = elapsed_label
+        .map(|elapsed| format!(" Thought / Action  ⏳ {elapsed} "))
+        .unwrap_or_else(|| " Thought / Action ".to_string());
     let mut out = String::new();
     out.push_str(ANSI_BOLD);
     out.push('┏');
     out.push('━');
-    out.push_str(title);
-    out.push_str(&"━".repeat(content_width.saturating_sub(display_width(title) + 1)));
+    out.push_str(&title);
+    out.push_str(&"━".repeat(content_width.saturating_sub(display_width(&title) + 1)));
     out.push('┓');
     out.push_str(ANSI_RESET);
     out.push('\n');

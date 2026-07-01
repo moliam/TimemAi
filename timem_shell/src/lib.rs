@@ -17,7 +17,8 @@ mod structured_output;
 
 pub use observation::{
     observation_events_from_model_response, observation_panel_width_for_terminal,
-    render_observation_panel, render_observation_panel_at, ObservationEvent, ObservationLine,
+    render_observation_panel, render_observation_panel_at,
+    render_observation_panel_at_with_elapsed, ObservationEvent, ObservationLine,
     ObservationLineStyle, ObservationPanel,
 };
 pub use profiler::{collect_storage_profile, render_prof_report, RuntimeProfiler, StorageProfile};
@@ -60,6 +61,7 @@ pub struct ShellStatusSnapshot {
     pub latest_usage: Option<UsageStats>,
     pub tick: usize,
     pub elapsed_secs: u64,
+    pub max_llm_input_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,27 +100,9 @@ pub fn render_shell_status_bar(message: &ShellStatusMessage) -> String {
 
 pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str) -> String {
     let icon = SPINNER_ICONS[(snapshot.tick / 4) % SPINNER_ICONS.len()];
-    let direction = match snapshot.direction {
-        ModelDirection::Upstream => "▲",
-        ModelDirection::Downstream => "▼",
-    };
-    let mut status_parts = Vec::new();
-    if !snapshot.memory_marker.trim().is_empty() {
-        status_parts.push(snapshot.memory_marker.clone());
-    }
-    status_parts.push(format!(
-        "{}:{}: {}{}",
-        snapshot.provider, snapshot.model, direction, snapshot.model_round
-    ));
-    status_parts.push(format!("已用 {}", format_elapsed(snapshot.elapsed_secs)));
-    status_parts.push(token_status_with_latest(
-        &snapshot.usage,
-        snapshot.latest_usage.as_ref(),
-        TokenStatusMode::Thinking,
-    ));
     let intent = compact_status_text(&snapshot.intent, 36);
     let intent_line = dim_line(&format!("{icon} {intent}..."));
-    let status_line = dim_line(&format!("  {}", status_parts.join(" ║ ")));
+    let status_line = render_thinking_status_line(snapshot);
     format!(
         "{}\n{intent_line}\n{status_line}\n",
         timem_prefix(time_label)
@@ -128,9 +112,10 @@ pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str
 pub fn render_thinking_view_at(snapshot: &ThinkingViewSnapshot, time_label: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("{}\n", timem_prefix(time_label)));
-    out.push_str(&render_observation_panel_at(
+    out.push_str(&render_observation_panel_at_with_elapsed(
         &snapshot.observations,
         snapshot.status.tick,
+        Some(&format_elapsed_clock(snapshot.status.elapsed_secs)),
     ));
     out.push_str(&render_thinking_status_line(&snapshot.status));
     out.push('\n');
@@ -138,34 +123,20 @@ pub fn render_thinking_view_at(snapshot: &ThinkingViewSnapshot, time_label: &str
 }
 
 fn render_thinking_status_line(snapshot: &ShellStatusSnapshot) -> String {
-    let direction = match snapshot.direction {
-        ModelDirection::Upstream => "▲",
-        ModelDirection::Downstream => "▼",
-    };
-    let mut status_parts = Vec::new();
-    if !snapshot.memory_marker.trim().is_empty() {
-        status_parts.push(snapshot.memory_marker.clone());
-    }
-    status_parts.push(format!(
-        "{}:{}: {}{}",
-        snapshot.provider, snapshot.model, direction, snapshot.model_round
-    ));
-    status_parts.push(format!("已用 {}", format_elapsed(snapshot.elapsed_secs)));
-    status_parts.push(token_status_with_latest(
-        &snapshot.usage,
-        snapshot.latest_usage.as_ref(),
-        TokenStatusMode::Thinking,
-    ));
-    dim_line(&format!("  {}", status_parts.join(" ║ ")))
+    let lines = thinking_status_lines(snapshot);
+    dim_line(&format!("  {}", lines.join("\n  ")))
 }
 
-fn format_elapsed(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
+fn format_elapsed_clock(secs: u64) -> String {
+    if secs < 3600 {
+        format!("{:02}:{:02}", secs / 60, secs % 60)
     } else {
-        let mins = secs / 60;
-        let rem = secs % 60;
-        format!("{mins}m{rem:02}s")
+        format!(
+            "{:02}:{:02}:{:02}",
+            secs / 3600,
+            (secs / 60) % 60,
+            secs % 60
+        )
     }
 }
 
@@ -189,23 +160,18 @@ pub fn render_final_response_at(
     provider: &str,
     model: &str,
     elapsed_secs: u64,
+    max_llm_input_tokens: u32,
     time_label: &str,
 ) -> String {
-    let mut status_parts = Vec::new();
-    let memory = memory_marker(stats);
-    if !memory.is_empty() {
-        status_parts.push(memory.to_string());
-    }
-    status_parts.push(format!("{}:{}: {}", provider, model, stats.llm_calls));
-    status_parts.push(token_status_with_latest(
+    let status = final_status_line(
         stats,
         latest_usage,
-        TokenStatusMode::Final,
-    ));
-    let status_line = dim_line(&format!(
-        " ↳ {elapsed_secs}s    ( {} )",
-        status_parts.join(" ║ ")
-    ));
+        provider,
+        model,
+        elapsed_secs,
+        max_llm_input_tokens,
+    );
+    let status_line = dim_line(&status);
     let body = render_terminal_markdown(text);
     format!("{}\n{body}\n{status_line}\n\n", timem_prefix(time_label))
 }
@@ -234,6 +200,120 @@ pub fn render_terminal_markdown(text: &str) -> String {
 
 pub fn token_status(stats: &UsageStats) -> String {
     token_status_with_latest(stats, None, TokenStatusMode::Plain)
+}
+
+fn thinking_status_lines(snapshot: &ShellStatusSnapshot) -> Vec<String> {
+    let latest = meaningful_latest(snapshot.latest_usage.as_ref());
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{}:{} ⇌{} ║ {}",
+        snapshot.provider,
+        snapshot.model,
+        snapshot.model_round,
+        compact_token_totals(&snapshot.usage)
+    ));
+    let context_tokens = latest
+        .map(|usage| usage.prompt_tokens)
+        .filter(|tokens| *tokens > 0)
+        .unwrap_or(snapshot.usage.prompt_tokens);
+    lines.push(format!(
+        "  ├─ context : {}",
+        context_bar(context_tokens, snapshot.max_llm_input_tokens)
+    ));
+    if let Some(usage) = latest {
+        lines.push(format!("  └─ {}", compact_token_latest(usage)));
+    } else {
+        lines.push("  └─ △0  ▽0".to_string());
+    }
+    lines
+}
+
+fn final_status_line(
+    stats: &UsageStats,
+    latest_usage: Option<&UsageStats>,
+    provider: &str,
+    model: &str,
+    elapsed_secs: u64,
+    max_llm_input_tokens: u32,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(latest) = meaningful_latest(latest_usage) {
+        let percent = context_percent(latest.prompt_tokens, max_llm_input_tokens);
+        if percent > 0 {
+            parts.push(format!("ctx[{percent}%]"));
+        }
+    }
+    parts.push(format!("▲{}", compact_count(stats.prompt_tokens)));
+    parts.push(format!("▼{}", compact_count(stats.completion_tokens)));
+    if stats.cached_tokens > 0 {
+        parts.push(format!("⌁{}", compact_count(stats.cached_tokens)));
+    }
+    format!(
+        " ↳  {}s    {}:{} ⇌{} ║ {}",
+        elapsed_secs,
+        provider,
+        model,
+        stats.llm_calls,
+        parts.join("  ")
+    )
+}
+
+fn compact_token_totals(stats: &UsageStats) -> String {
+    let mut parts = vec![
+        format!("▲{}", compact_count(stats.prompt_tokens)),
+        format!("▼{}", compact_count(stats.completion_tokens)),
+    ];
+    if stats.cached_tokens > 0 {
+        parts.push(format!("⌁{}", compact_count(stats.cached_tokens)));
+    }
+    parts.join(" | ")
+}
+
+fn compact_token_latest(usage: &UsageStats) -> String {
+    let mut parts = vec![
+        format!("△{}", compact_count(usage.prompt_tokens)),
+        format!("▽{}", compact_count(usage.completion_tokens)),
+    ];
+    if usage.cached_tokens > 0 {
+        parts.push(format!("⌁{}", compact_count(usage.cached_tokens)));
+    }
+    parts.join("  ")
+}
+
+fn meaningful_latest(latest_usage: Option<&UsageStats>) -> Option<&UsageStats> {
+    latest_usage.filter(|usage| {
+        usage.prompt_tokens > 0
+            || usage.completion_tokens > 0
+            || usage.cached_tokens > 0
+            || usage.shrunk_tokens > 0
+    })
+}
+
+fn context_percent(context_tokens: u32, max_llm_input_tokens: u32) -> u32 {
+    if context_tokens == 0 || max_llm_input_tokens == 0 {
+        return 0;
+    }
+    let percent = context_tokens
+        .saturating_mul(100)
+        .saturating_add(max_llm_input_tokens - 1)
+        / max_llm_input_tokens;
+    percent.clamp(1, 100)
+}
+
+fn context_bar(context_tokens: u32, max_llm_input_tokens: u32) -> String {
+    let percent = context_percent(context_tokens, max_llm_input_tokens);
+    let filled = if percent == 0 {
+        0
+    } else {
+        percent.saturating_add(9) / 10
+    }
+    .min(10);
+    let empty = 10 - filled;
+    format!(
+        "[{}{}]",
+        "■".repeat(filled as usize),
+        "□".repeat(empty as usize)
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2143,9 +2223,10 @@ mod tests {
             "aliyun",
             "qwen-plus",
             1,
+            100_000,
             "10:52:57",
         );
-        assert!(rendered.contains("Token: ▲1.2K(⌁1.21M) ▼88"));
+        assert!(rendered.contains("aliyun:qwen-plus ⇌3 ║ ▲1.2K  ▼88  ⌁1.21M"));
     }
 
     #[test]
@@ -2236,9 +2317,10 @@ mod tests {
             "custom",
             "aws-claude-sonnet-4-6",
             2,
+            100_000,
             "09:24:00",
         );
-        assert!(rendered.contains("Token [ctx 5.1K] ▲5.1K ▼45"));
+        assert!(rendered.contains("custom:aws-claude-sonnet-4-6 ⇌1 ║ ctx[6%]  ▲5.1K  ▼45"));
         assert!(!rendered.contains("▼45(+45)"));
     }
 
@@ -2718,16 +2800,18 @@ mod tests {
                 }),
                 tick: 0,
                 elapsed_secs: 7,
+                max_llm_input_tokens: 100_000,
             },
             "08:56:33",
         );
         assert!(block.contains("[08:56:33] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
         assert!(block.contains("🦩 查询记忆..."));
-        assert!(block.contains("◂⛃ ║ aliyun:qwen-plus: ▼2"));
-        assert!(block.contains("已用 7s"));
-        assert!(block.contains("Token: ▲210(+110) ▼21(+9)"));
+        assert!(block.contains("aliyun:qwen-plus ⇌2 ║ ▲210 | ▼21"));
+        assert!(block.contains("├─ context : [■□□□□□□□□□]"));
+        assert!(block.contains("└─ △110  ▽9"));
+        assert!(!block.contains("已用 7s"));
         assert!(!block.contains("⚡cache"));
-        assert_eq!(block.lines().count(), 3);
+        assert_eq!(block.lines().count(), 5);
         assert!(!block.contains("thinking..."));
     }
 
@@ -2748,13 +2832,14 @@ mod tests {
                 }),
                 tick: 8,
                 elapsed_secs: 65,
+                max_llm_input_tokens: 100_000,
             },
             "23:33:05",
         );
 
-        assert_eq!(block.lines().count(), 3);
+        assert_eq!(block.lines().count(), 5);
         assert!(block.contains("Check local system"));
-        assert!(block.contains("已用 1m05s"));
+        assert!(block.contains("├─ context : [■□□□□□□□□□]"));
         assert!(block.contains('…'));
         assert!(!block.contains("observance"));
     }
@@ -2786,6 +2871,7 @@ mod tests {
                     }),
                     tick: 0,
                     elapsed_secs: 12,
+                    max_llm_input_tokens: 100_000,
                 },
                 observations,
             },
@@ -2794,11 +2880,13 @@ mod tests {
 
         assert!(view.contains("[12:00:00] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
         assert!(view.contains("Thought / Action"));
+        assert!(view.contains("Thought / Action  ⏳ 00:12"));
         assert!(view.contains("· 正在分析用户请求"));
         assert!(view.contains("\x1b[38;5;245m· Bash: rg --files | wc -l"));
-        assert!(view.contains("aliyun:qwen-plus: ▼2"));
-        assert!(view.contains("已用 12s"));
-        assert!(view.contains("Token: ▲1.2K(⌁300)(+800) ▼20(+12)"));
+        assert!(view.contains("aliyun:qwen-plus ⇌2 ║ ▲1.2K | ▼20 | ⌁300"));
+        assert!(view.contains("├─ context : [■□□□□□□□□□]"));
+        assert!(view.contains("└─ △800  ▽12"));
+        assert!(!view.contains("已用 12s"));
         assert!(!view.contains("ignored in panel mode"));
     }
 
@@ -2823,6 +2911,7 @@ mod tests {
             "aliyun",
             "qwen-plus",
             2,
+            100_000,
             "08:56:46",
         );
         assert!(rendered.contains("[08:56:46] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
@@ -2833,8 +2922,7 @@ mod tests {
             .nth(1)
             .is_some_and(|line| line == "你叫默默。"));
         assert!(rendered.contains("你叫默默。"));
-        assert!(rendered.contains("◂▸⛃ ║ aliyun:qwen-plus: 2"));
-        assert!(rendered.contains("Token [ctx 410] ▲812(⌁384) ▼52"));
+        assert!(rendered.contains("aliyun:qwen-plus ⇌2 ║ ctx[1%]  ▲812  ▼52  ⌁384"));
         assert!(!rendered.contains("▼52(+31)"));
         assert!(!rendered.contains("你 >"));
         assert!(!rendered.contains("thinking..."));
@@ -2854,6 +2942,7 @@ mod tests {
             "custom",
             "aws-claude-sonnet-4-6",
             1,
+            100_000,
             "17:20:00",
         );
         assert!(rendered.contains(&format!("{ANSI_BOLD}系统{ANSI_RESET}：macOS")));
@@ -2874,12 +2963,13 @@ mod tests {
             "aliyun",
             "qwen-plus",
             1,
+            100_000,
             "10:00:00",
         );
         let status_line = rendered.lines().nth(2).unwrap();
         assert!(status_line.starts_with(&format!("{ANSI_RESET}{ANSI_DIM}")));
         assert!(status_line.ends_with(ANSI_RESET));
-        assert!(status_line.contains("↳ 1s"));
+        assert!(status_line.contains("↳  1s"));
     }
 
     #[test]
@@ -2913,9 +3003,10 @@ mod tests {
             "aliyun",
             "qwen-plus",
             1,
+            100_000,
             "10:08:43",
         );
-        assert!(rendered.contains("( aliyun:qwen-plus: 1 ║ Token: ▲237 ▼26 )"));
+        assert!(rendered.contains("aliyun:qwen-plus ⇌1 ║ ▲237  ▼26"));
         assert!(!rendered.contains("⛃"));
     }
 
