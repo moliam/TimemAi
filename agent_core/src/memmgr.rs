@@ -35,7 +35,7 @@ pub fn validate_action(input: MemmgrActionInput<'_>) -> Result<(), String> {
             let placeholder_count = input.sql.matches('?').count();
             if input.params.len() != placeholder_count {
                 return Err(format!(
-                    "next_actions[{}].input.params_count_mismatch expected={placeholder_count} actual={}",
+                    "next_actions[{}].args.params_count_mismatch expected={placeholder_count} actual={}",
                     input.idx,
                     input.params.len()
                 ));
@@ -67,7 +67,7 @@ pub fn validate_action(input: MemmgrActionInput<'_>) -> Result<(), String> {
             }
             if !matches!(normalized_type.as_str(), "notes" | "context_offload") {
                 return Err(format!(
-                    "next_actions[{}].input.kind_unsupported:{}",
+                    "next_actions[{}].args.kind_unsupported:{}",
                     input.idx, input.scratch_type
                 ));
             }
@@ -97,7 +97,7 @@ pub fn validate_action(input: MemmgrActionInput<'_>) -> Result<(), String> {
         }
         _ => {
             return Err(format!(
-                "next_actions[{}].input.unsupported_memmgr_type_or_op:{}/{}",
+                "next_actions[{}].args.unsupported_memmgr_type_or_op:{}/{}",
                 input.idx, input.mem_type, input.op
             ));
         }
@@ -114,7 +114,7 @@ pub fn normalize_scratch_kind(scratch_type: &str) -> String {
 }
 
 fn issue(idx: usize, name: &str) -> String {
-    format!("next_actions[{idx}].input.{name}")
+    format!("next_actions[{idx}].args.{name}")
 }
 
 #[cfg(test)]
@@ -142,7 +142,7 @@ mod tests {
     fn durable_query_requires_query() {
         assert_eq!(
             validate_action(input("durable", "query")).unwrap_err(),
-            "next_actions[0].input.query_required"
+            "next_actions[0].args.query_required"
         );
     }
 
@@ -170,7 +170,7 @@ mod tests {
 
         assert_eq!(
             validate_action(action).unwrap_err(),
-            "next_actions[0].input.prompt_refs_required"
+            "next_actions[0].args.prompt_refs_required"
         );
     }
 

@@ -9,6 +9,9 @@ pub fn response_v1_summary_value() -> Value {
 
 pub fn enrich_static_prompt_with_response_schema(static_prompt: &str) -> String {
     let _ = response_v1_summary_value();
+    if static_prompt.contains("{{RESPONSE_V1_SCHEMA}}") {
+        return static_prompt.replace("{{RESPONSE_V1_SCHEMA}}", RESPONSE_V1_SUMMARY);
+    }
     if let Some(enriched) = replace_json_string_field_with_raw_json(
         static_prompt,
         "json_schema_summary",
@@ -42,6 +45,16 @@ pub(crate) fn replace_json_string_field_with_value(
         field,
         &serde_json::to_string_pretty(replacement).ok()?,
     )
+}
+
+pub(crate) fn replace_markdown_placeholder_with_text(
+    source: &str,
+    placeholder: &str,
+    replacement: &str,
+) -> Option<String> {
+    source
+        .contains(placeholder)
+        .then(|| source.replace(placeholder, replacement))
 }
 
 pub(crate) fn replace_json_string_field_with_raw_json(
@@ -122,13 +135,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn response_v1_summary_resource_is_valid_and_named() {
+    fn response_v1_summary_resource_is_valid() {
         let summary = response_v1_summary_value();
 
-        assert_eq!(
-            summary.get("$id").and_then(Value::as_str),
-            Some("https://timem.local/schemas/response_v1.schema.json")
-        );
+        assert!(summary.get("$id").is_none());
         assert!(summary
             .get("fields")
             .and_then(|value| value.get("report_job_progress?"))
@@ -180,15 +190,26 @@ mod tests {
             r#"{"Response_rule":{"json_schema_summary":"stale"}}"#,
         );
 
-        assert!(
-            enriched.contains("\"$id\": \"https://timem.local/schemas/response_v1.schema.json\"")
-        );
+        assert!(!enriched.contains("\"$id\""));
         assert!(enriched.contains("\"fields\""));
         assert!(enriched.contains("\"status?\""));
         assert!(enriched.contains("\"report_job_progress?\""));
         assert!(enriched.contains("\"final_answer?\""));
         assert!(enriched.find("\"status?\"").unwrap() < enriched.find("\"thought?\"").unwrap());
         assert!(!enriched.contains("stale"));
+    }
+
+    #[test]
+    fn prompt_spec_injects_response_schema_summary_into_markdown_placeholder() {
+        let enriched = enrich_static_prompt_with_response_schema(
+            "## Response Protocol\n```json\n{{RESPONSE_V1_SCHEMA}}\n```",
+        );
+
+        assert!(!enriched.contains("\"$id\""));
+        assert!(enriched.contains("\"status?\""));
+        assert!(enriched.contains("\"report_job_progress?\""));
+        assert!(enriched.contains("\"final_answer?\""));
+        assert!(!enriched.contains("{{RESPONSE_V1_SCHEMA}}"));
     }
 
     #[test]

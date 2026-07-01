@@ -490,6 +490,7 @@ mod tests {
         observation_events_from_model_response, render_observation_panel_at, ObservationPanel,
     };
     use agent_core::{BashApprovalMode, CoreProfile};
+    use serde_json::Value;
     use std::collections::VecDeque;
 
     fn tmp_dir(name: &str) -> std::path::PathBuf {
@@ -554,6 +555,23 @@ mod tests {
             .collect()
     }
 
+    fn read_audit_events(path: &Path) -> Vec<Value> {
+        let text = std::fs::read_to_string(path).unwrap();
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        doc["events"].as_array().unwrap().clone()
+    }
+
+    fn audit_event_count(events: &[Value], event_type: &str) -> usize {
+        events
+            .iter()
+            .filter(|event| event["type"] == event_type)
+            .count()
+    }
+
+    fn audit_event<'a>(events: &'a [Value], event_type: &str) -> Option<&'a Value> {
+        events.iter().find(|event| event["type"] == event_type)
+    }
+
     struct ReplayModel {
         responses: VecDeque<Result<LlmResponse, String>>,
         prompts: Vec<String>,
@@ -604,7 +622,7 @@ mod tests {
     #[test]
     fn session_turn_retries_transient_provider_errors_and_reports_status() {
         let dir = tmp_dir("retry_transient_provider_error");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         let mut config = test_config();
         let mut ui = RetryRecordingUi::default();
@@ -639,14 +657,14 @@ mod tests {
         assert_eq!(ui.retries[0].1, 5);
         assert_eq!(ui.retries[0].2, Duration::ZERO);
         assert!(ui.retries[0].3.contains("provider_http_500"));
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert_eq!(audit_text.matches("\"type\":\"model_retry\"").count(), 2);
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_retry"), 2);
     }
 
     #[test]
     fn session_turn_does_not_retry_non_transient_provider_errors() {
         let dir = tmp_dir("no_retry_provider_400");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         let mut config = test_config();
         let mut ui = RetryRecordingUi::default();
@@ -678,13 +696,13 @@ mod tests {
     #[test]
     fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
         let dir = tmp_dir("session_cache_plan");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","report_job_progress":"查询 scratch 后继续。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","input":{"type":"scratch","op":"query","query":"","limit":3}}]}"#,
+                r#"{"status":"working","report_job_progress":"查询 scratch 后继续。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#,
                 5_000,
                 false,
             )),
@@ -747,7 +765,7 @@ mod tests {
     #[test]
     fn session_turn_records_cached_tokens_in_profiler_and_latest_usage() {
         let dir = tmp_dir("session_profiler_cache");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
@@ -758,7 +776,7 @@ mod tests {
         second_usage.cached_tokens = 6_500;
         let mut model = ReplayModel::new([
             Ok(LlmResponse {
-                content: r#"{"status":"working","report_job_progress":"先查询 scratch。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","input":{"type":"scratch","op":"query","query":"","limit":3}}]}"#.to_string(),
+                content: r#"{"status":"working","report_job_progress":"先查询 scratch。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#.to_string(),
                 model_name: "test-model".to_string(),
                 usage: first_usage.clone(),
                 truncated: false,
@@ -819,7 +837,7 @@ mod tests {
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 13_253, false));
@@ -848,7 +866,7 @@ mod tests {
     #[test]
     fn session_turn_can_cancel_before_provider_call_without_network() {
         let dir = tmp_dir("cancel");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         core.set_bash_approval_mode(BashApprovalMode::Ask);
         let mut config = test_config();
@@ -869,17 +887,17 @@ mod tests {
 
         assert_eq!(outcome.text, "已取消本轮。");
         assert_eq!(outcome.repair_issue.as_deref(), Some("cancelled_by_user"));
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert!(audit_text.contains("\"turn_start\""));
-        assert!(audit_text.contains("\"turn_final\""));
-        assert!(!audit_text.contains("\"llm_request\""));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "turn_start"), 1);
+        assert_eq!(audit_event_count(&events, "turn_final"), 1);
+        assert_eq!(audit_event_count(&events, "llm_request"), 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn session_turn_shows_plain_text_after_protocol_repair_failure() {
         let dir = tmp_dir("plain_text_repair_fallback");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
@@ -916,22 +934,28 @@ mod tests {
         );
         assert_eq!(model.prompts.len(), 2);
         assert!(model.prompts[1].contains("Protocol repair request"));
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert!(audit_text.contains("\"turn_final\""));
-        assert!(audit_text.contains("\"type\":\"model_repair_request\""));
-        assert!(audit_text.contains("\"issue\":\"invalid_json\""));
-        assert!(audit_text.contains("\"repair_calls\":1"));
-        assert!(audit_text.contains("\"repair_calls_delta\":1"));
-        assert!(audit_text.contains("\"truncated\":false"));
-        assert!(audit_text.contains("提交成功"));
-        assert!(!audit_text.contains("模型的回复不符合本地协议"));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "turn_final"), 1);
+        let repair = audit_event(&events, "model_repair_request").unwrap();
+        assert_eq!(repair["issue"], "invalid_json");
+        assert_eq!(repair["repair_calls"], 1);
+        assert_eq!(repair["repair_calls_delta"], 1);
+        assert_eq!(repair["truncated"], false);
+        let final_event = audit_event(&events, "turn_final").unwrap();
+        assert!(final_event["assistant_output"]
+            .as_str()
+            .unwrap()
+            .contains("提交成功"));
+        assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("模型的回复不符合本地协议"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
         let dir = tmp_dir("forced_shrink_e2e");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         core.set_max_llm_input_tokens(10_000);
         let mut config = test_config();
@@ -973,10 +997,13 @@ mod tests {
                 .count(),
             1
         );
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert!(audit_text.contains("\"turn_start\""));
-        assert!(audit_text.contains("\"turn_final\""));
-        assert!(audit_text.contains("压缩已完成，可以继续对话。"));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "turn_start"), 1);
+        let final_event = audit_event(&events, "turn_final").unwrap();
+        assert!(final_event["assistant_output"]
+            .as_str()
+            .unwrap()
+            .contains("压缩已完成，可以继续对话。"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -998,7 +1025,7 @@ mod tests {
     #[test]
     fn session_turn_truncated_output_expands_limit_and_retries_same_turn() {
         let dir = tmp_dir("truncated_expansion_e2e");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         let mut config = test_config();
         config.max_llm_output_tokens = 10_000;
@@ -1032,9 +1059,9 @@ mod tests {
         assert_eq!(ui.expansion_requests, 1);
         assert_eq!(model.prompts.len(), 2);
         assert_eq!(config.max_llm_output_tokens, 20_000);
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert!(audit_text.contains("\"max_llm_output_increased\""));
-        assert!(audit_text.contains("\"turn_final\""));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 1);
+        assert_eq!(audit_event_count(&events, "turn_final"), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1052,7 +1079,7 @@ mod tests {
     #[test]
     fn session_turn_round_limit_continue_recharges_and_finishes_same_task() {
         let dir = tmp_dir("round_limit_continue_e2e");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         core.set_max_rounds(1);
         let mut config = test_config();
@@ -1061,7 +1088,7 @@ mod tests {
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Look up evidence before answering.","input":{"type":"durable","op":"query","query":"round limit e2e","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory evidence"]}}"#,
+                r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Look up evidence before answering.","args":{"type":"durable","op":"query","query":"round limit e2e","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory evidence"]}}"#,
                 4_000,
                 false,
             )),
@@ -1090,10 +1117,10 @@ mod tests {
         assert_eq!(ui.continue_requests, 1);
         assert_eq!(model.prompts.len(), 2);
         assert!(model.prompts[1].contains("Runtime round budget continued by user."));
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert!(audit_text.contains("\"round_limit\""));
-        assert!(audit_text.contains("\"continued\":true"));
-        assert!(audit_text.contains("\"turn_final\""));
+        let events = read_audit_events(&audit);
+        let round_limit = audit_event(&events, "round_limit").unwrap();
+        assert_eq!(round_limit["continued"], true);
+        assert_eq!(audit_event_count(&events, "turn_final"), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1111,11 +1138,11 @@ mod tests {
     #[test]
     fn session_turn_bash_approval_executes_action_then_finishes_with_audit() {
         let dir = tmp_dir("bash_approval_e2e");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let output_file = dir.join("approved.txt");
         let command = format!("printf approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write approved test output.","input":{{"command":{},"timeout_ms":5000}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["bash result"]}}}}"#,
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write approved test output.","args":{{"command":{},"timeout_ms":5000}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["bash result"]}}}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -1154,27 +1181,27 @@ mod tests {
         assert_eq!(model.prompts.len(), 2);
         assert!(model.prompts[1].contains("Action result: run_bash"));
         assert!(model.prompts[1].contains("status: 0"));
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert!(audit_text.contains("\"user_approval\""));
-        assert!(audit_text.contains("\"approved\":true"));
-        assert!(audit_text.contains("\"turn_final\""));
+        let events = read_audit_events(&audit);
+        let approval = audit_event(&events, "user_approval").unwrap();
+        assert_eq!(approval["approved"], true);
+        assert_eq!(audit_event_count(&events, "turn_final"), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn session_turn_guarded_finalize_pass_skips_extra_model_round() {
-        let dir = tmp_dir("guarded_finalize_session_pass");
-        let audit = dir.join("audit.jsonl");
+    fn session_turn_final_command_check_pass_skips_extra_model_round() {
+        let dir = tmp_dir("final_command_check_session_pass");
+        let audit = dir.join("audit.json");
         let output_file = dir.join("guarded.txt");
-        let command = format!("printf guarded > {}", output_file.display());
-        let expect = format!("test -s {}", output_file.display());
+        let command = format!("test -s {}", output_file.display());
+        std::fs::write(&output_file, "guarded").unwrap();
         let response = format!(
-            r#"{{"report_job_progress":"文件已生成并验证。","continue":false,"next_actions":[{{"action":"run_bash","intent":"Write and verify guarded output.","input":{{"command":{},"timeout_ms":5000,"expect":{},"expect_timeout_ms":5000}}}}]}}"#,
-            serde_json::to_string(&command).unwrap(),
-            serde_json::to_string(&expect).unwrap()
+            r#"{{"report_job_progress":"文件已生成并验证。","continue":false,"next_actions":[{{"action":"run_bash","intent":"Verify guarded output.","args":{{"command":{},"timeout_ms":5000}}}}]}}"#,
+            serde_json::to_string(&command).unwrap()
         );
 
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_capability_registry(agent_core::capability::CapabilityRegistry::builtin());
         core.set_bash_approval_mode(BashApprovalMode::Approve);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
@@ -1197,11 +1224,11 @@ mod tests {
         assert_eq!(outcome.text, "文件已生成并验证。");
         assert_eq!(std::fs::read_to_string(&output_file).unwrap(), "guarded");
         assert_eq!(model.prompts.len(), 1);
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert!(audit_text.contains("\"turn_final\""));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "turn_final"), 1);
         let action_audit =
             std::fs::read_to_string(dir.join("audit").join("action_audit.json")).unwrap();
-        assert!(action_audit.contains("guarded_finalize_expect_pass"));
+        assert!(action_audit.contains("final_command_check_command_pass"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1224,7 +1251,7 @@ mod tests {
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","input":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch id"]}}}}"#,
+                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch id"]}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 4_000, false));
@@ -1246,7 +1273,7 @@ mod tests {
     #[test]
     fn session_turn_scratch_context_offload_records_id_and_continues() {
         let dir = tmp_dir("scratch_offload_e2e");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
@@ -1274,8 +1301,8 @@ mod tests {
         assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
         assert!(scratch_text.contains(r#""label":"session e2e offload""#));
         assert!(scratch_text.contains("extra context that should be offloaded"));
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert!(audit_text.contains("\"turn_final\""));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "turn_final"), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1332,7 +1359,7 @@ mod tests {
                     Ok(llm("畸形回复已恢复为用户可读文本。", 2_200, false))
                 }
                 4 => Ok(llm(
-                    r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"记录项目代号。","input":{"type":"durable","op":"upsert","id":"project_code","content":"项目代号是 AURORA"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#,
+                    r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"记录测试项目代号。","args":{"type":"durable","op":"upsert","id":"project_code","content":"测试项目代号是 OMEGA-7"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#,
                     2_300,
                     false,
                 )),
@@ -1342,13 +1369,13 @@ mod tests {
                     assert!(prompt.contains("operation: insert"));
                     assert!(prompt.contains("project_code"));
                     Ok(llm(
-                        r#"{"report_job_progress":"已记录项目代号。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
+                        r#"{"report_job_progress":"已记录测试项目代号。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                         2_400,
                         false,
                     ))
                 }
                 6 => Ok(llm(
-                    r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查询项目代号记忆。","input":{"type":"durable","op":"query","query":"项目代号","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#,
+                    r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查询测试项目代号记忆。","args":{"type":"durable","op":"query","query":"测试项目代号","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#,
                     2_500,
                     false,
                 )),
@@ -1356,9 +1383,9 @@ mod tests {
                     assert!(prompt.contains("Action result: memmgr"));
                     assert!(prompt.contains("type: durable"));
                     assert!(prompt.contains("op: query"));
-                    assert!(prompt.contains("项目代号是 AURORA"));
+                    assert!(prompt.contains("测试项目代号是 OMEGA-7"));
                     Ok(llm(
-                        r#"{"report_job_progress":"项目代号是 AURORA。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
+                        r#"{"report_job_progress":"测试项目代号是 OMEGA-7。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                         7_600,
                         false,
                     ))
@@ -1373,7 +1400,7 @@ mod tests {
                         "forced shrink prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","input":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch offload id"]}}}}"#,
+                        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch offload id"]}}}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_650, false))
@@ -1392,7 +1419,7 @@ mod tests {
                         "post-scratch forced shrink prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+                        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_700, false))
@@ -1416,7 +1443,7 @@ mod tests {
     #[test]
     fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering() {
         let dir = tmp_dir("story_replay_e2e");
-        let audit = dir.join("audit.jsonl");
+        let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         core.set_max_llm_input_tokens(8_000);
         let mut config = test_config();
@@ -1430,8 +1457,8 @@ mod tests {
         let inputs = [
             "你好",
             "请用畸形回复测试协议恢复",
-            "记住项目代号是 AURORA",
-            "项目代号是什么？",
+            "记住测试项目代号是 OMEGA-7",
+            "测试项目代号是什么？",
             "继续长上下文任务",
         ];
         let long_work_context = "长工作上下文片段。".repeat(2_500);
@@ -1439,8 +1466,8 @@ mod tests {
         let expected_outputs = [
             "你好，我在。",
             "畸形回复已恢复为用户可读文本。",
-            "已记录项目代号。",
-            "项目代号是 AURORA。",
+            "已记录测试项目代号。",
+            "测试项目代号是 OMEGA-7。",
             "上下文已转存并压缩，可以继续。",
         ];
 
@@ -1482,15 +1509,15 @@ mod tests {
         );
 
         let memory_text = std::fs::read_to_string(dir.join("memory.jsonl")).unwrap();
-        assert!(memory_text.contains("项目代号是 AURORA"));
+        assert!(memory_text.contains("测试项目代号是 OMEGA-7"));
         let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
         assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
         assert!(scratch_text.contains(r#""label":"story replay context offload""#));
 
         let rendered = ui.renders.join("\n");
-        assert!(rendered.contains("· 记录项目代号。"));
+        assert!(rendered.contains("· 记录测试项目代号。"));
         assert!(rendered.contains("└─ 长期记忆: 更新"));
-        assert!(rendered.contains("· 查询项目代号记忆。"));
+        assert!(rendered.contains("· 查询测试项目代号记忆。"));
         assert!(rendered.contains("└─ 长期记忆: 查询"));
         assert!(rendered.contains("· 先把长上下文转存到 scratch。"));
         assert!(rendered.contains("└─ 草稿区: 更新"));
@@ -1498,11 +1525,12 @@ mod tests {
         assert!(rendered.contains("└─ 上下文: 压缩"));
         assert!(!rendered.contains("memmgr"));
 
-        let audit_text = std::fs::read_to_string(&audit).unwrap();
-        assert_eq!(audit_text.matches("\"turn_start\"").count(), inputs.len());
-        assert_eq!(audit_text.matches("\"turn_final\"").count(), inputs.len());
-        assert!(audit_text.contains("畸形回复已恢复为用户可读文本。"));
-        assert!(audit_text.contains("上下文已转存并压缩，可以继续。"));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "turn_start"), inputs.len());
+        assert_eq!(audit_event_count(&events, "turn_final"), inputs.len());
+        let audit_json = serde_json::to_string(&events).unwrap();
+        assert!(audit_json.contains("畸形回复已恢复为用户可读文本。"));
+        assert!(audit_json.contains("上下文已转存并压缩，可以继续。"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1514,7 +1542,6 @@ mod tests {
             action: "run_bash".to_string(),
             intent: "test".to_string(),
             command: "echo hi".to_string(),
-            read_back_command: String::new(),
             risk: "test".to_string(),
             reason: "test".to_string(),
         };

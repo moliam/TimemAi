@@ -1,6 +1,6 @@
 use agent_core::{AgentCore, CoreProfile};
 
-const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.json");
+const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.md");
 
 fn main() {
     let mut memory_dir = std::env::temp_dir();
@@ -22,7 +22,6 @@ fn main() {
     println!(
         "This file is a read-only audit snapshot for humans. It is not read by Timem at runtime."
     );
-    println!("Runtime prompt generation still uses `resources/static_v1.json`, capability manifests, and response schema resources directly.");
     println!();
     println!("```text");
     println!("{}", core.render_prompt());

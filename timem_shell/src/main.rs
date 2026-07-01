@@ -32,7 +32,7 @@ use timem_shell::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.json");
+const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.md");
 const ANSI_RESET: &str = timem_shell::ANSI_RESET;
 const ANSI_BOLD: &str = timem_shell::ANSI_BOLD;
 const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
@@ -386,11 +386,7 @@ impl TurnUi for CliTurnUi<'_> {
 
     fn on_model_retry(&mut self, attempt: u32, max_attempts: u32, delay: Duration, error: &str) {
         if let Some(status) = self.status.as_deref_mut() {
-            let delay_secs = delay.as_secs().max(1);
-            status.set_retry_notice(format!(
-                "系统/HTTP 错误，{}s 后重试 {}/{}：{}",
-                delay_secs, attempt, max_attempts, error
-            ));
+            status.set_network_retry(attempt, max_attempts, delay, error);
         }
     }
 
@@ -451,6 +447,10 @@ impl ThinkingStatus {
                 elapsed_secs: 0,
                 max_llm_input_tokens,
                 retry_notice: None,
+                retry_until_epoch_ms: None,
+                retry_error: None,
+                retry_attempt: None,
+                retry_max_attempts: None,
             },
             observations: ObservationPanel::default(),
         }));
@@ -488,6 +488,10 @@ impl ThinkingStatus {
             state.status.model_round = round;
             state.status.direction = direction;
             state.status.retry_notice = None;
+            state.status.retry_until_epoch_ms = None;
+            state.status.retry_error = None;
+            state.status.retry_attempt = None;
+            state.status.retry_max_attempts = None;
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -539,9 +543,19 @@ impl ThinkingStatus {
         }
     }
 
-    fn set_retry_notice(&mut self, text: String) {
+    fn set_network_retry(&mut self, attempt: u32, max_attempts: u32, delay: Duration, error: &str) {
         if let Ok(mut state) = self.state.lock() {
-            state.status.retry_notice = Some(text);
+            state.status.retry_notice = None;
+            state.status.retry_until_epoch_ms = Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .saturating_add(delay)
+                    .as_millis(),
+            );
+            state.status.retry_error = Some(error.to_string());
+            state.status.retry_attempt = Some(attempt);
+            state.status.retry_max_attempts = Some(max_attempts);
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -2503,8 +2517,9 @@ fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<u
     snapshot
         .observations
         .set_max_width(observation_panel_width_for_terminal(terminal_width()));
+    let width = terminal_width();
     let rendered = render_thinking_view_at(&snapshot, &time_label());
-    let line_count = rendered.lines().count();
+    let line_count = rendered_terminal_rows(&rendered, width);
     print!("{rendered}");
     if let Ok(mut previous) = rendered_lines.lock() {
         *previous = line_count;
@@ -2526,6 +2541,15 @@ fn clear_thinking_block(rendered_lines: &Arc<Mutex<usize>>) {
         *lines = 0;
     }
     let _ = io::stdout().flush();
+}
+
+fn rendered_terminal_rows(rendered: &str, terminal_width: usize) -> usize {
+    let width = terminal_width.max(1);
+    let rows = rendered
+        .lines()
+        .map(|line| wrapped_terminal_rows(display_width(line), width))
+        .sum::<usize>();
+    rows.max(1)
 }
 
 fn random_spinner_tick() -> usize {
@@ -3076,7 +3100,7 @@ mod static_prompt_tests {
         render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
         render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
         render_user_approval_prompt, render_user_input_prompt, render_workspace_delete_choices,
-        render_workspace_menu, resolve_paste_markers, sanitize_user_input,
+        render_workspace_menu, rendered_terminal_rows, resolve_paste_markers, sanitize_user_input,
         stale_context_prompt_needed, strip_paste_markers, submitted_input_rows,
         timem_reedline_keybindings, utf8_expected_len, workspace_menu_line_count,
         wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField, ConfigRow,
@@ -3106,19 +3130,21 @@ mod static_prompt_tests {
 
     #[test]
     fn static_prompt_uses_full_shared_v1_resource() {
-        assert!(STATIC_PROMPT.contains("\"static_prefix_id\": \"static_prefix_v3\""));
-        assert!(STATIC_PROMPT.contains("\"General_rule\""));
-        assert!(STATIC_PROMPT.contains("\"Mem_rule\""));
-        assert!(STATIC_PROMPT.contains("\"Tool_capability\""));
-        assert!(STATIC_PROMPT.contains("\"Response_rule\""));
-        assert!(STATIC_PROMPT.contains("\"json_schema_summary\""));
-        assert!(STATIC_PROMPT.contains("Runtime injects response_v1 schema summary"));
+        assert!(STATIC_PROMPT.contains("# Timem Static Prompt"));
+        assert!(STATIC_PROMPT.contains("## Role"));
+        assert!(STATIC_PROMPT.contains("## Memory"));
+        assert!(STATIC_PROMPT.contains("## Tools And Skills"));
+        assert!(STATIC_PROMPT.contains("## Response Protocol"));
+        assert!(STATIC_PROMPT.contains("{{RESPONSE_V1_SCHEMA}}"));
+        assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));
+        assert!(STATIC_PROMPT.contains("{{SKILL_HEADERS}}"));
+        assert!(STATIC_PROMPT.contains("exactly one JSON object matching the following schema"));
+        assert!(!STATIC_PROMPT.contains("resources/response_v1_summary.json"));
+        assert!(!STATIC_PROMPT.contains("response_v1` schema summary"));
         assert!(!STATIC_PROMPT.contains("\"acceptance_check?\""));
-        assert!(STATIC_PROMPT.contains("\"perspective_policy\""));
-        assert!(STATIC_PROMPT.contains("\"tool_claim_policy\""));
-        assert!(STATIC_PROMPT.contains("\"storage_style_policy\""));
-        assert!(STATIC_PROMPT.contains("\"tool_catalog\""));
-        assert!(STATIC_PROMPT.contains("Runtime injects this object from capability manifests"));
+        assert!(!STATIC_PROMPT.contains("\"perspective_policy\""));
+        assert!(!STATIC_PROMPT.contains("\"tool_claim_policy\""));
+        assert!(!STATIC_PROMPT.contains("\"storage_style_policy\""));
         assert!(STATIC_PROMPT.contains("persisted user/assistant chat records"));
         assert!(!STATIC_PROMPT.contains("\"durable|raw_chat|scratch|context\""));
         assert!(!STATIC_PROMPT.contains("\"durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink\""));
@@ -3138,17 +3164,17 @@ mod static_prompt_tests {
         assert!(!STATIC_PROMPT.contains("foreground|background"));
         assert!(!STATIC_PROMPT.contains("\"durable_ctx_score\""));
         assert!(!STATIC_PROMPT.contains("Every model response must score"));
-        assert!(STATIC_PROMPT.contains("\"Context_maintenance\""));
-        assert!(STATIC_PROMPT.contains("memmgr next_actions"));
-        assert!(STATIC_PROMPT.contains("memmgr type=scratch op=write kind=context_offload"));
-        assert!(STATIC_PROMPT.contains("memmgr type=context op=shrink"));
-        assert!(STATIC_PROMPT.contains("Do not include runtime UI markers"));
-        assert!(STATIC_PROMPT.contains("Omitted status defaults to working"));
-        assert!(STATIC_PROMPT.contains("Use status:\\\"finished\\\" and final_answer together"));
+        assert!(STATIC_PROMPT.contains("Context maintenance"));
+        assert!(STATIC_PROMPT.contains("`memmgr` actions"));
+        assert!(STATIC_PROMPT.contains("never target this Timem Static Prompt"));
+        assert!(STATIC_PROMPT.contains("omit `status` or use `status:\"working\"`"));
+        assert!(STATIC_PROMPT
+            .contains("`status:\"finished\"` can include one final `run_bash` command"));
+        assert!(STATIC_PROMPT.contains("The command's exit code"));
         assert!(STATIC_PROMPT.contains("final_answer"));
-        assert!(STATIC_PROMPT.contains("\"json_protocol\""));
-        assert!(STATIC_PROMPT.contains("\"evidence_guard\""));
-        assert!(STATIC_PROMPT.contains("\"action_result_guard\""));
+        assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
+        assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));
+        assert!(!STATIC_PROMPT.contains("\"action_result_guard\""));
         assert!(!STATIC_PROMPT.contains("\"thought?\""));
         assert!(!STATIC_PROMPT.contains("\"Self_audit\""));
         assert!(!STATIC_PROMPT.contains("self_audit"));
@@ -3168,6 +3194,7 @@ mod static_prompt_tests {
             include_str!("../../README.md"),
             include_str!("../../env_template"),
             include_str!("../../resources/static_v1.json"),
+            include_str!("../../resources/static_v1.md"),
             include_str!("../src/lib.rs"),
             include_str!("../src/main.rs"),
         ]
@@ -3270,11 +3297,11 @@ mod static_prompt_tests {
         assert_eq!(workspace_menu_line_count(&[]), 2);
 
         let dirs = vec![
-            "/Users/limo3/my_code/timem_shell".to_string(),
+            "/tmp/timem_shell_fixture".to_string(),
             "/tmp/other".to_string(),
         ];
         let selected_dir = render_workspace_menu(&dirs, 1);
-        assert!(selected_dir.contains("/Users/limo3/my_code/timem_shell"));
+        assert!(selected_dir.contains("/tmp/timem_shell_fixture"));
         assert!(selected_dir.contains("\x1b[7m▶ /tmp/other\x1b[0m"));
         assert!(selected_dir.contains("  Add..."));
         assert_eq!(workspace_menu_line_count(&dirs), 3);
@@ -3521,7 +3548,7 @@ mod static_prompt_tests {
         let banner = render_startup_banner(
             ".xxx_mem",
             &config,
-            std::path::Path::new(".xxx_mem/audit/api_audit.jsonl"),
+            std::path::Path::new(".xxx_mem/audit/api_audit.json"),
             std::path::Path::new(".xxx_mem/audit/action_audit.json"),
             BashApprovalMode::Approve,
         );
@@ -3569,7 +3596,7 @@ mod static_prompt_tests {
         assert!(banner.contains("TIMEM_DATA_DIR"));
         assert!(banner.contains("/data"));
         assert!(banner.contains("local_audit"));
-        assert!(banner.contains("api_audit.jsonl"));
+        assert!(banner.contains("api_audit.json"));
         assert!(banner.contains("payload 记录"));
         assert!(banner.contains("action_audit.json"));
         assert!(banner.contains("action 记录"));
@@ -3653,7 +3680,7 @@ mod static_prompt_tests {
         let default_banner = render_startup_banner(
             ".test_mem",
             &default_config,
-            std::path::Path::new(".test_mem/audit/api_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/api_audit.json"),
             std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
         );
@@ -3672,7 +3699,7 @@ mod static_prompt_tests {
         let override_banner = render_startup_banner(
             ".test_mem",
             &override_config,
-            std::path::Path::new(".test_mem/audit/api_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/api_audit.json"),
             std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
         );
@@ -3704,7 +3731,7 @@ mod static_prompt_tests {
         let banner = render_startup_banner(
             ".test_mem",
             &config,
-            std::path::Path::new(".test_mem/audit/api_audit.jsonl"),
+            std::path::Path::new(".test_mem/audit/api_audit.json"),
             std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
         );
@@ -3883,7 +3910,6 @@ mod static_prompt_tests {
             approval_id: "approval_test".to_string(),
             action: "run_bash".to_string(),
             command: "uname -s".to_string(),
-            read_back_command: "pwd".to_string(),
             reason: "run_bash_requires_user_approval".to_string(),
             risk: "local_shell_command".to_string(),
             intent: "Inspect OS identity.".to_string(),
@@ -4486,6 +4512,23 @@ mod static_prompt_tests {
         assert_eq!(
             wrapped_terminal_rows(display_width("[12:00:00] You ❯❯ 你好"), 20),
             2
+        );
+    }
+
+    #[test]
+    fn rendered_terminal_rows_counts_soft_wrapped_status_lines() {
+        let rendered =
+            "[23:55:16] 𝓣𝓲𝓶𝓮𝓶  ⬇\n  └─ 网络错误，10s 后重试（第1/5次）\n  └─ 详情：provider_network_error: curl: (16) Error in the HTTP2 framing layer\n";
+        let logical_lines = rendered.lines().count();
+        let physical_rows = rendered_terminal_rows(rendered, 40);
+
+        assert!(physical_rows > logical_lines);
+        assert_eq!(
+            physical_rows,
+            rendered
+                .lines()
+                .map(|line| wrapped_terminal_rows(display_width(line), 40))
+                .sum::<usize>()
         );
     }
 }

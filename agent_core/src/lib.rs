@@ -101,7 +101,6 @@ pub struct ApprovalRequest {
     pub approval_id: String,
     pub action: String,
     pub command: String,
-    pub read_back_command: String,
     pub reason: String,
     pub risk: String,
     pub intent: String,
@@ -183,139 +182,104 @@ struct ParsedAction {
     action: String,
     intent: String,
     raw_input: Value,
-    mem_type: String,
-    op: String,
-    query: String,
-    content: String,
-    scratch_type: String,
-    label: String,
-    sql: String,
-    params: Vec<String>,
-    operation: String,
-    expected_version: Option<u64>,
-    id: String,
-    command: String,
-    read_back_command: String,
-    large_readback_opt_in: bool,
-    background: bool,
-    job_id: String,
-    key: String,
-    value: String,
-    delta_ids: Vec<String>,
-    slice_ids: Vec<String>,
-    timeout_ms: u64,
-    limit: usize,
-    after_ms: Option<i64>,
-    before_ms: Option<i64>,
-    expect: String,
-    expect_timeout_ms: u64,
 }
 impl ParsedAction {
     fn audit_input(&self) -> Value {
-        let mut input = match self.action.as_str() {
-            "capmgr" => json!({
-                "op": self.op,
-                "kind": self.scratch_type,
-                "id": self.id,
-            }),
-            "self_tool" => json!({
-                "type": self.mem_type,
-                "op": self.op,
-                "key": self.key,
-                "value": if self_tool::is_sensitive_env_key(&self.key)
-                    || self_tool::is_memory_path_env_key(&self.key)
-                {
-                    "<redacted>"
-                } else {
-                    self.value.as_str()
-                },
-            }),
-            "memmgr" => json!({
-                "type": self.mem_type,
-                "op": self.op,
-                "query": self.query,
-                "content": self.content,
-                "kind": self.scratch_type,
-                "label": self.label,
-                "sql": self.sql,
-                "params": self.params,
-                "operation": self.operation,
-                "expected_version": self.expected_version,
-                "id": self.id,
-                "delta_ids": self.delta_ids,
-                "slice_ids": self.slice_ids,
-                "limit": self.limit,
-                "after_ms": self.after_ms,
-                "before_ms": self.before_ms,
-            }),
-            "run_bash" => json!({
-                "command": self.command,
-                "read_back_command": self.read_back_command,
-                "large_readback_opt_in": self.large_readback_opt_in,
-                "background": self.background,
-                "timeout_ms": self.timeout_ms,
-            }),
-            "shell_job_status" => json!({
-                "job_id": self.job_id,
-                "timeout_ms": self.timeout_ms,
-            }),
-            "memory_sql_query" | "sql_read" => json!({
-                "sql": self.sql,
-                "params": self.params,
-                "limit": self.limit,
-            }),
-            "memory_update" => json!({
-                "operation": self.operation,
-                "id": self.id,
-                "expected_version": self.expected_version,
-                "content": self.content,
-            }),
-            "memory_write" | "write_memory" => json!({
-                "content": self.content,
-                "query": self.query,
-            }),
-            "scratch_write" => json!({
-                "type": self.scratch_type,
-                "label": self.label,
-                "content": self.content,
-                "delta_ids": self.delta_ids,
-                "slice_ids": self.slice_ids,
-            }),
-            "scratch_read" => json!({
-                "id": self.id,
-            }),
-            "scratch_delete" => json!({
-                "id": self.id,
-            }),
-            "prompt_shrink" => json!({
-                "delta_ids": self.delta_ids,
-                "slice_ids": self.slice_ids,
-            }),
-            "chat_history_delete" => json!({
-                "id": self.id,
-                "query": self.query,
-                "limit": self.limit,
-                "after_ms": self.after_ms,
-                "before_ms": self.before_ms,
-            }),
-            _ => json!({
-                "query": self.query,
-                "id": self.id,
-                "limit": self.limit,
-                "after_ms": self.after_ms,
-                "before_ms": self.before_ms,
-            }),
-        };
-        if !self.expect.is_empty() {
+        let mut input = self.raw_input.clone();
+        if self.action == "self_tool" {
             if let Some(object) = input.as_object_mut() {
-                object.insert("expect".to_string(), json!(self.expect));
-                object.insert(
-                    "expect_timeout_ms".to_string(),
-                    json!(self.expect_timeout_ms),
-                );
+                if let Some(key) = object.get("key").and_then(Value::as_str) {
+                    if self_tool::is_sensitive_env_key(key)
+                        || self_tool::is_memory_path_env_key(key)
+                    {
+                        object.insert("value".to_string(), json!("<redacted>"));
+                    }
+                }
             }
         }
         input
+    }
+
+    fn input_str(&self, key: &str) -> String {
+        self.raw_input
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
+
+    fn input_raw_str(&self, key: &str) -> String {
+        self.raw_input
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn input_lower(&self, key: &str) -> String {
+        self.input_str(key).to_lowercase()
+    }
+
+    fn input_u64(&self, key: &str) -> Option<u64> {
+        self.raw_input.get(key).and_then(json_u64)
+    }
+
+    fn input_i64(&self, key: &str) -> Option<i64> {
+        self.raw_input.get(key).and_then(json_i64)
+    }
+
+    fn input_bool(&self, key: &str) -> bool {
+        self.raw_input
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn input_list(&self, key: &str) -> Vec<String> {
+        self.raw_input
+            .get(key)
+            .map(json_string_list)
+            .unwrap_or_default()
+    }
+
+    fn input_params(&self) -> Vec<String> {
+        self.raw_input
+            .get("params")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(json_sql_param_to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    fn timeout_ms(&self, default_ms: u64) -> u64 {
+        self.input_u64("timeout_ms")
+            .or_else(|| {
+                self.input_u64("timeout_sec")
+                    .map(|seconds| seconds.saturating_mul(1000))
+            })
+            .unwrap_or(default_ms)
+    }
+
+    fn shell_timeout_ms(&self) -> u64 {
+        self.timeout_ms(5000).clamp(1000, 15000)
+    }
+
+    fn status_timeout_ms(&self) -> u64 {
+        self.timeout_ms(0).min(15000)
+    }
+
+    fn background(&self) -> bool {
+        self.input_bool("background")
+            || self
+                .raw_input
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("background"))
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,6 +291,7 @@ struct ParsedEnvelope {
     thought_keep_in_context: bool,
     next_actions: Vec<ParsedAction>,
     memory_candidates: Vec<String>,
+    runtime_note: Option<String>,
     repair_issue: Option<String>,
 }
 
@@ -344,8 +309,6 @@ impl ParsedEnvelope {
 struct PendingApproval {
     request: ApprovalRequest,
     command: String,
-    read_back_command: String,
-    large_readback_opt_in: bool,
     background: bool,
     timeout_ms: u64,
     intent: String,
@@ -605,7 +568,7 @@ fn default_self_tool_paths(memory_dir: &Path) -> SelfToolPaths {
         memory_dir: memory_dir.to_path_buf(),
         memory_file: memory_dir.join("memory.jsonl"),
         scratch_file: memory_dir.join("scratch_notes.jsonl"),
-        api_audit_file: space_dir.join("audit").join("api_audit.jsonl"),
+        api_audit_file: space_dir.join("audit").join("api_audit.json"),
         action_audit_file: space_dir.join("audit").join("action_audit.json"),
     }
 }
@@ -868,39 +831,15 @@ impl AgentCore {
             }
             let pending_final_text = parsed.final_text();
             let last_idx = parsed.next_actions.len() - 1;
-            let expect_cmd = parsed.next_actions[last_idx].expect.clone();
-            let expect_timeout = parsed.next_actions[last_idx].expect_timeout_ms;
+            let command = parsed.next_actions[last_idx].input_str("command");
+            let timeout_ms = parsed.next_actions[last_idx].shell_timeout_ms();
             if !pending_final_text.is_empty() {
                 slices.push((
                     "llm_progress".to_string(),
                     format!("Job progress shown to user:\n{}", pending_final_text),
                 ));
             }
-            let mut result_lines: Vec<String> = Vec::new();
-            for action in parsed.next_actions {
-                match self.execute_action(action) {
-                    ActionExecution::Completed(result) => result_lines.push(result),
-                    ActionExecution::NeedsApproval(pending) => {
-                        if !result_lines.is_empty() {
-                            slices.push((
-                                "result_of_llm_action".to_string(),
-                                result_lines.join("\n\n"),
-                            ));
-                        }
-                        self.append_delta(slices);
-                        let request = pending.request.clone();
-                        self.pending_approval = Some(pending);
-                        return CoreStep::NeedsUserApproval { request };
-                    }
-                }
-            }
-            if !result_lines.is_empty() {
-                slices.push((
-                    "result_of_llm_action".to_string(),
-                    result_lines.join("\n\n"),
-                ));
-            }
-            let expect_body = match self.run_guarded_finalize_expect(&expect_cmd, expect_timeout) {
+            let command_body = match self.run_finished_final_command(&command, timeout_ms) {
                 ActionExecution::Completed(result) => result,
                 ActionExecution::NeedsApproval(pending) => {
                     self.append_delta(slices);
@@ -909,8 +848,8 @@ impl AgentCore {
                     return CoreStep::NeedsUserApproval { request };
                 }
             };
-            let pass = expect_check_passed(&expect_body);
-            slices.push(("result_of_llm_action".to_string(), expect_body));
+            let pass = finished_final_command_passed(&command_body);
+            slices.push(("result_of_llm_action".to_string(), command_body));
             if pass {
                 for candidate in parsed.memory_candidates {
                     if self.memory.write(&candidate).is_ok() {
@@ -932,7 +871,7 @@ impl AgentCore {
             }
             slices.push((
                 "runtime_note".to_string(),
-                "Note: 你上轮用 status:finished + expect 声明完成，但 expect 命令 exit!=0。请根据以上证据修正后再回复。".to_string(),
+                "Note: 你上轮用 status:finished + final_answer + 最终 run_bash command 声明完成，但命令返回非 0。Runtime 已忽略 final_answer，请根据以上命令输出修正后再回复。".to_string(),
             ));
             self.append_delta(slices);
             self.append_in_turn_shrink_review_if_needed();
@@ -957,6 +896,9 @@ impl AgentCore {
             ));
         }
         // Omitted status is an intentional shorthand for status:working.
+        if let Some(note) = parsed.runtime_note.as_deref() {
+            slices.push(("runtime_note".to_string(), note.to_string()));
+        }
 
         if !parsed.next_actions.is_empty() {
             let mut result_lines = Vec::new();
@@ -1041,8 +983,6 @@ impl AgentCore {
         let result = if approved {
             execute_approved_bash(
                 &pending.command,
-                &pending.read_back_command,
-                pending.large_readback_opt_in,
                 pending.background,
                 pending.timeout_ms,
                 &pending.request,
@@ -1328,36 +1268,31 @@ impl AgentCore {
         }
         let dispatch_name = match &executor_target {
             executor::ExecutorTarget::Builtin { binding_name } => binding_name.as_str(),
-            executor::ExecutorTarget::Legacy { action } => action.as_str(),
             executor::ExecutorTarget::Command { .. } => {
                 unreachable!("command target returned early")
             }
         };
-        if !matches!(
-            dispatch_name,
-            "capmgr" | "memmgr" | "self_tool" | "run_bash" | "shell_job_status"
-        ) {
-            if let Some(result) = self.execute_legacy_memmgr_action(&action, dispatch_name) {
-                self.record_action_audit(&action_for_audit, "completed", Some(&result));
-                return ActionExecution::Completed(result);
-            }
-        }
         let result = match dispatch_name {
             "capmgr" => self.execute_capmgr_action(&action),
             "memmgr" => self.execute_memmgr_action(&action),
             "self_tool" => self.execute_self_tool_action(&action),
             "shell_job_status" => {
                 self.current_stats.tool_calls += 1;
-                self.shell_jobs.status(&action.job_id, action.timeout_ms)
+                if action.raw_input.get("timeout_ms").is_none()
+                    && action.raw_input.get("timeout_sec").is_none()
+                {
+                    "Action result: shell_job_status\nerror: invalid_input\nmessage: Missing `timeout_ms`. Choose how long the runtime should wait for this status check, from 0 to 15000 ms.".to_string()
+                } else {
+                    self.shell_jobs
+                        .status(&action.input_str("job_id"), action.status_timeout_ms())
+                }
             }
             "run_bash" => {
                 self.current_stats.tool_calls += 1;
                 let execution = execute_guarded_bash(
-                    &action.command,
-                    &action.read_back_command,
-                    action.large_readback_opt_in,
-                    action.background,
-                    action.timeout_ms,
+                    &action.input_str("command"),
+                    action.background(),
+                    action.shell_timeout_ms(),
                     self.bash_approval_mode,
                     &action.intent,
                     &self.shell_jobs,
@@ -1389,144 +1324,52 @@ impl AgentCore {
         ActionExecution::Completed(result)
     }
 
-    fn execute_legacy_memmgr_action(
-        &mut self,
-        action: &ParsedAction,
-        dispatch_name: &str,
-    ) -> Option<String> {
-        let mut canonical = action.clone();
-        canonical.action = "memmgr".to_string();
-        match dispatch_name {
-            "chat_history_query" => {
-                canonical.mem_type = "raw_chat".to_string();
-                canonical.op = "query".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "chat_history_query",
-                ))
-            }
-            "chat_history_delete" => {
-                canonical.mem_type = "raw_chat".to_string();
-                canonical.op = "delete".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "chat_history_delete",
-                ))
-            }
-            "query_memory" | "memory_query" => {
-                canonical.mem_type = "durable".to_string();
-                canonical.op = "query".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "query_memory",
-                ))
-            }
-            "memory_schema" => {
-                canonical.mem_type = "durable".to_string();
-                canonical.op = "schema".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "memory_schema",
-                ))
-            }
-            "memory_write" | "write_memory" => {
-                self.current_stats.tool_calls += 1;
-                let content = if action.content.trim().is_empty() {
-                    action.query.clone()
-                } else {
-                    action.content.clone()
-                };
-                if content.trim().is_empty() {
-                    Some("Action result: memory_write\nskipped: empty content".to_string())
-                } else if self.memory.write(&content).is_ok() {
-                    self.current_stats.mem_writes += 1;
-                    Some(format!("Action result: memory_write\nstored: {}", content))
-                } else {
-                    Some("Action result: memory_write\nerror: write_failed".to_string())
-                }
-            }
-            "memory_update" => {
-                self.current_stats.tool_calls += 1;
-                Some(
-                    match self.memory.update(
-                        &action.operation,
-                        &action.id,
-                        &action.content,
-                        action.expected_version,
-                    ) {
-                        Ok(result) => {
-                            self.current_stats.mem_writes += 1;
-                            result
-                        }
-                        Err(err) => format!("Action result: memory_update\nerror: {}", err),
-                    },
-                )
-            }
-            "sql_read" | "memory_sql_query" => {
-                canonical.mem_type = "durable".to_string();
-                canonical.op = "sql".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    dispatch_name,
-                ))
-            }
-            "scratch_write" => {
-                canonical.mem_type = "scratch".to_string();
-                canonical.op = "write".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "scratch_write",
-                ))
-            }
-            "scratch_read" => {
-                canonical.mem_type = "scratch".to_string();
-                canonical.op = "read".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "scratch_read",
-                ))
-            }
-            "scratch_query" => {
-                canonical.mem_type = "scratch".to_string();
-                canonical.op = "query".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "scratch_query",
-                ))
-            }
-            "scratch_delete" => {
-                canonical.mem_type = "scratch".to_string();
-                canonical.op = "delete".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "scratch_delete",
-                ))
-            }
-            "prompt_shrink" => {
-                canonical.mem_type = "context".to_string();
-                canonical.op = "shrink".to_string();
-                Some(rewrite_memmgr_result_header(
-                    self.execute_memmgr_action(&canonical),
-                    "prompt_shrink",
-                ))
-            }
-            _ => None,
-        }
-    }
-
     fn execute_memmgr_action(&mut self, action: &ParsedAction) -> String {
         self.current_stats.tool_calls += 1;
-        match (action.mem_type.as_str(), action.op.as_str()) {
+        let mem_type = action.input_lower("type");
+        let op = action.input_lower("op");
+        let query = action.input_str("query");
+        let content = action.input_str("content");
+        let scratch_type = action.input_str("kind");
+        let label = action.input_str("label");
+        let sql = action.input_str("sql");
+        let params = action.input_params();
+        let id = action.input_str("id");
+        let delta_ids = action.input_list("delta_ids");
+        let slice_ids = action.input_list("slice_ids");
+        let limit = action.input_u64("limit").unwrap_or(5) as usize;
+        let after_ms = action.input_i64("after_ms");
+        let before_ms = action.input_i64("before_ms");
+        let expected_version = action.input_u64("expected_version");
+        if let Err(issue) = memmgr::validate_action(memmgr::MemmgrActionInput {
+            idx: 0,
+            mem_type: &mem_type,
+            op: &op,
+            query: &query,
+            content: &content,
+            scratch_type: &scratch_type,
+            label: &label,
+            sql: &sql,
+            params: &params,
+            id: &id,
+            delta_ids: &delta_ids,
+            slice_ids: &slice_ids,
+        }) {
+            return format!(
+                "Action result: memmgr\ntype: {}\nop: {}\nerror: invalid_input\nmessage: {}",
+                empty_as_missing(&mem_type),
+                empty_as_missing(&op),
+                natural_tool_input_message(&issue)
+            );
+        }
+        match (mem_type.as_str(), op.as_str()) {
             ("durable", "query") => {
                 self.current_stats.mem_reads += 1;
-                let rows = self
-                    .memory
-                    .query(&action.query, action.limit)
-                    .unwrap_or_default();
+                let rows = self.memory.query(&query, limit).unwrap_or_default();
                 if rows.is_empty() {
                     format!(
                         "Action result: memmgr\ntype: durable\nop: query\nquery: {}\nresults: none",
-                        action.query
+                        query
                     )
                 } else {
                     let lines = rows
@@ -1541,7 +1384,7 @@ impl AgentCore {
                         .join("\n");
                     format!(
                         "Action result: memmgr\ntype: durable\nop: query\nquery: {}\nresults:\n{}",
-                        action.query, lines
+                        query, lines
                     )
                 }
             }
@@ -1552,16 +1395,14 @@ impl AgentCore {
             }
             ("durable", "sql") | ("raw_chat", "sql") => {
                 self.current_stats.mem_reads += 1;
-                match self.memory.sql_read(
-                    &self.chat_history,
-                    &action.sql,
-                    &action.params,
-                    action.limit,
-                ) {
+                match self
+                    .memory
+                    .sql_read(&self.chat_history, &sql, &params, limit)
+                {
                     Ok(rows) if rows.is_empty() => {
                         format!(
                             "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults: none",
-                            action.mem_type, action.sql
+                            mem_type, sql
                         )
                     }
                     Ok(rows) => {
@@ -1579,50 +1420,35 @@ impl AgentCore {
                             .join("\n");
                         format!(
                             "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults:\n{}",
-                            action.mem_type, action.sql, lines
+                            mem_type, sql, lines
                         )
                     }
                     Err(err) => format!(
                         "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nerror: {}",
-                        action.mem_type, action.sql, err
+                        mem_type, sql, err
                     ),
                 }
             }
             ("durable", "insert" | "update" | "upsert" | "delete") => {
-                match self.memory.update(
-                    &action.op,
-                    &action.id,
-                    &action.content,
-                    action.expected_version,
-                ) {
+                match self.memory.update(&op, &id, &content, expected_version) {
                     Ok(result) => {
                         self.current_stats.mem_writes += 1;
                         result
                             .replacen("Action result: memory_update", "Action result: memmgr\ntype: durable", 1)
                     }
-                    Err(err) => format!("Action result: memmgr\ntype: durable\nop: {}\nerror: {}", action.op, err),
+                    Err(err) => format!("Action result: memmgr\ntype: durable\nop: {}\nerror: {}", op, err),
                 }
             }
             ("raw_chat", "query") => {
                 let rows = self
                     .chat_history
-                    .query(
-                        &action.query,
-                        action.limit,
-                        action.after_ms,
-                        action.before_ms,
-                    )
+                    .query(&query, limit, after_ms, before_ms)
                     .unwrap_or_default();
-                let delta_rows = self.query_prompt_slices(
-                    &action.query,
-                    action.limit,
-                    action.after_ms,
-                    action.before_ms,
-                );
+                let delta_rows = self.query_prompt_slices(&query, limit, after_ms, before_ms);
                 if rows.is_empty() && delta_rows.is_empty() {
                     format!(
                         "Action result: memmgr\ntype: raw_chat\nop: query\nquery: {}\nresults: none",
-                        action.query
+                        query
                     )
                 } else {
                     let mut sections = Vec::new();
@@ -1664,45 +1490,40 @@ impl AgentCore {
                     }
                     format!(
                         "Action result: memmgr\ntype: raw_chat\nop: query\nquery: {}\nresults:\n{}",
-                        action.query,
+                        query,
                         sections.join("\n")
                     )
                 }
             }
             ("raw_chat", "delete") => match self.chat_history.delete(
-                &action.id,
-                &action.query,
-                action.limit,
-                action.after_ms,
-                action.before_ms,
+                &id,
+                &query,
+                limit,
+                after_ms,
+                before_ms,
             ) {
                 Ok(deleted) => format!(
                     "Action result: memmgr\ntype: raw_chat\nop: delete\nid: {}\nquery: {}\ndeleted_count: {}",
-                    action.id, action.query, deleted
+                    id, query, deleted
                 ),
                 Err(err) => format!("Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}", err),
             },
             ("scratch", "write") => {
-                let scratch_type = memmgr::normalize_scratch_kind(&action.scratch_type);
+                let scratch_type = memmgr::normalize_scratch_kind(&scratch_type);
                 let write_result = if scratch_type == "context_offload" {
-                    self.collect_prompt_context_for_scratch(&action.delta_ids, &action.slice_ids)
+                    self.collect_prompt_context_for_scratch(&delta_ids, &slice_ids)
                         .and_then(|offload| {
                             self.scratch.write_record(
                                 &scratch_type,
-                                &action.label,
+                                &label,
                                 &offload.content,
                                 &offload.delta_ids,
                                 &offload.slice_ids,
                             )
                         })
                 } else {
-                    self.scratch.write_record(
-                        &scratch_type,
-                        &action.label,
-                        &action.content,
-                        &[],
-                        &[],
-                    )
+                    self.scratch
+                        .write_record(&scratch_type, &label, &content, &[], &[])
                 };
                 match write_result {
                     Ok(record) => format_scratch_write_result(&record)
@@ -1710,19 +1531,19 @@ impl AgentCore {
                     Err(err) => format!("Action result: memmgr\ntype: scratch\nop: write\nerror: {}", err),
                 }
             }
-            ("scratch", "read") => match self.scratch.read(&action.id) {
+            ("scratch", "read") => match self.scratch.read(&id) {
                 Ok(Some(record)) => format_scratch_read_result(&record)
                     .replacen("Action result: scratch_read", "Action result: memmgr\ntype: scratch\nop: read", 1),
                 Ok(None) => format!(
                     "Action result: memmgr\ntype: scratch\nop: read\nid: {}\nfound: false",
-                    action.id
+                    id
                 ),
                 Err(err) => format!("Action result: memmgr\ntype: scratch\nop: read\nerror: {}", err),
             },
-            ("scratch", "query") => match self.scratch.query(&action.query, action.limit) {
+            ("scratch", "query") => match self.scratch.query(&query, limit) {
                 Ok(rows) if rows.is_empty() => format!(
                     "Action result: memmgr\ntype: scratch\nop: query\nquery: {}\nresults: none",
-                    action.query
+                    query
                 ),
                 Ok(rows) => {
                     let lines = rows
@@ -1741,28 +1562,28 @@ impl AgentCore {
                         .join("\n");
                     format!(
                         "Action result: memmgr\ntype: scratch\nop: query\nquery: {}\nresults:\n{}",
-                        action.query, lines
+                        query, lines
                     )
                 }
                 Err(err) => format!("Action result: memmgr\ntype: scratch\nop: query\nerror: {}", err),
             },
-            ("scratch", "delete") => match self.scratch.delete(&action.id) {
+            ("scratch", "delete") => match self.scratch.delete(&id) {
                 Ok(true) => format!(
                     "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: true",
-                    action.id
+                    id
                 ),
                 Ok(false) => format!(
                     "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: false",
-                    action.id
+                    id
                 ),
                 Err(err) => format!("Action result: memmgr\ntype: scratch\nop: delete\nerror: {}", err),
             },
             ("context", "shrink") => self
-                .apply_prompt_shrink(&action.delta_ids, &action.slice_ids)
+                .apply_prompt_shrink(&delta_ids, &slice_ids)
                 .replacen("Action result: prompt_shrink", "Action result: memmgr\ntype: context\nop: shrink", 1),
             _ => format!(
                 "Action result: memmgr\ntype: {}\nop: {}\nerror: unsupported_type_or_op",
-                action.mem_type, action.op
+                mem_type, op
             ),
         }
     }
@@ -1772,9 +1593,9 @@ impl AgentCore {
         capmgr::execute(
             &self.capabilities,
             capmgr::CapmgrActionInput {
-                op: &action.op,
-                kind: &action.scratch_type,
-                id: &action.id,
+                op: &action.input_lower("op"),
+                kind: &action.input_str("kind"),
+                id: &action.input_str("id"),
             },
         )
     }
@@ -1782,10 +1603,10 @@ impl AgentCore {
     fn execute_self_tool_action(&mut self, action: &ParsedAction) -> String {
         self.current_stats.tool_calls += 1;
         self.self_tool.execute(SelfToolInput {
-            self_type: &action.mem_type,
-            op: &action.op,
-            key: &action.key,
-            value: &action.value,
+            self_type: &action.input_lower("type"),
+            op: &action.input_lower("op"),
+            key: &action.input_str("key"),
+            value: &action.input_raw_str("value"),
         })
     }
 
@@ -1794,9 +1615,9 @@ impl AgentCore {
         let payload = json!({
             "action": action.action,
             "intent": action.intent,
-            "input": action.raw_input,
+            "args": action.raw_input,
         });
-        executor::execute_command_action(&action.action, path, &payload, action.timeout_ms)
+        executor::execute_command_action(&action.action, path, &payload, action.shell_timeout_ms())
     }
 
     fn record_action_audit(&self, action: &ParsedAction, status: &str, result: Option<&str>) {
@@ -1842,7 +1663,6 @@ impl AgentCore {
                 },
                 input: json!({
                     "command": pending.command,
-                    "read_back_command": pending.read_back_command,
                     "background": pending.background,
                     "timeout_ms": pending.timeout_ms,
                     "approval_id": pending.request.approval_id,
@@ -1856,12 +1676,10 @@ impl AgentCore {
         );
     }
 
-    fn run_guarded_finalize_expect(&mut self, command: &str, timeout_ms: u64) -> ActionExecution {
+    fn run_finished_final_command(&mut self, command: &str, timeout_ms: u64) -> ActionExecution {
         let timeout_ms = timeout_ms.clamp(1000, 15_000);
         let execution = execute_guarded_bash(
             command,
-            "",
-            false,
             false,
             timeout_ms,
             self.bash_approval_mode,
@@ -1870,24 +1688,24 @@ impl AgentCore {
         );
         match execution {
             ActionExecution::Completed(result) => {
-                let body = format_expect_check_result(command, &result);
-                let status = if expect_check_passed(&body) {
-                    "guarded_finalize_expect_pass"
+                let body = format_finished_final_command_result(command, &result);
+                let status = if finished_final_command_passed(&body) {
+                    "final_command_check_command_pass"
                 } else {
-                    "guarded_finalize_expect_fail"
+                    "final_command_check_command_fail"
                 };
-                self.record_guarded_finalize_audit(command, timeout_ms, status, Some(&body));
+                self.record_finished_final_command_audit(command, timeout_ms, status, Some(&body));
                 ActionExecution::Completed(body)
             }
             ActionExecution::NeedsApproval(pending) => {
                 let summary = format!(
-                    "Expect check:\ncommand: {}\nstatus: needs_user_approval\napproval_id: {}\nverdict: PENDING",
+                    "Final run_bash command:\ncommand: {}\nstatus: needs_user_approval\napproval_id: {}\nverdict: PENDING",
                     command, pending.request.approval_id
                 );
-                self.record_guarded_finalize_audit(
+                self.record_finished_final_command_audit(
                     command,
                     timeout_ms,
-                    "guarded_finalize_expect_needs_user_approval",
+                    "final_command_check_command_needs_user_approval",
                     Some(&summary),
                 );
                 ActionExecution::NeedsApproval(pending)
@@ -1895,7 +1713,7 @@ impl AgentCore {
         }
     }
 
-    fn record_guarded_finalize_audit(
+    fn record_finished_final_command_audit(
         &self,
         command: &str,
         timeout_ms: u64,
@@ -1910,7 +1728,7 @@ impl AgentCore {
             ActionAuditEntry {
                 time_ms: now_ms(),
                 round: self.current_round.max(1),
-                action: "guarded_finalize_expect".to_string(),
+                action: "final_command_check_command".to_string(),
                 intent: "Verify final answer before showing it.".to_string(),
                 status: status.to_string(),
                 input: json!({
@@ -2722,7 +2540,7 @@ struct FileChatHistoryStore {
 impl FileChatHistoryStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
-        let audit_file = space_dir.join("audit").join("api_audit.jsonl");
+        let audit_file = space_dir.join("audit").join("api_audit.json");
         let legacy_audit_file = space_dir.join("api_audit.jsonl");
         Self {
             audit_file,
@@ -2733,6 +2551,10 @@ impl FileChatHistoryStore {
 
     fn audit_files(&self) -> Vec<PathBuf> {
         let mut files = vec![self.audit_file.clone()];
+        let audit_dir_jsonl = self.audit_file.with_extension("jsonl");
+        if audit_dir_jsonl != self.audit_file {
+            files.push(audit_dir_jsonl);
+        }
         if self.legacy_audit_file != self.audit_file {
             files.push(self.legacy_audit_file.clone());
         }
@@ -2795,38 +2617,26 @@ impl FileChatHistoryStore {
             }
             let mut deleted_turn_ids = HashSet::new();
             for audit_file in self.audit_files() {
-                let file = match OpenOptions::new().read(true).open(&audit_file) {
-                    Ok(file) => file,
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(_) => return Err("chat_history_read_failed".to_string()),
-                };
+                if !audit_file.exists() {
+                    continue;
+                }
+                let events = read_audit_events_unlocked(&audit_file)
+                    .map_err(|_| "chat_history_read_failed".to_string())?;
                 let mut retained = Vec::new();
-                for line in BufReader::new(file).lines().map_while(Result::ok) {
-                    let turn_id = serde_json::from_str::<Value>(&line)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("turn_id")
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                        })
-                        .unwrap_or_default();
+                for value in events {
+                    let turn_id = value
+                        .get("turn_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     if !turn_id.is_empty() && targets.contains(&turn_id) {
                         deleted_turn_ids.insert(turn_id);
                         continue;
                     }
-                    retained.push(line);
+                    retained.push(value);
                 }
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(&audit_file)
+                write_audit_events_unlocked(&audit_file, &retained)
                     .map_err(|_| "chat_history_write_failed".to_string())?;
-                for line in retained {
-                    writeln!(file, "{}", line)
-                        .map_err(|_| "chat_history_write_failed".to_string())?;
-                }
             }
             Ok(deleted_turn_ids.len())
         })?
@@ -2841,15 +2651,7 @@ impl FileChatHistoryStore {
     fn read_all_unlocked(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
         let mut rows = Vec::<ChatHistoryRecord>::new();
         for audit_file in self.audit_files() {
-            let file = match OpenOptions::new().read(true).open(&audit_file) {
-                Ok(file) => file,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
-            };
-            for line in BufReader::new(file).lines().map_while(Result::ok) {
-                let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
+            for value in read_audit_events_unlocked(&audit_file)? {
                 let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
                 let turn_id = value
                     .get("turn_id")
@@ -2923,6 +2725,46 @@ impl FileChatHistoryStore {
             })
             .collect())
     }
+}
+
+fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+        if let Some(events) = value.get("events").and_then(Value::as_array) {
+            return Ok(events.clone());
+        }
+    }
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect())
+}
+
+fn write_audit_events_unlocked(path: &Path, events: &[Value]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        for event in events {
+            writeln!(file, "{}", serde_json::to_string(event).unwrap_or_default())?;
+        }
+        return Ok(());
+    }
+    let doc = json!({"version": 1, "events": events});
+    let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+    fs::write(path, format!("{text}\n"))
 }
 
 fn validate_memory_sql(sql: &str) -> Result<(), String> {
@@ -3041,169 +2883,6 @@ fn can_show_plain_text_after_repair_failure(content: &str) -> bool {
     .any(|needle| lowered.contains(needle))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_memmgr_action(
-    idx: usize,
-    mem_type: &str,
-    op: &str,
-    query: &str,
-    content: &str,
-    scratch_type: &str,
-    label: &str,
-    sql: &str,
-    params: &[String],
-    id: &str,
-    delta_ids: &[String],
-    slice_ids: &[String],
-) -> Result<(), String> {
-    memmgr::validate_action(memmgr::MemmgrActionInput {
-        idx,
-        mem_type,
-        op,
-        query,
-        content,
-        scratch_type,
-        label,
-        sql,
-        params,
-        id,
-        delta_ids,
-        slice_ids,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn validate_manifest_backed_action_extra(
-    idx: usize,
-    action: &str,
-    mem_type: &str,
-    op: &str,
-    query: &str,
-    content: &str,
-    scratch_type: &str,
-    label: &str,
-    sql: &str,
-    params: &[String],
-    id: &str,
-    delta_ids: &[String],
-    slice_ids: &[String],
-) -> Result<(), String> {
-    match action {
-        "capmgr" => {}
-        "memmgr" => validate_memmgr_action(
-            idx,
-            mem_type,
-            op,
-            query,
-            content,
-            scratch_type,
-            label,
-            sql,
-            params,
-            id,
-            delta_ids,
-            slice_ids,
-        )?,
-        "run_bash" => {}
-        "shell_job_status" => {}
-        _ => {}
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn validate_legacy_action_shape(
-    idx: usize,
-    action: &str,
-    query: &str,
-    content: &str,
-    scratch_type: &str,
-    label: &str,
-    sql: &str,
-    params: &[String],
-    operation: &str,
-    id: &str,
-    delta_ids: &[String],
-    slice_ids: &[String],
-) -> Result<(), String> {
-    match action {
-        "chat_history_query" => {}
-        "chat_history_delete" => {
-            if id.is_empty() && query.is_empty() {
-                return Err(format!("next_actions[{idx}].input.id_or_query_required"));
-            }
-        }
-        "query_memory" | "memory_query" => {
-            if query.is_empty() {
-                return Err(format!("next_actions[{idx}].input.query_required"));
-            }
-        }
-        "memory_schema" => {}
-        "memory_write" | "write_memory" => {
-            if content.is_empty() && query.is_empty() {
-                return Err(format!("next_actions[{idx}].input.content_required"));
-            }
-        }
-        "memory_update" => {
-            if operation.trim().is_empty() {
-                return Err(format!("next_actions[{idx}].input.operation_required"));
-            }
-            if matches!(operation, "insert" | "upsert" | "update") && content.is_empty() {
-                return Err(format!("next_actions[{idx}].input.content_required"));
-            }
-            if matches!(operation, "delete" | "update") && id.is_empty() {
-                return Err(format!("next_actions[{idx}].input.id_required"));
-            }
-        }
-        "scratch_write" => {
-            let normalized_type = memmgr::normalize_scratch_kind(scratch_type);
-            if scratch_type.trim().is_empty() {
-                return Err(format!("next_actions[{idx}].input.type_required"));
-            }
-            if !matches!(normalized_type.as_str(), "notes" | "context_offload") {
-                return Err(format!(
-                    "next_actions[{idx}].input.type_unsupported:{scratch_type}"
-                ));
-            }
-            if label.is_empty() {
-                return Err(format!("next_actions[{idx}].input.label_required"));
-            }
-            if normalized_type == "notes" && content.is_empty() {
-                return Err(format!("next_actions[{idx}].input.content_required"));
-            }
-            if normalized_type == "context_offload" && delta_ids.is_empty() && slice_ids.is_empty()
-            {
-                return Err(format!("next_actions[{idx}].input.prompt_refs_required"));
-            }
-        }
-        "scratch_read" | "scratch_delete" => {
-            if id.is_empty() {
-                return Err(format!("next_actions[{idx}].input.id_required"));
-            }
-        }
-        "scratch_query" => {}
-        "prompt_shrink" => {
-            if delta_ids.is_empty() && slice_ids.is_empty() {
-                return Err(format!("next_actions[{idx}].input.ids_required"));
-            }
-        }
-        "sql_read" | "memory_sql_query" => {
-            if sql.is_empty() {
-                return Err(format!("next_actions[{idx}].input.sql_required"));
-            }
-            let placeholder_count = sql.matches('?').count();
-            if params.len() != placeholder_count {
-                return Err(format!(
-                    "next_actions[{idx}].input.params_count_mismatch expected={placeholder_count} actual={}",
-                    params.len()
-                ));
-            }
-        }
-        _ => return Err(format!("next_actions[{idx}].unsupported_action:{action}")),
-    }
-    Ok(())
-}
-
 fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let value: Value = match parse_json_value_from_model_text(content) {
         Ok(value) => value,
@@ -3216,6 +2895,7 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
                 thought_keep_in_context: false,
                 next_actions: vec![],
                 memory_candidates: vec![],
+                runtime_note: None,
                 repair_issue: Some("invalid_json".to_string()),
             }
         }
@@ -3229,10 +2909,19 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
             thought_keep_in_context: false,
             next_actions: vec![],
             memory_candidates: vec![],
+            runtime_note: None,
             repair_issue: Some("root_must_be_json_object".to_string()),
         };
     }
     let mut repair_issue: Option<String> = None;
+    if let Some(object) = value.as_object() {
+        if let Some(extra_key) = object
+            .keys()
+            .find(|key| !is_allowed_response_top_level_key(key))
+        {
+            repair_issue = Some(format!("unexpected_top_level_field:{extra_key}"));
+        }
+    }
     if value.get("response_to_user").is_some() {
         repair_issue = Some("response_to_user_renamed_to_report_job_progress".to_string());
     }
@@ -3247,7 +2936,7 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
         .unwrap_or("")
         .to_string();
     let status = value.get("status").and_then(Value::as_str);
-    let continue_work = match status {
+    let mut continue_work = match status {
         Some("working") => true,
         Some("finished") => false,
         Some(_) => {
@@ -3301,6 +2990,7 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
             (s, keep_in_context)
         }
     };
+    let mut runtime_note: Option<String> = None;
 
     let mut next_actions = Vec::new();
     let bare_action = value.get("action").and_then(Value::as_str).is_some();
@@ -3330,23 +3020,22 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
                 repair_issue = Some(format!("next_actions[{idx}].action_missing"));
                 break;
             }
-            let input = action.get("input").unwrap_or(action);
-            let mem_type = input
-                .get("type")
-                .or_else(|| action.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_lowercase();
-            let op = input
-                .get("op")
-                .or_else(|| input.get("operation"))
-                .or_else(|| action.get("op"))
-                .or_else(|| action.get("operation"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_lowercase();
+            let parsed_input_holder;
+            let action_args = action.get("args");
+            let input = match action_args {
+                Some(Value::Object(_)) => {
+                    parsed_input_holder = action_args.cloned().unwrap_or(Value::Null);
+                    &parsed_input_holder
+                }
+                Some(_) => {
+                    repair_issue = Some(format!("next_actions[{idx}].args_must_be_object"));
+                    break;
+                }
+                None => {
+                    repair_issue = Some(format!("next_actions[{idx}].args_required"));
+                    break;
+                }
+            };
             let intent = action
                 .get("intent")
                 .or_else(|| input.get("intent"))
@@ -3357,256 +3046,19 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
                 repair_issue = Some(format!("next_actions[{idx}].intent_required"));
                 break;
             }
-            let query = input
-                .get("query")
-                .or_else(|| action.get("query"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let content = input
-                .get("content")
-                .or_else(|| action.get("content"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let scratch_type = input
-                .get("kind")
-                .or_else(|| input.get("scratch_type"))
-                .or_else(|| {
-                    if name == "scratch_write" {
-                        input.get("type")
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| action.get("type"))
-                .or_else(|| action.get("scratch_type"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let label = input
-                .get("label")
-                .or_else(|| action.get("label"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let sql = input
-                .get("sql")
-                .or_else(|| action.get("sql"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let params = input
-                .get("params")
-                .or_else(|| action.get("params"))
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(json_sql_param_to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let operation = input
-                .get("operation")
-                .or_else(|| input.get("op"))
-                .or_else(|| action.get("operation"))
-                .or_else(|| action.get("op"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_lowercase()
-                .to_string();
-            let expected_version = input
-                .get("expected_version")
-                .or_else(|| input.get("version"))
-                .or_else(|| action.get("expected_version"))
-                .or_else(|| action.get("version"))
-                .and_then(json_u64);
-            let id = input
-                .get("id")
-                .or_else(|| action.get("id"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let command = input
-                .get("command")
-                .or_else(|| action.get("command"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let read_back_command = input
-                .get("read_back_command")
-                .or_else(|| action.get("read_back_command"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let large_readback_opt_in = input
-                .get("large_readback_opt_in")
-                .or_else(|| action.get("large_readback_opt_in"))
-                .is_some();
-            let background = input
-                .get("background")
-                .or_else(|| action.get("background"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || input
-                    .get("mode")
-                    .or_else(|| action.get("mode"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("background"));
-            let job_id = input
-                .get("job_id")
-                .or_else(|| action.get("job_id"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let key = input
-                .get("key")
-                .or_else(|| action.get("key"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let value = input
-                .get("value")
-                .or_else(|| action.get("value"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let delta_ids = input
-                .get("delta_ids")
-                .or_else(|| action.get("delta_ids"))
-                .and_then(Value::as_array)
-                .map(|items| json_string_array(items))
-                .unwrap_or_default();
-            let slice_ids = input
-                .get("slice_ids")
-                .or_else(|| action.get("slice_ids"))
-                .and_then(Value::as_array)
-                .map(|items| json_string_array(items))
-                .unwrap_or_default();
-            let timeout_ms_raw = input
-                .get("timeout_ms")
-                .or_else(|| action.get("timeout_ms"))
-                .and_then(Value::as_u64);
-            let timeout_sec_raw = input
-                .get("timeout_sec")
-                .or_else(|| action.get("timeout_sec"))
-                .and_then(Value::as_u64);
-            let after_ms = input
-                .get("after_ms")
-                .or_else(|| action.get("after_ms"))
-                .and_then(json_i64);
-            let before_ms = input
-                .get("before_ms")
-                .or_else(|| action.get("before_ms"))
-                .and_then(json_i64);
             let normalized_name = name.as_str();
-            if capabilities.contains_tool(normalized_name) {
-                if let Err(issue) = capabilities.validate_action_input(normalized_name, input) {
-                    repair_issue = Some(format!("next_actions[{idx}].{issue}"));
-                    break;
-                }
-            }
-            if capabilities.contains_tool(normalized_name) {
-                if let Err(issue) = validate_manifest_backed_action_extra(
-                    idx,
-                    normalized_name,
-                    &mem_type,
-                    &op,
-                    &query,
-                    &content,
-                    &scratch_type,
-                    &label,
-                    &sql,
-                    &params,
-                    &id,
-                    &delta_ids,
-                    &slice_ids,
-                ) {
-                    repair_issue = Some(issue);
-                    break;
-                }
-            } else if let Err(issue) = validate_legacy_action_shape(
-                idx,
-                normalized_name,
-                &query,
-                &content,
-                &scratch_type,
-                &label,
-                &sql,
-                &params,
-                &operation,
-                &id,
-                &delta_ids,
-                &slice_ids,
-            ) {
-                repair_issue = Some(issue);
+            if !capabilities.contains_tool(normalized_name) {
+                repair_issue = Some(format!("unsupported_action:{normalized_name}"));
                 break;
             }
-            let parsed_timeout_ms = timeout_ms_raw
-                .or_else(|| timeout_sec_raw.map(|seconds| seconds.saturating_mul(1000)));
-            let timeout_ms = if normalized_name == "shell_job_status" {
-                parsed_timeout_ms.unwrap_or(0).min(15000)
-            } else {
-                parsed_timeout_ms.unwrap_or(5000).clamp(1000, 15000)
-            };
-            let expect = input
-                .get("expect")
-                .or_else(|| action.get("expect"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let expect_timeout_ms = input
-                .get("expect_timeout_ms")
-                .or_else(|| action.get("expect_timeout_ms"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            if let Err(issue) = capabilities.validate_action_input(normalized_name, input) {
+                repair_issue = Some(format!("next_actions[{idx}].{issue}"));
+                break;
+            }
             next_actions.push(ParsedAction {
                 action: name,
                 intent: intent.to_string(),
                 raw_input: input.clone(),
-                mem_type,
-                op,
-                query,
-                content,
-                scratch_type,
-                label,
-                sql,
-                params,
-                operation,
-                expected_version,
-                id,
-                command,
-                read_back_command,
-                large_readback_opt_in,
-                background,
-                job_id,
-                key,
-                value,
-                delta_ids,
-                slice_ids,
-                timeout_ms,
-                limit: input
-                    .get("limit")
-                    .or_else(|| action.get("limit"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(5) as usize,
-                after_ms,
-                before_ms,
-                expect,
-                expect_timeout_ms,
             });
         }
     }
@@ -3651,34 +3103,34 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
     {
         repair_issue = Some("final_answer_must_not_start_with_runtime_progress_marker".to_string());
     }
-    // guarded finalize validation: status:finished + next_actions requires expect on last action
-    if repair_issue.is_none() && continue_work {
-        for (i, a) in next_actions.iter().enumerate() {
-            if !a.expect.is_empty() {
-                repair_issue = Some(format!("next_actions[{i}].expect_requires_status_finished"));
-                break;
-            }
-        }
+    if repair_issue.is_none()
+        && !continue_work
+        && !next_actions.is_empty()
+        && !is_valid_finished_final_command_actions(&next_actions)
+        && next_actions.iter().any(is_evidence_gathering_action)
+    {
+        continue_work = true;
+        final_answer.clear();
+        runtime_note = Some(
+            "Note: 上轮输出同时声明 status:finished/final_answer 和需要取证的 next_actions。Runtime 已丢弃提前 final_answer，并按 status:working 执行这些 actions。请只根据下面的 action results 给最终答案。"
+                .to_string(),
+        );
     }
     if repair_issue.is_none() && !continue_work && !next_actions.is_empty() {
         let last_idx = next_actions.len() - 1;
-        for (i, a) in next_actions.iter().enumerate() {
-            if i != last_idx && !a.expect.is_empty() {
-                repair_issue = Some(format!(
-                    "next_actions[{i}].expect_only_allowed_on_last_action"
-                ));
-                break;
-            }
+        if next_actions.len() > 1 {
+            repair_issue =
+                Some("status_finished_next_actions_must_only_contain_guard_command".to_string());
         }
         if repair_issue.is_none() {
             let last = &next_actions[last_idx];
-            if last.expect.is_empty() {
+            if last.action != "run_bash" {
+                repair_issue = Some("status_finished_guard_requires_run_bash_command".to_string());
+            } else if last.input_str("command").is_empty() {
                 repair_issue =
-                    Some("status_finished_next_actions_require_expect_on_last_action".to_string());
-            } else if last.expect_timeout_ms == 0 {
-                repair_issue = Some(format!(
-                    "next_actions[{last_idx}].expect_timeout_ms_required"
-                ));
+                    Some("status_finished_next_actions_require_command_on_last_action".to_string());
+            } else if last.background() {
+                repair_issue = Some("status_finished_guard_must_only_use_command".to_string());
             }
         }
     }
@@ -3693,6 +3145,7 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
         thought_keep_in_context,
         next_actions,
         memory_candidates,
+        runtime_note,
         repair_issue,
     }
 }
@@ -3702,6 +3155,34 @@ fn starts_with_runtime_progress_marker(text: &str) -> bool {
     trimmed.starts_with('◉') || trimmed.starts_with("▰▱")
 }
 
+fn is_allowed_response_top_level_key(key: &str) -> bool {
+    matches!(
+        key,
+        "status"
+            | "report_job_progress"
+            | "final_answer"
+            | "next_actions"
+            | "thought"
+            | "memory_candidates"
+            | "continue"
+            | "acceptance_check"
+            | "action"
+            | "args"
+            | "intent"
+    )
+}
+
+fn is_valid_finished_final_command_actions(actions: &[ParsedAction]) -> bool {
+    let [action] = actions else {
+        return false;
+    };
+    action.action == "run_bash" && !action.input_str("command").is_empty() && !action.background()
+}
+
+fn is_evidence_gathering_action(action: &ParsedAction) -> bool {
+    action.action != "run_bash" || !action.input_str("command").is_empty() || action.background()
+}
+
 fn protocol_repair_instruction(issue: &str) -> &'static str {
     match issue {
         "final_answer_requires_status_finished" => {
@@ -3709,6 +3190,18 @@ fn protocol_repair_instruction(issue: &str) -> &'static str {
         }
         "final_answer_required_when_status_finished" => {
             "检查到刚刚的输出格式有点问题：你提供了 status:\"finished\"，但缺少 final_answer。如果 job 确实已经 finished，请同时提供 status:\"finished\" 和 final_answer；如果仍在工作中，请不要使用 status:\"finished\"，并提供 next_actions。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        "status_finished_guard_must_only_use_command" => {
+            "检查到刚刚的输出格式有点问题：status:\"finished\" + next_actions 只能包含一个最终 run_bash command，不能使用后台执行或其他额外字段。如果还需要查询证据，请省略 status 或使用 status:\"working\"；拿到 action result 后再给 status:\"finished\" + final_answer。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        "status_finished_next_actions_must_only_contain_guard_command" => {
+            "检查到刚刚的输出格式有点问题：status:\"finished\" + next_actions 只能包含一个最终 run_bash command。如果还需要多个动作或查询证据，请使用 status:\"working\"，执行 action 后再基于 action result 给出最终答案。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        "status_finished_guard_requires_run_bash_command" => {
+            "检查到刚刚的输出格式有点问题：status:\"finished\" + next_actions 的最终确认只能使用 action:\"run_bash\" 且 args.command 非空。如果需要查询记忆或执行其他工具，请使用 status:\"working\"。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        "status_finished_next_actions_require_command_on_last_action" => {
+            "检查到刚刚的输出格式有点问题：status:\"finished\" + next_actions 需要一个最终 run_bash command，用该 command 的返回值决定 final_answer 是否展示。Return exactly one valid JSON object. Do not use markdown fences."
         }
         _ => {
             "Return exactly one valid JSON object. Omitted status defaults to working; include next_actions when working. Use status:\"finished\" together with final_answer only when the job is complete. Do not use markdown fences."
@@ -3730,6 +3223,18 @@ fn protocol_repair_reason(issue: &str) -> &'static str {
         }
         "final_answer_required_when_status_finished" => {
             "The previous model response included status:\"finished\" without final_answer."
+        }
+        "status_finished_guard_must_only_use_command" => {
+            "The previous model response used status:\"finished\" with a final run_bash action that included fields other than command/timeout_ms."
+        }
+        "status_finished_next_actions_must_only_contain_guard_command" => {
+            "The previous model response used status:\"finished\" with multiple next_actions. With status:\"finished\" and final_answer, next_actions may only contain one final run_bash command."
+        }
+        "status_finished_guard_requires_run_bash_command" => {
+            "The previous model response used status:\"finished\" with a final action that was not run_bash."
+        }
+        "status_finished_next_actions_require_command_on_last_action" => {
+            "The previous model response used status:\"finished\" with next_actions but without a run_bash command."
         }
         "final_answer_must_not_start_with_runtime_progress_marker" => {
             "The final_answer started with a runtime UI progress marker instead of user-facing content."
@@ -4098,7 +3603,7 @@ fn memory_missing_expected_version_result(
     current_content: &str,
 ) -> String {
     format!(
-        "missing_expected_version id={} current_version={} current_content={} hint=query memory_sql_query/query_memory first, then retry memory_update with expected_version=current_version",
+        "missing_expected_version id={} current_version={} current_content={} hint=query with memmgr type=durable op=query or op=sql first, then retry memmgr type=durable op=update with expected_version=current_version",
         id,
         current_version,
         compact_text(current_content, 240)
@@ -4133,6 +3638,22 @@ fn json_string_array(items: &[Value]) -> Vec<String> {
         .collect()
 }
 
+fn json_string_list(value: &Value) -> Vec<String> {
+    if let Some(items) = value.as_array() {
+        return json_string_array(items);
+    }
+    value
+        .as_str()
+        .map(|text| {
+            text.split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| item.trim_matches(['"', '\'']).to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn json_sql_param_to_string(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return Some(text.to_string());
@@ -4152,37 +3673,25 @@ fn json_sql_param_to_string(value: &Value) -> Option<String> {
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
-#[allow(clippy::too_many_arguments)]
 fn execute_guarded_bash(
     command: &str,
-    read_back_command: &str,
-    large_readback_opt_in: bool,
     background: bool,
     timeout_ms: u64,
     approval_mode: BashApprovalMode,
     intent: &str,
     shell_jobs: &FileShellJobStore,
 ) -> ActionExecution {
-    let primary_command = command.trim();
-    let read_back = read_back_command.trim();
-    let command_to_run = if primary_command.is_empty() {
-        read_back
-    } else {
-        primary_command
-    };
+    let command_to_run = command.trim();
+    if command_to_run.is_empty() {
+        return ActionExecution::Completed(
+            "Action result: run_bash\nerror: command_required".to_string(),
+        );
+    }
     if let Err(reason) = shell_exec::validate_bash_request(command_to_run) {
         return ActionExecution::Completed(format!(
             "Action result: run_bash\ncommand: {}\nerror: {}",
             command_to_run, reason
         ));
-    }
-    if !background && !read_back.is_empty() && read_back != command_to_run {
-        if let Err(reason) = shell_exec::validate_bash_request(read_back) {
-            return ActionExecution::Completed(format!(
-                "Action result: run_bash\ncommand: {}\nerror: {}",
-                read_back, reason
-            ));
-        }
     }
     if approval_mode == BashApprovalMode::Ask {
         return ActionExecution::NeedsApproval(PendingApproval {
@@ -4190,14 +3699,11 @@ fn execute_guarded_bash(
                 approval_id: format!("approval_{}", now_ms()),
                 action: "run_bash".to_string(),
                 command: command_to_run.to_string(),
-                read_back_command: read_back.to_string(),
                 reason: "run_bash_requires_user_approval".to_string(),
                 risk: "local_shell_command".to_string(),
                 intent: intent.to_string(),
             },
             command: command_to_run.to_string(),
-            read_back_command: read_back.to_string(),
-            large_readback_opt_in,
             background,
             timeout_ms,
             intent: intent.to_string(),
@@ -4206,51 +3712,21 @@ fn execute_guarded_bash(
     if background {
         return ActionExecution::Completed(shell_jobs.spawn(command_to_run));
     }
-    let mut result = shell_exec::execute_one_bash(command_to_run, timeout_ms);
-    if !background && !read_back.is_empty() && read_back != command_to_run {
-        result.push_str("\n\n");
-        result.push_str("Read-back result:\n");
-        result.push_str(&shell_exec::execute_one_bash(read_back, timeout_ms));
-    }
-    if large_readback_opt_in {
-        result.push_str(
-            "\nread_back_policy: unbounded_v1_requested_but_native_output_is_still_bounded",
-        );
-    }
-    ActionExecution::Completed(result)
+    ActionExecution::Completed(shell_exec::execute_one_bash(command_to_run, timeout_ms))
 }
 
 fn execute_approved_bash(
     command: &str,
-    read_back_command: &str,
-    large_readback_opt_in: bool,
     background: bool,
     timeout_ms: u64,
     request: &ApprovalRequest,
     shell_jobs: &FileShellJobStore,
 ) -> String {
-    let primary_command = command.trim();
-    let read_back = read_back_command.trim();
-    let command_to_run = if primary_command.is_empty() {
-        read_back
-    } else {
-        primary_command
-    };
     let mut result = if background {
-        shell_jobs.spawn(command_to_run)
+        shell_jobs.spawn(command.trim())
     } else {
-        shell_exec::execute_one_bash(command_to_run, timeout_ms)
+        shell_exec::execute_one_bash(command.trim(), timeout_ms)
     };
-    if !read_back.is_empty() && read_back != command_to_run {
-        result.push_str("\n\n");
-        result.push_str("Read-back result:\n");
-        result.push_str(&shell_exec::execute_one_bash(read_back, timeout_ms));
-    }
-    if large_readback_opt_in {
-        result.push_str(
-            "\nread_back_policy: unbounded_v1_requested_but_native_output_is_still_bounded",
-        );
-    }
     result.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
         request.approval_id
@@ -4258,37 +3734,62 @@ fn execute_approved_bash(
     result
 }
 
-fn format_expect_check_result(command: &str, bash_result: &str) -> String {
+fn format_finished_final_command_result(command: &str, bash_result: &str) -> String {
     let verdict = if bash_result_status(bash_result) == Some(0) {
         "PASS"
     } else {
         "FAIL"
     };
     format!(
-        "Expect check:\ncommand: {}\ncontrolled_bash_result:\n{}\nverdict: {}",
+        "Final run_bash command:\ncommand: {}\ncontrolled_bash_result:\n{}\nverdict: {}",
         command, bash_result, verdict
     )
 }
 
-fn rewrite_memmgr_result_header(result: String, legacy_action: &str) -> String {
-    let mut lines = result.lines();
-    if lines.next() != Some("Action result: memmgr") {
-        return result;
+fn empty_as_missing(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "(missing)"
+    } else {
+        value.trim()
     }
-    let mut rewritten = vec![format!("Action result: {legacy_action}")];
-    let mut skipping_envelope = true;
-    for line in lines {
-        if skipping_envelope && (line.starts_with("type: ") || line.starts_with("op: ")) {
-            continue;
-        }
-        skipping_envelope = false;
-        rewritten.push(line.to_string());
-    }
-    rewritten.join("\n")
 }
 
-fn expect_check_passed(expect_body: &str) -> bool {
-    expect_body
+fn natural_tool_input_message(issue: &str) -> String {
+    let field = issue
+        .rsplit('.')
+        .next()
+        .unwrap_or(issue)
+        .split(':')
+        .next()
+        .unwrap_or(issue);
+    match field {
+        "type_required" => "Missing `type`. Choose which memory surface to use, such as durable, raw_chat, scratch, or context.".to_string(),
+        "op_required" => "Missing `op`. Choose an operation for the selected type, such as query, write, read, delete, sql, or shrink.".to_string(),
+        "query_required" => "Missing `query`. Provide the search text for this query operation.".to_string(),
+        "content_required" => "Missing `content`. Provide the text that should be written or updated.".to_string(),
+        "id_required" => "Missing `id`. Provide the id returned by a previous query/read/write result.".to_string(),
+        "id_or_query_required" => "Missing target. Provide either `id` or `query` so the runtime knows what to delete.".to_string(),
+        "operation_required" => "Missing `operation`/`op`. Provide the memory update operation.".to_string(),
+        "kind_required" | "type_required_when_op=write" => "Missing scratch `kind`. Use notes for a written checkpoint, or context_offload to store existing prompt delta/slice content.".to_string(),
+        "label_required" => "Missing `label`. Provide a short retrieval label for this scratch record.".to_string(),
+        "prompt_refs_required" => "Missing prompt references. For context_offload, provide at least one `delta_ids` or `slice_ids` value.".to_string(),
+        "ids_required" => "Missing context ids. Provide `delta_ids` or `slice_ids` to shrink/offload dynamic prompt context.".to_string(),
+        "sql_required" => "Missing `sql`. Provide a read-only SQL query for the selected memory surface.".to_string(),
+        other if other.starts_with("params_count_mismatch") || issue.contains("params_count_mismatch") => {
+            format!("SQL placeholder count does not match `params`. {issue}")
+        }
+        other if other.starts_with("unsupported_memmgr_type_or_op") || issue.contains("unsupported_memmgr_type_or_op") => {
+            format!("Unsupported memory type/op combination. Use a supported memmgr type and operation. Detail: {issue}")
+        }
+        other if other.starts_with("kind_unsupported") || issue.contains("kind_unsupported") => {
+            format!("Unsupported scratch kind. Use notes or context_offload. Detail: {issue}")
+        }
+        _ => format!("Invalid tool input. Detail: {issue}"),
+    }
+}
+
+fn finished_final_command_passed(result_body: &str) -> bool {
+    result_body
         .lines()
         .any(|line| line.trim() == "verdict: PASS")
 }

@@ -27,7 +27,7 @@ agent directly from a terminal without building the iOS app.
 - `agent_core/`: protocol loop, memory/search tools, guarded local actions.
 - `timem_shell/`: terminal UI, input editor, provider HTTP adapters, audit log,
   CLI.
-- `resources/static_v1.json`: static prompt used by the shell runtime.
+- `resources/static_v1.md`: Markdown static prompt used by the shell runtime.
 - `docs/architecture.md`: module boundaries, turn lifecycle, runtime contracts.
 - `docs/feature-test-management.md`: feature ownership and test coverage ledger.
 - `.github/workflows/ci.yml`: GitHub Actions workflow for push / pull request
@@ -245,8 +245,8 @@ kind: tool
 id: my_tool
 binding_type: command
 binding_name: scripts/my_tool.sh
-description: My runtime tool.
-prompt_when: |
+summary: My runtime tool.
+description: |
   Use when this local runtime tool is appropriate.
 input_properties:
   query: string
@@ -256,14 +256,14 @@ example_json: |
   {
     "action": "my_tool",
     "intent": "Run my runtime tool.",
-    "input": {
+    "args": {
       "query": "hello"
     }
   }
 ```
 
 Runtime invokes `/bin/sh scripts/my_tool.sh` and writes one JSON object to
-stdin: `{"action":"my_tool","intent":"...","input":{...}}`. Output is captured
+stdin: `{"action":"my_tool","intent":"...","args":{...}}`. Output is captured
 as an action result with bounded size and timeout.
 
 ## Runtime Data
@@ -272,12 +272,15 @@ By default, runtime data is written under the directory where you start
 `timem`:
 
 ```text
-data/<space>/audit/api_audit.jsonl
+data/<space>/audit/api_audit.json
 data/<space>/audit/action_audit.json
 data/<space>/memory/
 data/<space>/memory/shell_jobs/
 data/<space>/shell_history.txt
 ```
+
+`api_audit.json` is a JSON document with an `events` array. `action_audit.json`
+is grouped JSON for model-requested actions.
 
 Use a fixed data root if you do not want data under the current directory:
 
@@ -301,7 +304,7 @@ package installs, or video commands, the model can request:
 {
   "action": "run_bash",
   "intent": "Run a long local task.",
-  "input": {
+  "args": {
     "command": "cargo test",
     "background": true
   }

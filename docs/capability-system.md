@@ -27,8 +27,8 @@ optional TIMEM_CAPABILITIES_DIR overlay
 CapabilityRegistry
         ↓ render
 Tool_capability.tool_catalog in prompt_0
-        ↓ validate
-parse model next_actions
+        ↓ generic parse
+parse model next_actions action/intent/args
         ↓ resolve binding
 ExecutorTarget
         ↓ dispatch
@@ -42,19 +42,28 @@ The manifest is the human-maintained source for:
 - model-facing prompt description
 - JSON Schema style input IDL
 - JSON Schema style output IDL
-- required input fields derived from the input IDL
+- required input fields derived from the input IDL for registry/contract tests
 - any-of required groups from the `x-required-any` IDL extension
 - conditional required fields from the `x-required-when` IDL extension
 - enum field constraints derived from property `enum` values
 - examples
 
 The Rust executor still owns side-effect behavior, storage access, permissions,
-and complex cross-field validation. A manifest can expose only capabilities with
-an existing binding. Built-in tools must document both input and output schema;
-runtime overlay tools may omit output schema while they are experimental.
+and complex cross-field validation. The top-level parser must not know concrete
+tool options such as `command`, `query`, or `expected_version`; it only accepts
+the model's `args` JSON object, ensures the action is registered, and applies
+manifest-derived generic validation such as required fields, any-of groups,
+conditional required fields, and enum values. Those manifest-level argument
+errors become protocol repair before execution. Tool executors return natural
+language action results for runtime semantics such as storage conflicts, SQL
+safety failures, shell approval, missing files, timeouts, or invalid prompt
+references. A manifest can expose only capabilities with an existing binding.
+Built-in tools must document both input and output schema; runtime overlay
+tools may omit output schema while they are experimental.
 The IDL is intentionally data, not Rust code: the same `input_schema` and
-`output_schema` blocks are rendered into `Tool_capability.tool_catalog`, used by
-generic runtime validation, and exposed by `capmgr op=load kind=tool`.
+`output_schema` blocks drive generic runtime validation and are exposed by
+`capmgr op=load kind=tool`. The static prompt receives a shorter Markdown
+capability guide derived from the manifests, not a full schema dump.
 
 Complex built-in protocol rules and small built-in executors should live near
 their capability family, not in the top-level turn loop. For example,
@@ -69,21 +78,16 @@ Executor binding resolution is centralized in `agent_core::executor`:
 
 - manifest-backed `binding_type: builtin` becomes `ExecutorTarget::Builtin`
 - manifest-backed `binding_type: command` becomes `ExecutorTarget::Command`
-- actions outside the manifest remain `ExecutorTarget::Legacy` fallback while
-  the migration is still in progress
+- actions outside the manifest are rejected as unsupported actions
 
 Command-bound executor invocation also lives in `agent_core::executor`: it sends
 the model action envelope to the overlay command as JSON stdin, applies the same
 bounded timeout policy as other local command execution, and normalizes stdout,
 stderr, exit status, and timeout into an action result.
 
-Legacy fallback is not rendered into the prompt catalog. It exists only to keep
-older transcripts and transitional tests executable until their capability
-family is fully migrated.
-Legacy memory/chat/scratch/context actions are treated as compatibility entry
-points only: execution is bridged through the canonical `memmgr` path where
-possible, so new behavior should be added to `memmgr` instead of adding another
-legacy branch.
+There is no hidden compatibility action path. If the model asks for an action
+that is not present in the manifest registry, the runtime emits a protocol repair
+slice instead of executing it.
 
 Supported tool bindings:
 
@@ -110,7 +114,7 @@ Command binding protocol:
 
 - Runtime starts `/bin/sh <binding_name>`.
 - Runtime writes one JSON object to stdin:
-  `{"action": "...", "intent": "...", "input": {...}}`.
+  `{"action": "...", "intent": "...", "args": {"key": "value"}}`.
 - Script stdout/stderr is captured as the action result and truncated to a
   bounded size.
 - Execution timeout follows the action's `timeout_ms`, clamped to 1-15 seconds.
@@ -151,7 +155,7 @@ Expected shape:
 {
   "action": "capmgr",
   "intent": "Load the needed skill body before using it.",
-  "input": {
+  "args": {
     "op": "load",
     "kind": "skill",
     "id": "skill_id"
@@ -205,9 +209,9 @@ Move one capability family at a time:
 
 1. Add or update manifest.
 2. Generate prompt text from the manifest.
-3. Validate model actions through the registry for generic IDL constraints
-   such as required fields, any-of required groups, conditional required
-   fields, and enum fields.
+3. Validate model actions through the registry for IDL constraints such as
+   required fields, any-of required groups, conditional required fields, and
+   enum fields.
 4. Resolve the manifest binding through `agent_core::executor`.
 5. Dispatch only to an implemented binding.
 6. Add unit tests for manifest loading, prompt generation, and executor target

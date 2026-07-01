@@ -8,9 +8,21 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Changed
 
+- Runtime static prompt source now uses `resources/static_v1.md`, a Markdown
+  prompt with explicit injection placeholders for response schema, tool catalog,
+  and skill headers.
 - Capability tool manifests now use JSON Schema style `input_schema` and
-  `output_schema` blocks as the shared IDL for prompt rendering, `capmgr`
-  inspection, and generic runtime validation.
+  `output_schema` blocks as the executor-facing IDL for `capmgr` inspection and
+  generic runtime validation, while prompt rendering derives a concise Markdown
+  capability guide from the same manifests.
+- Action parsing is now generic over `action` / `intent` / JSON-object `args`
+  and no longer extracts concrete tool options in the top-level parser.
+  Tool-specific options and validation live in the manifest-backed executor
+  boundary, and unknown legacy action names are rejected instead of silently
+  bridged.
+- Host-adapter boundaries are documented and tested: `agent_core` stays free of
+  terminal UI dependencies and keeps C ABI entry points for future iOS/Web
+  integrations, while `timem_shell` owns terminal/provider adapter behavior.
 - Prompt segment rendering now lives in `agent_core::prompt_render`, keeping
   static prompt enrichment and visible delta/slice rendering behind a single
   module boundary.
@@ -33,6 +45,9 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Fixed
 
+- Clarified `status:"finished"` protocol semantics in the model prompt and
+  schema summary: a finished response closes the current model/action loop, so
+  models should use it only with a complete final answer.
 - Transient provider/network failures now retry up to five times with a
   user-visible status line before failing the turn.
 - Protocol repair slices now include a focused window around the malformed
@@ -43,6 +58,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Protocol repair requests now write structured `model_repair_request` audit
   events with issue, usage, truncation, and repair-count metadata for later
   diagnosis without storing raw malformed responses.
+- API payload audit now stores a structured `api_audit.json` document with a
+  `version` field and `events` array, while chat-history readers still accept
+  legacy JSONL audit files.
+- Responses that prematurely combine `status:"finished"` / `final_answer`
+  with evidence-gathering `next_actions` are now downgraded to working:
+  runtime discards the premature final answer, executes the actions, and asks
+  the next model round to answer only from action results.
 
 ## [0.6.0] - 2026-07-01
 

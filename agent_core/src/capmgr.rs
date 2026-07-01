@@ -8,9 +8,26 @@ pub struct CapmgrActionInput<'a> {
 }
 
 pub fn execute(registry: &CapabilityRegistry, input: CapmgrActionInput<'_>) -> String {
+    if input.op.trim().is_empty() {
+        return "Action result: capmgr\nerror: invalid_input\nmessage: Missing `op`. Use list, load, or inspect.".to_string();
+    }
     match input.op {
         "list" => registry.list_text(input.kind.trim()),
-        "load" | "inspect" => registry.load_text(input.kind.trim(), input.id),
+        "load" | "inspect" => {
+            if input.kind.trim().is_empty() {
+                return format!(
+                    "Action result: capmgr\nop: {}\nerror: invalid_input\nmessage: Missing `kind`. Use tool or skill.",
+                    input.op
+                );
+            }
+            if input.id.trim().is_empty() {
+                return format!(
+                    "Action result: capmgr\nop: {}\nkind: {}\nerror: invalid_input\nmessage: Missing `id`. Provide the capability id to load.",
+                    input.op, input.kind
+                );
+            }
+            registry.load_text(input.kind.trim(), input.id)
+        }
         other => format!("Action result: capmgr\nop: {other}\nerror: unsupported_op"),
     }
 }

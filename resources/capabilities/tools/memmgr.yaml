@@ -2,17 +2,24 @@ kind: tool
 id: memmgr
 binding_type: builtin
 binding_name: memmgr
-description: Unified local memory manager.
-prompt_when: |
+summary: Unified local memory manager.
+description: |
   Unified local memory manager. Use type=durable for long-lived user facts,
   type=raw_chat for UI-visible chat transcript, type=scratch for notes/context
   offload, and type=context for dynamic prompt context maintenance.
+prompt_synopsis: |
+  memmgr type=durable op=<query|schema|sql|insert|update|upsert|delete> ...
+  memmgr type=raw_chat op=<query|sql|delete> ...
+  memmgr type=scratch op=<query|write|read|delete> ...
+  memmgr type=context op=shrink delta_ids=<list>|slice_ids=<list>
 prompt_input: |
-  Always include type and op. durable supports query/schema/sql/insert/update/
-  upsert/delete; raw_chat supports query/sql/delete; scratch supports query/
-  write/read/delete; context supports shrink. Use expected_version when
-  modifying an existing durable row. SQL ops are read-only and limited to
-  memories/chat_messages table inspection/query.
+  Always include type and op. Choose one synopsis line above and fill only the
+  arguments needed for that operation as fields in the args object. Use arrays
+  for delta_ids, slice_ids, and params. Use query for query ops, sql and optional
+  params for sql ops, content for durable writes and scratch notes, id for
+  read/update/delete, and expected_version from a previous durable query/sql
+  result before updating or deleting an existing durable row. SQL ops are
+  read-only and limited to memories/chat_messages table inspection/query.
 prompt_result: |
   Returns matching records, ids/versions for writes, conflict/error strings for
   unsafe writes, scratch ids for notes/offload, or shrink counts for context.
@@ -40,12 +47,23 @@ input_schema: |
       "content": {"type": "string", "description": "Required for durable insert/update/upsert and scratch kind=notes."},
       "kind": {"type": "string", "enum": ["notes", "context_offload"], "description": "Scratch write mode."},
       "label": {"type": "string", "description": "Short retrieval label for scratch write."},
-      "delta_ids": {"type": "array", "items": {"type": "string"}, "description": "Prompt delta ids for scratch context_offload or context shrink."},
-      "slice_ids": {"type": "array", "items": {"type": "string"}, "description": "Prompt slice ids for scratch context_offload or context shrink."},
+      "delta_ids": {"type": "array", "items": {"type": "string"}, "description": "Prompt delta ids for scratch context_offload or context shrink. can be found in BEGIN PROMPT_DELTA header"},
+      "slice_ids": {"type": "array", "items": {"type": "string"}, "description": "Prompt slice id."},
       "after_ms": {"type": "integer", "description": "Inclusive lower created_at_ms bound for raw_chat."},
       "before_ms": {"type": "integer", "description": "Exclusive upper created_at_ms bound for raw_chat."},
       "limit": {"type": "integer", "description": "Result cap."}
-    }
+    },
+    "x-required-when": [
+      {"when": {"type": "durable", "op": "query"}, "required": ["query"]},
+      {"when": {"type": "durable", "op": "sql"}, "required": ["sql"]},
+      {"when": {"type": "raw_chat", "op": "sql"}, "required": ["sql"]},
+      {"when": {"type": "durable", "op": ["insert", "upsert"]}, "required": ["content"]},
+      {"when": {"type": "durable", "op": "update"}, "required": ["id", "content"]},
+      {"when": {"type": "durable", "op": "delete"}, "required": ["id"]},
+      {"when": {"type": "scratch", "op": "write"}, "required": ["kind", "label"]},
+      {"when": {"type": "scratch", "kind": "notes"}, "required": ["content"]},
+      {"when": {"type": "scratch", "op": ["read", "delete"]}, "required": ["id"]}
+    ]
   }
 output_schema: |
   {
@@ -66,10 +84,10 @@ example_json: |
   {
     "action": "memmgr",
     "intent": "Find confirmed durable memory before answering.",
-    "input": {
+    "args": {
       "type": "durable",
       "op": "query",
-      "query": "son birthday",
+      "query": "project codename",
       "limit": 5
     }
   }

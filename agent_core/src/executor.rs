@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 pub enum ExecutorTarget {
     Builtin { binding_name: String },
     Command { action: String, path: PathBuf },
-    Legacy { action: String },
 }
 
 pub fn resolve_action(
@@ -18,9 +17,7 @@ pub fn resolve_action(
     action: &str,
 ) -> Result<ExecutorTarget, String> {
     let Some(binding) = capabilities.binding(action) else {
-        return Ok(ExecutorTarget::Legacy {
-            action: action.to_string(),
-        });
+        return Err(format!("{action}:unsupported_action"));
     };
     match binding.binding_type.as_str() {
         "builtin" => Ok(ExecutorTarget::Builtin {
@@ -155,14 +152,12 @@ mod tests {
     }
 
     #[test]
-    fn action_outside_manifest_resolves_to_legacy_fallback() {
+    fn action_outside_manifest_is_rejected() {
         let registry = CapabilityRegistry::builtin();
 
         assert_eq!(
-            resolve_action(&registry, "query_memory").unwrap(),
-            ExecutorTarget::Legacy {
-                action: "query_memory".to_string()
-            }
+            resolve_action(&registry, "query_memory").unwrap_err(),
+            "query_memory:unsupported_action"
         );
     }
 
@@ -180,8 +175,8 @@ mod tests {
 id: local_echo
 binding_type: command
 binding_name: bin/local_echo.sh
-description: Local echo command.
-prompt_when: |
+summary: Local echo command.
+description: |
   Echo local input for tests.
 input_properties:
   message?: string
@@ -189,7 +184,7 @@ example_json: |
   {
     "action": "local_echo",
     "intent": "Echo test input.",
-    "input": {
+    "args": {
       "message": "hello"
     }
   }
@@ -214,14 +209,14 @@ example_json: |
         let dir = temp_case_dir("command_payload");
         fs::write(
             dir.join("echo_payload.sh"),
-            "#!/bin/sh\npython3 -c 'import sys,json; data=json.load(sys.stdin); print(data[\"input\"][\"message\"])'\n",
+            "#!/bin/sh\npython3 -c 'import sys,json; data=json.load(sys.stdin); print(data[\"args\"][\"message\"])'\n",
         )
         .unwrap();
 
         let result = execute_command_action(
             "local_echo",
             &dir.join("echo_payload.sh"),
-            &json!({"input":{"message":"hello from payload"}}),
+            &json!({"args":{"message":"hello from payload"}}),
             1000,
         );
 

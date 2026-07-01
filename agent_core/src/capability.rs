@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::prompt_spec::replace_json_string_field_with_value;
+use crate::prompt_spec::{
+    replace_json_string_field_with_value, replace_markdown_placeholder_with_text,
+};
 
 const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
 const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
@@ -28,7 +30,8 @@ pub struct CapabilityBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityPrompt {
-    pub when: String,
+    pub description: String,
+    pub synopsis: String,
     pub input: String,
     pub result: String,
 }
@@ -54,6 +57,7 @@ pub struct CapabilityRequiredWhen {
     pub field: String,
     pub values: Vec<String>,
     pub required: Vec<String>,
+    pub conditions: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +65,7 @@ pub struct ToolManifest {
     pub kind: String,
     pub id: String,
     pub binding: CapabilityBinding,
-    pub description: String,
+    pub summary: String,
     pub prompt: CapabilityPrompt,
     pub input_schema: CapabilityInputSchema,
     pub output_schema: CapabilityOutputSchema,
@@ -194,6 +198,13 @@ impl CapabilityRegistry {
         let Some(manifest) = self.tools.get(action) else {
             return Err(format!("unsupported_action:{action}"));
         };
+        if let Some(object) = input.as_object() {
+            for key in object.keys() {
+                if !input_property_declared(&manifest.input_schema.properties, key) {
+                    return Err(format!("input.{key}_unsupported"));
+                }
+            }
+        }
         for key in &manifest.input_schema.required {
             if is_missing_input_value(input.get(key)) {
                 return Err(format!("input.{key}_required"));
@@ -208,19 +219,12 @@ impl CapabilityRegistry {
             }
         }
         for rule in &manifest.input_schema.required_when {
-            let Some(value) = input.get(&rule.field).and_then(Value::as_str) else {
-                continue;
-            };
-            let normalized = value.trim().to_lowercase();
-            if !rule.values.iter().any(|allowed| allowed == &normalized) {
+            if !required_when_matches(rule, input) {
                 continue;
             }
             for key in &rule.required {
                 if is_missing_input_value(input.get(key)) {
-                    return Err(format!(
-                        "input.{key}_required_when_{}={normalized}",
-                        rule.field
-                    ));
+                    return Err(required_when_error(key, rule, input));
                 }
             }
         }
@@ -261,6 +265,25 @@ impl CapabilityRegistry {
         Value::Object(headers)
     }
 
+    pub fn render_skill_headers_markdown(&self) -> String {
+        if self.skills.is_empty() {
+            return "- No optional skills are currently loaded.".to_string();
+        }
+        self.skills
+            .values()
+            .map(|skill| {
+                format!(
+                    "#### `{}`\n- Title: {}\n- Summary: {}\n- Use when: {}",
+                    skill.id,
+                    one_line(&skill.title),
+                    one_line(&skill.summary),
+                    one_line(&skill.when_to_use)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     pub fn list_text(&self, kind: &str) -> String {
         match kind {
             "tool" => {
@@ -269,8 +292,8 @@ impl CapabilityRegistry {
                     .values()
                     .map(|tool| {
                         format!(
-                            "- id={} binding={}:{} description={}",
-                            tool.id, tool.binding.binding_type, tool.binding.name, tool.description
+                            "- id={} binding={}:{} summary={}",
+                            tool.id, tool.binding.binding_type, tool.binding.name, tool.summary
                         )
                     })
                     .collect::<Vec<_>>()
@@ -302,14 +325,11 @@ impl CapabilityRegistry {
         match kind {
             "tool" => match self.tools.get(id) {
                 Some(tool) => format!(
-                    "Action result: capmgr\nop: load\nkind: tool\nid: {}\ndescription: {}\nbinding: {}:{}\ninput:\n{}\noutput:\n{}\nexample:\n{}",
+                    "Action result: capmgr\nop: load\nkind: tool\nid: {}\nbinding: {}:{}\nmanual:\n{}",
                     tool.id,
-                    tool.description,
                     tool.binding.binding_type,
                     tool.binding.name,
-                    serde_json::to_string_pretty(&input_properties_value(tool)).unwrap_or_default(),
-                    serde_json::to_string_pretty(&output_properties_value(tool)).unwrap_or_default(),
-                    serde_json::to_string_pretty(&tool.example).unwrap_or_default()
+                    render_tool_manifest_markdown(tool)
                 ),
                 None => format!("Action result: capmgr\nop: load\nkind: tool\nid: {id}\nerror: not_found"),
             },
@@ -331,8 +351,8 @@ impl CapabilityRegistry {
         for (id, manifest) in &self.tools {
             let mut item = Map::new();
             item.insert(
-                "when".to_string(),
-                Value::String(manifest.prompt.when.clone()),
+                "description".to_string(),
+                Value::String(manifest.prompt.description.clone()),
             );
             item.insert(
                 "input".to_string(),
@@ -341,6 +361,10 @@ impl CapabilityRegistry {
             item.insert(
                 "result".to_string(),
                 Value::String(manifest.prompt.result.clone()),
+            );
+            item.insert(
+                "input_schema".to_string(),
+                input_schema_value(&manifest.input_schema),
             );
             if !manifest.input_schema.required.is_empty() {
                 item.insert(
@@ -395,7 +419,29 @@ impl CapabilityRegistry {
             .expect("tool catalog must render as JSON")
     }
 
+    pub fn render_tool_catalog_markdown(&self) -> String {
+        self.tools
+            .values()
+            .map(render_tool_manifest_markdown)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     pub fn enrich_static_prompt(&self, static_prompt: &str) -> String {
+        if let Some(with_catalog) = replace_markdown_placeholder_with_text(
+            static_prompt,
+            "{{TOOL_CATALOG}}",
+            &self.render_tool_catalog_markdown(),
+        ) {
+            if let Some(with_skills) = replace_markdown_placeholder_with_text(
+                &with_catalog,
+                "{{SKILL_HEADERS}}",
+                &self.render_skill_headers_markdown(),
+            ) {
+                return with_skills;
+            }
+        }
+
         if let Some(with_catalog) = replace_json_string_field_with_value(
             static_prompt,
             "tool_catalog",
@@ -424,6 +470,185 @@ impl CapabilityRegistry {
     }
 }
 
+fn render_tool_manifest_markdown(manifest: &ToolManifest) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("#### `{}`", manifest.id));
+    lines.push(String::new());
+    lines.push("**Name**".to_string());
+    lines.push(format!(
+        "`{}` - {}",
+        manifest.id,
+        one_line(&manifest.summary)
+    ));
+    lines.push(String::new());
+    lines.push("**Synopsis**".to_string());
+    lines.extend(render_synopsis(manifest));
+    lines.push(String::new());
+    lines.push("**Description**".to_string());
+    lines.push(one_line(&manifest.prompt.description));
+    lines.push(String::new());
+    if !manifest.prompt.input.trim().is_empty() {
+        lines.push("**Usage**".to_string());
+        lines.push(one_line(&manifest.prompt.input));
+        lines.push(String::new());
+    }
+    lines.push("**Options**".to_string());
+    for (name, property) in &manifest.input_schema.properties {
+        lines.push(format!("- `{name}`: {}", property_option_text(property)));
+    }
+    if !manifest.input_schema.required.is_empty() {
+        lines.push(format!(
+            "- Required: {}",
+            inline_code_list(&manifest.input_schema.required)
+        ));
+    }
+    if !manifest.input_schema.required_any.is_empty() {
+        let groups = manifest
+            .input_schema
+            .required_any
+            .iter()
+            .map(|group| inline_code_list(group))
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("- Required one of: {groups}"));
+    }
+    if !manifest.input_schema.required_when.is_empty() {
+        let rules = manifest
+            .input_schema
+            .required_when
+            .iter()
+            .map(required_when_markdown)
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("- Conditional: {rules}"));
+    }
+    lines.push(String::new());
+    lines.push("**Result**".to_string());
+    lines.push(one_line(&manifest.prompt.result));
+    lines.push(
+        "If args do not match this tool's manifest IDL, runtime asks you to repair the response before executing the tool."
+            .to_string(),
+    );
+    lines.push(String::new());
+    lines.push("**Example action**".to_string());
+    lines.push("```json".to_string());
+    lines.push(serde_json::to_string_pretty(&manifest.example).unwrap_or_default());
+    lines.push("```".to_string());
+    lines.join("\n")
+}
+
+fn render_synopsis(manifest: &ToolManifest) -> Vec<String> {
+    if manifest.prompt.synopsis.trim().is_empty() {
+        return vec![format!("`{}`", synopsis_from_schema(manifest))];
+    }
+    manifest
+        .prompt
+        .synopsis
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("`{line}`"))
+        .collect()
+}
+
+fn synopsis_from_schema(manifest: &ToolManifest) -> String {
+    let mut parts = vec![manifest.id.clone()];
+    let schema = &manifest.input_schema;
+    let mut used = Vec::<String>::new();
+
+    for name in &schema.required {
+        if let Some(property) = schema.properties.get(name) {
+            parts.push(format!("{name}={}", synopsis_placeholder(property)));
+            used.push(name.clone());
+        }
+    }
+
+    for group in &schema.required_any {
+        let alternatives = group
+            .iter()
+            .filter_map(|name| {
+                schema
+                    .properties
+                    .get(name)
+                    .map(|property| format!("{name}={}", synopsis_placeholder(property)))
+            })
+            .collect::<Vec<_>>();
+        if !alternatives.is_empty() {
+            parts.push(format!("({})", alternatives.join("|")));
+            used.extend(group.iter().cloned());
+        }
+    }
+
+    for name in schema.properties.keys() {
+        if used.iter().any(|used_name| used_name == name) {
+            continue;
+        }
+        if synopsis_omits_optional_field(name) {
+            continue;
+        }
+        if let Some(property) = schema.properties.get(name) {
+            parts.push(format!("[{name}={}]", synopsis_placeholder(property)));
+        }
+    }
+    parts.join(" ")
+}
+
+fn synopsis_omits_optional_field(_name: &str) -> bool {
+    false
+}
+
+fn synopsis_placeholder(property: &Value) -> String {
+    if let Some(values) = property.get("enum").and_then(Value::as_array) {
+        let allowed = values.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+        if !allowed.is_empty() {
+            return format!("<{}>", allowed.join("|"));
+        }
+    }
+    match property
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("value")
+    {
+        "string" => "<string>".to_string(),
+        "integer" | "number" => "<n>".to_string(),
+        "boolean" => "<true|false>".to_string(),
+        "array" => "<list>".to_string(),
+        "object" => "<object>".to_string(),
+        other => format!("<{other}>"),
+    }
+}
+
+fn property_option_text(property: &Value) -> String {
+    let mut text = property
+        .get("description")
+        .and_then(Value::as_str)
+        .map(one_line)
+        .unwrap_or_else(|| "Tool input field.".to_string());
+    if let Some(values) = property.get("enum").and_then(Value::as_array) {
+        let allowed = values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if !allowed.is_empty() {
+            text.push_str(&format!(" Allowed: {}.", inline_code_list(&allowed)));
+        }
+    }
+    text
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn inline_code_list(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| format!("`{}`", item))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let mut top = BTreeMap::<String, String>::new();
     let mut input_properties = BTreeMap::<String, Value>::new();
@@ -432,7 +657,8 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let mut required_any = Vec::<Vec<String>>::new();
     let mut required_when = Vec::<CapabilityRequiredWhen>::new();
     let mut enum_fields = BTreeMap::<String, Vec<String>>::new();
-    let mut prompt_when = String::new();
+    let mut prompt_description = String::new();
+    let mut prompt_synopsis = String::new();
     let mut prompt_input = String::new();
     let mut prompt_result = String::new();
     let mut input_schema_json = String::new();
@@ -444,12 +670,16 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
-        if line == "prompt_when: |" {
-            section = Some("prompt_when");
+        if line == "description: |" {
+            section = Some("description");
             continue;
         }
         if line == "prompt_input: |" {
             section = Some("prompt_input");
+            continue;
+        }
+        if line == "prompt_synopsis: |" {
+            section = Some("prompt_synopsis");
             continue;
         }
         if line == "prompt_result: |" {
@@ -493,17 +723,23 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             continue;
         }
         match section {
-            Some("prompt_when") if line.starts_with("  ") => {
-                if !prompt_when.is_empty() {
-                    prompt_when.push('\n');
+            Some("description") if line.starts_with("  ") => {
+                if !prompt_description.is_empty() {
+                    prompt_description.push('\n');
                 }
-                prompt_when.push_str(line.trim());
+                prompt_description.push_str(line.trim());
             }
             Some("prompt_input") if line.starts_with("  ") => {
                 if !prompt_input.is_empty() {
                     prompt_input.push('\n');
                 }
                 prompt_input.push_str(line.trim());
+            }
+            Some("prompt_synopsis") if line.starts_with("  ") => {
+                if !prompt_synopsis.is_empty() {
+                    prompt_synopsis.push('\n');
+                }
+                prompt_synopsis.push_str(line.trim());
             }
             Some("prompt_result") if line.starts_with("  ") => {
                 if !prompt_result.is_empty() {
@@ -597,6 +833,7 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
                     field: field.trim().to_string(),
                     values,
                     required,
+                    conditions: BTreeMap::new(),
                 });
             }
             Some("enum_fields") if line.starts_with("  ") => {
@@ -671,9 +908,10 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             name: required_top(&top, "binding_name")?,
             command_path: None,
         },
-        description: required_top(&top, "description")?,
+        summary: required_top(&top, "summary")?,
         prompt: CapabilityPrompt {
-            when: prompt_when,
+            description: prompt_description,
+            synopsis: prompt_synopsis,
             input: prompt_input,
             result: prompt_result,
         },
@@ -814,29 +1052,68 @@ fn parse_required_when_field(
         let Some(object) = item.as_object() else {
             return Err(format!("{tool_id}:{field}_item_must_be_object"));
         };
-        let Some(condition_field) = object
+        let condition_field = object
             .get("field")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|text| !text.is_empty())
-        else {
-            return Err(format!("{tool_id}:{field}_field_required"));
-        };
+            .map(str::to_string);
         let values = parse_string_array_field(object.get("values"), tool_id, "values")?
             .into_iter()
             .map(|value| value.to_lowercase())
             .collect::<Vec<_>>();
+        let conditions = parse_required_when_conditions(object.get("when"), tool_id, field)?;
         let required = parse_string_array_field(object.get("required"), tool_id, "required")?;
-        if values.is_empty() || required.is_empty() {
+        if condition_field.is_none() && conditions.is_empty() {
+            return Err(format!("{tool_id}:{field}_condition_required"));
+        }
+        if condition_field.is_some() && values.is_empty() {
+            return Err(format!("{tool_id}:{field}_values_required"));
+        }
+        if required.is_empty() {
             return Err(format!("{tool_id}:{field}_values_and_required_required"));
         }
         parsed.push(CapabilityRequiredWhen {
-            field: condition_field.to_string(),
+            field: condition_field.unwrap_or_default(),
             values,
             required,
+            conditions,
         });
     }
     Ok(parsed)
+}
+
+fn parse_required_when_conditions(
+    value: Option<&Value>,
+    tool_id: &str,
+    field: &str,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(object) = value.as_object() else {
+        return Err(format!("{tool_id}:{field}_when_must_be_object"));
+    };
+    let mut conditions = BTreeMap::new();
+    for (key, raw_values) in object {
+        let values = if let Some(text) = raw_values.as_str() {
+            vec![text.trim().to_lowercase()]
+        } else {
+            parse_string_array_field(Some(raw_values), tool_id, "when")?
+                .into_iter()
+                .map(|value| value.to_lowercase())
+                .collect::<Vec<_>>()
+        };
+        let values = values
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            return Err(format!("{tool_id}:{field}_when_values_required:{key}"));
+        }
+        conditions.insert(key.trim().to_string(), values);
+    }
+    Ok(conditions)
 }
 
 fn enum_fields_from_properties(
@@ -869,6 +1146,61 @@ fn is_missing_input_value(value: Option<&Value>) -> bool {
         Some(Value::Object(object)) => object.is_empty(),
         Some(Value::Bool(_)) | Some(Value::Number(_)) => false,
     }
+}
+
+fn required_when_matches(rule: &CapabilityRequiredWhen, input: &Value) -> bool {
+    if !rule.field.is_empty() {
+        let Some(value) = input.get(&rule.field).and_then(Value::as_str) else {
+            return false;
+        };
+        let normalized = value.trim().to_lowercase();
+        if !allowed_values_match(&rule.values, &normalized) {
+            return false;
+        }
+    }
+    for (field, allowed_values) in &rule.conditions {
+        let Some(value) = input.get(field).and_then(Value::as_str) else {
+            return false;
+        };
+        let normalized = value.trim().to_lowercase();
+        if !allowed_values_match(allowed_values, &normalized) {
+            return false;
+        }
+    }
+    true
+}
+
+fn allowed_values_match(allowed_values: &[String], normalized: &str) -> bool {
+    allowed_values
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == normalized)
+}
+
+fn required_when_error(key: &str, rule: &CapabilityRequiredWhen, input: &Value) -> String {
+    if !rule.conditions.is_empty() {
+        let condition = rule
+            .conditions
+            .iter()
+            .map(|(field, values)| {
+                let value = input
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| values.first().map(String::as_str).unwrap_or(""));
+                format!("{field}={value}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        return format!("input.{key}_required_when_{condition}");
+    }
+    let value = input
+        .get(&rule.field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| rule.values.first().map(String::as_str).unwrap_or(""));
+    format!("input.{key}_required_when_{}={value}", rule.field)
 }
 
 fn parse_skill_manifest(raw: &str, body: &str) -> Result<SkillManifest, String> {
@@ -930,34 +1262,108 @@ fn json_object(items: impl IntoIterator<Item = (&'static str, Value)>) -> Value 
     Value::Object(object)
 }
 
-fn input_properties_value(manifest: &ToolManifest) -> Value {
-    let mut object = Map::new();
-    for (key, value) in &manifest.input_schema.properties {
-        object.insert(key.clone(), value.clone());
-    }
-    Value::Object(object)
-}
-
-fn output_properties_value(manifest: &ToolManifest) -> Value {
-    let mut object = Map::new();
-    for (key, value) in &manifest.output_schema.properties {
-        object.insert(key.clone(), value.clone());
-    }
-    Value::Object(object)
-}
-
 fn required_when_value(rule: &CapabilityRequiredWhen) -> Value {
-    json_object([
-        ("field", Value::String(rule.field.clone())),
-        (
-            "values",
+    let mut object = Map::new();
+    if !rule.field.is_empty() {
+        object.insert("field".to_string(), Value::String(rule.field.clone()));
+        object.insert(
+            "values".to_string(),
             Value::Array(rule.values.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !rule.conditions.is_empty() {
+        let mut when = Map::new();
+        for (field, values) in &rule.conditions {
+            when.insert(
+                field.clone(),
+                Value::Array(values.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        object.insert("when".to_string(), Value::Object(when));
+    }
+    object.insert(
+        "required".to_string(),
+        Value::Array(rule.required.iter().cloned().map(Value::String).collect()),
+    );
+    Value::Object(object)
+}
+
+fn required_when_markdown(rule: &CapabilityRequiredWhen) -> String {
+    let condition = if !rule.conditions.is_empty() {
+        let mut conditions = rule.conditions.iter().collect::<Vec<_>>();
+        conditions.sort_by_key(|(field, _)| condition_field_order(field));
+        conditions
+            .into_iter()
+            .map(|(field, values)| format!("{field}={}", pipe_values(values)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        format!("{}={}", rule.field, pipe_values(&rule.values))
+    };
+    format!("({condition}) requires {}", rule.required.join(", "))
+}
+
+fn pipe_values(values: &[String]) -> String {
+    values.join("|")
+}
+
+fn condition_field_order(field: &str) -> (usize, &str) {
+    let rank = match field {
+        "type" => 0,
+        "op" => 1,
+        "kind" => 2,
+        _ => 3,
+    };
+    (rank, field)
+}
+
+fn input_schema_value(schema: &CapabilityInputSchema) -> Value {
+    let mut object = Map::new();
+    object.insert(
+        "type".to_string(),
+        Value::String(schema.schema_type.clone()),
+    );
+    object.insert(
+        "properties".to_string(),
+        Value::Object(
+            schema
+                .properties
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
         ),
-        (
-            "required",
-            Value::Array(rule.required.iter().cloned().map(Value::String).collect()),
-        ),
-    ])
+    );
+    if !schema.required.is_empty() {
+        object.insert(
+            "required".to_string(),
+            Value::Array(schema.required.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !schema.required_any.is_empty() {
+        object.insert(
+            "required_any".to_string(),
+            Value::Array(
+                schema
+                    .required_any
+                    .iter()
+                    .map(|group| Value::Array(group.iter().cloned().map(Value::String).collect()))
+                    .collect(),
+            ),
+        );
+    }
+    if !schema.required_when.is_empty() {
+        object.insert(
+            "required_when".to_string(),
+            Value::Array(
+                schema
+                    .required_when
+                    .iter()
+                    .map(required_when_value)
+                    .collect(),
+            ),
+        );
+    }
+    Value::Object(object)
 }
 
 fn validate_manifest(manifest: &ToolManifest) -> Result<(), String> {
@@ -976,8 +1382,8 @@ fn validate_manifest(manifest: &ToolManifest) -> Result<(), String> {
     if !BUILTIN_BINDINGS.contains(&manifest.binding.name.as_str()) {
         return Err(format!("{}:unsupported_builtin_binding", manifest.id));
     }
-    if manifest.prompt.when.trim().is_empty() {
-        return Err(format!("{}:prompt_when_required", manifest.id));
+    if manifest.prompt.description.trim().is_empty() {
+        return Err(format!("{}:description_required", manifest.id));
     }
     if manifest.input_schema.schema_type != "object" {
         return Err(format!("{}:input_schema_must_be_object", manifest.id));
@@ -1028,8 +1434,8 @@ fn validate_overlay_manifest(
         }
         _ => return Err(format!("{}:unsupported_binding_type", manifest.id)),
     }
-    if manifest.prompt.when.trim().is_empty() {
-        return Err(format!("{}:prompt_when_required", manifest.id));
+    if manifest.prompt.description.trim().is_empty() {
+        return Err(format!("{}:description_required", manifest.id));
     }
     if manifest.input_schema.schema_type != "object" {
         return Err(format!("{}:input_schema_must_be_object", manifest.id));
@@ -1090,11 +1496,21 @@ fn validate_manifest_rule_fields(manifest: &ToolManifest) -> Result<(), String> 
         }
     }
     for rule in &manifest.input_schema.required_when {
-        if !input_property_declared(&manifest.input_schema.properties, &rule.field) {
+        if !rule.field.is_empty()
+            && !input_property_declared(&manifest.input_schema.properties, &rule.field)
+        {
             return Err(format!(
                 "{}:required_when_field_without_property:{}",
                 manifest.id, rule.field
             ));
+        }
+        for key in rule.conditions.keys() {
+            if !input_property_declared(&manifest.input_schema.properties, key) {
+                return Err(format!(
+                    "{}:required_when_condition_without_property:{key}",
+                    manifest.id
+                ));
+            }
         }
         for key in &rule.required {
             if !input_property_declared(&manifest.input_schema.properties, key) {
@@ -1221,28 +1637,34 @@ mod tests {
     #[test]
     fn registry_renders_prompt_tool_catalog_from_manifests() {
         let registry = CapabilityRegistry::builtin();
-        let rendered = registry.render_tool_catalog_json();
+        let rendered = registry.render_tool_catalog_markdown();
 
-        assert!(rendered.contains("\"memmgr\""));
-        assert!(rendered.contains("\"capmgr\""));
-        assert!(rendered.contains("\"run_bash\""));
-        assert!(rendered.contains("\"shell_job_status\""));
-        assert!(rendered.contains("\"self_tool\""));
+        assert!(rendered.contains("#### `memmgr`"));
+        assert!(rendered.contains("#### `capmgr`"));
+        assert!(rendered.contains("#### `run_bash`"));
+        assert!(rendered.contains("#### `shell_job_status`"));
+        assert!(rendered.contains("#### `self_tool`"));
+        assert!(rendered.contains("**Synopsis**"));
+        assert!(rendered.contains("**Options**"));
         assert!(rendered.contains("Unified local memory manager"));
         assert!(rendered.contains("Use when the user asks about Timem itself"));
-        assert!(rendered.contains("\"required_any\""));
-        assert!(rendered.contains("\"required_when\""));
-        assert!(rendered.contains("\"result\""));
-        assert!(rendered.contains("\"command\""));
-        assert!(rendered.contains("\"read_back_command\""));
-        assert!(rendered.contains("background=true"));
+        assert!(rendered.contains("Conditional:"));
+        assert!(rendered.contains("(type=durable, op=query) requires query"));
+        assert!(!rendered.contains("when `` is"));
+        assert!(rendered.contains("**Result**"));
+        assert!(rendered.contains("\"args\": {"));
+        assert!(rendered.contains("\"command\": \"rg --files | wc -l\""));
+        assert!(!rendered.contains("read_back_command"));
+        assert!(!rendered.contains("large_readback"));
+        assert!(rendered.contains("`background`:"));
         assert!(rendered.contains("Foreground returns status and bounded output"));
-        assert!(rendered.contains("\"op\""));
-        assert!(rendered.contains("\"inspect\""));
+        assert!(rendered.contains("\"op\": \"load\""));
+        assert!(rendered.contains("\"kind\": \"skill\""));
+        assert!(rendered.contains("\"id\": \"xx_skill_id\""));
+        assert!(rendered.contains("`inspect`"));
         assert!(rendered.contains("memory_conflict"));
         assert!(!rendered.contains("\"output\": {"));
         assert!(!rendered.contains("\"description\""));
-        assert!(!rendered.contains("Shell command to execute."));
         assert!(!rendered.contains("Background job id when background=true."));
     }
 
@@ -1278,6 +1700,40 @@ mod tests {
             .contains("input.op_required"));
         assert!(registry
             .validate_action_input(
+                "memmgr",
+                &json_object([
+                    ("type", Value::String("durable".to_string())),
+                    ("op", Value::String("query".to_string())),
+                ])
+            )
+            .unwrap_err()
+            .contains("input.query_required_when_op=query,type=durable"));
+        assert!(registry
+            .validate_action_input(
+                "memmgr",
+                &json_object([
+                    ("type", Value::String("scratch".to_string())),
+                    ("op", Value::String("write".to_string())),
+                    ("kind", Value::String("notes".to_string())),
+                    ("content", Value::String("checkpoint".to_string())),
+                ])
+            )
+            .unwrap_err()
+            .contains("input.label_required_when_op=write,type=scratch"));
+        assert!(registry
+            .validate_action_input(
+                "memmgr",
+                &json_object([
+                    ("type", Value::String("scratch".to_string())),
+                    ("op", Value::String("write".to_string())),
+                    ("kind", Value::String("notes".to_string())),
+                    ("label", Value::String("checkpoint".to_string())),
+                    ("content", Value::String("checkpoint".to_string())),
+                ])
+            )
+            .is_ok());
+        assert!(registry
+            .validate_action_input(
                 "shell_job_status",
                 &json_object([("job_id", Value::String("job_1".to_string()))])
             )
@@ -1286,7 +1742,7 @@ mod tests {
         assert!(registry
             .validate_action_input("run_bash", &json_object([]))
             .unwrap_err()
-            .contains("input.any_required:command|read_back_command"));
+            .contains("input.command_required"));
         assert!(registry
             .validate_action_input("self_tool", &json_object([]))
             .unwrap_err()
@@ -1315,6 +1771,29 @@ mod tests {
             .validate_action_input(
                 "run_bash",
                 &json_object([("read_back_command", Value::String("pwd".to_string()))])
+            )
+            .unwrap_err()
+            .contains("input.read_back_command_unsupported"));
+        assert!(registry
+            .validate_action_input(
+                "run_bash",
+                &json_object([
+                    ("command", Value::String("pwd".to_string())),
+                    (
+                        "large_readback_opt_in",
+                        Value::String("need full output".to_string())
+                    ),
+                ])
+            )
+            .unwrap_err()
+            .contains("input.large_readback_opt_in_unsupported"));
+        assert!(registry
+            .validate_action_input(
+                "run_bash",
+                &json_object([
+                    ("command", Value::String("test -s output.txt".to_string())),
+                    ("timeout_ms", Value::Number(5000.into())),
+                ])
             )
             .is_ok());
         assert!(registry
@@ -1405,15 +1884,51 @@ mod tests {
     #[test]
     fn registry_enriches_static_prompt_tool_catalog() {
         let registry = CapabilityRegistry::builtin();
-        let enriched = registry.enrich_static_prompt(
-            r#"{"Tool_capability":{"tool_catalog":{"stale_tool":{"when":"old"}}}}"#,
-        );
+        let enriched = registry
+            .enrich_static_prompt("## Tools\n{{TOOL_CATALOG}}\n## Skills\n{{SKILL_HEADERS}}");
 
-        assert!(enriched.contains("\"memmgr\""));
-        assert!(enriched.contains("\"skill_headers\""));
+        assert!(enriched.contains("#### `memmgr`"));
         assert!(!enriched.contains("\"release_quality_gate\""));
-        assert!(enriched.contains("\"run_bash\""));
-        assert!(!enriched.contains("stale_tool"));
+        assert!(enriched.contains("#### `run_bash`"));
+        assert!(enriched.contains("No optional skills are currently loaded."));
+        assert!(!enriched.contains("{{TOOL_CATALOG}}"));
+        assert!(!enriched.contains("{{SKILL_HEADERS}}"));
+    }
+
+    #[test]
+    fn run_bash_idl_uses_command_for_finished_final_command_without_expect_fields() {
+        let registry = CapabilityRegistry::builtin();
+        let catalog = registry.tool_catalog_value();
+        let run_bash = catalog
+            .get("run_bash")
+            .and_then(Value::as_object)
+            .expect("run_bash catalog entry");
+        let input_schema = run_bash
+            .get("input_schema")
+            .and_then(Value::as_object)
+            .expect("run_bash input schema");
+        let input_properties = input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("run_bash input schema properties");
+
+        assert!(input_properties.contains_key("command"));
+        assert!(!input_properties.contains_key("read_back_command"));
+        assert!(!input_properties.contains_key("large_readback_opt_in"));
+        assert!(!input_properties.contains_key("expect"));
+        assert!(!input_properties.contains_key("expect_timeout_ms"));
+
+        let required = input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("run_bash required");
+        assert!(required.iter().any(|field| field == "command"));
+
+        let prompt = registry.render_tool_catalog_markdown();
+        assert!(prompt.contains("run_bash command=<shell_command>"));
+        assert!(prompt.contains("With status=finished"));
+        assert!(!prompt.contains("`expect`:"));
+        assert!(!prompt.contains("expect_timeout_ms"));
     }
 
     #[test]
@@ -1433,10 +1948,15 @@ mod tests {
 
         let loaded_tool = registry.load_text("tool", "run_bash");
         assert!(loaded_tool.contains("kind: tool"));
-        assert!(loaded_tool.contains("input:"));
-        assert!(loaded_tool.contains("output:"));
-        assert!(loaded_tool.contains("approval_status"));
-        assert!(loaded_tool.contains("approved_by_user"));
+        assert!(loaded_tool.contains("manual:"));
+        assert!(loaded_tool.contains("#### `run_bash`"));
+        assert!(loaded_tool.contains("**Options**"));
+        assert!(loaded_tool.contains("run_bash command=<shell_command>"));
+        assert!(!loaded_tool.contains("read_back_command"));
+        assert!(!loaded_tool.contains("large_readback"));
+        assert!(loaded_tool.contains("With status=finished"));
+        assert!(!loaded_tool.contains("expect_timeout_ms"));
+        assert!(loaded_tool.contains("rg --files | wc -l"));
     }
 
     #[test]
@@ -1452,8 +1972,8 @@ mod tests {
 id: local_echo
 binding_type: builtin
 binding_name: run_bash
-description: Echo a bounded local string through Bash.
-prompt_when: |
+summary: Echo a bounded local string through Bash.
+description: |
   Use this runtime overlay tool only when a bounded echo command is enough.
 input_properties:
   command: string
@@ -1463,7 +1983,7 @@ example_json: |
   {
     "action": "local_echo",
     "intent": "Echo a short string.",
-    "input": {
+    "args": {
       "command": "printf hello"
     }
   }
@@ -1497,14 +2017,13 @@ when_to_use: |
             .and_then(|tool| tool.get("output"))
             .is_none());
         assert!(registry
-            .render_tool_catalog_json()
-            .contains("\"local_echo\""));
+            .render_tool_catalog_markdown()
+            .contains("#### `local_echo`"));
         assert!(registry
             .load_text("skill", "log_review")
             .contains("# Runtime Log Review"));
         assert!(registry
-            .skill_headers_value()
-            .to_string()
+            .render_skill_headers_markdown()
             .contains("Runtime-loaded log review checklist"));
     }
 
@@ -1519,8 +2038,8 @@ when_to_use: |
 id: ghost
 binding_type: builtin
 binding_name: missing_executor
-description: This tool has no executor.
-prompt_when: |
+summary: This tool has no executor.
+description: |
   Should not load.
 input_properties:
   query: string
@@ -1528,7 +2047,7 @@ example_json: |
   {
     "action": "ghost",
     "intent": "Should not execute.",
-    "input": {
+    "args": {
       "query": "x"
     }
   }

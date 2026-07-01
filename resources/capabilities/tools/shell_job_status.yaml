@@ -2,12 +2,12 @@ kind: tool
 id: shell_job_status
 binding_type: builtin
 binding_name: shell_job_status
-description: Check a background shell job.
-prompt_when: |
+summary: Check a background shell job.
+description: |
   Check a background shell job previously started by run_bash.
 prompt_input: |
-  Requires input.job_id from run_bash and input.timeout_ms chosen by you for
-  this check; 0 means immediate check, max 15000.
+  Requires job_id from the previous run_bash result and timeout_ms chosen by
+  you for this check; 0 means immediate check, max 15000.
 prompt_result: |
   Returns running with partial output, or finished with exit code and bounded
   output. job_not_found means the job id is unknown.
@@ -38,7 +38,7 @@ example_json: |
   {
     "action": "shell_job_status",
     "intent": "Check whether the background build finished.",
-    "input": {
+    "args": {
       "job_id": "job_1782200000000_1",
       "timeout_ms": 10000
     }

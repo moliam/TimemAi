@@ -2,32 +2,32 @@ kind: tool
 id: run_bash
 binding_type: builtin
 binding_name: run_bash
-description: Run local shell commands.
-prompt_when: |
-  Run a shell command on the local machine when local evidence or local changes
-  are needed. Supports foreground and background execution. Provide
-  read_back_command when stdout needs verification. Opt-in via
-  large_readback_opt_in if output is truncated.
+summary: Run local shell commands.
+prompt_synopsis: |
+  run_bash command=<shell_command> [timeout_ms=<n>] [background=true|mode=background]
+description: |
+  `run_bash` provides you the capability to run a shell command on the local machine and collect the output of the command. This capability is very powerful, such as running bin, reading/editing file, almost everything. Supports foreground and background execution. With status=finished and final_answer, the response may include one final run_bash command; that command's exit code decides whether final_answer is shown.
 prompt_input: |
-  Use input.command for the shell command, or input.read_back_command for a
-  verification/readback command. Optional: timeout_ms, background=true or
-  mode=background, large_readback_opt_in.
+  Use command for the shell command. Optional: timeout_ms, background=true or
+  mode=background. If status=finished and final_answer includes one final
+  run_bash command, keep it foreground-only and use the command exit code as the
+  final completion check.
 prompt_result: |
   Foreground returns status and bounded output. Background returns job_id; use
   shell_job_status with that job_id and your chosen timeout_ms to wait/check.
-  Errors are short machine-readable strings such as timeout or command_failed.
+  With status=finished and final_answer, the final command exit code determines
+  whether to really finish or continue. If the command exits nonzero, runtime
+  ignores final_answer and returns the command output for continued work.
 input_schema: |
   {
     "type": "object",
     "properties": {
       "command": {"type": "string", "description": "Shell command to execute."},
-      "read_back_command": {"type": "string", "description": "Follow-up command used to verify stdout or file results."},
       "timeout_ms": {"type": "integer", "description": "Foreground wait budget in milliseconds."},
       "background": {"type": "boolean", "description": "When true, return a job_id instead of blocking."},
-      "mode": {"type": "string", "enum": ["foreground", "background"], "description": "Execution mode alias."},
-      "large_readback_opt_in": {"type": "object", "description": "Explicit opt-in when large output readback is needed."}
+      "mode": {"type": "string", "enum": ["foreground", "background"], "description": "Execution mode alias."}
     },
-    "x-required-any": [["command", "read_back_command"]]
+    "required": ["command"]
   }
 output_schema: |
   {
@@ -48,7 +48,7 @@ example_json: |
   {
     "action": "run_bash",
     "intent": "Count files in the current folder.",
-    "input": {
+    "args": {
       "command": "rg --files | wc -l",
       "timeout_ms": 5000
     }

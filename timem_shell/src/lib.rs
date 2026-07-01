@@ -1,8 +1,7 @@
 use agent_core::{CoreProfile, LlmResponse, MemGuard, UsageStats};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -63,6 +62,10 @@ pub struct ShellStatusSnapshot {
     pub elapsed_secs: u64,
     pub max_llm_input_tokens: u32,
     pub retry_notice: Option<String>,
+    pub retry_until_epoch_ms: Option<u128>,
+    pub retry_error: Option<String>,
+    pub retry_attempt: Option<u32>,
+    pub retry_max_attempts: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +208,8 @@ pub fn token_status(stats: &UsageStats) -> String {
 
 fn thinking_status_lines(snapshot: &ShellStatusSnapshot) -> Vec<String> {
     let latest = meaningful_latest(snapshot.latest_usage.as_ref());
+    let retry_lines = retry_status_lines(snapshot);
+    let has_retry = !retry_lines.is_empty();
     let mut lines = Vec::new();
     lines.push(format!(
         "{}:{} ⇌{} ║ {}",
@@ -219,27 +224,91 @@ fn thinking_status_lines(snapshot: &ShellStatusSnapshot) -> Vec<String> {
         .unwrap_or(snapshot.usage.prompt_tokens);
     lines.push(format!(
         "  {} context : {}",
-        if snapshot.retry_notice.is_some() || latest.is_some() {
+        if has_retry || latest.is_some() {
             "├─"
         } else {
             "└─"
         },
         context_bar(context_tokens, snapshot.max_llm_input_tokens)
     ));
-    let latest_prefix = if snapshot.retry_notice.is_some() {
-        "├─"
-    } else {
-        "└─"
-    };
+    let latest_prefix = if has_retry { "├─" } else { "└─" };
     if let Some(usage) = latest {
         lines.push(format!("  {latest_prefix} {}", compact_token_latest(usage)));
-    } else if snapshot.retry_notice.is_some() {
+    } else if has_retry {
         lines.push(format!("  {latest_prefix} △0  ▽0"));
     }
-    if let Some(retry_notice) = snapshot.retry_notice.as_deref() {
-        lines.push(format!("  └─ {}", retry_notice));
+    lines.extend(retry_lines);
+    lines
+}
+
+fn retry_status_lines(snapshot: &ShellStatusSnapshot) -> Vec<String> {
+    let has_retry = snapshot.retry_notice.is_some()
+        || snapshot.retry_until_epoch_ms.is_some()
+        || snapshot.retry_error.is_some();
+    if !has_retry {
+        return Vec::new();
+    }
+    let remaining_secs = snapshot
+        .retry_until_epoch_ms
+        .map(retry_remaining_secs)
+        .unwrap_or(0);
+    let main = snapshot
+        .retry_notice
+        .as_deref()
+        .map(compact_retry_notice)
+        .unwrap_or_else(|| {
+            let attempt = snapshot.retry_attempt.unwrap_or(1);
+            let max_attempts = snapshot.retry_max_attempts.unwrap_or(5);
+            format!(
+                "网络错误，{}s 后重试（第{}/{}次）",
+                remaining_secs, attempt, max_attempts
+            )
+        });
+    let mut lines = Vec::new();
+    if let Some(error) = snapshot
+        .retry_error
+        .as_deref()
+        .filter(|x| !x.trim().is_empty())
+    {
+        lines.push(format!("  ├─ {main}"));
+        lines.push(format!("  └─ 详情：{}", compact_retry_notice(error)));
+    } else {
+        lines.push(format!("  └─ {main}"));
     }
     lines
+}
+
+fn retry_remaining_secs(until_epoch_ms: u128) -> u64 {
+    let now = current_epoch_ms();
+    let remaining_ms = until_epoch_ms.saturating_sub(now);
+    remaining_ms.div_ceil(1000) as u64
+}
+
+fn current_epoch_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn compact_retry_notice(text: &str) -> String {
+    const MAX_CHARS: usize = 78;
+    let compacted = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>();
+    if compacted.chars().count() <= MAX_CHARS {
+        return compacted;
+    }
+    let mut out = compacted
+        .chars()
+        .take(MAX_CHARS.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
 }
 
 fn final_status_line(
@@ -447,12 +516,12 @@ pub fn action_status_hint(content: &str) -> Option<ActionStatusHint> {
     let value = observation::parse_observation_json_value(content)?;
     let first = value.get("next_actions")?.as_array()?.first()?;
     let action = first.get("action").and_then(Value::as_str).unwrap_or("");
+    let args = action_args_object(first);
     let intent = first
         .get("intent")
         .and_then(Value::as_str)
         .or_else(|| {
-            first
-                .get("input")
+            args.as_ref()
                 .and_then(|input| input.get("intent"))
                 .and_then(Value::as_str)
         })
@@ -461,7 +530,7 @@ pub fn action_status_hint(content: &str) -> Option<ActionStatusHint> {
         .map(ToString::to_string);
     match action {
         "memmgr" => {
-            let input = first.get("input").unwrap_or(first);
+            let input = args.as_ref().unwrap_or(first);
             let mem_type = input.get("type").and_then(Value::as_str).unwrap_or("");
             let op = input.get("op").and_then(Value::as_str).unwrap_or("");
             let (fallback, marker) = match (mem_type, op) {
@@ -504,6 +573,13 @@ pub fn action_status_hint(content: &str) -> Option<ActionStatusHint> {
             intent: intent.unwrap_or_else(|| "检查后台任务".to_string()),
             memory_marker: String::new(),
         }),
+        _ => None,
+    }
+}
+
+fn action_args_object(action: &Value) -> Option<Value> {
+    match action.get("args")? {
+        Value::Object(_) => action.get("args").cloned(),
         _ => None,
     }
 }
@@ -1175,17 +1251,38 @@ pub fn append_audit(path: &Path, event: &Value) -> std::io::Result<()> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-            writeln!(file, "{}", serde_json::to_string(event).unwrap_or_default())
+            let mut doc = read_audit_doc(path)?;
+            doc["events"]
+                .as_array_mut()
+                .expect("audit doc events must be an array")
+                .push(event.clone());
+            let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+            fs::write(path, format!("{text}\n"))
         })
         .map_err(std::io::Error::other)?
 }
 
+fn read_audit_doc(path: &Path) -> std::io::Result<Value> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(json!({"version": 1, "events": []}));
+    };
+    if text.trim().is_empty() {
+        return Ok(json!({"version": 1, "events": []}));
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+        if value.get("events").and_then(Value::as_array).is_some() {
+            return Ok(value);
+        }
+    }
+    let events = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    Ok(json!({"version": 1, "events": events}))
+}
+
 pub fn audit_path(space: &str) -> PathBuf {
-    data_root()
-        .join(space)
-        .join("audit")
-        .join("api_audit.jsonl")
+    data_root().join(space).join("audit").join("api_audit.json")
 }
 
 pub fn action_audit_path(space: &str) -> PathBuf {
@@ -2186,9 +2283,9 @@ mod tests {
     #[test]
     fn chinese_backspace_removes_one_character() {
         let mut line = LineBuffer::default();
-        line.push_str("我叫默默");
+        line.push_str("中文测试");
         assert!(line.backspace());
-        assert_eq!(line.as_string(), "我叫默");
+        assert_eq!(line.as_string(), "中文测");
     }
 
     #[test]
@@ -2699,13 +2796,42 @@ mod tests {
     }
 
     #[test]
-    fn append_audit_writes_jsonl() {
+    fn append_audit_writes_json_document() {
         let mut path = std::env::temp_dir();
-        path.push(format!("timem_shell_audit_{}.jsonl", std::process::id()));
+        path.push(format!("timem_shell_audit_{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         append_audit(&path, &json!({"type":"turn_final","ok":true})).unwrap();
+        append_audit(&path, &json!({"type":"llm_request","ok":true})).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("turn_final"));
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["version"], 1);
+        let events = doc["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], "turn_final");
+        assert_eq!(events[1]["type"], "llm_request");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn append_audit_migrates_legacy_jsonl_to_json_document() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "timem_shell_legacy_audit_{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "{\"type\":\"turn_start\",\"ok\":true}\n").unwrap();
+
+        append_audit(&path, &json!({"type":"turn_final","ok":true})).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["version"], 1);
+        let events = doc["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], "turn_start");
+        assert_eq!(events[1]["type"], "turn_final");
+        assert!(!text.lines().next().unwrap().starts_with(r#"{"type""#));
         let _ = std::fs::remove_file(path);
     }
 
@@ -2714,7 +2840,7 @@ mod tests {
         std::env::remove_var("TIMEM_DATA_DIR");
         assert_eq!(
             audit_path(".test_mem"),
-            std::path::PathBuf::from("data/.test_mem/audit/api_audit.jsonl")
+            std::path::PathBuf::from("data/.test_mem/audit/api_audit.json")
         );
         assert_eq!(
             action_audit_path(".test_mem"),
@@ -2728,7 +2854,7 @@ mod tests {
         std::env::set_var("TIMEM_DATA_DIR", "/tmp/timem-shell-data-test");
         assert_eq!(
             audit_path(".test_mem"),
-            std::path::PathBuf::from("/tmp/timem-shell-data-test/.test_mem/audit/api_audit.jsonl")
+            std::path::PathBuf::from("/tmp/timem-shell-data-test/.test_mem/audit/api_audit.json")
         );
         assert_eq!(
             action_audit_path(".test_mem"),
@@ -2745,46 +2871,46 @@ mod tests {
 
     #[test]
     fn action_status_hint_uses_model_intent() {
-        let hint = action_status_hint(r#"{"next_actions":[{"action":"query_memory","intent":"确认用户姓名","input":{"query":"名字"}}]}"#).unwrap();
-        assert_eq!(hint.intent, "确认用户姓名");
+        let hint = action_status_hint(r#"{"next_actions":[{"action":"query_memory","intent":"确认测试代号","args":{"query":"测试代号"}}]}"#).unwrap();
+        assert_eq!(hint.intent, "确认测试代号");
         assert_eq!(hint.memory_marker, "◂⛃");
     }
 
     #[test]
     fn action_status_hint_marks_memmgr_durable_read_and_write() {
-        let read_hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"确认用户姓名","input":{"type":"durable","op":"query","query":"名字"}}]}"#).unwrap();
-        assert_eq!(read_hint.intent, "确认用户姓名");
+        let read_hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"确认测试代号","args":{"type":"durable","op":"query","query":"测试代号"}}]}"#).unwrap();
+        assert_eq!(read_hint.intent, "确认测试代号");
         assert_eq!(read_hint.memory_marker, "◂⛃");
 
-        let write_hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"更新用户姓名","input":{"type":"durable","op":"upsert","id":"user_name","content":"用户叫默默"}}]}"#).unwrap();
-        assert_eq!(write_hint.intent, "更新用户姓名");
+        let write_hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"更新测试代号","args":{"type":"durable","op":"upsert","id":"user_name","content":"测试代号是 ALPHA-42"}}]}"#).unwrap();
+        assert_eq!(write_hint.intent, "更新测试代号");
         assert_eq!(write_hint.memory_marker, "▸⛃");
     }
 
     #[test]
     fn action_status_hint_marks_memmgr_raw_chat_without_durable_marker() {
-        let hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"查询刚才说法","input":{"type":"raw_chat","op":"query","query":"刚才"}}]}"#).unwrap();
+        let hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"查询刚才说法","args":{"type":"raw_chat","op":"query","query":"刚才"}}]}"#).unwrap();
         assert_eq!(hint.intent, "查询刚才说法");
         assert_eq!(hint.memory_marker, "");
     }
 
     #[test]
     fn action_status_hint_marks_self_tool_without_memory_icon() {
-        let hint = action_status_hint(r#"{"next_actions":[{"action":"self_tool","intent":"查看 Timem 路径","input":{"type":"mem_path","op":"read"}}]}"#).unwrap();
+        let hint = action_status_hint(r#"{"next_actions":[{"action":"self_tool","intent":"查看 Timem 路径","args":{"type":"mem_path","op":"read"}}]}"#).unwrap();
         assert_eq!(hint.intent, "查看 Timem 路径");
         assert_eq!(hint.memory_marker, "");
     }
 
     #[test]
     fn action_status_hint_marks_chat_history_without_memory_icon() {
-        let hint = action_status_hint(r#"{"next_actions":[{"action":"chat_history_query","intent":"查询刚才说法","input":{"query":"刚才"}}]}"#).unwrap();
+        let hint = action_status_hint(r#"{"next_actions":[{"action":"chat_history_query","intent":"查询刚才说法","args":{"query":"刚才"}}]}"#).unwrap();
         assert_eq!(hint.intent, "查询刚才说法");
         assert_eq!(hint.memory_marker, "");
     }
 
     #[test]
     fn action_status_hint_marks_run_bash_without_memory_icon() {
-        let hint = action_status_hint(r#"{"next_actions":[{"action":"run_bash","intent":"统计日志行数","input":{"command":"rg --files | wc -l"}}]}"#).unwrap();
+        let hint = action_status_hint(r#"{"next_actions":[{"action":"run_bash","intent":"统计日志行数","args":{"command":"rg --files | wc -l"}}]}"#).unwrap();
         assert_eq!(hint.intent, "统计日志行数");
         assert_eq!(hint.memory_marker, "");
     }
@@ -2800,7 +2926,7 @@ mod tests {
     {
       "action": "run_bash",
       "intent": "统计提交",
-      "input": {"command": "git log --oneline -5"}
+      "args":{"command":"git log --oneline -5"}
     }
   ]
 }
@@ -2815,7 +2941,7 @@ mod tests {
     #[test]
     fn action_status_hint_marks_shell_job_status_without_memory_icon() {
         let hint = action_status_hint(
-            r#"{"next_actions":[{"action":"shell_job_status","intent":"检查后台测试","input":{"job_id":"job_1"}}]}"#,
+            r#"{"next_actions":[{"action":"shell_job_status","intent":"检查后台测试","args":{"job_id":"job_1"}}]}"#,
         )
         .unwrap();
         assert_eq!(hint.intent, "检查后台测试");
@@ -2824,14 +2950,14 @@ mod tests {
 
     #[test]
     fn action_status_hint_marks_sql_read_as_memory_lookup() {
-        let hint = action_status_hint(r#"{"next_actions":[{"action":"memory_sql_query","intent":"按入库时间查询","input":{"sql":"SELECT content FROM memories","limit":5}}]}"#).unwrap();
+        let hint = action_status_hint(r#"{"next_actions":[{"action":"memory_sql_query","intent":"按入库时间查询","args":{"sql":"SELECT content FROM memories","limit":5}}]}"#).unwrap();
         assert_eq!(hint.intent, "按入库时间查询");
         assert_eq!(hint.memory_marker, "◂⛃");
     }
 
     #[test]
     fn supporting_context_does_not_infer_memory_lookup_from_language() {
-        let identity_context = supporting_context("aliyun", "qwen-plus", "我叫什么名字");
+        let identity_context = supporting_context("aliyun", "qwen-plus", "我的测试代号是什么");
         let explicit_memory_text_context = supporting_context("aliyun", "qwen-plus", "查记忆");
         assert!(!identity_context.contains("memory_lookup_hint"));
         assert!(!explicit_memory_text_context.contains("memory_lookup_hint"));
@@ -2873,6 +2999,10 @@ mod tests {
                 elapsed_secs: 7,
                 max_llm_input_tokens: 100_000,
                 retry_notice: None,
+                retry_until_epoch_ms: None,
+                retry_error: None,
+                retry_attempt: None,
+                retry_max_attempts: None,
             },
             "08:56:33",
         );
@@ -2906,6 +3036,10 @@ mod tests {
                 elapsed_secs: 65,
                 max_llm_input_tokens: 100_000,
                 retry_notice: None,
+                retry_until_epoch_ms: None,
+                retry_error: None,
+                retry_attempt: None,
+                retry_max_attempts: None,
             },
             "23:33:05",
         );
@@ -2946,6 +3080,10 @@ mod tests {
                     elapsed_secs: 12,
                     max_llm_input_tokens: 100_000,
                     retry_notice: None,
+                    retry_until_epoch_ms: None,
+                    retry_error: None,
+                    retry_attempt: None,
+                    retry_max_attempts: None,
                 },
                 observations,
             },
@@ -2981,6 +3119,10 @@ mod tests {
                     elapsed_secs: 3,
                     max_llm_input_tokens: 100_000,
                     retry_notice: Some("系统/HTTP 错误，10s 后重试 1/5：provider_http_500".into()),
+                    retry_until_epoch_ms: None,
+                    retry_error: None,
+                    retry_attempt: None,
+                    retry_max_attempts: None,
                 },
                 observations: ObservationPanel::default(),
             },
@@ -2990,6 +3132,83 @@ mod tests {
         assert!(view.contains("├─ context : ▱▱▱▱▱▱▱▱▱▱"));
         assert!(view.contains("├─ △0  ▽0"));
         assert!(view.contains("└─ 系统/HTTP 错误，10s 后重试 1/5：provider_http_500"));
+    }
+
+    #[test]
+    fn thinking_status_line_compacts_long_retry_notice_to_one_line() {
+        let long_error = "系统/HTTP 错误，10s 后重试 1/5：provider_network_error: curl: (16) Error in the HTTP2 framing layer while reading response headers from upstream gateway after a long timeout";
+        let view = render_thinking_view_at(
+            &ThinkingViewSnapshot {
+                status: ShellStatusSnapshot {
+                    provider: "aliyun".into(),
+                    model: "qwen-plus".into(),
+                    intent: String::new(),
+                    memory_marker: String::new(),
+                    model_round: 1,
+                    direction: ModelDirection::Upstream,
+                    usage: UsageStats::zero(),
+                    latest_usage: None,
+                    tick: 0,
+                    elapsed_secs: 3,
+                    max_llm_input_tokens: 100_000,
+                    retry_notice: Some(long_error.into()),
+                    retry_until_epoch_ms: None,
+                    retry_error: None,
+                    retry_attempt: None,
+                    retry_max_attempts: None,
+                },
+                observations: ObservationPanel::default(),
+            },
+            "12:00:00",
+        );
+
+        let retry_lines: Vec<_> = view
+            .lines()
+            .filter(|line| line.contains("系统/HTTP 错误"))
+            .collect();
+        assert_eq!(retry_lines.len(), 1, "{view}");
+        assert!(retry_lines[0].contains('…'), "{view}");
+        assert!(retry_lines[0].chars().count() < 120, "{view}");
+        assert!(!view.contains("reading response headers from upstream gateway"));
+    }
+
+    #[test]
+    fn thinking_status_line_shows_network_retry_countdown_and_detail_line() {
+        let view = render_thinking_view_at(
+            &ThinkingViewSnapshot {
+                status: ShellStatusSnapshot {
+                    provider: "aliyun".into(),
+                    model: "qwen-plus".into(),
+                    intent: String::new(),
+                    memory_marker: String::new(),
+                    model_round: 1,
+                    direction: ModelDirection::Upstream,
+                    usage: UsageStats::zero(),
+                    latest_usage: None,
+                    tick: 0,
+                    elapsed_secs: 3,
+                    max_llm_input_tokens: 100_000,
+                    retry_notice: None,
+                    retry_until_epoch_ms: Some(current_epoch_ms() + 10_000),
+                    retry_error: Some(
+                        "provider_network_error: curl: (16) Error in the HTTP2 framing layer while reading response headers from upstream gateway"
+                            .into(),
+                    ),
+                    retry_attempt: Some(1),
+                    retry_max_attempts: Some(5),
+                },
+                observations: ObservationPanel::default(),
+            },
+            "12:00:00",
+        );
+
+        assert!(
+            view.contains("├─ 网络错误，10s 后重试（第1/5次）"),
+            "{view}"
+        );
+        assert!(view.contains("└─ 详情：provider_network_error"), "{view}");
+        assert!(!view.contains("网络错误，10s 后重试（第1次）"), "{view}");
+        assert!(!view.contains("reading response headers from upstream gateway"));
     }
 
     #[test]
@@ -3018,6 +3237,10 @@ mod tests {
                     elapsed_secs: 80,
                     max_llm_input_tokens: 100_000,
                     retry_notice: None,
+                    retry_until_epoch_ms: None,
+                    retry_error: None,
+                    retry_attempt: None,
+                    retry_max_attempts: None,
                 },
                 observations: ObservationPanel::default(),
             },
@@ -3030,7 +3253,7 @@ mod tests {
     #[test]
     fn final_response_visual_contract() {
         let rendered = render_final_response_at(
-            "你叫默默。",
+            "测试代号是 ALPHA-42。",
             &UsageStats {
                 llm_calls: 2,
                 mem_reads: 1,
@@ -3057,8 +3280,8 @@ mod tests {
         assert!(rendered
             .lines()
             .nth(1)
-            .is_some_and(|line| line == "你叫默默。"));
-        assert!(rendered.contains("你叫默默。"));
+            .is_some_and(|line| line == "测试代号是 ALPHA-42。"));
+        assert!(rendered.contains("测试代号是 ALPHA-42。"));
         assert!(rendered.contains("aliyun:qwen-plus ⇌2 ║ ctx[1%]  ▲812  ▼52  ⌁384"));
         assert!(!rendered.contains("▼52(+31)"));
         assert!(!rendered.contains("你 >"));

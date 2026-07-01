@@ -384,7 +384,10 @@ fn extract_balanced_json_object(input: &str) -> Option<String> {
 
 fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
     let action_name = action.get("action").and_then(Value::as_str).unwrap_or("");
-    let input = action.get("input").unwrap_or(&Value::Null);
+    let input = match action.get("args") {
+        Some(Value::Object(_)) => action.get("args").unwrap(),
+        _ => &Value::Null,
+    };
     let intent = action
         .get("intent")
         .and_then(Value::as_str)
@@ -397,12 +400,6 @@ fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
                 .get("command")
                 .or_else(|| action.get("command"))
                 .and_then(Value::as_str)
-                .or_else(|| {
-                    input
-                        .get("read_back_command")
-                        .or_else(|| action.get("read_back_command"))
-                        .and_then(Value::as_str)
-                })
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
             else {
@@ -727,7 +724,7 @@ mod tests {
     #[test]
     fn continuing_report_job_progress_renders_progress_marker() {
         let events = observation_events_from_model_response(
-            r#"{"report_job_progress":"已经完成备份，继续写文件。","next_actions":[{"action":"run_bash","intent":"写入文件","input":{"command":"printf ok"}}]}"#,
+            r#"{"report_job_progress":"已经完成备份，继续写文件。","next_actions":[{"action":"run_bash","intent":"写入文件","args":{"command":"printf ok"}}]}"#,
         );
         assert_eq!(
             events,
@@ -745,7 +742,7 @@ mod tests {
     #[test]
     fn model_response_maps_run_bash_to_user_facing_bash() {
         let events = observation_events_from_model_response(
-            r#"{"thought":"不要展示的模型思考","next_actions":[{"action":"run_bash","intent":"统计当前代码量","input":{"command":"rg --files | wc -l"}}]}"#,
+            r#"{"thought":"不要展示的模型思考","next_actions":[{"action":"run_bash","intent":"统计当前代码量","args":{"command":"rg --files | wc -l"}}]}"#,
         );
         assert_eq!(
             events,
@@ -773,9 +770,7 @@ mod tests {
     {
       "action": "run_bash",
       "intent": "整理 v0.5.2 之后的提交",
-      "input": {
-        "command": "git log --oneline v0.5.2..HEAD"
-      }
+      "args":{"command":"git log --oneline v0.5.2..HEAD"}
     }
   ]
 }
@@ -806,8 +801,8 @@ mod tests {
   "next_actions": [
     {
       "action": "query_memory",
-      "intent": "查询用户姓名记忆",
-      "input": {"query": "名字", "limit": 5}
+      "intent": "查询测试代号记忆",
+      "args":{"query":"测试代号","limit":5}
     }
   ]
 }
@@ -817,7 +812,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("查询用户姓名记忆".to_string()),
+                ObservationEvent::Persistent("查询测试代号记忆".to_string()),
                 ObservationEvent::PersistentChild {
                     text: "记忆: 查询".to_string(),
                     is_last: true
@@ -830,14 +825,14 @@ mod tests {
     fn memmgr_actions_map_to_user_readable_observation_events() {
         let events = observation_events_from_model_response(
             r#"{"next_actions":[
-                {"action":"memmgr","intent":"查询用户姓名记忆","input":{"type":"durable","op":"query","query":"名字"}},
-                {"action":"memmgr","intent":"移除过期上下文","input":{"type":"context","op":"shrink","delta_ids":["pd_1"]}}
+                {"action":"memmgr","intent":"查询测试代号记忆","args":{"type":"durable","op":"query","query":"测试代号"}},
+                {"action":"memmgr","intent":"移除过期上下文","args":{"type":"context","op":"shrink","delta_ids":["pd_1"]}}
             ]}"#,
         );
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("查询用户姓名记忆".to_string()),
+                ObservationEvent::Persistent("查询测试代号记忆".to_string()),
                 ObservationEvent::PersistentChild {
                     text: "长期记忆: 查询".to_string(),
                     is_last: true
@@ -855,7 +850,7 @@ mod tests {
     fn capmgr_action_maps_to_user_readable_observation_events() {
         let events = observation_events_from_model_response(
             r#"{"next_actions":[
-                {"action":"capmgr","intent":"加载发布检查能力","input":{"op":"load","kind":"skill","id":"release_quality_gate"}}
+                {"action":"capmgr","intent":"加载发布检查能力","args":{"op":"load","kind":"skill","id":"release_quality_gate"}}
             ]}"#,
         );
         assert_eq!(
@@ -874,8 +869,8 @@ mod tests {
     fn self_tool_action_maps_to_user_readable_observation_events() {
         let events = observation_events_from_model_response(
             r#"{"next_actions":[
-                {"action":"self_tool","intent":"查看 Timem 记忆路径","input":{"type":"mem_path","op":"read"}},
-                {"action":"self_tool","intent":"查看 Timem 软件信息","input":{"type":"about_me","op":"read"}}
+                {"action":"self_tool","intent":"查看 Timem 记忆路径","args":{"type":"mem_path","op":"read"}},
+                {"action":"self_tool","intent":"查看 Timem 软件信息","args":{"type":"about_me","op":"read"}}
             ]}"#,
         );
         assert_eq!(
@@ -905,7 +900,7 @@ mod tests {
     {
       "action": "run_bash",
       "intent": "写入包含 JSON 的示例",
-      "input": {
+      "args": {
         "command": "printf '{\"ok\":true}' > target/example.json"
       }
     }
@@ -930,15 +925,15 @@ mod tests {
     fn model_output_maps_first_two_actions_and_ignores_extra_for_compact_ui() {
         let events = observation_events_from_model_response(
             r#"{"next_actions":[
-                {"action":"query_memory","intent":"查名字","input":{"query":"名字"}},
-                {"action":"run_bash","intent":"看状态","input":{"command":"git status --short"}},
-                {"action":"chat_history_query","intent":"查聊天","input":{"query":"昨天"}}
+                {"action":"query_memory","intent":"查测试代号","args":{"query":"测试代号"}},
+                {"action":"run_bash","intent":"看状态","args":{"command":"git status --short"}},
+                {"action":"chat_history_query","intent":"查聊天","args":{"query":"昨天"}}
             ]}"#,
         );
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("查名字".to_string()),
+                ObservationEvent::Persistent("查测试代号".to_string()),
                 ObservationEvent::PersistentChild {
                     text: "记忆: 查询".to_string(),
                     is_last: true
@@ -965,7 +960,7 @@ mod tests {
         let events = observation_events_from_model_response(
             r#"
 ```json
-{"next_actions":[{"action":"run_bash","intent":"坏掉了","input":{"command":"git status"}}
+{"next_actions":[{"action":"run_bash","intent":"坏掉了","args":{"command":"git status"}}
 "#,
         );
         assert!(events.is_empty());
@@ -974,7 +969,7 @@ mod tests {
     #[test]
     fn unknown_action_uses_intent_without_exposing_action_name() {
         let events = observation_events_from_model_response(
-            r#"{"next_actions":[{"action":"future_tool","intent":"执行未来扩展动作","input":{}}]}"#,
+            r#"{"next_actions":[{"action":"future_tool","intent":"执行未来扩展动作","args":{}}]}"#,
         );
         assert_eq!(
             events,
@@ -994,7 +989,7 @@ mod tests {
     fn model_response_does_not_expose_internal_action_name() {
         let mut panel = ObservationPanel::default();
         panel.apply_all(observation_events_from_model_response(
-            r#"{"next_actions":[{"action":"run_bash","intent":"统计","input":{"command":"rg --files | wc -l"}}]}"#,
+            r#"{"next_actions":[{"action":"run_bash","intent":"统计","args":{"command":"rg --files | wc -l"}}]}"#,
         ));
         let rendered = render_observation_panel(&panel);
         assert!(rendered.contains("· 统计"));
@@ -1021,7 +1016,7 @@ mod tests {
     #[test]
     fn run_bash_without_intent_shows_plain_label() {
         let events = observation_events_from_model_response(
-            r#"{"next_actions":[{"action":"run_bash","input":{"command":"ls -la"}}]}"#,
+            r#"{"next_actions":[{"action":"run_bash","args":{"command":"ls -la"}}]}"#,
         );
         assert_eq!(
             events,

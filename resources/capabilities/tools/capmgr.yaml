@@ -2,15 +2,15 @@ kind: tool
 id: capmgr
 binding_type: builtin
 binding_name: capmgr
-description: Manage capability tools and skills.
-prompt_when: |
+summary: Manage capability tools and skills.
+description: |
   Capability manager. Use op=list to inspect available capability headers.
   Use op=load when a specific skill body or tool detail is needed.
 prompt_input: |
   Requires op. Use op=list for headers. For op=load or op=inspect, also provide
   kind=tool|skill and id.
 prompt_result: |
-  list returns available capability headers. load returns a skill body or tool
+  `list` returns available capability headers. `load` returns a skill body or tool
   detail when you need more than the static catalog.
 input_schema: |
   {
@@ -53,10 +53,10 @@ output_schema: |
 example_json: |
   {
     "action": "capmgr",
-    "intent": "Load a needed skill body before using it.",
-    "input": {
+    "intent": "Load skill xx",
+    "args": {
       "op": "load",
       "kind": "skill",
-      "id": "skill_id"
+      "id": "xx_skill_id"
     }
   }

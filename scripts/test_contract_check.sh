@@ -73,6 +73,61 @@ for pattern in "${ci_required[@]}"; do
   fi
 done
 
+for file in resources/capabilities/tools/*.yaml; do
+  if ! awk '/^example_json: \|/{in_example=1; next} /^kind: /{in_example=0} in_example && /"args"[[:space:]]*:/{found=1} END{exit found ? 0 : 1}' "$file"; then
+    echo "tool manifest example_json must include args: $file" >&2
+    exit 1
+  fi
+  if awk '/^example_json: \|/{in_example=1; next} /^kind: /{in_example=0} in_example && /"input"[[:space:]]*:/{found=1} END{exit found ? 0 : 1}' "$file"; then
+    echo "tool manifest example_json must use args, not input: $file" >&2
+    exit 1
+  fi
+done
+
+legacy_action_input_hits="$(
+  rg -n 'next_actions.*"input"[[:space:]]*:' \
+    agent_core/tests timem_shell/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs \
+    | rg -v 'allow_legacy_input_negative_test' || true
+)"
+if [ -n "$legacy_action_input_hits" ]; then
+  echo "mock model outputs must use args, not legacy input:" >&2
+  echo "$legacy_action_input_hits" >&2
+  exit 1
+fi
+if ! search_fixed "allow_legacy_input_negative_test" agent_core/tests/core_tests.rs; then
+  echo "missing explicit negative test marker for legacy input rejection" >&2
+  exit 1
+fi
+string_args_hits="$(
+  rg -n '"args"[[:space:]]*:[[:space:]]*"' \
+    agent_core/tests timem_shell/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
+    | rg -v 'allow_string_args_negative_test' \
+    | rg -v 'response_v1_summary.json' \
+    | rg -v 'docs/static-prompt-expanded.md' \
+    || true
+)"
+if [ -n "$string_args_hits" ]; then
+  echo "mock model outputs and docs must use object args, not string args:" >&2
+  echo "$string_args_hits" >&2
+  exit 1
+fi
+if ! search_fixed "allow_string_args_negative_test" agent_core/tests/core_tests.rs; then
+  echo "missing explicit negative test marker for string args rejection" >&2
+  exit 1
+fi
+
+private_fixture_hits="$(
+  rg -n '默默|李默|儿子|son birthday|6月12|蓝色雨伞|绿色雨衣|fangchang|/Users/limo3|/Users/fangchang|v0\.6 发布检查|AURORA' \
+    agent_core/tests timem_shell/src resources docs README.md CHANGELOG.md scripts \
+    | rg -v 'scripts/test_contract_check.sh' \
+    || true
+)"
+if [ -n "$private_fixture_hits" ]; then
+  echo "tests/docs must not contain private real-user fixture data:" >&2
+  echo "$private_fixture_hits" >&2
+  exit 1
+fi
+
 feature_doc="docs/feature-test-management.md"
 if [ ! -f "$feature_doc" ]; then
   echo "missing feature/test management document: $feature_doc" >&2
@@ -162,9 +217,14 @@ static_prompt_snapshot_required=(
   "read-only audit snapshot"
   "not read by Timem at runtime"
   "[BEGIN SEGMENT 0: prompt_0]"
-  "\"tool_catalog\""
-  "\"result\""
-  "\"json_schema_summary\""
+  "#### \`run_bash\`"
+  "#### \`memmgr\`"
+  "**Usage**"
+  "**Result**"
+  '"args": {'
+  '"command": "'
+  '"fields"'
+  '"status?"'
 )
 
 for pattern in "${static_prompt_snapshot_required[@]}"; do
@@ -176,7 +236,6 @@ done
 
 static_prompt_snapshot_forbidden=(
   "\"output\": {"
-  "Shell command to execute."
   "Background job id when background=true."
   "\"output_file\""
   "\"status_file\""
@@ -187,9 +246,9 @@ static_prompt_snapshot_forbidden=(
   "ui_label"
   "ui_visible"
   "\"tool_policy\""
-  "\"run_bash_readback\""
   "\"sql_tables\""
   "\"bash_safety\""
+  '"$id"'
 )
 
 for pattern in "${static_prompt_snapshot_forbidden[@]}"; do

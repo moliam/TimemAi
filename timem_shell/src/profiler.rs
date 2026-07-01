@@ -269,7 +269,7 @@ mod tests {
         let report = render_prof_report(
             &profiler,
             std::path::Path::new("/missing/memory"),
-            std::path::Path::new("/missing/audit.jsonl"),
+            std::path::Path::new("/missing/audit.json"),
             std::path::Path::new("/missing/action_audit.json"),
         );
         assert!(report.contains("\x1b[1m▸ Token 监控（per model）\x1b[0m"));
@@ -296,18 +296,18 @@ mod tests {
         fs::create_dir_all(&memory_dir).unwrap();
         let memory = memory_dir.join("memory.jsonl");
         let scratch = memory_dir.join("scratch_notes.jsonl");
-        let api_audit = dir.join("api_audit.jsonl");
+        let api_audit = dir.join("api_audit.json");
         let action_audit = dir.join("action_audit.json");
         fs::write(&memory, "{}\n\n{}\n").unwrap();
         fs::write(&scratch, "{}\n").unwrap();
-        fs::write(&api_audit, "audit\n").unwrap();
+        fs::write(&api_audit, "{\n  \"version\": 1,\n  \"events\": []\n}\n").unwrap();
         fs::write(&action_audit, "{\n  \"turns\": []\n}\n").unwrap();
 
         let profile = collect_storage_profile(&memory_dir, &api_audit, &action_audit);
         assert_eq!(profile.durable_entries, 2);
         assert_eq!(profile.scratch_entries, 1);
         assert!(profile.durable_bytes > 0);
-        assert_eq!(profile.api_audit_bytes, 6);
+        assert!(profile.api_audit_bytes > 0);
         assert!(profile.action_audit_bytes > 0);
 
         let _ = fs::remove_dir_all(dir);
@@ -344,7 +344,7 @@ mod tests {
         let report = render_prof_report(
             &profiler,
             std::path::Path::new("/missing/memory"),
-            std::path::Path::new("/missing/audit.jsonl"),
+            std::path::Path::new("/missing/audit.json"),
             std::path::Path::new("/missing/action_audit.json"),
         );
         let call_lines: Vec<&str> = report

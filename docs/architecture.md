@@ -28,7 +28,7 @@ flowchart LR
     Runtime --> Guard
     Guard --> Store["Local data\nmemory + chat history + audit"]
     Core --> Bash["run_bash\nbounded local shell"]
-    Guard --> Audit["audit/api_audit.jsonl\naudit/action_audit.json"]
+    Guard --> Audit["audit/api_audit.json\naudit/action_audit.json"]
 ```
 
 ### `agent_core/`
@@ -81,14 +81,14 @@ Key shell-side modules:
   rows using `├─`/`└─` prefixes.
 - `profiler.rs`: `/prof` token, latency, and storage reporting.
 
-### `resources/static_v1.json`
+### `resources/static_v1.md`
 
 This is the static prompt contract visible to the model. It describes the
 response envelope, tool catalog, memory layers, and safety rules. It should stay
 stable because providers can cache it.
 
-The literal `tool_catalog` in this file is not the long-term source of truth.
-At runtime, `agent_core` replaces it with a catalog generated from built-in
+The literal `{{TOOL_CATALOG}}` placeholder in this file is not the long-term
+source of truth. At runtime, `agent_core` replaces it with a catalog generated from built-in
 `resources/capabilities/tools/*.yaml` manifests plus an optional
 `TIMEM_CAPABILITIES_DIR` overlay. See
 [`docs/capability-system.md`](capability-system.md).
@@ -146,6 +146,34 @@ Non-interactive callers should use `NoopTurnUi`, whose defaults deny approvals,
 do not continue round limits, do not request output expansion, and do not
 require terminal state.
 
+## Host Adapter Boundary and iOS Readiness
+
+`agent_core` is the reusable agent engine. It must remain free of terminal UI
+dependencies such as Reedline, Crossterm, ANSI rendering, prompt menus, or
+terminal input handling. Host integrations should treat it as a state machine:
+
+- call `begin_turn` with user input and host-provided supporting context
+- send `NeedModel.prompt` to the host's provider adapter
+- call `apply_model_response` with the provider response
+- handle `NeedsUserApproval`, `RoundLimitReached`, and `Final` through the host UI
+
+The terminal app is one host adapter. iOS should be another host adapter, not a
+fork of the agent loop. The iOS path should reuse `agent_core` through the
+existing JSON-in/JSON-out C ABI or a thin generated binding, then implement only
+iOS-specific pieces outside the core:
+
+- native UI rendering and input
+- provider networking or a bridge to a trusted local/cloud provider service
+- user approval prompts
+- local shell bridge selection and transport
+- platform-specific audit and data-directory wiring
+
+`timem_shell::session_runtime` is intentionally UI-neutral but still lives in
+the shell crate because it depends on shell-side provider config, audit, and
+profiling. A future shared host-runtime crate may extract that layer if iOS and
+Web need the same provider orchestration. Until then, do not move terminal UI
+or provider HTTP details into `agent_core`.
+
 ## Memory Space Guard
 
 A Timem memory space is the unit of shared memory state:
@@ -170,7 +198,7 @@ data/
    ├─ memory/scratch_notes.jsonl
    ├─ memory/shell_jobs/jobs.jsonl
    └─ audit/
-      ├─ api_audit.jsonl
+      ├─ api_audit.json
       └─ action_audit.json
 ```
 
@@ -192,7 +220,8 @@ space has one authoritative memory writer.
 The guard has two responsibilities:
 
 - Physical consistency: serialize file reads and read-modify-write blocks so
-  JSONL/audit files are not truncated or interleaved by multiple CLI processes.
+  JSONL memory files and JSON audit files are not truncated or interleaved by
+  multiple CLI processes.
 - Semantic conflict detection: durable memory rows carry `version` and
   `updated_at_ms`. Updating or deleting an existing row requires
   `expected_version`, obtained from `memmgr type=durable op=query|sql`. If
@@ -205,7 +234,7 @@ Guarded operations include:
 - scratch write/read/query/delete
 - chat history query/delete over audit-backed records
 - read-only SQL snapshots over durable memory and chat history
-- `api_audit.jsonl` append
+- `api_audit.json` event-document updates
 - `action_audit.json` grouped action audit updates
 - shell job index append/query
 
@@ -364,10 +393,12 @@ The model does not call Rust functions directly. It sends a response envelope.
 The envelope contains an optional `status`, optional `report_job_progress`,
 optional `next_actions`, and optional `final_answer`.
 `report_job_progress` is progress text for the Thought/Action panel while
-the job is working. Missing `status` defaults to `working`. `final_answer` is
-the final user-visible answer when `status:"finished"`. `final_answer` and
-`status:"finished"` must appear together; if one appears without the other,
-runtime returns a protocol-repair slice.
+the job is working. Missing `status` defaults to `working`. `status:"finished"`
+means the current task is complete: after that envelope, runtime ends the
+current model/action interaction and shows `final_answer` as the closing
+user-visible answer. `final_answer` and `status:"finished"` must appear
+together; if one appears without the other, runtime returns a protocol-repair
+slice.
 
 ```mermaid
 stateDiagram-v2
@@ -400,7 +431,7 @@ The top-level JSON object has this shape:
     {
       "action": "run_bash",
       "intent": "Count Rust source lines",
-      "input": {
+      "args": {
         "command": "rg --files -g '*.rs' | xargs wc -l",
         "timeout_ms": 5000
       }
@@ -412,16 +443,23 @@ The top-level JSON object has this shape:
 With omitted `status` or `status:"working"`, `next_actions` is required and
 `report_job_progress` is shown in the Thought/Action panel with a runtime
 progress marker. With `status:"finished"`, `final_answer` is required and is
-shown as the final answer; `final_answer` without `status:"finished"` is also
-rejected for repair. The guarded finalize exception allows
-`status:"finished" + next_actions` only when the last action carries `expect`
-and `expect_timeout_ms`; runtime executes the actions, then runs `expect`
-through the same controlled Bash approval/safety path as `run_bash`. Only a
-passing expect check can show `final_answer` as the final answer. Every action
-needs a top-level `intent`; the shell displays it while the action runs. The
-parser also tolerates common provider drift such as a valid JSON envelope
-embedded in Markdown text, but it never shows raw protocol fragments to the
-user.
+shown as the closing answer before runtime stops this task's action/model
+loop; `final_answer` without `status:"finished"` is also rejected for repair.
+The final command check exception allows
+`status:"finished" + next_actions` only for one final `run_bash` command.
+That action uses the same `command` field as normal shell execution, but it
+must not use background execution or other evidence-gathering work. The command exit code decides whether `final_answer` is shown: exit 0
+shows the answer, while nonzero/timeout returns the command result to the model
+and ignores the premature answer. If the model still needs evidence, it must
+stay `working`, run actions, and answer after the action result is visible. If
+a model mistakenly sends `status:"finished"` plus evidence-gathering actions,
+runtime downgrades that response to `working`, discards the premature
+`final_answer`, executes the actions, and adds a runtime note telling the next
+model round to answer only from the action results. Every action needs a
+top-level `intent`; the shell
+displays it while the action runs. The parser also tolerates common provider
+drift such as a valid JSON envelope embedded in Markdown text, but it never
+shows raw protocol fragments to the user.
 
 ### Action Object
 
@@ -431,7 +469,7 @@ Each `next_actions` item is a structured command:
 {
   "action": "memmgr",
   "intent": "Find recent chat messages by created time",
-  "input": {
+  "args": {
     "type": "raw_chat",
     "op": "sql",
     "sql": "SELECT created_at_ms, role, content FROM chat_messages ORDER BY created_at_ms DESC",
@@ -447,11 +485,13 @@ Fields:
   memory, raw chat history, scratch memory, and dynamic context shrink.
 - `intent`: concise human-readable reason. It is required because shell UI uses
   it as action status.
-- `input`: action-specific structured parameters. Runtime validates this shape
-  before executing anything.
+- `args`: action-specific arguments as a JSON object. Put each parameter in its
+  own JSON field. The top-level parser only validates this generic object
+  against the manifest registry; concrete option meaning and validation
+  belong to the manifest-backed executor for that tool.
 
-The runtime may accept narrow compatibility aliases for older model outputs, but
-new prompt and documentation should use canonical action names.
+The runtime does not execute hidden compatibility aliases. Unknown action names
+produce a protocol repair slice instead of being bridged to an old tool.
 
 ### Action Result Slice
 
@@ -607,7 +647,7 @@ slices:
 {
   "action": "memmgr",
   "intent": "Remove stale context by id.",
-  "input": {
+  "args": {
     "type": "context",
     "op": "shrink",
     "delta_ids": ["pd_1782200000000_2"],
@@ -639,7 +679,7 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
     {
       "action": "memmgr",
       "intent": "Offload dynamic prompt context before shrinking.",
-      "input": {
+      "args": {
         "type": "scratch",
         "op": "write",
         "kind": "context_offload",
@@ -650,7 +690,7 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
     {
       "action": "memmgr",
       "intent": "Remove dynamic prompt deltas covered by the compact summary.",
-      "input": {
+      "args": {
         "type": "context",
         "op": "shrink",
         "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
@@ -711,7 +751,7 @@ environment/config and are redacted from audit logs.
 By default, data is scoped to the directory where `timem-shell` starts:
 
 ```text
-data/<space>/audit/api_audit.jsonl
+data/<space>/audit/api_audit.json
 data/<space>/audit/action_audit.json
 data/<space>/memory/
 data/<space>/memory/shell_jobs/
@@ -720,10 +760,11 @@ data/<space>/shell_history.txt
 
 Use `TIMEM_DATA_DIR=/path/to/data` for a fixed data root.
 
-The API audit log records provider requests/responses and final turn summaries.
-The action audit log groups model-requested actions by user turn and model
-interaction. These are debugging artifacts, not user-facing transcripts.
-Secrets are redacted.
+The API audit file is a JSON document with a `version` field and an `events`
+array. It records provider requests/responses and final turn summaries. The
+action audit file is also JSON and groups model-requested actions by user turn
+and model interaction. These are debugging artifacts, not user-facing
+transcripts. Secrets are redacted.
 
 ## Runtime Boundary
 
@@ -739,7 +780,7 @@ Allowed runtime behavior:
 
 Forbidden runtime behavior:
 
-- Keyword-based intent routing such as detecting "昨天", "生日", or "名字".
+- Keyword-based intent routing such as detecting "昨天", "纪念日", or "测试代号".
 - Semantic alias tables or hardcoded query rewrites.
 - Auto-running memory/chat/shell/search prechecks based on user wording.
 - Fixing one bug report by adding case-specific prompt or runtime rules.

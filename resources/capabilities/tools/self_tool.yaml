@@ -2,8 +2,8 @@ kind: tool
 id: self_tool
 binding_type: builtin
 binding_name: self_tool
-description: Inspect or adjust Timem runtime self information.
-prompt_when: |
+summary: Inspect or adjust Timem runtime self information.
+description: |
   Use when the user asks about Timem itself, current runtime environment
   variables, memory/audit paths, or wants to adjust a non-secret process env
   value for this running Timem session.
@@ -63,7 +63,7 @@ output_schema: |
       "memory_dir": {"type": "string", "description": "Memory data directory."},
       "memory_file": {"type": "string", "description": "Durable memory file."},
       "scratch_file": {"type": "string", "description": "Scratch notes file."},
-      "api_audit_file": {"type": "string", "description": "API audit JSONL file."},
+      "api_audit_file": {"type": "string", "description": "API audit JSON file."},
       "action_audit_file": {"type": "string", "description": "Action audit JSON file."},
       "name": {"type": "string", "description": "Software name."},
       "version": {"type": "string", "description": "Software version."},
@@ -81,7 +81,7 @@ example_json: |
   {
     "action": "self_tool",
     "intent": "Show the current Timem memory and audit paths.",
-    "input": {
+    "args": {
       "type": "mem_path",
       "op": "read"
     }

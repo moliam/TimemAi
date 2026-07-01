@@ -80,15 +80,18 @@ mod tests {
         };
 
         let rendered = render_prompt(
-            r#"{"Response_rule":{"json_schema_summary":"stale"},"Tool_capability":{"tool_catalog":{}}}"#,
+            "## Response Protocol\n{{RESPONSE_V1_SCHEMA}}\n## Tools\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
             &CapabilityRegistry::builtin(),
             &[delta],
         );
 
         assert!(rendered.contains("[BEGIN SEGMENT 0: prompt_0]"));
-        assert!(rendered.contains("\"json_schema_summary\""));
-        assert!(rendered.contains("https://timem.local/schemas/response_v1.schema.json"));
-        assert!(rendered.contains("\"memmgr\""));
+        assert!(!rendered.contains("\"$id\""));
+        assert!(rendered.contains("\"fields\""));
+        assert!(rendered.contains("\"status?\""));
+        assert!(rendered.contains("#### `memmgr`"));
+        assert!(rendered.contains("**Options**"));
+        assert!(!rendered.contains("\"tool_catalog\""));
         assert!(rendered.contains("delta_id: pd_test_1"));
         assert!(rendered.contains("hello"));
         assert!(!rendered.contains("UNIQUE_HIDDEN_SLICE_SENTINEL"));

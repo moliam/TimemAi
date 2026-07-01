@@ -60,6 +60,15 @@ impl SelfToolState {
     }
 
     pub fn execute(&mut self, input: SelfToolInput<'_>) -> String {
+        if input.self_type.trim().is_empty() {
+            return "Action result: self_tool\nerror: invalid_input\nmessage: Missing `type`. Use env, mem_path, or about_me.".to_string();
+        }
+        if input.op.trim().is_empty() {
+            return format!(
+                "Action result: self_tool\ntype: {}\nerror: invalid_input\nmessage: Missing `op`. Use read or write.",
+                input.self_type
+            );
+        }
         match (input.self_type, input.op) {
             ("env", "read") => self.read_env(input.key),
             ("env", "write") => self.write_env(input.key, input.value),
@@ -281,7 +290,7 @@ mod tests {
             value: "",
         });
         assert!(paths.contains("memory_file: /tmp/timem/memory/memory.jsonl"));
-        assert!(paths.contains("api_audit_file: /tmp/timem/audit/api_audit.jsonl"));
+        assert!(paths.contains("api_audit_file: /tmp/timem/audit/api_audit.json"));
 
         let about = tool.execute(SelfToolInput {
             self_type: "about_me",
@@ -309,7 +318,7 @@ mod tests {
                 memory_dir: "/tmp/timem/memory".into(),
                 memory_file: "/tmp/timem/memory/memory.jsonl".into(),
                 scratch_file: "/tmp/timem/memory/scratch_notes.jsonl".into(),
-                api_audit_file: "/tmp/timem/audit/api_audit.jsonl".into(),
+                api_audit_file: "/tmp/timem/audit/api_audit.json".into(),
                 action_audit_file: "/tmp/timem/audit/action_audit.json".into(),
             },
             SelfToolAbout {
