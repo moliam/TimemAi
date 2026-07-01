@@ -14,6 +14,9 @@ coverage.
 - Add or update one feature row for every feature, user-visible behavior change,
   protocol change, storage change, terminal interaction change, provider change,
   or high-risk bug fix.
+- Classify coverage under the two quality axes: Agent Core interaction
+  correctness and UI display correctness. If a feature crosses both, it needs
+  tests on both sides before it is release-ready.
 - A feature is not release-ready if it only has helper-function tests while the
   real user path crosses runtime state, provider IO, storage, shell, TTY, or
   model action parsing.
@@ -35,6 +38,8 @@ coverage.
 
 | Suite | Command / location | Purpose | Release expectation |
 |---|---|---|---|
+| Agent Core interaction correctness | `agent_core/tests/core_tests.rs`, `timem_shell/src/session_runtime.rs` tests, `scripts/edge_regression.sh` | Prove the model/runtime loop, protocol parsing, actions, memory, scratch, shrink, provider errors, audit, cancellation, and multi-round state transitions work. | Must pass for every feature touching runtime behavior. |
+| UI display correctness | `timem_shell` render tests, observation/status/input tests, `scripts/real_tty_smoke.expect` | Prove shell output is accurate, readable, stable, and does not leak internal action names or model-private thought. | Must pass for every feature touching terminal or user-visible display. |
 | Script syntax and install logic | `scripts/ci.sh`, `scripts/install_logic_test.sh` | Keep install/update/uninstall scripts syntactically valid and OS logic testable. | Must pass. |
 | Contract check | `scripts/test_contract_check.sh` | Ensure required regression names, CI gates, and this feature ledger remain present. | Must pass. |
 | Rust workspace tests | `cargo test --workspace` | Unit, integration, parser, protocol, storage, UI-render, and runtime tests. | Must pass; ignored live-network tests are not release blockers. |

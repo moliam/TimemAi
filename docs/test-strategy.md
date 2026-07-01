@@ -9,6 +9,31 @@ The authoritative feature-to-test ledger is
 that ledger in the same change so the feature, test suites, covered boundaries,
 and remaining supplement decisions stay visible.
 
+## Two Quality Axes
+
+Every feature test must be reviewed against two product-facing axes:
+
+1. Agent Core interaction correctness
+
+   The runtime/model loop must advance correctly. These tests prove protocol
+   parsing, model repair, action execution, memory/scratch/chat behavior,
+   prompt shrink, cache planning, provider errors, audit, cancellation, and
+   multi-round state transitions. Prefer `agent_core` unit/integration tests
+   and `session_runtime` fake-model tests for this axis.
+
+2. UI display correctness
+
+   The shell UI must accurately and clearly represent what the runtime is doing.
+   These tests prove observation rendering, status/token lines, config/banner
+   layout, input editing, paste recovery, menus, elapsed time, cancellation
+   prompts, and that internal protocol names or model-private thought are not
+   leaked. Prefer render contract tests plus real pseudo-TTY smoke for this
+   axis.
+
+A behavior that crosses both axes needs tests on both sides. For example,
+model-output parsing must prove that Agent Core can execute the action and that
+the UI can render the same model output as the correct intent/action display.
+
 ## Required Layers
 
 - Function tests: pure parsing, formatting, prompt cache planning, provider

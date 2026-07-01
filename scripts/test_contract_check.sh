@@ -59,6 +59,8 @@ fi
 feature_doc_required=(
   "Feature and Test Management"
   "Maintenance Rules"
+  "Agent Core interaction correctness"
+  "UI display correctness"
   "Feature Coverage Matrix"
   "Current Supplement Decisions"
   "every new feature"
@@ -67,6 +69,26 @@ feature_doc_required=(
 for pattern in "${feature_doc_required[@]}"; do
   if ! rg -q -F -- "$pattern" "$feature_doc"; then
     echo "missing required feature management item: $pattern" >&2
+    exit 1
+  fi
+done
+
+test_strategy_doc="docs/test-strategy.md"
+if [ ! -f "$test_strategy_doc" ]; then
+  echo "missing test strategy document: $test_strategy_doc" >&2
+  exit 1
+fi
+
+test_strategy_required=(
+  "Two Quality Axes"
+  "Agent Core interaction correctness"
+  "UI display correctness"
+  "A behavior that crosses both axes needs tests on both sides"
+)
+
+for pattern in "${test_strategy_required[@]}"; do
+  if ! rg -q -F -- "$pattern" "$test_strategy_doc"; then
+    echo "missing required test strategy item: $pattern" >&2
     exit 1
   fi
 done
