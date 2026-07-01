@@ -223,7 +223,7 @@ pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationE
     events
 }
 
-fn parse_observation_json_value(content: &str) -> Option<Value> {
+pub(crate) fn parse_observation_json_value(content: &str) -> Option<Value> {
     let trimmed = content.trim();
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
         return Some(value);
@@ -528,6 +528,113 @@ mod tests {
                 ObservationEvent::Persistent("整理 v0.5.2 之后的提交".to_string()),
                 ObservationEvent::Active("Bash: git log --oneline v0.5.2..HEAD".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn prose_wrapped_model_response_maps_last_valid_envelope() {
+        let events = observation_events_from_model_response(
+            r#"
+先说明一下：{"not":"an envelope"}
+
+```json
+{
+  "response_to_user": "",
+  "next_actions": [
+    {
+      "action": "query_memory",
+      "intent": "查询用户姓名记忆",
+      "input": {"query": "名字", "limit": 5}
+    }
+  ]
+}
+```
+"#,
+        );
+        assert_eq!(
+            events,
+            vec![ObservationEvent::Persistent(
+                "查询记忆: 查询用户姓名记忆".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn model_output_with_json_like_command_keeps_command_intact() {
+        let events = observation_events_from_model_response(
+            r#"
+```json
+{
+  "next_actions": [
+    {
+      "action": "run_bash",
+      "intent": "写入包含 JSON 的示例",
+      "input": {
+        "command": "printf '{\"ok\":true}' > target/example.json"
+      }
+    }
+  ]
+}
+```
+"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("写入包含 JSON 的示例".to_string()),
+                ObservationEvent::Active(
+                    "Bash: printf '{\"ok\":true}' > target/example.json".to_string()
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn model_output_maps_first_two_actions_and_ignores_extra_for_compact_ui() {
+        let events = observation_events_from_model_response(
+            r#"{"next_actions":[
+                {"action":"query_memory","intent":"查名字","input":{"query":"名字"}},
+                {"action":"run_bash","intent":"看状态","input":{"command":"git status --short"}},
+                {"action":"chat_history_query","intent":"查聊天","input":{"query":"昨天"}}
+            ]}"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("查询记忆: 查名字".to_string()),
+                ObservationEvent::Persistent("看状态".to_string()),
+                ObservationEvent::Active("Bash: git status --short".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn final_only_model_response_creates_no_observation_events() {
+        let events = observation_events_from_model_response(
+            r#"{"thought":"内部思考","response_to_user":"已经完成"}"#,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn truncated_fenced_model_response_creates_no_observation_events() {
+        let events = observation_events_from_model_response(
+            r#"
+```json
+{"next_actions":[{"action":"run_bash","intent":"坏掉了","input":{"command":"git status"}}
+"#,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn unknown_action_uses_intent_without_exposing_action_name() {
+        let events = observation_events_from_model_response(
+            r#"{"next_actions":[{"action":"future_tool","intent":"执行未来扩展动作","input":{}}]}"#,
+        );
+        assert_eq!(
+            events,
+            vec![ObservationEvent::Persistent("执行未来扩展动作".to_string())]
         );
     }
 

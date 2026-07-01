@@ -341,7 +341,7 @@ pub struct ActionStatusHint {
 }
 
 pub fn action_status_hint(content: &str) -> Option<ActionStatusHint> {
-    let value: Value = serde_json::from_str(content.trim()).ok()?;
+    let value = observation::parse_observation_json_value(content)?;
     let first = value.get("next_actions")?.as_array()?.first()?;
     let action = first.get("action").and_then(Value::as_str).unwrap_or("");
     let intent = first
@@ -2591,6 +2591,29 @@ mod tests {
     fn action_status_hint_marks_run_bash_without_memory_icon() {
         let hint = action_status_hint(r#"{"next_actions":[{"action":"run_bash","intent":"统计日志行数","input":{"command":"rg --files | wc -l"}}]}"#).unwrap();
         assert_eq!(hint.intent, "统计日志行数");
+        assert_eq!(hint.memory_marker, "");
+    }
+
+    #[test]
+    fn action_status_hint_accepts_fenced_model_json() {
+        let hint = action_status_hint(
+            r#"
+```json
+{
+  "thought": {"content": "hidden", "durable": false},
+  "next_actions": [
+    {
+      "action": "run_bash",
+      "intent": "统计提交",
+      "input": {"command": "git log --oneline -5"}
+    }
+  ]
+}
+```
+"#,
+        )
+        .unwrap();
+        assert_eq!(hint.intent, "统计提交");
         assert_eq!(hint.memory_marker, "");
     }
 
