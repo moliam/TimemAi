@@ -211,7 +211,7 @@ pub fn render_observation_panel_at(panel: &ObservationPanel, tick: usize) -> Str
 }
 
 pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationEvent> {
-    let Ok(value) = serde_json::from_str::<Value>(content.trim()) else {
+    let Some(value) = parse_observation_json_value(content) else {
         return Vec::new();
     };
     let mut events = Vec::new();
@@ -221,6 +221,71 @@ pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationE
         }
     }
     events
+}
+
+fn parse_observation_json_value(content: &str) -> Option<Value> {
+    let trimmed = content.trim();
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return Some(value);
+    }
+    let mut last_envelope = None;
+    for (idx, ch) in trimmed.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let candidate = &trimmed[idx..];
+        if let Some(object_text) = extract_balanced_json_object(candidate) {
+            if let Ok(value) = serde_json::from_str::<Value>(&object_text) {
+                if is_likely_observation_envelope(&value) {
+                    last_envelope = Some(value);
+                }
+            }
+        }
+    }
+    last_envelope
+}
+
+fn is_likely_observation_envelope(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.contains_key("next_actions")
+            || object.contains_key("response_to_user")
+            || object.contains_key("thought")
+    })
+}
+
+fn extract_balanced_json_object(input: &str) -> Option<String> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some(input[..idx + ch.len_utf8()].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
@@ -430,6 +495,38 @@ mod tests {
             vec![
                 ObservationEvent::Persistent("统计当前代码量".to_string()),
                 ObservationEvent::Active("Bash: rg --files | wc -l".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn fenced_model_response_still_maps_observation_events() {
+        let events = observation_events_from_model_response(
+            r#"
+```json
+{
+  "thought": {
+    "content": "内部推理，不应该显示",
+    "durable": false
+  },
+  "next_actions": [
+    {
+      "action": "run_bash",
+      "intent": "整理 v0.5.2 之后的提交",
+      "input": {
+        "command": "git log --oneline v0.5.2..HEAD"
+      }
+    }
+  ]
+}
+```
+"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("整理 v0.5.2 之后的提交".to_string()),
+                ObservationEvent::Active("Bash: git log --oneline v0.5.2..HEAD".to_string())
             ]
         );
     }
