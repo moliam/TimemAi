@@ -446,13 +446,15 @@ mod tests {
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"response_to_user":"","next_actions":[{{"action":"prompt_shrink","intent":"Remove visible dynamic context after checkpointing.","input":{{"delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+                    r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 13_253, false));
             }
             assert_eq!(self.prompts.len(), 2);
-            assert!(prompt.contains("Action result: prompt_shrink"));
+            assert!(prompt.contains("Action result: memmgr"));
+            assert!(prompt.contains("type: context"));
+            assert!(prompt.contains("op: shrink"));
             assert!(!prompt.contains("mode=force_shrink_required"));
             Ok(llm(
                 r#"{"response_to_user":"压缩已完成，可以继续对话。","acceptance_check":{"is_satisfied":true}}"#,
@@ -681,7 +683,7 @@ mod tests {
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"response_to_user":"","next_actions":[{"action":"query_memory","intent":"Look up evidence before answering.","input":{"query":"round limit e2e","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory evidence"]}}"#,
+                r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"Look up evidence before answering.","input":{"type":"durable","op":"query","query":"round limit e2e","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory evidence"]}}"#,
                 4_000,
                 false,
             )),
@@ -800,13 +802,15 @@ mod tests {
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"response_to_user":"","next_actions":[{{"action":"scratch_write","intent":"Offload visible prompt context for later retrieval.","input":{{"type":"context_offload","label":"session e2e offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch id"]}}}}"#,
+                    r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","input":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch id"]}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 4_000, false));
             }
             assert_eq!(self.prompts.len(), 2);
-            assert!(prompt.contains("Action result: scratch_write"));
+            assert!(prompt.contains("Action result: memmgr"));
+            assert!(prompt.contains("type: scratch"));
+            assert!(prompt.contains("op: write"));
             assert!(prompt.contains("id: scratch_"));
             assert!(prompt.contains("label: session e2e offload"));
             Ok(llm(

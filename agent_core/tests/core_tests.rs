@@ -1321,6 +1321,29 @@ fn memmgr_scratch_write_and_read_notes() {
 }
 
 #[test]
+fn memmgr_requires_type_and_op_for_protocol_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("memmgr_missing_op"),
+    );
+    let _ = core.begin_turn("查一下记忆", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"Broken memory action","input":{"type":"durable","query":"名字"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("next_actions[0].input.op_required"));
+    assert!(!prompt.contains("Action result: memmgr"));
+}
+
+#[test]
 fn scratch_query_empty_query_lists_recent_notes_with_limit() {
     let mut core = AgentCore::new(
         "STATIC",
