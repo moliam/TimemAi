@@ -101,10 +101,10 @@ proc wait_cancelled {scenario} {
     expect {
         -re "\033\\\[6n" {
             append output $expect_out(buffer)
+            send "\033\[24;1R"
             if {[string first "已取消当前输入" $output] >= 0} {
                 return $output
             }
-            send "\033\[24;1R"
             exp_continue
         }
         -re "已取消当前输入" {
@@ -122,33 +122,6 @@ proc wait_cancelled {scenario} {
         }
         eof {
             error "unexpected EOF waiting for cancellation in $scenario"
-        }
-    }
-    return $output
-}
-
-proc wait_cancelled_or_prompt {scenario} {
-    set output ""
-    expect {
-        -re "\033\\\[6n" {
-            append output $expect_out(buffer)
-            if {[string first "已取消当前输入" $output] >= 0} {
-                return $output
-            }
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "已取消当前输入" {
-            append output $expect_out(buffer)
-        }
-        -re "❯❯" {
-            append output $expect_out(buffer)
-        }
-        timeout {
-            error "timeout waiting for cancellation or prompt in $scenario"
-        }
-        eof {
-            error "unexpected EOF waiting for cancellation or prompt in $scenario"
         }
     }
     return $output
@@ -173,12 +146,22 @@ proc assert_not_repeated_too_much {scenario output needle limit} {
 proc run_prof_smoke {} {
     spawn_timem
     send "/prof\r"
+    set output ""
     expect {
         -re "\033\\\[6n" {
+            append output $expect_out(buffer)
             send "\033\[24;1R"
-            exp_continue
+            if {[string first "Token" $output] >= 0} {
+                # The device-status query can arrive in the same buffer as the
+                # /prof output; stop waiting for Token but still exit normally.
+            }
+            if {[string first "Token" $output] < 0} {
+                exp_continue
+            }
         }
-        -re "Token" {}
+        -re "Token" {
+            append output $expect_out(buffer)
+        }
         timeout {
             error "timeout waiting for /prof output"
         }
