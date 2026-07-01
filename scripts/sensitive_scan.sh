@@ -48,7 +48,12 @@ scan_current() {
   fi
 
   for marker in "${private_markers[@]}"; do
-    if printf '%s\n' "$files" | xargs rg -n -i -F -- "$marker" >/tmp/timem_sensitive_hits.$$ 2>/dev/null; then
+    if command -v rg >/dev/null 2>&1; then
+      scan_cmd=(rg -n -i -F -- "$marker")
+    else
+      scan_cmd=(grep -n -i -F -- "$marker")
+    fi
+    if printf '%s\n' "$files" | xargs "${scan_cmd[@]}" >/tmp/timem_sensitive_hits.$$ 2>/dev/null; then
       echo "private marker found in current tree: $marker" >&2
       cat /tmp/timem_sensitive_hits.$$ >&2
       failed=1
@@ -56,7 +61,12 @@ scan_current() {
   done
 
   for regex in "${secret_regexes[@]}"; do
-    if printf '%s\n' "$files" | xargs rg -n --pcre2 -- "$regex" >/tmp/timem_sensitive_hits.$$ 2>/dev/null; then
+    if command -v rg >/dev/null 2>&1; then
+      scan_cmd=(rg -n --pcre2 -- "$regex")
+    else
+      scan_cmd=(grep -n -E -- "$regex")
+    fi
+    if printf '%s\n' "$files" | xargs "${scan_cmd[@]}" >/tmp/timem_sensitive_hits.$$ 2>/dev/null; then
       echo "secret-like token found in current tree: $regex" >&2
       cat /tmp/timem_sensitive_hits.$$ >&2
       failed=1

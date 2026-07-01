@@ -4,6 +4,26 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+search_regex() {
+  local pattern="$1"
+  shift
+  if command -v rg >/dev/null 2>&1; then
+    rg -q -- "$pattern" "$@"
+  else
+    grep -R -q --exclude-dir=target --exclude-dir=.git -- "$pattern" "$@"
+  fi
+}
+
+search_fixed() {
+  local pattern="$1"
+  shift
+  if command -v rg >/dev/null 2>&1; then
+    rg -q -F -- "$pattern" "$@"
+  else
+    grep -R -F -q --exclude-dir=target --exclude-dir=.git -- "$pattern" "$@"
+  fi
+}
+
 required_patterns=(
   "session_turn_forced_shrink_runs_to_final_without_repeated_shrink"
   "session_turn_truncated_output_expands_limit_and_retries_same_turn"
@@ -32,7 +52,7 @@ required_patterns=(
 )
 
 for pattern in "${required_patterns[@]}"; do
-  if ! rg -q -- "$pattern" agent_core timem_shell scripts docs; then
+  if ! search_regex "$pattern" agent_core timem_shell scripts docs; then
     echo "missing required test/contract pattern: $pattern" >&2
     exit 1
   fi
@@ -46,7 +66,7 @@ ci_required=(
 )
 
 for pattern in "${ci_required[@]}"; do
-  if ! rg -q -F -- "$pattern" scripts/ci.sh; then
+  if ! search_fixed "$pattern" scripts/ci.sh; then
     echo "missing required CI gate: $pattern" >&2
     exit 1
   fi
@@ -74,7 +94,7 @@ feature_doc_required=(
 )
 
 for pattern in "${feature_doc_required[@]}"; do
-  if ! rg -q -F -- "$pattern" "$feature_doc"; then
+  if ! search_fixed "$pattern" "$feature_doc"; then
     echo "missing required feature management item: $pattern" >&2
     exit 1
   fi
@@ -99,7 +119,7 @@ test_strategy_required=(
 )
 
 for pattern in "${test_strategy_required[@]}"; do
-  if ! rg -q -F -- "$pattern" "$test_strategy_doc"; then
+  if ! search_fixed "$pattern" "$test_strategy_doc"; then
     echo "missing required test strategy item: $pattern" >&2
     exit 1
   fi
@@ -107,7 +127,7 @@ done
 
 for id in $(seq 1 27); do
   feature_id="$(printf 'F%02d' "$id")"
-  if ! rg -q -F -- "| $feature_id |" "$feature_doc"; then
+  if ! search_fixed "| $feature_id |" "$feature_doc"; then
     echo "missing required feature row: $feature_id" >&2
     exit 1
   fi
@@ -124,7 +144,7 @@ changelog_required=(
 )
 
 for pattern in "${changelog_required[@]}"; do
-  if ! rg -q -F -- "$pattern" CHANGELOG.md; then
+  if ! search_fixed "$pattern" CHANGELOG.md; then
     echo "missing required changelog item: $pattern" >&2
     exit 1
   fi
@@ -146,7 +166,7 @@ workflow_required=(
 )
 
 for pattern in "${workflow_required[@]}"; do
-  if ! rg -q -F -- "$pattern" "$workflow"; then
+  if ! search_fixed "$pattern" "$workflow"; then
     echo "missing required workflow item: $pattern" >&2
     exit 1
   fi
