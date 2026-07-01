@@ -8,6 +8,7 @@ const ACTIVE_TEXT_COLORS: [&str; 3] = ["\x1b[38;5;245m", "\x1b[38;5;250m", "\x1b
 const OBSERVATION_LINE_PREFIX: &str = "· ";
 const OBSERVATION_CHILD_MID_PREFIX: &str = "  ├─ ";
 const OBSERVATION_CHILD_LAST_PREFIX: &str = "  └─ ";
+const MAX_WRAPPED_LINES_PER_ITEM: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservationEvent {
@@ -50,7 +51,7 @@ struct TransientObservation {
 
 impl Default for ObservationPanel {
     fn default() -> Self {
-        Self::new(8, 72)
+        Self::new(20, 72)
     }
 }
 
@@ -217,34 +218,39 @@ pub fn render_observation_panel_at(panel: &ObservationPanel, tick: usize) -> Str
     out.push('┓');
     out.push_str(ANSI_RESET);
     out.push('\n');
+    let line_width = content_width.saturating_sub(2);
+    let mut render_rows = Vec::new();
     for line in panel.visible_lines() {
-        let line_width = content_width.saturating_sub(2);
         let text_width = line_width.saturating_sub(display_width(&line.prefix));
-        for (idx, wrapped) in wrap_display_width(&line.text, text_width)
-            .into_iter()
-            .enumerate()
-        {
+        let wrapped =
+            wrap_display_width_limited(&line.text, text_width, MAX_WRAPPED_LINES_PER_ITEM);
+        for (idx, wrapped) in wrapped.into_iter().enumerate() {
             let prefix = if idx == 0 {
                 line.prefix.clone()
             } else {
                 " ".repeat(display_width(&line.prefix))
             };
-            let content = format!("{prefix}{wrapped}");
-            let padded = pad_display_width(&content, line_width);
-            out.push('┃');
-            out.push(' ');
-            match line.style {
-                ObservationLineStyle::Normal => out.push_str(&padded),
-                ObservationLineStyle::ActiveBlink => {
-                    out.push_str(active_color);
-                    out.push_str(&padded);
-                    out.push_str(ANSI_RESET);
-                }
-            }
-            out.push(' ');
-            out.push('┃');
-            out.push('\n');
+            render_rows.push((line.style, format!("{prefix}{wrapped}")));
         }
+    }
+    while render_rows.len() > panel.max_lines {
+        render_rows.remove(0);
+    }
+    for (style, content) in render_rows {
+        let padded = pad_display_width(&content, line_width);
+        out.push('┃');
+        out.push(' ');
+        match style {
+            ObservationLineStyle::Normal => out.push_str(&padded),
+            ObservationLineStyle::ActiveBlink => {
+                out.push_str(active_color);
+                out.push_str(&padded);
+                out.push_str(ANSI_RESET);
+            }
+        }
+        out.push(' ');
+        out.push('┃');
+        out.push('\n');
     }
     out.push_str(ANSI_BOLD);
     out.push('┗');
@@ -515,6 +521,40 @@ fn wrap_display_width(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+fn wrap_display_width_limited(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let max_lines = max_lines.max(1);
+    let mut lines = wrap_display_width(text, width);
+    if lines.len() <= max_lines {
+        return lines;
+    }
+    lines.truncate(max_lines);
+    if let Some(last) = lines.last_mut() {
+        *last = fit_with_ellipsis(last, width);
+    }
+    lines
+}
+
+fn fit_with_ellipsis(text: &str, width: usize) -> String {
+    let width = width.max(1);
+    let ellipsis = "…";
+    if width <= display_width(ellipsis) {
+        return ellipsis.to_string();
+    }
+    let target_width = width.saturating_sub(display_width(ellipsis));
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > target_width {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    out.push_str(ellipsis);
+    out
+}
+
 fn pad_display_width(text: &str, width: usize) -> String {
     let current = display_width(text);
     if current >= width {
@@ -569,6 +609,19 @@ mod tests {
         assert!(rendered.contains("· b "));
         assert!(rendered.contains("· c "));
         assert!(rendered.contains("· d "));
+    }
+
+    #[test]
+    fn default_panel_allows_twenty_visible_rows() {
+        let mut panel = ObservationPanel::default();
+        for idx in 0..21 {
+            panel.apply(ObservationEvent::Persistent(format!("line {idx}")));
+        }
+        let rendered = render_observation_panel(&panel);
+        let content_rows = rendered.lines().filter(|line| line.contains('┃')).count();
+        assert_eq!(content_rows, 20);
+        assert!(!rendered.contains("line 0"));
+        assert!(rendered.contains("line 20"));
     }
 
     #[test]
@@ -895,16 +948,17 @@ mod tests {
     }
 
     #[test]
-    fn panel_wraps_long_command_without_truncating() {
+    fn panel_wraps_long_command_and_truncates_one_item_after_four_rows() {
         let mut panel = ObservationPanel::new(8, 44);
         panel.apply(ObservationEvent::Active(format!(
             "Bash: {}",
-            "rg --files -g '*.rs' | xargs wc -l && echo very-long-tail"
+            "rg --files -g '*.rs' | xargs wc -l && echo very-long-tail && echo more-output && echo another-long-part && echo segment-four && echo segment-five && echo segment-six && echo hidden-tail-after-limit"
         )));
         let rendered = render_observation_panel(&panel);
-        assert!(!rendered.contains('…'));
-        assert!(rendered.contains("very-long-tail"));
-        assert!(rendered.lines().count() > 3);
+        let content_rows = rendered.lines().filter(|line| line.contains('┃')).count();
+        assert_eq!(content_rows, 4);
+        assert!(rendered.contains('…'));
+        assert!(!rendered.contains("hidden-tail-after-limit"));
     }
 
     #[test]
