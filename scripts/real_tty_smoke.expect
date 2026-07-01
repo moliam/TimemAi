@@ -101,17 +101,54 @@ proc wait_cancelled {scenario} {
     expect {
         -re "\033\\\[6n" {
             append output $expect_out(buffer)
+            if {[string first "已取消当前输入" $output] >= 0} {
+                return $output
+            }
             send "\033\[24;1R"
             exp_continue
         }
         -re "已取消当前输入" {
             append output $expect_out(buffer)
         }
+        -re "❯❯" {
+            append output $expect_out(buffer)
+            if {[string first "已取消当前输入" $output] >= 0} {
+                return $output
+            }
+            exp_continue
+        }
         timeout {
             error "timeout waiting for cancellation in $scenario"
         }
         eof {
             error "unexpected EOF waiting for cancellation in $scenario"
+        }
+    }
+    return $output
+}
+
+proc wait_cancelled_or_prompt {scenario} {
+    set output ""
+    expect {
+        -re "\033\\\[6n" {
+            append output $expect_out(buffer)
+            if {[string first "已取消当前输入" $output] >= 0} {
+                return $output
+            }
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "已取消当前输入" {
+            append output $expect_out(buffer)
+        }
+        -re "❯❯" {
+            append output $expect_out(buffer)
+        }
+        timeout {
+            error "timeout waiting for cancellation or prompt in $scenario"
+        }
+        eof {
+            error "unexpected EOF waiting for cancellation or prompt in $scenario"
         }
     }
     return $output
