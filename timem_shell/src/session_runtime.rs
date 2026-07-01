@@ -449,7 +449,7 @@ mod tests {
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 13_253, false));
@@ -460,7 +460,7 @@ mod tests {
             assert!(prompt.contains("op: shrink"));
             assert!(!prompt.contains("mode=force_shrink_required"));
             Ok(llm(
-                r#"{"response_to_user":"压缩已完成，可以继续对话。","acceptance_check":{"is_satisfied":true}}"#,
+                r#"{"report_job_progress":"压缩已完成，可以继续对话。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                 1_200,
                 false,
             ))
@@ -564,7 +564,7 @@ mod tests {
 
         let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
         let seed_step = core.apply_model_response(llm(
-            r#"{"response_to_user":"seeded","acceptance_check":{"is_satisfied":true}}"#,
+            r#"{"report_job_progress":"seeded","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
             13_253,
             false,
         ));
@@ -631,9 +631,9 @@ mod tests {
             expansion_requests: 0,
         };
         let mut model = ReplayModel::new([
-            Ok(llm(r#"{"response_to_user":"partial""#, 5_000, true)),
+            Ok(llm(r#"{"report_job_progress":"partial""#, 5_000, true)),
             Ok(llm(
-                r#"{"response_to_user":"扩容后完成。","acceptance_check":{"is_satisfied":true}}"#,
+                r#"{"report_job_progress":"扩容后完成。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                 5_100,
                 false,
             )),
@@ -686,12 +686,12 @@ mod tests {
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"Look up evidence before answering.","input":{"type":"durable","op":"query","query":"round limit e2e","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory evidence"]}}"#,
+                r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Look up evidence before answering.","input":{"type":"durable","op":"query","query":"round limit e2e","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory evidence"]}}"#,
                 4_000,
                 false,
             )),
             Ok(llm(
-                r#"{"response_to_user":"续跑后完成。","acceptance_check":{"is_satisfied":true}}"#,
+                r#"{"report_job_progress":"续跑后完成。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                 4_200,
                 false,
             )),
@@ -740,7 +740,7 @@ mod tests {
         let output_file = dir.join("approved.txt");
         let command = format!("printf approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"response_to_user":"","next_actions":[{{"action":"run_bash","intent":"Write approved test output.","input":{{"command":{},"timeout_ms":5000}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["bash result"]}}}}"#,
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write approved test output.","input":{{"command":{},"timeout_ms":5000}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["bash result"]}}}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -753,7 +753,7 @@ mod tests {
         let mut model = ReplayModel::new([
             Ok(llm(first_response, 3_000, false)),
             Ok(llm(
-                r#"{"response_to_user":"命令已执行并确认。","acceptance_check":{"is_satisfied":true}}"#,
+                r#"{"report_job_progress":"命令已执行并确认。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                 3_100,
                 false,
             )),
@@ -805,7 +805,7 @@ mod tests {
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","input":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch id"]}}}}"#,
+                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","input":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch id"]}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 4_000, false));
@@ -817,7 +817,7 @@ mod tests {
             assert!(prompt.contains("id: scratch_"));
             assert!(prompt.contains("label: session e2e offload"));
             Ok(llm(
-                r#"{"response_to_user":"scratch 已记录，可以继续。","acceptance_check":{"is_satisfied":true}}"#,
+                r#"{"report_job_progress":"scratch 已记录，可以继续。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                 4_100,
                 false,
             ))
@@ -903,7 +903,7 @@ mod tests {
             self.prompts.push(prompt.to_string());
             match self.calls {
                 1 => Ok(llm(
-                    r#"{"response_to_user":"你好，我在。","acceptance_check":{"is_satisfied":true}}"#,
+                    r#"{"report_job_progress":"你好，我在。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                     2_000,
                     false,
                 )),
@@ -913,7 +913,7 @@ mod tests {
                     Ok(llm("畸形回复已恢复为用户可读文本。", 2_200, false))
                 }
                 4 => Ok(llm(
-                    r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"记录项目代号。","input":{"type":"durable","op":"upsert","id":"project_code","content":"项目代号是 AURORA"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#,
+                    r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"记录项目代号。","input":{"type":"durable","op":"upsert","id":"project_code","content":"项目代号是 AURORA"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#,
                     2_300,
                     false,
                 )),
@@ -923,13 +923,13 @@ mod tests {
                     assert!(prompt.contains("operation: insert"));
                     assert!(prompt.contains("project_code"));
                     Ok(llm(
-                        r#"{"response_to_user":"已记录项目代号。","acceptance_check":{"is_satisfied":true}}"#,
+                        r#"{"report_job_progress":"已记录项目代号。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                         2_400,
                         false,
                     ))
                 }
                 6 => Ok(llm(
-                    r#"{"response_to_user":"","next_actions":[{"action":"memmgr","intent":"查询项目代号记忆。","input":{"type":"durable","op":"query","query":"项目代号","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#,
+                    r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查询项目代号记忆。","input":{"type":"durable","op":"query","query":"项目代号","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#,
                     2_500,
                     false,
                 )),
@@ -939,7 +939,7 @@ mod tests {
                     assert!(prompt.contains("op: query"));
                     assert!(prompt.contains("项目代号是 AURORA"));
                     Ok(llm(
-                        r#"{"response_to_user":"项目代号是 AURORA。","acceptance_check":{"is_satisfied":true}}"#,
+                        r#"{"report_job_progress":"项目代号是 AURORA。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                         7_600,
                         false,
                     ))
@@ -954,7 +954,7 @@ mod tests {
                         "forced shrink prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","input":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch offload id"]}}}}"#,
+                        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","input":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch offload id"]}}}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_650, false))
@@ -973,7 +973,7 @@ mod tests {
                         "post-scratch forced shrink prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"response_to_user":"","next_actions":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+                        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","input":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_700, false))
@@ -984,7 +984,7 @@ mod tests {
                     assert!(prompt.contains("op: shrink"));
                     assert!(!prompt.contains("mode=force_shrink_required"));
                     Ok(llm(
-                        r#"{"response_to_user":"上下文已转存并压缩，可以继续。","acceptance_check":{"is_satisfied":true}}"#,
+                        r#"{"report_job_progress":"上下文已转存并压缩，可以继续。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
                         2_000,
                         false,
                     ))

@@ -345,14 +345,16 @@ Important invariants:
 ## Action Protocol
 
 The model does not call Rust functions directly. It sends a response envelope.
-The envelope either contains a final `response_to_user`, or a list of
-`next_actions` for the runtime to execute before the next model round.
+The envelope contains optional `report_job_progress`, optional `next_actions`,
+and an optional `continue` flag. Missing `continue` defaults to `true`.
+`report_job_progress` is progress text while work continues; it becomes the
+final user-visible answer only when `continue:false`.
 
 ```mermaid
 stateDiagram-v2
     [*] --> ModelResponse
-    ModelResponse --> Final: response_to_user + satisfied
-    ModelResponse --> ValidateActions: next_actions
+    ModelResponse --> Final: continue:false + report_job_progress
+    ModelResponse --> ValidateActions: continue:true + next_actions
     ValidateActions --> Repair: invalid JSON or invalid action shape
     Repair --> ModelResponse: one repair prompt_delta
     ValidateActions --> ExecuteActions: valid action protocol
@@ -368,7 +370,8 @@ The top-level JSON object has this shape:
 ```json
 {
   "thought": "optional private planning note",
-  "response_to_user": "",
+  "report_job_progress": "Checking the project files.",
+  "continue": true,
   "next_actions": [
     {
       "action": "run_bash",
@@ -386,11 +389,15 @@ The top-level JSON object has this shape:
 }
 ```
 
-`response_to_user` may be empty only when `next_actions` is non-empty.
-Every action needs a top-level `intent`; the shell displays it while the action
-runs. The parser also tolerates common provider drift such as a valid JSON
-envelope embedded in Markdown text, but it never shows raw protocol fragments to
-the user.
+When `continue` is omitted, runtime treats it as `true` and adds a note to the
+next prompt asking the model to be explicit next time. With `continue:true`,
+`next_actions` is required and `report_job_progress` is shown in the
+Thought/Action panel with a `▰▱` prefix. With `continue:false`,
+`report_job_progress` is required, `next_actions` must be absent, and the text
+is shown as the final answer. Every action needs a top-level `intent`; the shell
+displays it while the action runs. The parser also tolerates common provider
+drift such as a valid JSON envelope embedded in Markdown text, but it never
+shows raw protocol fragments to the user.
 
 ### Action Object
 
@@ -455,7 +462,7 @@ whether to answer or ask for another action.
 Provider output is untrusted. The runtime validates:
 
 - The response is a JSON object or contains an extractable JSON envelope.
-- `response_to_user` and `acceptance_check` follow the contract.
+- `report_job_progress`, `continue`, and `acceptance_check` follow the contract.
 - `next_actions` is an array when present.
 - Every action has `action`, `intent`, and valid `input`.
 - SQL and bash actions pass their own safety checks.
@@ -467,7 +474,7 @@ increment:
 prompt_type: result_of_llm_action
 Protocol repair request
 issue: next_actions[0].intent_required
-Return exactly one valid JSON object with response_to_user.
+Return exactly one valid JSON object with report_job_progress.
 ```
 
 Only one repair round is allowed per model response failure. If the repair also
@@ -579,7 +586,8 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
 ```json
 {
   "thought": "Compact dynamic context before continuing.",
-  "response_to_user": "",
+  "report_job_progress": "",
+  "continue": true,
   "next_actions": [
     {
       "action": "memmgr",

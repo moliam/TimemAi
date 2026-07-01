@@ -272,6 +272,20 @@ pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationE
         return Vec::new();
     };
     let mut events = Vec::new();
+    let should_continue = value
+        .get("continue")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if should_continue {
+        if let Some(progress) = value
+            .get("report_job_progress")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            events.push(ObservationEvent::Persistent(format!("▰▱ {progress}")));
+        }
+    }
     if let Some(actions) = value.get("next_actions").and_then(Value::as_array) {
         for action in actions.iter().take(2) {
             events.extend(observation_events_from_action(action));
@@ -305,7 +319,7 @@ pub(crate) fn parse_observation_json_value(content: &str) -> Option<Value> {
 fn is_likely_observation_envelope(value: &Value) -> bool {
     value.as_object().is_some_and(|object| {
         object.contains_key("next_actions")
-            || object.contains_key("response_to_user")
+            || object.contains_key("report_job_progress")
             || object.contains_key("thought")
     })
 }
@@ -612,6 +626,24 @@ mod tests {
     }
 
     #[test]
+    fn continuing_report_job_progress_renders_progress_marker() {
+        let events = observation_events_from_model_response(
+            r#"{"report_job_progress":"已经完成备份，继续写文件。","next_actions":[{"action":"run_bash","intent":"写入文件","input":{"command":"printf ok"}}]}"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("▰▱ 已经完成备份，继续写文件。".to_string()),
+                ObservationEvent::Persistent("写入文件".to_string()),
+                ObservationEvent::ActiveChild {
+                    text: "Bash: printf ok".to_string(),
+                    is_last: true
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn model_response_maps_run_bash_to_user_facing_bash() {
         let events = observation_events_from_model_response(
             r#"{"thought":"不要展示的模型思考","next_actions":[{"action":"run_bash","intent":"统计当前代码量","input":{"command":"rg --files | wc -l"}}]}"#,
@@ -671,7 +703,7 @@ mod tests {
 
 ```json
 {
-  "response_to_user": "",
+  "report_job_progress": "",
   "next_actions": [
     {
       "action": "query_memory",
@@ -780,7 +812,7 @@ mod tests {
     #[test]
     fn final_only_model_response_creates_no_observation_events() {
         let events = observation_events_from_model_response(
-            r#"{"thought":"内部思考","response_to_user":"已经完成"}"#,
+            r#"{"thought":"内部思考","report_job_progress":"已经完成","continue":false}"#,
         );
         assert!(events.is_empty());
     }
@@ -810,7 +842,7 @@ mod tests {
     #[test]
     fn model_thought_is_hidden_from_observation_panel() {
         let events = observation_events_from_model_response(
-            r#"{"thought":{"content":"内部推理，不给用户看","durable":true},"response_to_user":"ok"}"#,
+            r#"{"thought":{"content":"内部推理，不给用户看","durable":true},"report_job_progress":"ok","continue":false}"#,
         );
         assert!(events.is_empty());
     }

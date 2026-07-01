@@ -282,7 +282,9 @@ impl ParsedAction {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedEnvelope {
-    response_to_user: String,
+    report_job_progress: String,
+    continue_work: bool,
+    continue_was_implicit: bool,
     thought: String,
     thought_durable: bool,
     next_actions: Vec<ParsedAction>,
@@ -691,7 +693,7 @@ impl AgentCore {
         if response.truncated && !self.repair_attempted {
             return self.request_protocol_repair(
                 "truncated_model_output",
-                "The previous model output was cut off by the max output token limit before a complete JSON object was produced. Return one short valid JSON object only. If the task needs a long report, use run_bash to write the full report to a file and keep response_to_user concise.",
+                "The previous model output was cut off by the max output token limit before a complete JSON object was produced. Return one short valid JSON object only. If the task needs a long report, use run_bash to write the full report to a file and keep report_job_progress concise.",
             );
         }
         let parsed = parse_envelope(&response.content);
@@ -706,7 +708,7 @@ impl AgentCore {
             if !self.repair_attempted {
                 return self.request_protocol_repair(
                     &issue,
-                    "Return exactly one valid JSON object with response_to_user. Do not use markdown fences.",
+                    "Return exactly one valid JSON object with report_job_progress and continue. Do not use markdown fences.",
                 );
             }
             if issue == "invalid_json"
@@ -725,10 +727,10 @@ impl AgentCore {
                     repair_issue: Some("invalid_json_plain_text_fallback".to_string()),
                 });
             }
-            let final_text = if parsed.response_to_user.trim().is_empty() {
+            let final_text = if parsed.report_job_progress.trim().is_empty() {
                 repair_failure_message(self.last_repair_issue.as_deref().unwrap_or(&issue), &issue)
             } else {
-                parsed.response_to_user
+                parsed.report_job_progress
             };
             slices.push((
                 "llm_response".to_string(),
@@ -742,16 +744,14 @@ impl AgentCore {
                 repair_issue: Some(issue),
             });
         }
-        // A model response must choose exactly one path: final answer or next actions.
-        // Treating a mixed response as final silently drops work the model already requested.
-        if !parsed.response_to_user.trim().is_empty() {
+        if !parsed.continue_work {
             for candidate in parsed.memory_candidates {
                 if self.memory.write(&candidate).is_ok() {
                     self.current_stats.tool_calls += 1;
                     self.current_stats.mem_writes += 1;
                 }
             }
-            let final_text = parsed.response_to_user.trim().to_string();
+            let final_text = parsed.report_job_progress.trim().to_string();
             slices.push((
                 "llm_response".to_string(),
                 format!("Response shown to user:\n{}", final_text),
@@ -763,6 +763,23 @@ impl AgentCore {
                 profile_label: self.profile.label(),
                 repair_issue: None,
             });
+        }
+
+        if !parsed.report_job_progress.trim().is_empty() {
+            slices.push((
+                "llm_progress".to_string(),
+                format!(
+                    "Job progress shown to user:\n{}",
+                    parsed.report_job_progress.trim()
+                ),
+            ));
+        }
+        if parsed.continue_was_implicit {
+            slices.push((
+                "runtime_note".to_string(),
+                "Note: 上轮回复没有写 continue，runtime 已默认按 continue=true 处理。以后最好明确给出 continue。"
+                    .to_string(),
+            ));
         }
 
         if !parsed.next_actions.is_empty() {
@@ -808,7 +825,7 @@ impl AgentCore {
                 self.current_stats.mem_writes += 1;
             }
         }
-        let final_text = parsed.response_to_user.trim().to_string();
+        let final_text = parsed.report_job_progress.trim().to_string();
         let final_text = if final_text.is_empty() {
             response.content
         } else {
@@ -3019,7 +3036,7 @@ fn can_show_plain_text_after_repair_failure(content: &str) -> bool {
     let lowered = trimmed.to_lowercase();
     ![
         "next_actions",
-        "response_to_user",
+        "report_job_progress",
         "memory_candidates",
         "\"action\"",
         "'action'",
@@ -3138,7 +3155,9 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         Ok(value) => value,
         Err(_) => {
             return ParsedEnvelope {
-                response_to_user: String::new(),
+                report_job_progress: String::new(),
+                continue_work: true,
+                continue_was_implicit: false,
                 thought: String::new(),
                 thought_durable: false,
                 next_actions: vec![],
@@ -3149,7 +3168,9 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
     };
     if !value.is_object() {
         return ParsedEnvelope {
-            response_to_user: String::new(),
+            report_job_progress: String::new(),
+            continue_work: true,
+            continue_was_implicit: false,
             thought: String::new(),
             thought_durable: false,
             next_actions: vec![],
@@ -3158,11 +3179,25 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
         };
     }
     let mut repair_issue: Option<String> = None;
-    let response_to_user = value
-        .get("response_to_user")
+    if value.get("response_to_user").is_some() {
+        repair_issue = Some("response_to_user_renamed_to_report_job_progress".to_string());
+    }
+    let report_job_progress = value
+        .get("report_job_progress")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let (continue_work, continue_was_implicit) = match value.get("continue") {
+        Some(value) => match value.as_bool() {
+            Some(value) => (value, false),
+            None => {
+                repair_issue =
+                    repair_issue.or_else(|| Some("continue_must_be_boolean".to_string()));
+                (true, false)
+            }
+        },
+        None => (true, true),
+    };
     let (thought, thought_durable) = {
         let v = value.get("thought");
         if let Some(obj) = v.and_then(Value::as_object) {
@@ -3593,14 +3628,19 @@ fn parse_envelope(content: &str) -> ParsedEnvelope {
                 repair_issue.or_else(|| Some("memory_candidates_must_be_array".to_string()));
         }
     }
-    if repair_issue.is_none() && response_to_user.trim().is_empty() && next_actions.is_empty() {
-        repair_issue = Some("next_actions_required".to_string());
+    if repair_issue.is_none() && !continue_work && report_job_progress.trim().is_empty() {
+        repair_issue = Some("report_job_progress_required_when_continue_false".to_string());
     }
-    if repair_issue.is_none() && !response_to_user.trim().is_empty() && !next_actions.is_empty() {
-        repair_issue = Some("response_to_user_next_actions_conflict".to_string());
+    if repair_issue.is_none() && !continue_work && !next_actions.is_empty() {
+        repair_issue = Some("continue_false_must_not_include_next_actions".to_string());
+    }
+    if repair_issue.is_none() && continue_work && next_actions.is_empty() {
+        repair_issue = Some("next_actions_required_when_continue_true".to_string());
     }
     ParsedEnvelope {
-        response_to_user,
+        report_job_progress,
+        continue_work,
+        continue_was_implicit,
         thought,
         thought_durable,
         next_actions,
@@ -3661,7 +3701,7 @@ fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::
 
 fn is_likely_response_envelope(value: &Value) -> bool {
     value.as_object().is_some_and(|object| {
-        object.contains_key("response_to_user") || object.contains_key("next_actions")
+        object.contains_key("report_job_progress") || object.contains_key("next_actions")
     })
 }
 
@@ -3704,7 +3744,7 @@ fn repair_known_string_field_quotes(input: &str) -> Option<String> {
     let mut output = input.to_string();
     let mut changed = false;
     for key in [
-        "response_to_user",
+        "report_job_progress",
         "thought",
         "intent",
         "query",

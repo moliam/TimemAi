@@ -1490,13 +1490,15 @@ mod tests {
 
         let response = call_model(
             &config,
-            r#"Return exactly this JSON object and no markdown: {"response_to_user":"pong","acceptance_check":{"is_satisfied":true}}"#,
+            r#"Return exactly this JSON object and no markdown: {"report_job_progress":"pong","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
             &audit_file,
         )
         .unwrap();
 
         assert_eq!(response.model_name, model);
-        assert!(response.content.contains("response_to_user") || response.content.contains("pong"));
+        assert!(
+            response.content.contains("report_job_progress") || response.content.contains("pong")
+        );
         assert!(response.usage.llm_calls >= 1);
         assert!(response.usage.prompt_tokens > 0 || response.usage.total_tokens > 0);
 
@@ -2250,7 +2252,7 @@ mod tests {
             &env(&[("TIMEM_API_KEY", "k")]),
         )
         .unwrap();
-        let raw = json!({"choices":[{"message":{"content":"{\"response_to_user\":\"hi\"}"}}],"usage":{"prompt_tokens":3019,"completion_tokens":104,"total_tokens":3123,"prompt_tokens_details":{"cached_tokens":2048}}});
+        let raw = json!({"choices":[{"message":{"content":"{\"report_job_progress\":\"hi\"}"}}],"usage":{"prompt_tokens":3019,"completion_tokens":104,"total_tokens":3123,"prompt_tokens_details":{"cached_tokens":2048}}});
         let response = parse_llm_response(&config, &raw).unwrap();
         assert_eq!(response.usage.prompt_tokens, 3019);
         assert_eq!(response.usage.completion_tokens, 104);
@@ -2269,7 +2271,7 @@ mod tests {
         )
         .unwrap();
         let raw = json!({
-            "choices":[{"finish_reason":"length","message":{"content":"{\"response_to_user\":\"partial\"}"}}],
+            "choices":[{"finish_reason":"length","message":{"content":"{\"report_job_progress\":\"partial\"}"}}],
             "usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}
         });
         let response = parse_llm_response(&config, &raw).unwrap();
@@ -2289,7 +2291,7 @@ mod tests {
         )
         .unwrap();
         let raw = json!({
-            "choices":[{"message":{"content":"{\"response_to_user\":\"hi\"}"}}],
+            "choices":[{"message":{"content":"{\"report_job_progress\":\"hi\"}"}}],
             "usage":{
                 "prompt_tokens":8868,
                 "cache_creation_input_tokens":0,
@@ -2315,7 +2317,7 @@ mod tests {
         )
         .unwrap();
         let raw = json!({
-            "output_text":"{\"response_to_user\":\"hi\"}",
+            "output_text":"{\"report_job_progress\":\"hi\"}",
             "usage":{
                 "input_tokens":8438,
                 "input_tokens_details":{"cached_tokens":4096},
@@ -2325,7 +2327,7 @@ mod tests {
             }
         });
         let response = parse_llm_response(&config, &raw).unwrap();
-        assert_eq!(response.content, "{\"response_to_user\":\"hi\"}");
+        assert_eq!(response.content, "{\"report_job_progress\":\"hi\"}");
         assert_eq!(response.usage.prompt_tokens, 8438);
         assert_eq!(response.usage.completion_tokens, 398);
         assert_eq!(response.usage.total_tokens, 8836);
@@ -2346,7 +2348,7 @@ mod tests {
         let raw = json!({
             "status":"incomplete",
             "incomplete_details":{"reason":"max_output_tokens"},
-            "output_text":"{\"response_to_user\":\"partial\"}",
+            "output_text":"{\"report_job_progress\":\"partial\"}",
             "usage":{"input_tokens":10,"output_tokens":10,"total_tokens":20}
         });
         let response = parse_llm_response(&config, &raw).unwrap();
@@ -2367,7 +2369,7 @@ mod tests {
             "output":[{
                 "type":"message",
                 "role":"assistant",
-                "content":[{"type":"output_text","text":"{\"response_to_user\":\"from output\"}","annotations":[]}]
+                "content":[{"type":"output_text","text":"{\"report_job_progress\":\"from output\"}","annotations":[]}]
             }],
             "usage":{
                 "input_tokens":32,
@@ -2378,7 +2380,10 @@ mod tests {
             }
         });
         let response = parse_llm_response(&config, &raw).unwrap();
-        assert_eq!(response.content, "{\"response_to_user\":\"from output\"}");
+        assert_eq!(
+            response.content,
+            "{\"report_job_progress\":\"from output\"}"
+        );
         assert_eq!(response.usage.prompt_tokens, 32);
         assert_eq!(response.usage.completion_tokens, 18);
         assert_eq!(response.usage.cached_tokens, 0);
@@ -2423,7 +2428,7 @@ mod tests {
         .unwrap();
         let raw = json!({
             "stop_reason":"max_tokens",
-            "content":[{"type":"text","text":"{\"response_to_user\":\"partial\"}"}],
+            "content":[{"type":"text","text":"{\"report_job_progress\":\"partial\"}"}],
             "usage":{"input_tokens":10,"output_tokens":10}
         });
         let response = parse_llm_response(&config, &raw).unwrap();
