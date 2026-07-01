@@ -4275,6 +4275,10 @@ mod static_prompt_tests {
             PasteRecoveryKey::Cancel
         );
         assert_eq!(
+            read_paste_recovery_key(&mut Cursor::new(vec![27])),
+            PasteRecoveryKey::Cancel
+        );
+        assert_eq!(
             read_paste_recovery_key(&mut Cursor::new(vec![27, 27])),
             PasteRecoveryKey::Cancel
         );

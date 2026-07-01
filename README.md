@@ -29,6 +29,9 @@ agent directly from a terminal without building the iOS app.
   CLI.
 - `resources/static_v1.json`: static prompt used by the shell runtime.
 - `docs/architecture.md`: module boundaries, turn lifecycle, runtime contracts.
+- `docs/feature-test-management.md`: feature ownership and test coverage ledger.
+- `.github/workflows/ci.yml`: GitHub Actions workflow for push / pull request
+  CI.
 
 ## Quick Start
 
@@ -119,6 +122,24 @@ source /path/to/your/env
 
 If you cloned into another directory, run the same commands there. Keep your
 private env file wherever it is easiest for you to manage.
+
+## Quality Gates
+
+Local production gate:
+
+```bash
+scripts/ci.sh
+```
+
+This runs script syntax checks, install logic tests, feature/test contract
+checks, sensitive scan, Rust formatting, full workspace tests, repeated edge
+regression, release build, real TTY smoke, and whitespace checks.
+
+GitHub Actions runs the same `scripts/ci.sh` gate on pushes and pull requests
+for Linux and macOS. Feature coverage is tracked in
+`docs/feature-test-management.md`; each release-ready feature is expected to
+have normal, boundary, error, and stress/repetition coverage or an explicit
+residual-risk note.
 
 ## Provider Config
 

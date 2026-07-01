@@ -19,6 +19,7 @@ required_patterns=(
   "ci_realistic_multiturn_memory_tools_security_and_shrink_story"
   "run_multiline_paste_cancel_smoke"
   "run_edited_paste_recovery_ctrl_c_smoke"
+  "run_edited_paste_recovery_esc_smoke"
   "run_edited_paste_recovery_return_to_edit_smoke"
   "run_shift_enter_cancel_smoke"
   "run_wrapped_edit_cancel_smoke"
@@ -62,6 +63,11 @@ feature_doc_required=(
   "Agent Core interaction correctness"
   "UI display correctness"
   "Feature Coverage Matrix"
+  "Per-Feature Coverage Floor"
+  "Normal path"
+  "Boundary path"
+  "Error path"
+  "Stress/repetition path"
   "Current Supplement Decisions"
   "every new feature"
 )
@@ -81,9 +87,14 @@ fi
 
 test_strategy_required=(
   "Two Quality Axes"
+  "Four Coverage Dimensions"
   "Agent Core interaction correctness"
   "UI display correctness"
   "A behavior that crosses both axes needs tests on both sides"
+  "Normal path"
+  "Boundary path"
+  "Error path"
+  "Stress / repetition path"
 )
 
 for pattern in "${test_strategy_required[@]}"; do
@@ -93,10 +104,49 @@ for pattern in "${test_strategy_required[@]}"; do
   fi
 done
 
-for id in $(seq 1 25); do
+for id in $(seq 1 27); do
   feature_id="$(printf 'F%02d' "$id")"
   if ! rg -q -F -- "| $feature_id |" "$feature_doc"; then
     echo "missing required feature row: $feature_id" >&2
+    exit 1
+  fi
+done
+
+if [ ! -f CHANGELOG.md ]; then
+  echo "missing CHANGELOG.md" >&2
+  exit 1
+fi
+
+changelog_required=(
+  "# Changelog"
+  "## [Unreleased]"
+)
+
+for pattern in "${changelog_required[@]}"; do
+  if ! rg -q -F -- "$pattern" CHANGELOG.md; then
+    echo "missing required changelog item: $pattern" >&2
+    exit 1
+  fi
+done
+
+workflow=".github/workflows/ci.yml"
+if [ ! -f "$workflow" ]; then
+  echo "missing GitHub Actions workflow: $workflow" >&2
+  exit 1
+fi
+
+workflow_required=(
+  "push:"
+  "pull_request:"
+  "scripts/ci.sh"
+  "ubuntu-latest"
+  "macos-latest"
+  "expect"
+)
+
+for pattern in "${workflow_required[@]}"; do
+  if ! rg -q -F -- "$pattern" "$workflow"; then
+    echo "missing required workflow item: $pattern" >&2
     exit 1
   fi
 done

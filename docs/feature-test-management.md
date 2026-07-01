@@ -23,6 +23,16 @@ coverage.
 - Tests should cover normal use, malformed/unexpected model output, boundary
   values, cancellation/error paths, persistence, and repeated multi-turn use
   when those dimensions are relevant.
+- Every release-ready feature row should have roughly four independent test
+  protections across the following dimensions, or explicitly document why a
+  dimension is not applicable:
+  - Normal path: the user-visible happy path works end to end.
+  - Boundary path: limits, empty values, long values, wrapping, id ranges, or
+    threshold transitions behave correctly.
+  - Error path: malformed model output, provider errors, cancellation,
+    permission denial, missing fields, or invalid input fails safely.
+  - Stress/repetition path: multi-turn, repeated edge regression, concurrent
+    state, pseudo-TTY smoke, or race-prone paths stay stable under repetition.
 - For terminal features, include real pseudo-TTY smoke in
   `scripts/real_tty_smoke.expect` when the behavior depends on actual terminal
   control sequences or interactive key handling.
@@ -48,6 +58,25 @@ coverage.
 | Real TTY smoke | `scripts/real_tty_smoke.expect` | Drive the release binary through a pseudo terminal for prompt, paste, config, workspace, Ctrl+C, and multiline behaviors. | Must pass. |
 | Sensitive scan | `scripts/sensitive_scan.sh --current` | Prevent secrets and private/internal endpoints in public source. | Must pass before push/release. |
 | Whitespace/diff check | `git diff --check` | Prevent whitespace errors. | Must pass. |
+| GitHub Actions CI | `.github/workflows/ci.yml` | Run the same production CI gate on pushes and pull requests for Linux and macOS. | Must exist and call `scripts/ci.sh`. |
+
+## Per-Feature Coverage Floor
+
+Each feature row is managed against these four coverage dimensions. The feature
+matrix keeps the exact test names close to the feature; this checklist defines
+what reviewers must look for before a feature can be considered production
+quality.
+
+| Dimension | What counts | Examples in this repo |
+|---|---|---|
+| Normal | The expected user path works with realistic runtime state. | `session_turn_*`, provider request-building tests, memory query/write tests. |
+| Boundary | Limits and edge values are exercised. | token thresholds, long wrapped lines, empty query listing, CRLF paste, narrow terminal width. |
+| Error | Bad input or external failure is safe and user-readable. | protocol repair, provider HTTP errors, invalid SQL/action fields, denied approval, Ctrl+C/Esc cancel. |
+| Stress / repetition | Repeated, concurrent, or real-terminal-like paths remain stable. | `scripts/edge_regression.sh`, memory guard multi-process tests, real TTY smoke, repeated shrink/session loops. |
+
+If a feature cannot reasonably cover all four dimensions, the row's
+`Status / supplement needed` column must state the residual risk and the next
+test to add when that area changes.
 
 ## Feature Coverage Matrix
 
@@ -70,14 +99,16 @@ coverage.
 | F15 | Session runtime turn loop | UI-neutral runtime can drive model/action rounds, decisions, audit, profiler, and cancellation. | `session_turn_*` tests, `noop_turn_ui_defaults_to_noninteractive_denials`, repeated edge session group. | Fake model client, real core/actions/audit, approval decisions, round limit continue, truncation expansion, cancel before provider call. | Covered. New UI adapters must use `TurnUi` and add adapter-specific E2E. |
 | F16 | Round limit continuation | User can continue a long task after max rounds without resetting model-visible task context. | `default_max_rounds_is_twenty`, `round_limit_can_be_continued_without_model_visible_task_reset`, `session_turn_round_limit_continue_recharges_and_finishes_same_task`. | Default 20 rounds, continue recharges rounds to 20, stop path, context preserved. | Covered. Add terminal smoke if the prompt UI changes. |
 | F17 | Stale context prompt | After long idle with large context, user can choose whether to continue old task context. | `stale_context_prompt_needed`, `render_stale_context_prompt`, stale context choice tests. | 3-hour idle threshold, 10K context threshold, keyboard-driven choice, no prompt below threshold. | Covered. Add session-runtime E2E if stale context policy moves out of CLI. |
-| F18 | Terminal input editor | User can type, edit, cancel, Shift+Enter newline, and paste multi-line/CJK text without corrupt display or triggering accidental model calls. | `reedline_*`, `queued_paste_*`, `raw_multiline_paste_*`, `paste_marker_*`, `submitted_input_rows_counts_real_newlines_independently_of_wrapping`, `submitted_user_line_rewrite_clears_actual_multiline_input_rows`, `chinese_backspace_removes_one_character`, `run_edited_paste_recovery_ctrl_c_smoke`, `run_edited_paste_recovery_return_to_edit_smoke`, real TTY smoke. | Bracketed paste enable, `[ pasted N lines ]` reverse-video display, edited placeholder recovery with `继续/恢复粘贴/返回编辑`, Ctrl+C/Esc cancel from recovery prompt, return-to-edit restores the edited draft, CRLF boundary, Ctrl+C drains residual input, CJK width, wrapped input, real newline row counting, submitted-line rewrite clears status plus true multiline rows, Shift+Enter. | Conditionally covered. Pseudo-TTY proves bracketed paste mode and core behavior, but real iTerm2/Terminal/tmux/SSH differences remain. Manual iTerm2 smoke is required before release when changing input code. |
+| F18 | Terminal input editor | User can type, edit, cancel, Shift+Enter newline, and paste multi-line/CJK text without corrupt display or triggering accidental model calls. | `reedline_*`, `queued_paste_*`, `raw_multiline_paste_*`, `paste_marker_*`, `submitted_input_rows_counts_real_newlines_independently_of_wrapping`, `submitted_user_line_rewrite_clears_actual_multiline_input_rows`, `chinese_backspace_removes_one_character`, `run_edited_paste_recovery_ctrl_c_smoke`, `run_edited_paste_recovery_esc_smoke`, `run_edited_paste_recovery_return_to_edit_smoke`, real TTY smoke. | Bracketed paste enable, `[ pasted N lines ]` reverse-video display, edited placeholder recovery with `继续/恢复粘贴/返回编辑`, Ctrl+C/Esc cancel from recovery prompt, return-to-edit restores the edited draft, CRLF boundary, Ctrl+C drains residual input, CJK width, wrapped input, real newline row counting, submitted-line rewrite clears status plus true multiline rows, Shift+Enter. | Conditionally covered. Pseudo-TTY proves bracketed paste mode and core behavior, but real iTerm2/Terminal/tmux/SSH differences remain. Manual iTerm2 smoke is required before release when changing input code. |
 | F19 | Observation panel | User sees current thought/action progress without internal protocol names or stale transients. | `observation::tests::*`, `thinking_view_renders_observation_panel_and_status_line`, visual contract tests. | Active/transient/persistent events, scroll window, command truncation, user-facing Bash label, malformed model response ignored, active color cycling. | Covered. Add multi-agent observation tests when parallel agents exist. |
 | F20 | Token/status rendering | User sees context size, current request token deltas, cache hits, shrink markers, provider/model, and elapsed time clearly. | `token_status_*`, `final_token_status_does_not_show_latest_output_delta`, `final_response_visual_contract`, status bar tests. | Pending request deltas, final status without latest output delta, `[ctx N]` label, compact K formatting, zero totals, cache marker `⌁`. | Covered. Add screenshot/golden TTY smoke if status layout changes often. |
 | F21 | Runtime profiling `/prof` | User can inspect token totals, cache hit rate, model wait time, local time, and storage sizes. | `profiler::tests::*`, `/prof` real TTY smoke. | Per-model aggregation, avg wait per 1K output, storage entry counts and byte sizes, no model calls for `/prof`. | Covered. Add file IO counters when profiler starts tracking file reads/writes. |
 | F22 | API and action audit | Supportability data is stored locally with secret redaction and grouped by user turn. | `append_audit_writes_jsonl`, `audit_redacts_secret_fields`, `action_audit_groups_actions_by_user_turn_and_round`, session audit assertions, sensitive scan. | Payload audit vs action audit paths, grouped actions, denial/approval audit, secret-looking strings, memory outside audit dir. | Covered. Add retention/rotation tests if audit cleanup is introduced. |
-| F23 | Install, uninstall, update, and README run path | New users can install, configure env, run `timem`, and update safely on macOS/Linux. | `scripts/install_logic_test.sh`, script syntax CI, README/help env tests. | OS detection, Rust version logic, env template, uninstall path, cargo-run latest dev path, install output recommends `source env` then plain `timem` without duplicating `--space/--model`. | Partially covered. Logic and docs are tested; actual clean-machine install/update/uninstall on macOS/Linux is not automated. Add clean VM/container smoke before major public releases. |
+| F23 | Install, uninstall, update, and README run path | New users can install, configure env, run `timem`, and update safely on macOS/Linux. | `scripts/install_logic_test.sh`, script syntax CI, README/help env tests, GitHub Actions macOS/Linux CI invoking `scripts/ci.sh`. | OS detection, Rust version logic, env template, uninstall path, cargo-run latest dev path, install output recommends `source env` then plain `timem` without duplicating `--space/--model`, remote Linux/macOS CI runner coverage. | Covered for repo CI and install logic. Actual destructive install/uninstall on a clean personal machine remains a manual release smoke before major public releases. |
 | F24 | Sensitive information control | Public repo must not contain private gateway URLs, real keys, or internal config. | `scripts/sensitive_scan.sh --current`, `scripts/sensitive_scan.sh --history`, `public_repo_sources_do_not_contain_private_gateway_markers`, release manual scan. | Secret-looking token strings, private gateway markers, redaction tests, audit summary hashes, history marker/secret scan. | Covered for current tree in default CI; history scan is available but not default CI. Run `--history` before force-push, public release, or after any history rewrite. |
-| F25 | Documentation and quality gates | Users and maintainers can understand architecture, tests, release risk, and feature coverage. | `docs/architecture.md`, `docs/test-strategy.md`, this document, `scripts/test_contract_check.sh`. | CI gate list, feature matrix, release audit, maintenance rules, required regression names, F01-F25 presence check. | Covered by this change. Future feature work must update this document; contract check now verifies all F01-F25 rows exist. |
+| F25 | Documentation and quality gates | Users and maintainers can understand architecture, tests, release risk, and feature coverage. | `docs/architecture.md`, `docs/test-strategy.md`, this document, `scripts/test_contract_check.sh`. | CI gate list, feature matrix, release audit, maintenance rules, required regression names, F01-F27 presence check, four-dimension coverage floor. | Covered by this change. Future feature work must update this document; contract check verifies all F01-F27 rows exist. |
+| F26 | Changelog and release notes | Users and maintainers can see what changed before installing, updating, or tagging a release. | `CHANGELOG.md`, `scripts/test_contract_check.sh` changelog existence/content checks, release checklist, sensitive scan. | Unreleased section, tagged release sections, current public-source scan, release checklist requires release note review, no secrets/private endpoints in notes. | Covered. Future release tags must move relevant Unreleased entries into the tagged section. |
+| F27 | GitHub Actions production CI | Pushes and pull requests automatically run the same quality gate used locally. | `.github/workflows/ci.yml`, `scripts/test_contract_check.sh` workflow existence/content checks, `scripts/ci.sh`, GitHub matrix for `ubuntu-latest` and `macos-latest`. | Linux/macOS runners, expect dependency install, stable Rust install, local CI script reuse, push/PR triggers, concurrency cancellation, no separate weaker remote test path. | Covered structurally and by local contract checks. Actual remote green status is verified after push on GitHub. |
 
 ## Current Supplement Decisions
 
@@ -88,7 +119,7 @@ the next tests to add when the corresponding area changes:
 |---|---|---|
 | Terminal paste across emulator variants | Pseudo-TTY smoke proves bracketed paste mode and core behavior, but iTerm2, Terminal.app, tmux, and SSH can differ. | Add a small manual release checklist or automated tmux smoke if tmux becomes supported. |
 | Live provider behavior | Unit tests use provider response fixtures; live tests require credentials and network. | Add opt-in provider smoke scripts keyed off explicit env vars; never run them by default CI. |
-| Clean-machine install | Script logic is tested, but full install depends on host OS/package state. | Add macOS and Linux CI runners or a documented pre-release clean VM smoke. |
+| Clean-machine install | Script logic and macOS/Linux CI runners are covered, but a fully destructive install/uninstall on a personal clean machine depends on host policy and package state. | Run a manual clean VM smoke before major public releases. |
 | Future Web UI | Architecture anticipates a UI adapter, but Web UI is not implemented. | Add UI adapter E2E and mem-guard multi-session tests before shipping Web UI. |
 
 ## Adversarial Audit Notes
@@ -105,7 +136,7 @@ The current suite is broad, but the following claims should not be overstated:
 - Default CI scans the current tree for secrets. History scanning is available
   and must be run before history rewrites or public releases where history risk
   matters.
-- The feature ledger is now guarded for F01-F25 row presence, but it still
+- The feature ledger is now guarded for F01-F27 row presence, but it still
   relies on reviewer discipline to decide whether a new feature deserves a new
   feature id or an update to an existing row.
 

@@ -219,6 +219,47 @@ proc run_edited_paste_recovery_ctrl_c_smoke {} {
     exit_timem
 }
 
+proc run_edited_paste_recovery_esc_smoke {} {
+    spawn_timem
+    after 200
+    send "\033\[200~第一行中文；abc\n第二行 English；123\n第三行 │ TIMEM_MODEL │ qwen-plus │\033\[201~"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "pasted 3 lines" {}
+        timeout {
+            error "timeout waiting for edited paste placeholder before Esc"
+        }
+        eof {
+            error "unexpected EOF waiting for edited paste placeholder before Esc"
+        }
+    }
+    after 300
+    send "\033\[D"
+    send "x"
+    send "\r"
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "可能被误编辑" {}
+        timeout {
+            error "timeout waiting for paste recovery confirmation before Esc"
+        }
+        eof {
+            error "unexpected EOF waiting for paste recovery confirmation before Esc"
+        }
+    }
+    send "\033"
+    set output [wait_cancelled "edited paste recovery esc"]
+    assert_no_model_call "edited paste recovery esc" $output
+    assert_cancelled "edited paste recovery esc" $output
+    exit_timem
+}
+
 proc run_edited_paste_recovery_return_to_edit_smoke {} {
     spawn_timem
     after 200
@@ -690,6 +731,7 @@ proc run_workspace_add_cancel_smoke {} {
 run_prof_smoke
 run_multiline_paste_cancel_smoke
 run_edited_paste_recovery_ctrl_c_smoke
+run_edited_paste_recovery_esc_smoke
 run_edited_paste_recovery_return_to_edit_smoke
 run_shift_enter_cancel_smoke
 run_wrapped_edit_cancel_smoke

@@ -34,6 +34,20 @@ A behavior that crosses both axes needs tests on both sides. For example,
 model-output parsing must prove that Agent Core can execute the action and that
 the UI can render the same model output as the correct intent/action display.
 
+## Four Coverage Dimensions
+
+Each release-ready feature should be protected by roughly four independent
+checks. If a dimension is not applicable, record that residual decision in
+`docs/feature-test-management.md`.
+
+1. Normal path: the expected user flow works end to end.
+2. Boundary path: limits, empty values, long values, wrapping, id ranges,
+   thresholds, or narrow terminal widths behave correctly.
+3. Error path: malformed model output, provider errors, cancellation, permission
+   denial, missing fields, or invalid input fails safely.
+4. Stress / repetition path: multi-turn sessions, repeated edge regression,
+   concurrent state, pseudo-TTY smoke, or race-prone paths stay stable.
+
 ## Required Layers
 
 - Function tests: pure parsing, formatting, prompt cache planning, provider
