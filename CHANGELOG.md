@@ -6,6 +6,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-01
+
 ### Added
 
 - Model response protocol now uses `report_job_progress` plus `continue`.
@@ -25,6 +27,9 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   script syntax checks, install logic, contract checks, sensitive scan,
   formatting, full Rust tests, edge regression, release build, real TTY smoke,
   and whitespace checks.
+- Thinking status now shows model round count, total token usage, current
+  context utilization bar, and latest request token deltas in a compact
+  multi-line layout.
 
 ### Fixed
 
@@ -39,6 +44,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   edited when stale preserved paste records exist from an earlier return-to-edit
   flow.
 - Paste recovery Note menu treats Esc as cancel for the current input activity.
+- Final response status now uses a concise `ctx[N%]` context label instead of
+  mixing current-turn deltas into the completed turn summary.
 
 ### Changed
 
@@ -46,6 +53,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   interface instead of separate memory, chat, scratch, and shrink action names.
 - Architecture and feature/test management docs now describe the `memmgr`
   protocol and session-level coverage.
+- Default maximum agent interaction rounds increased from 20 to 50; continuing
+  after the round limit recharges the task to 50 rounds.
 
 ## [0.5.2] - 2026-06-30
 
