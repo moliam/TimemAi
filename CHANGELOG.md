@@ -22,6 +22,10 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   manifest schemas internally.
 - The release-quality skill is now an optional capability overlay example
   instead of a built-in skill compiled into `agent_core`.
+- Added a built-in `self_tool` capability for Timem self-inspection:
+  non-secret runtime env read/write, memory/audit path reporting, and software
+  about/version/process metadata. Memory path env variables such as
+  `TIMEM_DATA_DIR` and `TIMEM_SPACE` are protected as startup-only settings.
 
 ### Fixed
 

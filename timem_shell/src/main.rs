@@ -1,4 +1,5 @@
 use agent_core::capability::CapabilityRegistry;
+use agent_core::self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, UsageStats};
 use crossterm::event::Event;
 use reedline::{
@@ -82,6 +83,30 @@ fn main() {
     let mut bash_approval_mode = bash_approval_mode_from_options(&options, &env);
     let mut profiler = RuntimeProfiler::default();
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
+    core.set_self_tool_state(SelfToolState::new(
+        env.clone().into_iter().collect(),
+        SelfToolPaths {
+            space_dir: absolute_path(data_root().join(&space)),
+            memory_dir: absolute_path(memory_dir.clone()),
+            memory_file: absolute_path(memory_dir.join("memory.jsonl")),
+            scratch_file: absolute_path(memory_dir.join("scratch_notes.jsonl")),
+            api_audit_file: absolute_path(audit_file.clone()),
+            action_audit_file: absolute_path(action_audit_file.clone()),
+        },
+        SelfToolAbout {
+            name: "TimemAi".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            author: "TimemAi <phylimo@163.com>".to_string(),
+            summary: "A lightweight local agent with Bash capability and multidimensional, time-aware memory.".to_string(),
+            project: "https://github.com/moliam/TimemAi".to_string(),
+            star_message: "Please star https://github.com/moliam/TimemAi".to_string(),
+        },
+        SelfToolProcess {
+            pid: std::process::id(),
+            current_dir: absolute_path(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            executable: absolute_path(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("timem"))),
+        },
+    ));
     if let Some(capabilities_dir) = capabilities_dir_from_options(&options, &env) {
         match CapabilityRegistry::builtin_with_overlay_dir(&capabilities_dir) {
             Ok(registry) => core.set_capability_registry(registry),
@@ -306,6 +331,16 @@ fn main() {
 
 fn consume_turn_cancel_request() -> bool {
     TURN_CANCEL_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+fn absolute_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
 }
 
 struct CliTurnUi<'a> {

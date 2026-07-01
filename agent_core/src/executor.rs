@@ -146,6 +146,12 @@ mod tests {
                 binding_name: "capmgr".to_string()
             }
         );
+        assert_eq!(
+            resolve_action(&registry, "self_tool").unwrap(),
+            ExecutorTarget::Builtin {
+                binding_name: "self_tool".to_string()
+            }
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use rusqlite::{params_from_iter, types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -20,7 +20,9 @@ pub mod executor;
 pub mod memmgr;
 pub mod prompt_render;
 pub mod prompt_spec;
+pub mod self_tool;
 pub mod shell_exec;
+use self_tool::{SelfToolAbout, SelfToolInput, SelfToolPaths, SelfToolProcess, SelfToolState};
 use shell_exec::FileShellJobStore;
 pub use shell_exec::ShellJobRecord;
 
@@ -197,6 +199,8 @@ struct ParsedAction {
     large_readback_opt_in: bool,
     background: bool,
     job_id: String,
+    key: String,
+    value: String,
     delta_ids: Vec<String>,
     slice_ids: Vec<String>,
     timeout_ms: u64,
@@ -213,6 +217,18 @@ impl ParsedAction {
                 "op": self.op,
                 "kind": self.scratch_type,
                 "id": self.id,
+            }),
+            "self_tool" => json!({
+                "type": self.mem_type,
+                "op": self.op,
+                "key": self.key,
+                "value": if self_tool::is_sensitive_env_key(&self.key)
+                    || self_tool::is_memory_path_env_key(&self.key)
+                {
+                    "<redacted>"
+                } else {
+                    self.value.as_str()
+                },
             }),
             "memmgr" => json!({
                 "type": self.mem_type,
@@ -582,6 +598,37 @@ fn space_dir_for_memory_dir(memory_dir: &Path) -> &Path {
     }
 }
 
+fn default_self_tool_paths(memory_dir: &Path) -> SelfToolPaths {
+    let space_dir = space_dir_for_memory_dir(memory_dir).to_path_buf();
+    SelfToolPaths {
+        space_dir: space_dir.clone(),
+        memory_dir: memory_dir.to_path_buf(),
+        memory_file: memory_dir.join("memory.jsonl"),
+        scratch_file: memory_dir.join("scratch_notes.jsonl"),
+        api_audit_file: space_dir.join("audit").join("api_audit.jsonl"),
+        action_audit_file: space_dir.join("audit").join("action_audit.json"),
+    }
+}
+
+fn default_self_tool_about() -> SelfToolAbout {
+    SelfToolAbout {
+        name: "TimemAi".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        author: "TimemAi <phylimo@163.com>".to_string(),
+        summary: "A lightweight local agent with Bash capability and multidimensional, time-aware memory.".to_string(),
+        project: "https://github.com/moliam/TimemAi".to_string(),
+        star_message: "Please star https://github.com/moliam/TimemAi".to_string(),
+    }
+}
+
+fn default_self_tool_process() -> SelfToolProcess {
+    SelfToolProcess {
+        pid: std::process::id(),
+        current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        executable: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("timem")),
+    }
+}
+
 #[derive(Debug)]
 pub struct AgentCore {
     static_prompt: String,
@@ -592,6 +639,7 @@ pub struct AgentCore {
     chat_history: FileChatHistoryStore,
     shell_jobs: FileShellJobStore,
     action_audit: FileActionAuditStore,
+    self_tool: SelfToolState,
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
@@ -613,6 +661,12 @@ impl AgentCore {
         memory_dir: impl AsRef<Path>,
     ) -> Self {
         let memory_dir = memory_dir.as_ref();
+        let self_tool = SelfToolState::new(
+            std::env::vars().collect::<BTreeMap<_, _>>(),
+            default_self_tool_paths(memory_dir),
+            default_self_tool_about(),
+            default_self_tool_process(),
+        );
         Self {
             static_prompt: static_prompt.into(),
             profile,
@@ -622,6 +676,7 @@ impl AgentCore {
             chat_history: FileChatHistoryStore::new(memory_dir),
             shell_jobs: FileShellJobStore::new(memory_dir),
             action_audit: FileActionAuditStore::new(memory_dir),
+            self_tool,
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
@@ -649,6 +704,9 @@ impl AgentCore {
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
         self.capabilities = capabilities;
+    }
+    pub fn set_self_tool_state(&mut self, self_tool: SelfToolState) {
+        self.self_tool = self_tool;
     }
     pub fn profile(&self) -> &CoreProfile {
         &self.profile
@@ -1277,7 +1335,7 @@ impl AgentCore {
         };
         if !matches!(
             dispatch_name,
-            "capmgr" | "memmgr" | "run_bash" | "shell_job_status"
+            "capmgr" | "memmgr" | "self_tool" | "run_bash" | "shell_job_status"
         ) {
             if let Some(result) = self.execute_legacy_memmgr_action(&action, dispatch_name) {
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
@@ -1287,6 +1345,7 @@ impl AgentCore {
         let result = match dispatch_name {
             "capmgr" => self.execute_capmgr_action(&action),
             "memmgr" => self.execute_memmgr_action(&action),
+            "self_tool" => self.execute_self_tool_action(&action),
             "shell_job_status" => {
                 self.current_stats.tool_calls += 1;
                 self.shell_jobs.status(&action.job_id, action.timeout_ms)
@@ -1718,6 +1777,16 @@ impl AgentCore {
                 id: &action.id,
             },
         )
+    }
+
+    fn execute_self_tool_action(&mut self, action: &ParsedAction) -> String {
+        self.current_stats.tool_calls += 1;
+        self.self_tool.execute(SelfToolInput {
+            self_type: &action.mem_type,
+            op: &action.op,
+            key: &action.key,
+            value: &action.value,
+        })
     }
 
     fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> String {
@@ -3401,6 +3470,19 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
                 .unwrap_or("")
                 .trim()
                 .to_string();
+            let key = input
+                .get("key")
+                .or_else(|| action.get("key"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let value = input
+                .get("value")
+                .or_else(|| action.get("value"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let delta_ids = input
                 .get("delta_ids")
                 .or_else(|| action.get("delta_ids"))
@@ -3511,6 +3593,8 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
                 large_readback_opt_in,
                 background,
                 job_id,
+                key,
+                value,
                 delta_ids,
                 slice_ids,
                 timeout_ms,

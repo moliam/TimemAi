@@ -181,6 +181,24 @@ Concrete skills are loaded through overlays or examples, not compiled into
 release-quality skill that can be loaded by pointing `TIMEM_CAPABILITIES_DIR` at
 the example capability root.
 
+## `self_tool`
+
+`self_tool` exposes Timem runtime self-information to the model through the same
+manifest and executor path as other builtin tools. It is intentionally narrow:
+
+- `type=env, op=read|write`: current process env only; API key/token variables
+  and secret/password-like variables are denied. Memory path env variables such
+  as `TIMEM_DATA_DIR` and `TIMEM_SPACE` are startup-only and writes are denied.
+- `type=mem_path, op=read`: current memory/audit paths.
+- `type=about_me, op=read`: software name, version, author/contact, project/star
+  info, summary, current process id, working directory, and executable path.
+
+Do not use `self_tool` for user memory, shell commands, project file edits, or
+provider model calls. Those remain owned by `memmgr`, `run_bash`, and the
+session runtime respectively. Future additions should stay within Timem runtime
+self-state, such as config inspection, workspace references, capability overlay
+status, or recent diagnostics.
+
 ## Iteration Rule
 
 Move one capability family at a time:

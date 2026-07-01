@@ -78,6 +78,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Multi-CLI memory conflicts | mem guard cross-process and same-version conflict tests | realistic story exercises shared storage shape | memory concurrency group |
 | Chat history | persisted query, delete, SQL time-window, current prompt fallback | realistic story | full CI |
 | Bash actions | approval risk, foreground shell, readback, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
+| Runtime self tool | `self_tool::tests::*`, manifest/registry/executor tests, sensitive/protected env denial tests | core action replay for env/path/about/process plus UI observation tests | full CI |
 | Shell jobs | background start/poll/status timeout tests | realistic story where applicable | shell job group |
 | Multi-turn replay story | protocol parsing, memory/scratch/shrink primitives | `session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering` | full CI |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |

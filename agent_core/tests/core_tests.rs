@@ -3875,6 +3875,155 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
 }
 
 #[test]
+fn self_tool_reads_mem_paths_and_about_info() {
+    let dir = tmp_dir("self_tool_paths");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("Timem 的记忆路径和版本是什么？", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"查询 Timem 自身信息。","next_actions":[{"action":"self_tool","intent":"查看本次记忆和审计路径。","input":{"type":"mem_path","op":"read"}},{"action":"self_tool","intent":"查看 Timem 软件信息。","input":{"type":"about_me","op":"read"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("type: mem_path"));
+    assert!(prompt.contains("memory_file:"));
+    assert!(prompt.contains("api_audit_file:"));
+    assert!(prompt.contains("type: about_me"));
+    assert!(prompt.contains("name: TimemAi"));
+    assert!(prompt.contains("author: TimemAi <phylimo@163.com>"));
+    assert!(prompt.contains("project: https://github.com/moliam/TimemAi"));
+    assert!(prompt.contains("star_message: Please star https://github.com/moliam/TimemAi"));
+    assert!(prompt.contains("pid:"));
+    assert!(prompt.contains("current_dir:"));
+    assert!(prompt.contains("executable:"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"TimemAi 当前进程信息和记忆路径已确认。"}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final after self_tool evidence, got {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("TimemAi"));
+}
+
+#[test]
+fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("self_tool_env"),
+    );
+    let _ = core.begin_turn("调整 Timem 的运行期环境。", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"检查并更新运行期环境。","next_actions":[{"action":"self_tool","intent":"确认 API key 不会暴露。","input":{"type":"env","op":"read","key":"TIMEM_API_KEY"}},{"action":"self_tool","intent":"设置一个非敏感运行期标记。","input":{"type":"env","op":"write","key":"TIMEM_SELF_TOOL_TEST","value":"enabled"}},{"action":"self_tool","intent":"读取刚设置的运行期标记。","input":{"type":"env","op":"read","key":"TIMEM_SELF_TOOL_TEST"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(prompt.contains("key: TIMEM_API_KEY"));
+    assert!(prompt.contains("error: sensitive_env_denied"));
+    assert!(prompt.contains("status: updated_current_process_env"));
+    assert!(prompt.contains("key: TIMEM_SELF_TOOL_TEST"));
+    assert!(prompt.contains("value: enabled"));
+}
+
+#[test]
+fn self_tool_env_denies_memory_path_writes_through_core_action() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("self_tool_protected_env"),
+    );
+    let _ = core.begin_turn("把 Timem 的 data dir 改到另一个目录。", None);
+    let attempted_path = "/tmp/timem-should-not-become-data-root";
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"status":"working","report_job_progress":"尝试更新 Timem 数据目录。","next_actions":[{{"action":"self_tool","intent":"更新 Timem 数据根目录。","input":{{"type":"env","op":"write","key":"TIMEM_DATA_DIR","value":"{attempted_path}"}}}},{{"action":"self_tool","intent":"更新 Timem 记忆空间。","input":{{"type":"env","op":"write","key":"TIMEM_SPACE","value":".other_mem"}}}}]}}"#
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(prompt.contains("key: TIMEM_DATA_DIR"));
+    assert!(prompt.contains("key: TIMEM_SPACE"));
+    assert_eq!(prompt.matches("error: protected_env_denied").count(), 2);
+    assert!(prompt.contains("reason: memory_path_env_is_startup_only"));
+    assert!(!prompt.contains("status: updated_current_process_env"));
+    assert!(!prompt.contains(attempted_path));
+}
+
+#[test]
+fn self_tool_supports_identity_and_process_qa_replay() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("self_tool_identity_process_qa"),
+    );
+    let _ = core.begin_turn("你是谁？你这个 Timem 进程是什么？", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"查询 Timem 自身身份和进程。","next_actions":[{"action":"self_tool","intent":"查看 Timem 身份、版本、作者和当前进程。","input":{"type":"about_me","op":"read"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("type: about_me"));
+    assert!(prompt.contains("name: TimemAi"));
+    assert!(prompt.contains("version:"));
+    assert!(prompt.contains("author: TimemAi <phylimo@163.com>"));
+    assert!(prompt.contains("project: https://github.com/moliam/TimemAi"));
+    assert!(prompt.contains("star_message: Please star https://github.com/moliam/TimemAi"));
+    assert!(prompt.contains("pid:"));
+    assert!(prompt.contains("current_dir:"));
+    assert!(prompt.contains("executable:"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"我是 TimemAi。当前 self_tool 已返回版本、作者、pid、current_dir 和 executable，可据此说明我正在本机 Timem 进程中运行。"}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final identity answer, got {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("TimemAi"));
+    assert!(final_turn.response_to_user.contains("pid"));
+    assert!(final_turn.response_to_user.contains("executable"));
+}
+
+#[test]
 fn capmgr_load_requires_kind_and_id_for_protocol_repair() {
     let mut core = AgentCore::new(
         "STATIC",

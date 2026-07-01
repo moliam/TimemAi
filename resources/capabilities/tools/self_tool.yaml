@@ -1,0 +1,88 @@
+kind: tool
+id: self_tool
+binding_type: builtin
+binding_name: self_tool
+description: Inspect or adjust Timem runtime self information.
+prompt_when: |
+  Use when the user asks about Timem itself, current runtime environment
+  variables, memory/audit paths, or wants to adjust a non-secret process env
+  value for this running Timem session.
+prompt_input: |
+  Always include type and op. type=env supports op=read/write; read may include
+  key or omit key to list non-sensitive env values. write requires key and
+  value and only changes current process runtime env. type=mem_path supports
+  op=read. type=about_me supports op=read. API key/token/secret/password-like
+  env variables are not readable or writable. Memory path env variables such as
+  TIMEM_DATA_DIR and TIMEM_SPACE are startup-only and are not writable through
+  self_tool.
+prompt_result: |
+  Returns current runtime env values, memory/audit paths, or Timem about
+  information. Sensitive env requests return sensitive_env_denied. Env writes
+  update the current process only; model/provider config may still need /config
+  or restart. Memory path env writes return protected_env_denied because those
+  resources are selected at startup. about_me also returns project/star info,
+  current process id, current directory, and executable path.
+input_schema: |
+  {
+    "type": "object",
+    "required": ["type", "op"],
+    "properties": {
+      "type": {
+        "type": "string",
+        "enum": ["env", "mem_path", "about_me"],
+        "description": "Self information surface."
+      },
+      "op": {
+        "type": "string",
+        "enum": ["read", "write"],
+        "description": "Operation. env supports read/write; mem_path and about_me support read."
+      },
+      "key": {
+        "type": "string",
+        "description": "Environment variable name for type=env."
+      },
+      "value": {
+        "type": "string",
+        "description": "Environment variable value for type=env op=write."
+      }
+    },
+    "x-required-when": [
+      {"field": "op", "values": ["write"], "required": ["key", "value"]}
+    ]
+  }
+output_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "type": {"type": "string", "description": "Echoed self surface."},
+      "op": {"type": "string", "description": "Echoed operation."},
+      "key": {"type": "string", "description": "Environment key when relevant."},
+      "value": {"type": "string", "description": "Environment value when non-sensitive."},
+      "results": {"type": "string", "description": "Environment list when no key is provided."},
+      "space_dir": {"type": "string", "description": "Current memory space directory."},
+      "memory_dir": {"type": "string", "description": "Memory data directory."},
+      "memory_file": {"type": "string", "description": "Durable memory file."},
+      "scratch_file": {"type": "string", "description": "Scratch notes file."},
+      "api_audit_file": {"type": "string", "description": "API audit JSONL file."},
+      "action_audit_file": {"type": "string", "description": "Action audit JSON file."},
+      "name": {"type": "string", "description": "Software name."},
+      "version": {"type": "string", "description": "Software version."},
+      "author": {"type": "string", "description": "Author/contact."},
+      "summary": {"type": "string", "description": "Short software summary."},
+      "project": {"type": "string", "description": "Public project URL."},
+      "star_message": {"type": "string", "description": "Optional project star request."},
+      "pid": {"type": "integer", "description": "Current Timem process id."},
+      "current_dir": {"type": "string", "description": "Current process working directory."},
+      "executable": {"type": "string", "description": "Current Timem executable path."},
+      "error": {"type": "string", "description": "sensitive_env_denied|protected_env_denied|key_required|unsupported_type_or_op"}
+    }
+  }
+example_json: |
+  {
+    "action": "self_tool",
+    "intent": "Show the current Timem memory and audit paths.",
+    "input": {
+      "type": "mem_path",
+      "op": "read"
+    }
+  }

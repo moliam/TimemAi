@@ -10,7 +10,14 @@ const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/c
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
 const SHELL_JOB_STATUS_MANIFEST: &str =
     include_str!("../../resources/capabilities/tools/shell_job_status.yaml");
-const BUILTIN_BINDINGS: &[&str] = &["memmgr", "capmgr", "run_bash", "shell_job_status"];
+const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
+const BUILTIN_BINDINGS: &[&str] = &[
+    "memmgr",
+    "capmgr",
+    "run_bash",
+    "shell_job_status",
+    "self_tool",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityBinding {
@@ -109,6 +116,7 @@ impl CapabilityRegistry {
                 CAPMGR_MANIFEST,
                 RUN_BASH_MANIFEST,
                 SHELL_JOB_STATUS_MANIFEST,
+                SELF_TOOL_MANIFEST,
             ],
             &[],
         )
@@ -1206,6 +1214,7 @@ mod tests {
         assert!(registry.contains_tool("capmgr"));
         assert!(registry.contains_tool("run_bash"));
         assert!(registry.contains_tool("shell_job_status"));
+        assert!(registry.contains_tool("self_tool"));
         assert!(!registry.contains_tool("query_memory"));
     }
 
@@ -1218,7 +1227,9 @@ mod tests {
         assert!(rendered.contains("\"capmgr\""));
         assert!(rendered.contains("\"run_bash\""));
         assert!(rendered.contains("\"shell_job_status\""));
+        assert!(rendered.contains("\"self_tool\""));
         assert!(rendered.contains("Unified local memory manager"));
+        assert!(rendered.contains("Use when the user asks about Timem itself"));
         assert!(rendered.contains("\"required_any\""));
         assert!(rendered.contains("\"required_when\""));
         assert!(rendered.contains("\"result\""));
@@ -1246,6 +1257,7 @@ mod tests {
             registry.binding_name("shell_job_status"),
             Some("shell_job_status")
         );
+        assert_eq!(registry.binding_name("self_tool"), Some("self_tool"));
         assert_eq!(registry.binding_name("future_tool"), None);
     }
 
@@ -1275,6 +1287,30 @@ mod tests {
             .validate_action_input("run_bash", &json_object([]))
             .unwrap_err()
             .contains("input.any_required:command|read_back_command"));
+        assert!(registry
+            .validate_action_input("self_tool", &json_object([]))
+            .unwrap_err()
+            .contains("input.type_required"));
+        assert!(registry
+            .validate_action_input(
+                "self_tool",
+                &json_object([
+                    ("type", Value::String("env".to_string())),
+                    ("op", Value::String("write".to_string())),
+                    ("key", Value::String("TIMEM_TEST_FLAG".to_string())),
+                ])
+            )
+            .unwrap_err()
+            .contains("input.value_required_when_op=write"));
+        assert!(registry
+            .validate_action_input(
+                "self_tool",
+                &json_object([
+                    ("type", Value::String("mem_path".to_string())),
+                    ("op", Value::String("read".to_string())),
+                ])
+            )
+            .is_ok());
         assert!(registry
             .validate_action_input(
                 "run_bash",

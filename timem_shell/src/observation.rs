@@ -457,6 +457,18 @@ fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
             };
             action_observation_pair(intent, ObservationLineStyle::Normal, detail)
         }
+        "self_tool" => {
+            let self_type = input.get("type").and_then(Value::as_str).unwrap_or("");
+            let op = input.get("op").and_then(Value::as_str).unwrap_or("");
+            let detail = match (self_type, op) {
+                ("env", "read") => "Timem: 查看环境".to_string(),
+                ("env", "write") => "Timem: 更新环境".to_string(),
+                ("mem_path", "read") => "Timem: 查看记忆路径".to_string(),
+                ("about_me", "read") => "Timem: 查看自身信息".to_string(),
+                _ => "Timem: 自身工具".to_string(),
+            };
+            action_observation_pair(intent, ObservationLineStyle::Normal, detail)
+        }
         "query_memory" | "memory_query" | "memory_sql_query" | "sql_read" | "memory_schema" => {
             action_observation_pair(
                 intent,
@@ -852,6 +864,31 @@ mod tests {
                 ObservationEvent::Persistent("加载发布检查能力".to_string()),
                 ObservationEvent::PersistentChild {
                     text: "能力: 加载 skill/release_quality_gate".to_string(),
+                    is_last: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn self_tool_action_maps_to_user_readable_observation_events() {
+        let events = observation_events_from_model_response(
+            r#"{"next_actions":[
+                {"action":"self_tool","intent":"查看 Timem 记忆路径","input":{"type":"mem_path","op":"read"}},
+                {"action":"self_tool","intent":"查看 Timem 软件信息","input":{"type":"about_me","op":"read"}}
+            ]}"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("查看 Timem 记忆路径".to_string()),
+                ObservationEvent::PersistentChild {
+                    text: "Timem: 查看记忆路径".to_string(),
+                    is_last: true
+                },
+                ObservationEvent::Persistent("查看 Timem 软件信息".to_string()),
+                ObservationEvent::PersistentChild {
+                    text: "Timem: 查看自身信息".to_string(),
                     is_last: true
                 }
             ]

@@ -111,6 +111,35 @@ Runtime prompt generation still uses `resources/static_v1.json`, capability mani
         "result": "Foreground returns status and bounded output. Background returns job_id; use\nshell_job_status with that job_id and your chosen timeout_ms to wait/check.\nErrors are short machine-readable strings such as timeout or command_failed.",
         "when": "Run a shell command on the local machine when local evidence or local changes\nare needed. Supports foreground and background execution. Provide\nread_back_command when stdout needs verification. Opt-in via\nlarge_readback_opt_in if output is truncated."
       },
+      "self_tool": {
+        "example": {
+          "action": "self_tool",
+          "input": {
+            "op": "read",
+            "type": "mem_path"
+          },
+          "intent": "Show the current Timem memory and audit paths."
+        },
+        "input": "Always include type and op. type=env supports op=read/write; read may include\nkey or omit key to list non-sensitive env values. write requires key and\nvalue and only changes current process runtime env. type=mem_path supports\nop=read. type=about_me supports op=read. API key/token/secret/password-like\nenv variables are not readable or writable. Memory path env variables such as\nTIMEM_DATA_DIR and TIMEM_SPACE are startup-only and are not writable through\nself_tool.",
+        "required": [
+          "type",
+          "op"
+        ],
+        "required_when": [
+          {
+            "field": "op",
+            "required": [
+              "key",
+              "value"
+            ],
+            "values": [
+              "write"
+            ]
+          }
+        ],
+        "result": "Returns current runtime env values, memory/audit paths, or Timem about\ninformation. Sensitive env requests return sensitive_env_denied. Env writes\nupdate the current process only; model/provider config may still need /config\nor restart. Memory path env writes return protected_env_denied because those\nresources are selected at startup. about_me also returns project/star info,\ncurrent process id, current directory, and executable path.",
+        "when": "Use when the user asks about Timem itself, current runtime environment\nvariables, memory/audit paths, or wants to adjust a non-secret process env\nvalue for this running Timem session."
+      },
       "shell_job_status": {
         "example": {
           "action": "shell_job_status",

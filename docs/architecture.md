@@ -514,6 +514,7 @@ flowchart TB
     Memmgr --> Memory["durable query/schema/sql/write/delete\nlong-lived facts"]
     Memmgr --> Scratch["scratch query/write/read/delete\ntyped notes and context offload"]
     Memmgr --> Shrink["context shrink\nremove delta/slice context"]
+    Core --> SelfTool["self_tool\nTimem runtime self-info"]
     Core --> Bash["run_bash\nlocal command"]
 ```
 
@@ -542,6 +543,28 @@ Current implemented surface:
   git repository under the selected memory directory when git is available.
 - Scratch memory: `memmgr` with `type=scratch, op=query|write|read|delete` over
   `scratch_notes.jsonl`.
+
+### Timem Self Tool
+
+`self_tool` is for questions or requests about Timem itself, not user memory or
+local project work. Current surfaces:
+
+- `type=env, op=read|write`: read or update non-sensitive environment values in
+  the current Timem process. API key, token, secret, password, credential, and
+  access-key-like variables are denied. Memory path variables such as
+  `TIMEM_DATA_DIR` and `TIMEM_SPACE` are startup-only and cannot be changed via
+  `self_tool`; use CLI/env at startup instead.
+- `type=mem_path, op=read`: list the current memory space, memory files, and
+  API/action audit files.
+- `type=about_me, op=read`: report TimemAi name, version, author/contact,
+  project/star info, and a short software summary, plus current process id,
+  working directory, and executable path.
+
+Candidate future surfaces are `config` for runtime config inspection,
+`workspace` for loaded workspace references, `capabilities` for active
+capability overlays, and `diagnostics` for recent retry/repair counters. These
+should stay scoped to Timem runtime state; file work remains `run_bash`, and
+memory work remains `memmgr`.
 
 ### Read-only SQL
 

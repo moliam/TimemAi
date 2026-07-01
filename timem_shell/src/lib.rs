@@ -478,6 +478,10 @@ pub fn action_status_hint(content: &str) -> Option<ActionStatusHint> {
                 memory_marker: marker.to_string(),
             })
         }
+        "self_tool" => Some(ActionStatusHint {
+            intent: intent.unwrap_or_else(|| "查看 Timem 自身状态".to_string()),
+            memory_marker: String::new(),
+        }),
         "chat_history_query" => Some(ActionStatusHint {
             intent: intent.unwrap_or_else(|| "查询聊天记录".to_string()),
             memory_marker: String::new(),
@@ -2761,6 +2765,13 @@ mod tests {
     fn action_status_hint_marks_memmgr_raw_chat_without_durable_marker() {
         let hint = action_status_hint(r#"{"next_actions":[{"action":"memmgr","intent":"查询刚才说法","input":{"type":"raw_chat","op":"query","query":"刚才"}}]}"#).unwrap();
         assert_eq!(hint.intent, "查询刚才说法");
+        assert_eq!(hint.memory_marker, "");
+    }
+
+    #[test]
+    fn action_status_hint_marks_self_tool_without_memory_icon() {
+        let hint = action_status_hint(r#"{"next_actions":[{"action":"self_tool","intent":"查看 Timem 路径","input":{"type":"mem_path","op":"read"}}]}"#).unwrap();
+        assert_eq!(hint.intent, "查看 Timem 路径");
         assert_eq!(hint.memory_marker, "");
     }
 
