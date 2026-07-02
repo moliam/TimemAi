@@ -1547,7 +1547,7 @@ fn choose_raw_multiline_paste_submit(line_count: usize) -> ApprovalChoice {
 
 fn choose_user_approval(request: &ApprovalRequest) -> ApprovalChoice {
     print!("{}", render_user_approval_prompt(request));
-    choose_with_keyboard(render_approval_choices, ApprovalChoice::Deny)
+    choose_with_keyboard(render_approval_choices, ApprovalChoice::Allow)
 }
 
 fn choose_round_limit_continue(request: RoundLimitDecisionRequest) -> ApprovalChoice {
