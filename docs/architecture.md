@@ -398,6 +398,62 @@ Important invariants:
   (`✚`) for Anthropic-style responses, so status, `/prof`, and audit can
   distinguish real cache hits from newly written cache.
 
+### KVC Cache Planning
+
+`prompt_cache.rs` owns provider cache-control planning. The planning input is
+the fully rendered prompt; provider adapters only translate the resulting
+`PromptBlock` list into each wire protocol.
+
+Algorithm:
+
+1. Split rendered prompt into `prompt_0` and dynamic prompt-delta slices.
+2. Emit `prompt_0` as a system block and always mark it cacheable.
+3. Emit every dynamic slice as a user block, preserving rendered order and
+   exact slice boundaries.
+4. Mark the latest `DYNAMIC_TAIL_CACHE_BLOCKS = 3` dynamic blocks cacheable.
+5. Leave older dynamic blocks unmarked.
+
+This is a tail-checkpoint strategy, not an old-deltas strategy. It deliberately
+marks the newest prompt tail cacheable. For append-only conversations, the
+newest tail in request N becomes a stable prefix inside request N+1, so
+provider prefix-cache lookup can reuse the previous cached prefix while the new
+tail writes the next boundary.
+
+Rejected strategies and why:
+
+- Static-only cache is cheap but only covers the invariant static prompt.
+- One ever-growing `old_deltas` block changes every turn, so it repeatedly
+  creates cache instead of producing useful prefix hits.
+- Stable `llm_response` checkpoints improve over static-only, but they can lag
+  behind the active working tail and leave recent tool/action context outside
+  the best cache boundary.
+- Typed tails such as only `result_of_llm_action` perform well in local replay,
+  but they encode prompt-type assumptions into cache planning and miss mixed
+  user/action/response tail flows.
+
+Current replay result over local `api_audit` data:
+
+| Strategy | Setting | Hit rate | Create rate | Score hit-create |
+|---|---:|---:|---:|---:|
+| static only | - | 30.8% | 1.3% | 29.5% |
+| legacy old-deltas block | - | 31.0% | 66.2% | -35.2% |
+| stable checkpoint | threshold=1, ckpt=2 | 69.0% | 3.7% | 65.3% |
+| latest tail | tail=3 | 94.0% | 6.0% | 88.0% |
+
+`tail=3` is selected because `tail=3` and `tail=4` tie on the replay score, but
+`tail=3` uses fewer cache marks and keeps explicit breakpoints at
+`1 static + 3 dynamic = 4`. Re-run
+`python3 scripts/kvc_replay.py --data-dir data --max-tail-blocks 4` after
+changing cache planning or prompt rendering.
+
+Limitations:
+
+- Replay uses local audit history and character counts as a token proxy.
+- It models provider prefix cache behavior with a bounded lookback; real
+  provider TTL, eviction, and proxy-layer behavior still need live monitoring.
+- Production status lines and `/prof` must keep cache hits and cache creation
+  separate: hits are reuse, creation writes the next cache boundary.
+
 ## Action Protocol
 
 The model does not call Rust functions directly. It sends a response envelope.
