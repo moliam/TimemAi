@@ -4860,9 +4860,9 @@ fn prose_then_final_answer_only_json_extracts_payload() {
     let _ = core.begin_turn("你叫什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"你叫李默！
+            r#"你叫张三！
 
-{"status":"finished","final_answer":"你叫**李默**！"}
+{"status":"finished","final_answer":"你叫**张三**！"}
 "#,
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
@@ -4873,7 +4873,7 @@ fn prose_then_final_answer_only_json_extracts_payload() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("李默"));
+    assert!(final_turn.response_to_user.contains("张三"));
     assert_eq!(final_turn.repair_issue, None);
 }
 
@@ -4921,7 +4921,9 @@ fn prose_with_json_reference_before_actual_response() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("JSON is a data format"));
+    assert!(final_turn
+        .response_to_user
+        .contains("JSON is a data format"));
     assert_eq!(final_turn.repair_issue, None);
 }
 
@@ -4996,7 +4998,6 @@ fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
     assert!(final_turn.response_to_user.contains("curly braces"));
     assert_eq!(final_turn.repair_issue, None);
 }
-
 
 #[test]
 fn array_of_actions_auto_wrapped_as_next_actions() {

@@ -3348,7 +3348,11 @@ fn strip_markdown_code_fences(input: &str) -> Option<&str> {
     let rest = trimmed.strip_prefix("```")?;
     let after_tag = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("");
     let body = after_tag.strip_suffix("```").map(str::trim)?;
-    if body.is_empty() { None } else { Some(body) }
+    if body.is_empty() {
+        None
+    } else {
+        Some(body)
+    }
 }
 
 fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::Error> {
@@ -3414,7 +3418,8 @@ fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::
 
 fn is_likely_response_envelope(value: &Value) -> bool {
     value.as_object().is_some_and(|object| {
-        object.contains_key("report_job_progress") || object.contains_key("next_actions")
+        object.contains_key("report_job_progress")
+            || object.contains_key("next_actions")
             || object.contains_key("final_answer")
             || object.contains_key("status")
             || object.contains_key("thought")
