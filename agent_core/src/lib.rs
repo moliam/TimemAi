@@ -2903,6 +2903,22 @@ fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnv
             }
         }
     };
+    // Auto-wrap array of action objects into {"next_actions": [...]}
+    let value = if value.is_array() {
+        let arr = value.as_array().unwrap();
+        let all_actions = !arr.is_empty()
+            && arr.iter().all(|item| {
+                item.as_object()
+                    .is_some_and(|obj| obj.contains_key("action"))
+            });
+        if all_actions {
+            json!({"next_actions": value})
+        } else {
+            value
+        }
+    } else {
+        value
+    };
     if !value.is_object() {
         return ParsedEnvelope {
             report_job_progress: String::new(),

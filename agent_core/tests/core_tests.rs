@@ -4998,3 +4998,73 @@ fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
 }
 
 
+#[test]
+fn array_of_actions_auto_wrapped_as_next_actions() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("array_actions"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("find files", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"[{"action":"run_bash","intent":"Find files.","args":{"command":"echo ok","timeout_ms":5000}}]"#,
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel with action results, got: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("ok"));
+}
+
+#[test]
+fn array_of_multiple_actions_auto_wrapped() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("array_multi_actions"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("multi", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"[{"action":"run_bash","intent":"First.","args":{"command":"echo one","timeout_ms":5000}},{"action":"run_bash","intent":"Second.","args":{"command":"echo two","timeout_ms":5000}}]"#,
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got: {other:?}"),
+    };
+    assert!(prompt.contains("one"));
+    assert!(prompt.contains("two"));
+}
+
+#[test]
+fn array_without_action_key_still_rejected() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("array_no_action"),
+    );
+    let _ = core.begin_turn("bad", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"[{"foo":"bar"}]"#),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel (repair), got: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair"));
+}
