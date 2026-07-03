@@ -608,7 +608,25 @@ fn pad_display_width(text: &str, width: usize) -> String {
 }
 
 fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
+    UnicodeWidthStr::width(strip_ansi(text).as_str())
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code_ch in chars.by_ref() {
+                if code_ch.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1068,5 +1086,27 @@ mod tests {
             .replace(ANSI_RESET, "");
         let first_line_width = display_width(&first_line);
         assert_eq!(first_line_width, 96);
+    }
+
+    #[test]
+    fn panel_ansi_sequences_do_not_affect_visible_width() {
+        let mut panel = ObservationPanel::new(8, 80);
+        panel.apply(ObservationEvent::Active(
+            "正在执行长命令并刷新状态".to_string(),
+        ));
+        panel.apply(ObservationEvent::ActiveChild {
+            text: "Bash: echo \"=== git status ===\"; git status; echo; git diff --cached"
+                .to_string(),
+            is_last: true,
+        });
+        panel.apply(ObservationEvent::Transient("思考中...".to_string()));
+
+        let rendered = render_observation_panel_at_with_elapsed(&panel, 2, Some("00:57"));
+        let visible_widths = rendered.lines().map(display_width).collect::<Vec<_>>();
+        assert!(
+            visible_widths.iter().all(|width| *width == 80),
+            "all panel rows should have the same visible width: {visible_widths:?}\n{rendered}"
+        );
+        assert!(rendered.contains("\x1b[38;5;255m"));
     }
 }
