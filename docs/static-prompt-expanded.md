@@ -318,9 +318,9 @@ Available skill headers:
 Response must be either a final answer, optionally guarded by one final
 `run_bash` command, or an intermediate action response.
 
-Every response MUST BE enclosed in EXACTLY ONE JSON object matching the following schema. DO NOT leave anything outside.
+All your output things MUST BE enclosed in EXACTLY ONE JSON object starting/ending with {/}, matching the following schema. DO NOT leave or add anything outside.
 Note: <1> The following block is a descriptive schema summary, not an example response.  <2> A key ending with '?' in this summary means optional and can be omitted when empty/false/n/a. The actual JSON key name must not include '?'.
-
+Schema:
 {
   "fields": {
     "status?": "string; optional; working/finished. Default is working. Use finished only when the job is complete and no more runtime interaction is needed; then final_answer is shown as the closing user response.",

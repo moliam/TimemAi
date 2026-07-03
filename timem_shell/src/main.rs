@@ -3138,9 +3138,10 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("{{RESPONSE_V1_SCHEMA}}"));
         assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));
         assert!(STATIC_PROMPT.contains("{{SKILL_HEADERS}}"));
-        assert!(STATIC_PROMPT
-            .contains("MUST BE enclosed in EXACTLY ONE JSON object matching the following schema"));
-        assert!(STATIC_PROMPT.contains("DO NOT leave anything outside"));
+        assert!(STATIC_PROMPT.contains(
+            "output things MUST BE enclosed in EXACTLY ONE JSON object starting/ending with {/}"
+        ));
+        assert!(STATIC_PROMPT.contains("DO NOT leave or add anything outside"));
         assert!(STATIC_PROMPT.contains("descriptive schema summary, not an example response"));
         assert!(!STATIC_PROMPT.contains("```json\n{{RESPONSE_V1_SCHEMA}}"));
         assert!(!STATIC_PROMPT.contains("```text\n{{RESPONSE_V1_SCHEMA}}"));
