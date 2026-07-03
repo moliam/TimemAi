@@ -6,6 +6,18 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-03
+
+### Added
+
+- Auto-wrap bare array of action objects as `next_actions` in model response parsing, improving tolerance for non-envelope responses.
+- Expanded envelope detection and added Markdown fence stripping for model responses.
+
+### Fixed
+
+- Replaced private fixture data (`李默`) with synthetic test name in core tests to pass `test_contract_check`.
+- Applied `cargo fmt` to resolve formatting diffs in CI.
+
 ## [0.8.0] - 2026-07-03
 
 ### Added
