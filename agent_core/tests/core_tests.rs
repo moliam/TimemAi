@@ -3138,11 +3138,22 @@ fn mem_guard_child_process_holds_lock_helper() {
         return;
     };
     let marker = PathBuf::from(std::env::var("TIMEM_MEM_GUARD_CHILD_MARKER").unwrap());
+    let release = std::env::var("TIMEM_MEM_GUARD_CHILD_RELEASE")
+        .ok()
+        .map(PathBuf::from);
     let guard = MemGuard::for_memory_dir(dir);
     guard
         .with_write(|| {
             fs::write(&marker, "locked").unwrap();
-            thread::sleep(Duration::from_millis(350));
+            if let Some(release) = release {
+                let started = std::time::Instant::now();
+                while !release.exists() {
+                    assert!(started.elapsed() < Duration::from_secs(10));
+                    thread::sleep(Duration::from_millis(20));
+                }
+            } else {
+                thread::sleep(Duration::from_millis(350));
+            }
         })
         .unwrap();
 }
@@ -3156,6 +3167,7 @@ fn mem_guard_serializes_writes_across_processes() {
     fs::create_dir_all(&dir).unwrap();
     let child_marker = dir.join("child_locked.txt");
     let parent_marker = dir.join("parent_after_child.txt");
+    let release_marker = dir.join("release_child.txt");
     let current_exe = std::env::current_exe().unwrap();
     let mut child = Command::new(current_exe)
         .arg("--exact")
@@ -3163,6 +3175,7 @@ fn mem_guard_serializes_writes_across_processes() {
         .arg("--nocapture")
         .env("TIMEM_MEM_GUARD_CHILD_DIR", &dir)
         .env("TIMEM_MEM_GUARD_CHILD_MARKER", &child_marker)
+        .env("TIMEM_MEM_GUARD_CHILD_RELEASE", &release_marker)
         .spawn()
         .unwrap();
 
@@ -3172,15 +3185,21 @@ fn mem_guard_serializes_writes_across_processes() {
         thread::sleep(Duration::from_millis(20));
     }
 
-    let waited = std::time::Instant::now();
-    MemGuard::for_memory_dir(&dir)
-        .with_write(|| fs::write(&parent_marker, "done"))
-        .unwrap()
-        .unwrap();
+    let parent_dir = dir.clone();
+    let parent_marker_for_thread = parent_marker.clone();
+    let parent = thread::spawn(move || {
+        MemGuard::for_memory_dir(&parent_dir)
+            .with_write(|| fs::write(&parent_marker_for_thread, "done"))
+            .unwrap()
+            .unwrap();
+    });
+    thread::sleep(Duration::from_millis(200));
     assert!(
-        waited.elapsed() >= Duration::from_millis(250),
+        !parent_marker.exists(),
         "parent should wait for child process guard"
     );
+    fs::write(&release_marker, "release").unwrap();
+    parent.join().unwrap();
     let status = child.wait().unwrap();
     assert!(status.success());
     assert_eq!(fs::read_to_string(parent_marker).unwrap(), "done");
