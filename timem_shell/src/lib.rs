@@ -328,11 +328,8 @@ fn final_status_line(
     }
     parts.push(format!("▲{}", compact_count(stats.prompt_tokens)));
     parts.push(format!("▼{}", compact_count(stats.completion_tokens)));
-    if stats.cached_tokens > 0 {
-        parts.push(format!("⌁{}", compact_count(stats.cached_tokens)));
-    }
-    if stats.cache_created_tokens > 0 {
-        parts.push(format!("✚{}", compact_count(stats.cache_created_tokens)));
+    if let Some(kvc) = kvc_status(stats.cached_tokens, stats.cache_created_tokens) {
+        parts.push(kvc);
     }
     format!(
         " ↳  {}s    {}:{} ⇌{} ║ {}",
@@ -357,11 +354,8 @@ fn compact_token_totals(stats: &UsageStats) -> String {
         format!("▲{}", compact_count(stats.prompt_tokens)),
         format!("▼{}", compact_count(stats.completion_tokens)),
     ];
-    if stats.cached_tokens > 0 {
-        parts.push(format!("⌁{}", compact_count(stats.cached_tokens)));
-    }
-    if stats.cache_created_tokens > 0 {
-        parts.push(format!("✚{}", compact_count(stats.cache_created_tokens)));
+    if let Some(kvc) = kvc_status(stats.cached_tokens, stats.cache_created_tokens) {
+        parts.push(kvc);
     }
     parts.join(" | ")
 }
@@ -371,13 +365,25 @@ fn compact_token_latest(usage: &UsageStats) -> String {
         format!("△{}", compact_count(usage.prompt_tokens)),
         format!("▽{}", compact_count(usage.completion_tokens)),
     ];
-    if usage.cached_tokens > 0 {
-        parts.push(format!("⌁{}", compact_count(usage.cached_tokens)));
-    }
-    if usage.cache_created_tokens > 0 {
-        parts.push(format!("✚{}", compact_count(usage.cache_created_tokens)));
+    if let Some(kvc) = kvc_status(usage.cached_tokens, usage.cache_created_tokens) {
+        parts.push(kvc);
     }
     parts.join("  ")
+}
+
+fn kvc_status(cached_tokens: u32, cache_created_tokens: u32) -> Option<String> {
+    let mut parts = Vec::new();
+    if cached_tokens > 0 {
+        parts.push(format!("⌁{}", compact_count(cached_tokens)));
+    }
+    if cache_created_tokens > 0 {
+        parts.push(format!("✚{}", compact_count(cache_created_tokens)));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("KVC({})", parts.join(" ")))
+    }
 }
 
 fn meaningful_latest(latest_usage: Option<&UsageStats>) -> Option<&UsageStats> {
@@ -446,10 +452,13 @@ pub fn token_status_with_latest(
     let mut input = format!("▲{}", compact_count(stats.prompt_tokens));
     let mut input_annotations = Vec::new();
     if stats.cached_tokens > 0 {
-        input_annotations.push(format!("⌁{}", compact_count(stats.cached_tokens)));
+        input_annotations.push(format!("KVC:⌁{}", compact_count(stats.cached_tokens)));
     }
     if stats.cache_created_tokens > 0 {
-        input_annotations.push(format!("✚{}", compact_count(stats.cache_created_tokens)));
+        input_annotations.push(format!(
+            "KVC:✚{}",
+            compact_count(stats.cache_created_tokens)
+        ));
     }
     if stats.shrunk_tokens > 0 {
         input_annotations.push(format!("⇃{}", compact_count(stats.shrunk_tokens)));
@@ -2561,7 +2570,7 @@ mod tests {
             100_000,
             "10:52:57",
         );
-        assert!(rendered.contains("aliyun:qwen-plus ⇌3 ║ ▲1.2K  ▼88  ⌁1.21M"));
+        assert!(rendered.contains("aliyun:qwen-plus ⇌3 ║ ▲1.2K  ▼88  KVC(⌁1.21M)"));
     }
 
     #[test]
@@ -2588,7 +2597,7 @@ mod tests {
             "22:29:07",
         );
         assert!(rendered
-            .contains("custom:aws-claude-opus-4-7 ⇌13 (⚠3) ║ ctx[80%]  ▲85K  ▼3.5K  ⌁53.9K"));
+            .contains("custom:aws-claude-opus-4-7 ⇌13 (⚠3) ║ ctx[80%]  ▲85K  ▼3.5K  KVC(⌁53.9K)"));
     }
 
     #[test]
@@ -2613,7 +2622,7 @@ mod tests {
                 shrunk_tokens: 200,
                 ..UsageStats::zero()
             }),
-            "Token: ▲22.2K(⌁1.2K , ⇃200) ▼1.4K"
+            "Token: ▲22.2K(KVC:⌁1.2K , ⇃200) ▼1.4K"
         );
     }
 
@@ -2636,6 +2645,28 @@ mod tests {
         assert_eq!(
             token_status_with_latest(&total, Some(&latest), TokenStatusMode::Final),
             "Token [ctx 2K] ▲4.4K ▼56"
+        );
+    }
+
+    #[test]
+    fn token_status_groups_cache_creation_as_kvc() {
+        let total = UsageStats {
+            prompt_tokens: 4_900,
+            completion_tokens: 39,
+            cache_created_tokens: 4_900,
+            ..UsageStats::zero()
+        };
+        let latest = UsageStats {
+            prompt_tokens: 4_900,
+            completion_tokens: 39,
+            cache_created_tokens: 4_900,
+            ..UsageStats::zero()
+        };
+        assert_eq!(compact_token_totals(&total), "▲4.9K | ▼39 | KVC(✚4.9K)");
+        assert_eq!(compact_token_latest(&latest), "△4.9K  ▽39  KVC(✚4.9K)");
+        assert_eq!(
+            final_status_line(&total, Some(&latest), "aliyun", "qwen-plus", 1, 100_000),
+            " ↳  1s    aliyun:qwen-plus ⇌0 ║ ctx[5%]  ▲4.9K  ▼39  KVC(✚4.9K)"
         );
     }
 
@@ -3298,7 +3329,7 @@ mod tests {
         assert!(view.contains("Thought / Action  ⏳ 00:12"));
         assert!(view.contains("· 正在分析用户请求"));
         assert!(view.contains("\x1b[38;5;245m· Bash: rg --files | wc -l"));
-        assert!(view.contains("aliyun:qwen-plus ⇌2 ║ ▲1.2K | ▼20 | ⌁300"));
+        assert!(view.contains("aliyun:qwen-plus ⇌2 ║ ▲1.2K | ▼20 | KVC(⌁300)"));
         assert!(view.contains("├─ context : ▰▱▱▱▱▱▱▱▱▱"));
         assert!(view.contains("└─ △800  ▽12"));
         assert!(!view.contains("已用 12s"));
@@ -3450,7 +3481,7 @@ mod tests {
             "12:00:00",
         );
 
-        assert!(view.contains("custom:aws-claude-sonnet-4-6 ⇌13 (⚠3) ║ ▲85K | ▼3.5K | ⌁53.9K"));
+        assert!(view.contains("custom:aws-claude-sonnet-4-6 ⇌13 (⚠3) ║ ▲85K | ▼3.5K | KVC(⌁53.9K)"));
     }
 
     #[test]
@@ -3485,7 +3516,7 @@ mod tests {
             .nth(1)
             .is_some_and(|line| line == "测试代号是 ALPHA-42。"));
         assert!(rendered.contains("测试代号是 ALPHA-42。"));
-        assert!(rendered.contains("aliyun:qwen-plus ⇌2 ║ ctx[1%]  ▲812  ▼52  ⌁384"));
+        assert!(rendered.contains("aliyun:qwen-plus ⇌2 ║ ctx[1%]  ▲812  ▼52  KVC(⌁384)"));
         assert!(!rendered.contains("▼52(+31)"));
         assert!(!rendered.contains("你 >"));
         assert!(!rendered.contains("thinking..."));
