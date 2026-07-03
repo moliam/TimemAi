@@ -2467,6 +2467,46 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_request_maps_cache_strategy_to_messages() {
+        let config = provider_config_from_env(
+            &CliOptions {
+                provider: Some("aliyun".into()),
+                model: Some("qwen-plus".into()),
+                ..CliOptions::default()
+            },
+            &env(&[("TIMEM_API_KEY", "k")]),
+        )
+        .unwrap();
+        let mut prompt =
+            "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n".to_string();
+        for idx in 1..=5 {
+            prompt.push_str(&format!(
+                "[BEGIN SEGMENT {idx}: prompt_delta]\ndelta_id: pd_{idx}\nprompt_type: llm_response\ndelta {idx}\n[END SEGMENT {idx}: prompt_delta]\n"
+            ));
+        }
+
+        let body = build_request(&config, &prompt);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "STATIC");
+        assert_eq!(messages[0]["cache_control"]["type"], "ephemeral");
+
+        assert!(messages[1]["content"].as_str().unwrap().contains("delta 1"));
+        assert!(messages[2]["content"].as_str().unwrap().contains("delta 2"));
+        assert_eq!(messages[1].get("cache_control"), None);
+        assert_eq!(messages[2].get("cache_control"), None);
+
+        for idx in 3..=5 {
+            assert!(messages[idx]["content"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("delta {idx}")));
+            assert_eq!(messages[idx]["cache_control"]["type"], "ephemeral");
+        }
+    }
+
+    #[test]
     fn same_model_keeps_provider_endpoint_distinct() {
         let aliyun = provider_config_from_env(
             &CliOptions {
