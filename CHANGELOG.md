@@ -5,6 +5,7 @@ pragmatic Keep a Changelog style: newest changes first, with release sections
 for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
+## [0.7.0-pre] - 2026-07-03
 
 ### Changed
 
