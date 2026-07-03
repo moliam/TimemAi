@@ -6,6 +6,29 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-03
+
+### Added
+
+- Added tail-aware KV-cache planning for growing prompt deltas, with replay
+  tests that simulate provider-side cache matching and guard against the old
+  low-hit-rate strategy.
+- Added CI coverage for KV-cache replay quality gates and openai-compatible
+  cache marker generation.
+
+### Changed
+
+- Refined the model-facing response envelope wording and regenerated the
+  expanded static prompt snapshot.
+- Documented the KV-cache tail planning algorithm and replay evidence in the
+  architecture and optimization notes.
+
+### Fixed
+
+- Stabilized Thought / Action panel rendering when ANSI color sequences are
+  present, preventing visible-width miscalculation during long command/status
+  redraws.
+
 ## [0.7.1] - 2026-07-03
 
 ### Fixed
