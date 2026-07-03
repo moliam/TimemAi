@@ -200,9 +200,9 @@ mod tests {
     }
 
     #[test]
-    fn prompt_spec_injects_response_schema_summary_into_markdown_placeholder() {
+    fn prompt_spec_injects_response_schema_summary_into_plain_placeholder() {
         let enriched = enrich_static_prompt_with_response_schema(
-            "## Response Protocol\n```json\n{{RESPONSE_V1_SCHEMA}}\n```",
+            "## Response Protocol\n{{RESPONSE_V1_SCHEMA}}",
         );
 
         assert!(!enriched.contains("\"$id\""));
@@ -210,6 +210,8 @@ mod tests {
         assert!(enriched.contains("\"report_job_progress?\""));
         assert!(enriched.contains("\"final_answer?\""));
         assert!(!enriched.contains("{{RESPONSE_V1_SCHEMA}}"));
+        assert!(!enriched.contains("```json\n{\n  \"fields\""));
+        assert!(!enriched.contains("```text\n{\n  \"fields\""));
     }
 
     #[test]

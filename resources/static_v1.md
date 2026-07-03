@@ -114,12 +114,11 @@ Available skill headers:
 
 Response must be either a final answer, optionally guarded by one final
 `run_bash` command, or an intermediate action response.
-You must return exactly one JSON object matching the following schema:
-(Note: A key ending with '?' in this summary means optional and can be omitted when empty/false/n/a. The actual JSON key name must not include '?'.)
 
-```json
+Every response MUST BE EXACTLY ONE JSON object matching the following schema. DO NOT WRAP ANYTHING around it.
+Note: <1> The following block is a descriptive schema summary, not an example response.  <2> A key ending with '?' in this summary means optional and can be omitted when empty/false/n/a. The actual JSON key name must not include '?'.
+
 {{RESPONSE_V1_SCHEMA}}
-```
 
 You may issue multiple `next_actions` in one response to save interaction
 rounds.
@@ -137,16 +136,13 @@ work.
 
 ### Example: final answer
 
-```json
 {
   "status": "finished",
   "final_answer": "好的，我明白了。"
 }
-```
 
 ### Example: finished with final command
 
-```json
 {
   "status": "finished",
   "final_answer": "任务已完成。",
@@ -161,11 +157,9 @@ work.
     }
   ]
 }
-```
 
 ### Example: need actions
 
-```json
 {
   "report_job_progress": "正在查找相关记忆和系统版本。",
   "next_actions": [
@@ -189,4 +183,3 @@ work.
     }
   ]
 }
-```

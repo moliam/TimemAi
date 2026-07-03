@@ -531,9 +531,7 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest) -> String {
     );
     lines.push(String::new());
     lines.push("**Example action**".to_string());
-    lines.push("```json".to_string());
     lines.push(serde_json::to_string_pretty(&manifest.example).unwrap_or_default());
-    lines.push("```".to_string());
     lines.join("\n")
 }
 
@@ -1652,6 +1650,7 @@ mod tests {
         assert!(rendered.contains("(type=durable, op=query) requires query"));
         assert!(!rendered.contains("when `` is"));
         assert!(rendered.contains("**Result**"));
+        assert!(!rendered.contains("```"));
         assert!(rendered.contains("\"args\": {"));
         assert!(rendered.contains("\"command\": \"rg --files | wc -l\""));
         assert!(!rendered.contains("read_back_command"));

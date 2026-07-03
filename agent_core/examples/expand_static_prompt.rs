@@ -23,7 +23,5 @@ fn main() {
         "This file is a read-only audit snapshot for humans. It is not read by Timem at runtime."
     );
     println!();
-    println!("```text");
     println!("{}", core.render_prompt());
-    println!("```");
 }

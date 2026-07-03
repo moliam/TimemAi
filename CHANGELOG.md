@@ -5,6 +5,17 @@ pragmatic Keep a Changelog style: newest changes first, with release sections
 for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
+
+## [0.7.1] - 2026-07-03
+
+### Fixed
+
+- Removed Markdown fenced code blocks from the model-facing static prompt,
+  response schema summary, and generated tool action examples. This reduces
+  the chance that models copy Markdown fences into protocol responses.
+- Updated the expanded static prompt snapshot and regression tests to guard
+  against reintroducing prompt fences.
+
 ## [0.7.0] - 2026-07-03
 
 ### Changed

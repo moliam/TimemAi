@@ -92,6 +92,7 @@ mod tests {
         assert!(rendered.contains("#### `memmgr`"));
         assert!(rendered.contains("**Options**"));
         assert!(!rendered.contains("\"tool_catalog\""));
+        assert!(!rendered.contains("```"));
         assert!(rendered.contains("delta_id: pd_test_1"));
         assert!(rendered.contains("hello"));
         assert!(!rendered.contains("UNIQUE_HIDDEN_SLICE_SENTINEL"));
