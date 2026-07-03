@@ -6,3 +6,6 @@ target/
 /*_env
 *.log
 *.tmp
+.DS_Store
+__pycache__/
+*.pyc

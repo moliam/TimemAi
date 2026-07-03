@@ -4146,7 +4146,9 @@ fn static_prompt_keeps_contracts_concise() {
     );
     assert!(static_prompt.contains("The command's exit code"));
     assert!(static_prompt.contains("final_answer"));
-    assert!(static_prompt.contains("MUST BE EXACTLY ONE JSON object matching the following schema"));
+    assert!(static_prompt
+        .contains("MUST BE enclosed in EXACTLY ONE JSON object matching the following schema"));
+    assert!(static_prompt.contains("DO NOT leave anything outside"));
     assert!(static_prompt.contains("descriptive schema summary, not an example response"));
     assert!(!static_prompt.contains("```json\n{{RESPONSE_V1_SCHEMA}}"));
     assert!(!static_prompt.contains("```text\n{{RESPONSE_V1_SCHEMA}}"));

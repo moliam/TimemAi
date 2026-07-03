@@ -404,7 +404,7 @@ def main() -> int:
     parser.add_argument(
         "--data-dir",
         action="append",
-        default=["data"],
+        default=None,
         help="Data directory to scan recursively. Default: data",
     )
     parser.add_argument("--audit", action="append", help="Specific api_audit file")
@@ -412,6 +412,9 @@ def main() -> int:
     parser.add_argument("--max-checkpoints", type=int, default=3)
     parser.add_argument("--max-tail-blocks", type=int, default=4)
     args = parser.parse_args()
+
+    if args.data_dir is None:
+        args.data_dir = ["data"]
 
     paths = audit_paths(args)
     events = load_events(paths)
