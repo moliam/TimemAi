@@ -51,6 +51,7 @@ pub struct UsageStats {
     pub completion_tokens: u32,
     pub total_tokens: u32,
     pub cached_tokens: u32,
+    pub cache_created_tokens: u32,
     pub shrunk_tokens: u32,
 }
 impl UsageStats {
@@ -65,6 +66,7 @@ impl UsageStats {
             completion_tokens: 0,
             total_tokens: 0,
             cached_tokens: 0,
+            cache_created_tokens: 0,
             shrunk_tokens: 0,
         }
     }
@@ -78,6 +80,7 @@ impl UsageStats {
         self.completion_tokens += other.completion_tokens;
         self.total_tokens += other.total_tokens;
         self.cached_tokens += other.cached_tokens;
+        self.cache_created_tokens += other.cache_created_tokens;
         self.shrunk_tokens += other.shrunk_tokens;
     }
 }

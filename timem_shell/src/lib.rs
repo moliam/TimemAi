@@ -331,6 +331,9 @@ fn final_status_line(
     if stats.cached_tokens > 0 {
         parts.push(format!("⌁{}", compact_count(stats.cached_tokens)));
     }
+    if stats.cache_created_tokens > 0 {
+        parts.push(format!("✚{}", compact_count(stats.cache_created_tokens)));
+    }
     format!(
         " ↳  {}s    {}:{} ⇌{} ║ {}",
         elapsed_secs,
@@ -357,6 +360,9 @@ fn compact_token_totals(stats: &UsageStats) -> String {
     if stats.cached_tokens > 0 {
         parts.push(format!("⌁{}", compact_count(stats.cached_tokens)));
     }
+    if stats.cache_created_tokens > 0 {
+        parts.push(format!("✚{}", compact_count(stats.cache_created_tokens)));
+    }
     parts.join(" | ")
 }
 
@@ -368,6 +374,9 @@ fn compact_token_latest(usage: &UsageStats) -> String {
     if usage.cached_tokens > 0 {
         parts.push(format!("⌁{}", compact_count(usage.cached_tokens)));
     }
+    if usage.cache_created_tokens > 0 {
+        parts.push(format!("✚{}", compact_count(usage.cache_created_tokens)));
+    }
     parts.join("  ")
 }
 
@@ -376,6 +385,7 @@ fn meaningful_latest(latest_usage: Option<&UsageStats>) -> Option<&UsageStats> {
         usage.prompt_tokens > 0
             || usage.completion_tokens > 0
             || usage.cached_tokens > 0
+            || usage.cache_created_tokens > 0
             || usage.shrunk_tokens > 0
     })
 }
@@ -423,6 +433,7 @@ pub fn token_status_with_latest(
         usage.prompt_tokens > 0
             || usage.completion_tokens > 0
             || usage.cached_tokens > 0
+            || usage.cache_created_tokens > 0
             || usage.shrunk_tokens > 0
     });
     let ctx = if mode == TokenStatusMode::Final {
@@ -436,6 +447,9 @@ pub fn token_status_with_latest(
     let mut input_annotations = Vec::new();
     if stats.cached_tokens > 0 {
         input_annotations.push(format!("⌁{}", compact_count(stats.cached_tokens)));
+    }
+    if stats.cache_created_tokens > 0 {
+        input_annotations.push(format!("✚{}", compact_count(stats.cache_created_tokens)));
     }
     if stats.shrunk_tokens > 0 {
         input_annotations.push(format!("⇃{}", compact_count(stats.shrunk_tokens)));
@@ -1098,6 +1112,7 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
                     completion_tokens,
                     total_tokens,
                     cached_tokens,
+                    cache_created_tokens: 0,
                     ..UsageStats::zero()
                 },
                 finish_reason == "length" || finish_reason == "max_tokens",
@@ -1136,6 +1151,7 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
                     completion_tokens,
                     total_tokens,
                     cached_tokens,
+                    cache_created_tokens: 0,
                     ..UsageStats::zero()
                 },
                 status == "incomplete" && incomplete_reason == "max_output_tokens",
@@ -1179,6 +1195,7 @@ pub fn parse_llm_response(config: &ProviderConfig, raw: &Value) -> Result<LlmRes
                     completion_tokens,
                     total_tokens: billed_prompt_tokens + completion_tokens,
                     cached_tokens: cache_read_tokens,
+                    cache_created_tokens: cache_creation_tokens,
                     ..UsageStats::zero()
                 },
                 stop_reason == "max_tokens",
@@ -2051,45 +2068,227 @@ mod tests {
 
     #[test]
     fn prompt_cache_strategy_marks_incremental_prefixes() {
-        let prompt1 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]";
+        let prompt1 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\nprompt_type: user_question\ndelta1\n[END SEGMENT 1: prompt_delta]";
         let blocks1 = plan_prompt_cache(prompt1);
         assert_eq!(blocks1.len(), 2);
         assert_eq!(blocks1[0].role, PromptBlockRole::System);
         assert_eq!(blocks1[0].text, "STATIC");
         assert_eq!(blocks1[0].cache, CacheControl::Ephemeral);
         assert!(blocks1[1].text.contains("delta1"));
-        assert_eq!(blocks1[1].cache, CacheControl::None);
+        assert_eq!(blocks1[1].cache, CacheControl::Ephemeral);
 
-        let prompt2 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta2\n[END SEGMENT 2: prompt_delta]";
+        let prompt2 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta_id: pd_1\nprompt_type: llm_response\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta_id: pd_2\nprompt_type: user_question\ndelta2\n[END SEGMENT 2: prompt_delta]";
         let blocks2 = plan_prompt_cache(prompt2);
         assert_eq!(blocks2.len(), 3);
         assert!(blocks2[1].text.contains("delta1"));
         assert!(!blocks2[1].text.contains("delta2"));
         assert_eq!(blocks2[1].cache, CacheControl::Ephemeral);
         assert!(blocks2[2].text.contains("delta2"));
-        assert_eq!(blocks2[2].cache, CacheControl::None);
+        assert_eq!(blocks2[2].cache, CacheControl::Ephemeral);
 
-        let prompt3 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta2\n[END SEGMENT 2: prompt_delta]\n[BEGIN SEGMENT 3: prompt_delta]\ndelta3\n[END SEGMENT 3: prompt_delta]";
+        let prompt3 = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta_id: pd_1\nprompt_type: llm_response\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta_id: pd_2\nprompt_type: user_question\ndelta2\n[END SEGMENT 2: prompt_delta]\n[BEGIN SEGMENT 3: prompt_delta]\ndelta_id: pd_3\nprompt_type: user_question\ndelta3\n[END SEGMENT 3: prompt_delta]";
         let blocks3 = plan_prompt_cache(prompt3);
-        assert_eq!(blocks3.len(), 3);
+        assert_eq!(blocks3.len(), 4);
         assert!(blocks3[1].text.contains("delta1"));
-        assert!(blocks3[1].text.contains("delta2"));
         assert!(!blocks3[1].text.contains("delta3"));
         assert_eq!(blocks3[1].cache, CacheControl::Ephemeral);
-        assert!(blocks3[2].text.contains("delta3"));
-        assert_eq!(blocks3[2].cache, CacheControl::None);
+        assert!(blocks3[2].text.contains("delta2"));
+        assert_eq!(blocks3[2].cache, CacheControl::Ephemeral);
+        assert!(blocks3[3].text.contains("delta3"));
+        assert_eq!(blocks3[3].cache, CacheControl::Ephemeral);
     }
 
     #[test]
-    fn prompt_cache_strategy_keeps_multi_slice_delta_together() {
-        let prompt = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta_id: pd_1\nslice_id: ps_1_s001\nslice: 1/1\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta_id: pd_2\nslice_id: ps_2_s001\nslice: 1/2\ndelta2 slice1\n[END SEGMENT 2: prompt_delta]\n[BEGIN SEGMENT 3: prompt_delta]\ndelta_id: pd_2\nslice_id: ps_2_s002\nslice: 2/2\ndelta2 slice2\n[END SEGMENT 3: prompt_delta]";
+    fn prompt_cache_strategy_marks_static_and_recent_tail_blocks() {
+        let mut prompt =
+            "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n".to_string();
+        for idx in 1..=9 {
+            prompt.push_str(&format!(
+                "[BEGIN SEGMENT {idx}: prompt_delta]\ndelta_id: pd_{idx}\nprompt_type: llm_response\nassistant stable {idx}\n[END SEGMENT {idx}: prompt_delta]\n"
+            ));
+        }
+        prompt.push_str("[BEGIN SEGMENT 10: prompt_delta]\ndelta_id: pd_10\nprompt_type: user_question\ncurrent turn\n[END SEGMENT 10: prompt_delta]");
+
+        let blocks = plan_prompt_cache(&prompt);
+        let cached_texts = blocks
+            .iter()
+            .filter(|block| block.cache == CacheControl::Ephemeral)
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(cached_texts.iter().any(|text| *text == "STATIC"));
+        assert!(cached_texts
+            .iter()
+            .any(|text| text.contains("assistant stable 8")));
+        assert!(cached_texts
+            .iter()
+            .any(|text| text.contains("assistant stable 9")));
+        assert!(cached_texts
+            .iter()
+            .any(|text| text.contains("current turn")));
+        assert!(!cached_texts
+            .iter()
+            .any(|text| text.contains("assistant stable 7")));
+    }
+
+    #[derive(Debug, Default)]
+    struct SimulatedCloudCache {
+        stored_hashes: std::collections::HashSet<String>,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct SimulatedCacheUsage {
+        read_chars: usize,
+        created_chars: usize,
+    }
+
+    impl SimulatedCloudCache {
+        fn observe(&mut self, blocks: &[PromptBlock]) -> SimulatedCacheUsage {
+            let mut prefix = String::new();
+            let mut prefixes = Vec::new();
+            let mut cache_indexes = Vec::new();
+            for (idx, block) in blocks.iter().enumerate() {
+                prefix.push_str(match block.role {
+                    PromptBlockRole::System => "\n<system>\n",
+                    PromptBlockRole::User => "\n<user>\n",
+                });
+                prefix.push_str(&block.text);
+                prefixes.push((stable_text_fingerprint(&prefix), prefix.chars().count()));
+                if block.cache == CacheControl::Ephemeral {
+                    cache_indexes.push(idx);
+                }
+            }
+
+            let mut usage = SimulatedCacheUsage::default();
+            let mut write_end = 0;
+            for idx in cache_indexes.iter().copied() {
+                let lookback_start = idx.saturating_sub(19);
+                let mut best_hit = 0;
+                for probe_idx in (lookback_start..=idx).rev() {
+                    let (hash, prefix_chars) = &prefixes[probe_idx];
+                    if self.stored_hashes.contains(hash) {
+                        best_hit = *prefix_chars;
+                        break;
+                    }
+                }
+                usage.read_chars = usage.read_chars.max(best_hit);
+                let (hash, prefix_chars) = &prefixes[idx];
+                if !self.stored_hashes.contains(hash) {
+                    write_end = write_end.max(*prefix_chars);
+                }
+            }
+            usage.created_chars = write_end.saturating_sub(usage.read_chars);
+            for idx in cache_indexes {
+                self.stored_hashes.insert(prefixes[idx].0.clone());
+            }
+            usage
+        }
+    }
+
+    fn rendered_prompt_with_stable_assistant_count(stable_count: usize) -> String {
+        let mut prompt =
+            "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n".to_string();
+        for idx in 1..=stable_count {
+            prompt.push_str(&format!(
+                "[BEGIN SEGMENT {idx}: prompt_delta]\ndelta_id: pd_{idx}\nprompt_type: llm_response\nassistant stable checkpoint payload {idx}\n[END SEGMENT {idx}: prompt_delta]\n"
+            ));
+        }
+        let current = stable_count + 1;
+        prompt.push_str(&format!(
+            "[BEGIN SEGMENT {current}: prompt_delta]\ndelta_id: pd_{current}\nprompt_type: user_question\ncurrent user turn {current}\n[END SEGMENT {current}: prompt_delta]"
+        ));
+        prompt
+    }
+
+    #[test]
+    fn prompt_cache_strategy_improves_hits_against_simulated_cloud_cache() {
+        let mut cloud = SimulatedCloudCache::default();
+        let usage1 = cloud.observe(&plan_prompt_cache(
+            &rendered_prompt_with_stable_assistant_count(1),
+        ));
+        let usage2 = cloud.observe(&plan_prompt_cache(
+            &rendered_prompt_with_stable_assistant_count(2),
+        ));
+        let usage3 = cloud.observe(&plan_prompt_cache(
+            &rendered_prompt_with_stable_assistant_count(3),
+        ));
+        let usage4 = cloud.observe(&plan_prompt_cache(
+            &rendered_prompt_with_stable_assistant_count(4),
+        ));
+        let usage5 = cloud.observe(&plan_prompt_cache(
+            &rendered_prompt_with_stable_assistant_count(5),
+        ));
+        let usage6 = cloud.observe(&plan_prompt_cache(
+            &rendered_prompt_with_stable_assistant_count(6),
+        ));
+
+        assert!(usage1.created_chars > 0);
+        assert_eq!(usage1.read_chars, 0);
+        assert!(usage2.read_chars > 0, "static + recent tail should hit");
+        assert!(usage2.created_chars > 0, "new tail block should be written");
+        assert!(usage3.read_chars > 0, "previous tail prefix should hit");
+        assert!(usage3.created_chars > 0, "new tail block should advance");
+        assert!(usage4.read_chars > usage4.created_chars);
+        assert!(
+            usage5.created_chars > 0,
+            "next turn should create the advanced tail block"
+        );
+        assert!(usage6.read_chars > usage6.created_chars);
+    }
+
+    #[test]
+    fn prompt_cache_strategy_would_miss_with_growing_old_delta_block() {
+        let mut cloud = SimulatedCloudCache::default();
+        let mut created = Vec::new();
+        let mut reads = Vec::new();
+        for stable_count in 1..=4 {
+            let parts = prompt_parts_from_rendered_prompt(
+                &rendered_prompt_with_stable_assistant_count(stable_count),
+            );
+            let legacy_blocks = vec![
+                PromptBlock {
+                    role: PromptBlockRole::System,
+                    text: parts.static_prompt,
+                    cache: CacheControl::Ephemeral,
+                },
+                PromptBlock {
+                    role: PromptBlockRole::User,
+                    text: parts.old_deltas,
+                    cache: CacheControl::Ephemeral,
+                },
+                PromptBlock {
+                    role: PromptBlockRole::User,
+                    text: parts.new_delta,
+                    cache: CacheControl::None,
+                },
+            ];
+            let usage = cloud.observe(&legacy_blocks);
+            created.push(usage.created_chars);
+            reads.push(usage.read_chars);
+        }
+
+        assert!(
+            created.iter().skip(1).all(|chars| *chars > 0),
+            "legacy old_deltas block changes every turn and keeps creating cache"
+        );
+        assert!(
+            reads.iter().skip(1).all(|chars| *chars < created[0] * 2),
+            "legacy strategy mostly reuses only the small static block"
+        );
+    }
+
+    #[test]
+    fn prompt_cache_strategy_can_mark_recent_multi_slice_delta_blocks() {
+        let prompt = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta_id: pd_1\nslice_id: ps_1_s001\nprompt_type: llm_response\nslice: 1/1\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta_id: pd_2\nslice_id: ps_2_s001\nprompt_type: user_question\nslice: 1/2\ndelta2 slice1\n[END SEGMENT 2: prompt_delta]\n[BEGIN SEGMENT 3: prompt_delta]\ndelta_id: pd_2\nslice_id: ps_2_s002\nprompt_type: result_of_llm_action\nslice: 2/2\ndelta2 slice2\n[END SEGMENT 3: prompt_delta]";
         let blocks = plan_prompt_cache(prompt);
-        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks.len(), 4);
         assert!(blocks[1].text.contains("delta1"));
         assert!(!blocks[1].text.contains("delta2"));
+        assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
         assert!(blocks[2].text.contains("delta2 slice1"));
-        assert!(blocks[2].text.contains("delta2 slice2"));
-        assert_eq!(blocks[2].cache, CacheControl::None);
+        assert_eq!(blocks[2].cache, CacheControl::Ephemeral);
+        assert!(blocks[3].text.contains("delta2 slice2"));
+        assert_eq!(blocks[3].cache, CacheControl::Ephemeral);
     }
 
     #[test]
@@ -2102,7 +2301,7 @@ mod tests {
             &env(&[("TIMEM_API_KEY", "k")]),
         )
         .unwrap();
-        let prompt = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta2\n[END SEGMENT 2: prompt_delta]";
+        let prompt = "[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]\ndelta_id: pd_1\nprompt_type: llm_response\ndelta1\n[END SEGMENT 1: prompt_delta]\n[BEGIN SEGMENT 2: prompt_delta]\ndelta_id: pd_2\nprompt_type: user_question\ndelta2\n[END SEGMENT 2: prompt_delta]";
         let body = build_request(&config, prompt);
         assert_eq!(body["system"][0]["text"], "STATIC");
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
@@ -2118,9 +2317,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("delta2"));
-        assert!(body["messages"][0]["content"][1]
-            .get("cache_control")
-            .is_none());
+        assert_eq!(
+            body["messages"][0]["content"][1]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
@@ -2227,9 +2427,10 @@ mod tests {
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"][0]["text"], "hello");
-        assert!(body["messages"][0]["content"][0]
-            .get("cache_control")
-            .is_none());
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
@@ -2656,6 +2857,7 @@ mod tests {
         assert_eq!(response.usage.completion_tokens, 318);
         assert_eq!(response.usage.total_tokens, 6476);
         assert_eq!(response.usage.cached_tokens, 0);
+        assert_eq!(response.usage.cache_created_tokens, 6155);
         assert!(!response.truncated);
     }
 
@@ -2762,6 +2964,7 @@ mod tests {
         assert_eq!(response.usage.completion_tokens, 50);
         assert_eq!(response.usage.total_tokens, 1050);
         assert_eq!(response.usage.cached_tokens, 300);
+        assert_eq!(response.usage.cache_created_tokens, 200);
     }
 
     #[test]

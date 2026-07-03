@@ -20,6 +20,7 @@ pub struct ModelProfile {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+    pub cache_created_tokens: u64,
     pub wait: Duration,
 }
 
@@ -53,6 +54,9 @@ impl RuntimeProfiler {
         profile.cached_tokens = profile
             .cached_tokens
             .saturating_add(usage.cached_tokens as u64);
+        profile.cache_created_tokens = profile
+            .cache_created_tokens
+            .saturating_add(usage.cache_created_tokens as u64);
         profile.wait = profile.wait.saturating_add(wait);
         self.model_wait = self.model_wait.saturating_add(wait);
     }
@@ -115,9 +119,10 @@ pub fn render_prof_report(
                 format_percent(profile.cached_tokens, profile.input_tokens)
             ));
             out.push_str(&format!(
-                "    └─ ▲{} (⌁{})  ▼{}  |  sec/▼1K: {}\n",
+                "    └─ ▲{} (⌁{} / ✚{})  ▼{}  |  sec/▼1K: {}\n",
                 format_count(profile.input_tokens),
                 format_count(profile.cached_tokens),
+                format_count(profile.cache_created_tokens),
                 format_count(profile.output_tokens),
                 format_wait_per_1k_output(profile.wait, profile.output_tokens)
             ));
@@ -240,6 +245,7 @@ mod tests {
                 prompt_tokens: 1000,
                 completion_tokens: 200,
                 cached_tokens: 700,
+                cache_created_tokens: 120,
                 ..UsageStats::zero()
             },
             Duration::from_millis(500),
@@ -252,6 +258,7 @@ mod tests {
                 prompt_tokens: 500,
                 completion_tokens: 300,
                 cached_tokens: 100,
+                cache_created_tokens: 80,
                 ..UsageStats::zero()
             },
             Duration::from_millis(1000),
@@ -263,6 +270,7 @@ mod tests {
         assert_eq!(profile.input_tokens, 1500);
         assert_eq!(profile.output_tokens, 500);
         assert_eq!(profile.cached_tokens, 800);
+        assert_eq!(profile.cache_created_tokens, 200);
         assert_eq!(profiler.model_wait(), Duration::from_millis(1500));
         assert_eq!(profiler.local_work(), Duration::from_millis(500));
 
@@ -275,7 +283,7 @@ mod tests {
         assert!(report.contains("\x1b[1m▸ Token 监控（per model）\x1b[0m"));
         assert!(report.contains("  aliyun:qwen-plus"));
         assert!(report.contains("│─ calls: 2  ||  kvc hit rate(⌁): 53.3%"));
-        assert!(report.contains("└─ ▲1.5K (⌁800)  ▼500  |  sec/▼1K: 3 s"));
+        assert!(report.contains("└─ ▲1.5K (⌁800 / ✚200)  ▼500  |  sec/▼1K: 3 s"));
         assert!(report.contains("53.3%"));
         assert!(!report.contains("total input"));
     }

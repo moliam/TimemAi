@@ -24,6 +24,13 @@ pub struct PromptParts {
     pub new_delta: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptSegment {
+    text: String,
+}
+
+const DYNAMIC_TAIL_CACHE_BLOCKS: usize = 3;
+
 pub fn split_prompt(full_prompt: &str) -> (String, String) {
     const BEGIN_MARKER: &str = "[BEGIN SEGMENT 0: prompt_0]";
     const END_MARKER: &str = "[END SEGMENT 0: prompt_0]";
@@ -99,20 +106,30 @@ pub fn plan_incremental_cache(parts: PromptParts) -> Vec<PromptBlock> {
         text: parts.static_prompt,
         cache: CacheControl::Ephemeral,
     }];
-    if !parts.old_deltas.trim().is_empty() {
-        blocks.push(PromptBlock {
-            role: PromptBlockRole::User,
-            text: parts.old_deltas,
-            cache: CacheControl::Ephemeral,
-        });
+
+    let dynamic = [parts.old_deltas.as_str(), parts.new_delta.as_str()]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if dynamic.trim().is_empty() {
+        return blocks;
     }
-    if !parts.new_delta.trim().is_empty() {
-        blocks.push(PromptBlock {
+
+    let segments = split_prompt_segments(&dynamic);
+    let cache_indexes = cache_tail_indexes(&segments);
+    blocks.extend(segments.into_iter().enumerate().map(|(idx, segment)| {
+        let cache = if cache_indexes.contains(&idx) {
+            CacheControl::Ephemeral
+        } else {
+            CacheControl::None
+        };
+        PromptBlock {
             role: PromptBlockRole::User,
-            text: parts.new_delta,
-            cache: CacheControl::None,
-        });
-    }
+            text: segment.text,
+            cache,
+        }
+    }));
     blocks
 }
 
@@ -151,4 +168,35 @@ fn segment_delta_id(segment: &str) -> Option<String> {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     })
+}
+
+fn split_prompt_segments(dynamic_prompt: &str) -> Vec<PromptSegment> {
+    let dynamic_prompt = dynamic_prompt.trim();
+    if dynamic_prompt.is_empty() {
+        return Vec::new();
+    }
+    let starts = prompt_delta_segment_starts(dynamic_prompt);
+    if starts.is_empty() {
+        return vec![PromptSegment {
+            text: dynamic_prompt.to_string(),
+        }];
+    }
+
+    starts
+        .iter()
+        .enumerate()
+        .map(|(idx, start)| {
+            let end = starts.get(idx + 1).copied().unwrap_or(dynamic_prompt.len());
+            let text = dynamic_prompt[*start..end].trim().to_string();
+            PromptSegment { text }
+        })
+        .collect()
+}
+
+fn cache_tail_indexes(segments: &[PromptSegment]) -> Vec<usize> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let first_tail = segments.len().saturating_sub(DYNAMIC_TAIL_CACHE_BLOCKS);
+    (first_tail..segments.len()).collect()
 }

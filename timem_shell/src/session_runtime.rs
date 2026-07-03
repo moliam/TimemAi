@@ -738,7 +738,7 @@ mod tests {
         );
         assert_eq!(
             first_blocks[1].cache,
-            crate::prompt_cache::CacheControl::None
+            crate::prompt_cache::CacheControl::Ephemeral
         );
 
         let second_parts =
@@ -747,19 +747,14 @@ mod tests {
         assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
         assert!(second_parts.new_delta.contains("Action result: memmgr"));
         let second_blocks = crate::prompt_cache::plan_incremental_cache(second_parts);
-        assert_eq!(second_blocks.len(), 3);
+        assert_eq!(second_blocks.len(), 4);
         assert_eq!(
             second_blocks[0].cache,
             crate::prompt_cache::CacheControl::Ephemeral
         );
-        assert_eq!(
-            second_blocks[1].cache,
-            crate::prompt_cache::CacheControl::Ephemeral
-        );
-        assert_eq!(
-            second_blocks[2].cache,
-            crate::prompt_cache::CacheControl::None
-        );
+        assert!(second_blocks[1..]
+            .iter()
+            .all(|block| block.cache == crate::prompt_cache::CacheControl::Ephemeral));
     }
 
     #[test]

@@ -72,8 +72,10 @@ Key shell-side modules:
   a small `TurnUi` trait. CLI is one adapter; future Web UI should implement
   the same callbacks instead of copying the agent loop.
 - `protocol_adapter.rs`: provider-specific request/response packing.
-- `prompt_cache.rs`: provider cache-control planning over static prompt and
-  retained dynamic deltas.
+- `prompt_cache.rs`: provider cache-control planning over the static prompt
+  plus the recent dynamic tail slices. It avoids marking one ever-growing
+  old-deltas block because that block changes every round and defeats provider
+  prefix reuse.
 - `structured_output.rs`: protocol-specific structured-output options.
 - `observation.rs`: modular Thought / Action observation events and rendering.
   It hides model-private `thought`, renders user-facing intent as top-level
@@ -385,7 +387,16 @@ Important invariants:
 - The static prefix is sent through provider system-role/system-field support
   when available. Dynamic deltas go in the user message.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
-  the static system block so the provider can reuse the prefix.
+  the static system block and to the latest three dynamic prompt slices. The
+  newest prompt delta can be marked cacheable because provider prefix-cache
+  lookup can look backward from the newest breakpoint to prior cached prefixes
+  in append-only conversations. This keeps provider cache boundaries near the
+  active tail while prompt context continues to grow. The tail width is backed by
+  `scripts/kvc_replay.py` replay over local `api_audit` data; see
+  `docs/kvc-optimization-report.md`.
+- Usage parsing keeps cache reads (`⌁`) separate from cache creation writes
+  (`✚`) for Anthropic-style responses, so status, `/prof`, and audit can
+  distinguish real cache hits from newly written cache.
 
 ## Action Protocol
 
