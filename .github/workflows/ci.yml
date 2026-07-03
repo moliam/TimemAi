@@ -25,7 +25,6 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,6 +34,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == "Linux" ]]; then
+            # Remove problematic Microsoft repos that may return 403
+            sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                       /etc/apt/sources.list.d/azure-cli.list
             sudo apt-get update
             sudo apt-get install -y expect
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
@@ -56,4 +58,3 @@ jobs:
       - name: Run production CI gate
         shell: bash
         run: scripts/ci.sh
-
