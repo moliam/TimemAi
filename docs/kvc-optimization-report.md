@@ -37,7 +37,7 @@ counted a whole marked prefix as newly created.
 Current local replay input:
 
 - Audit files scanned: 5
-- LLM requests replayed: 1133
+- LLM requests replayed: 1158
 
 The replay includes historical local shell usage from `.test_mem` plus smoke
 spaces. It does not send network requests and does not print prompt contents.
@@ -71,8 +71,8 @@ Summary table from the current local audit replay:
 | action_tail | tail=2 | 93.2% | 5.9% | 87.3% | 2.58 |
 | tail | tail=1 | 90.9% | 9.1% | 81.8% | 2.00 |
 | tail | tail=2 | 92.2% | 7.8% | 84.3% | 2.90 |
-| tail | tail=3 | 94.0% | 6.0% | 88.0% | 3.78 |
-| tail | tail=4 | 94.0% | 6.0% | 88.0% | 4.61 |
+| tail | tail=3 | 94.0% | 6.0% | 88.1% | 3.78 |
+| tail | tail=4 | 94.0% | 6.0% | 88.1% | 4.61 |
 
 `tail=3` and `tail=4` tie on hit/create score, but `tail=3` is selected because
 it uses fewer cache marks and keeps the total explicit breakpoints to
@@ -118,4 +118,6 @@ The branch includes:
 
 - Prefix-cache simulation tests, not only block-hash tests.
 - A replay script for local audit data.
+- A CI replay fixture test that verifies explicit `--data-dir` does not
+  accidentally scan local `data/`.
 - Documentation of the selected threshold and tradeoff.

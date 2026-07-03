@@ -438,7 +438,7 @@ Current replay result over local `api_audit` data:
 | static only | - | 30.8% | 1.3% | 29.5% |
 | legacy old-deltas block | - | 31.0% | 66.2% | -35.2% |
 | stable checkpoint | threshold=1, ckpt=2 | 69.0% | 3.7% | 65.3% |
-| latest tail | tail=3 | 94.0% | 6.0% | 88.0% |
+| latest tail | tail=3 | 94.0% | 6.0% | 88.1% |
 
 `tail=3` is selected because `tail=3` and `tail=4` tie on the replay score, but
 `tail=3` uses fewer cache marks and keeps explicit breakpoints at
