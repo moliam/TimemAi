@@ -4849,3 +4849,152 @@ fn finished_with_self_tool_action_does_not_preserve_hallucinated_final_answer() 
     assert!(!prompt.contains("Protocol repair request"));
     assert!(!prompt.contains("/tmp/timem_nonexistent_user_fixture"));
 }
+
+#[test]
+fn prose_then_final_answer_only_json_extracts_payload() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("prose_final_answer_only"),
+    );
+    let _ = core.begin_turn("你叫什么", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"你叫李默！
+
+{"status":"finished","final_answer":"你叫**李默**！"}
+"#,
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("李默"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn markdown_fenced_final_answer_only_json_extracts_payload() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("fenced_final_answer_only"),
+    );
+    let _ = core.begin_turn("秘密是什么", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            "```json\n{\"status\":\"finished\",\"final_answer\":\"ABC = 123456\"}\n```",
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("ABC = 123456"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn prose_with_json_reference_before_actual_response() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("prose_json_ref"),
+    );
+    let _ = core.begin_turn("explain json", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            "JSON looks like {\"key\":\"value\"} and is widely used.\n\n{\"status\":\"finished\",\"final_answer\":\"JSON is a data format.\"}",
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("JSON is a data format"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn final_answer_containing_json_code_example() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("final_answer_json_code"),
+    );
+    let _ = core.begin_turn("show json example", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"Use this format:\n```json\n{\"name\": \"test\"}\n```"}"#,
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("Use this format"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn prose_with_fake_envelope_keys_picks_last_valid_json() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("fake_envelope"),
+    );
+    let _ = core.begin_turn("test", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            "Example:\n{\"status\":\"finished\",\"final_answer\":\"wrong\"}\n\nActual:\n{\"status\":\"finished\",\"final_answer\":\"correct answer\"}",
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("correct answer"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("curly_in_code"),
+    );
+    let _ = core.begin_turn("rust code", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            "In Rust: fn main() { println!(\"hello\"); }\n\n{\"status\":\"finished\",\"final_answer\":\"Rust uses curly braces for blocks.\"}",
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.response_to_user.contains("curly braces"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+

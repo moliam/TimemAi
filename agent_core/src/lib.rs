@@ -3326,6 +3326,15 @@ fn char_window_around_focus(text: &str, focus: usize, context_chars: usize) -> S
     )
 }
 
+/// Strip markdown code fences (```json ... ``` or ``` ... ```) from model output.
+fn strip_markdown_code_fences(input: &str) -> Option<&str> {
+    let trimmed = input.trim();
+    let rest = trimmed.strip_prefix("```")?;
+    let after_tag = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("");
+    let body = after_tag.strip_suffix("```").map(str::trim)?;
+    if body.is_empty() { None } else { Some(body) }
+}
+
 fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::Error> {
     let trimmed = content.trim();
     if let Ok(value) = serde_json::from_str(trimmed) {
@@ -3334,6 +3343,17 @@ fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::
     if let Some(repaired) = repair_known_string_field_quotes(trimmed) {
         if let Ok(value) = serde_json::from_str(&repaired) {
             return Ok(value);
+        }
+    }
+    // Strip markdown code fences and retry
+    if let Some(stripped) = strip_markdown_code_fences(trimmed) {
+        if let Ok(value) = serde_json::from_str(stripped) {
+            return Ok(value);
+        }
+        if let Some(repaired) = repair_known_string_field_quotes(stripped) {
+            if let Ok(value) = serde_json::from_str(&repaired) {
+                return Ok(value);
+            }
         }
     }
     let mut last_ok = None;
@@ -3379,6 +3399,9 @@ fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::
 fn is_likely_response_envelope(value: &Value) -> bool {
     value.as_object().is_some_and(|object| {
         object.contains_key("report_job_progress") || object.contains_key("next_actions")
+            || object.contains_key("final_answer")
+            || object.contains_key("status")
+            || object.contains_key("thought")
     })
 }
 
