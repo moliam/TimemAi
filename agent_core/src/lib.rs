@@ -87,17 +87,18 @@ pub use data_layout::{
 pub use host::{
     core_initialized_topic_event, core_initialized_topic_event_with_worker,
     normalize_user_supplements, resolve_topic_reply, session_worker_default_display_name,
-    topic_event_status_hint, CoreActionTopic, CoreDynamicContextSummary, CoreGlobalWorkerStatus,
-    CoreHostDecisionRequestTopic, CoreLifecycleEvent, CoreLifecycleTopic, CoreModelResponseTopic,
-    CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
-    CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, HostDecision, HostDecisionDefault,
-    HostDecisionRequest, NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution,
-    RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError,
-    TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi,
-    CORE_TOPIC_ACTION, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_MODEL_RESPONSE,
+    topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
+    CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
+    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelResponseTopic, CoreSessionState,
+    CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic, CoreTopicEvent,
+    CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic, HostDecision,
+    HostDecisionDefault, HostDecisionRequest, NoopTurnUi, OutputExpansionRequest,
+    OutputExpansionResolution, RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn,
+    TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
+    TurnStopSummary, TurnUi, CORE_TOPIC_ACTION, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_MODEL_RESPONSE,
     CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
     CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD_REQUEST, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};

@@ -2,7 +2,9 @@ use crate::{
     context_policy::StaleContextDecisionRequest,
     notification::{CoreActionKind, CoreMemoryActivity, CoreNotification},
     redaction::redact_value,
-    work_instructions::WorkInstructionLoadRequest,
+    work_instructions::{
+        WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
+    },
     ApprovalRequest, CoreProfile, UsageStats,
 };
 use serde::{Deserialize, Serialize};
@@ -314,8 +316,7 @@ pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
 pub const CORE_TOPIC_OUTPUT_EXPAND_REQUEST: &str = "core.user.output_expand.request";
 pub const CORE_TOPIC_STALE_CONTEXT_REQUEST: &str = "core.user.stale_context.request";
-pub const CORE_TOPIC_WORK_INSTRUCTION_LOAD_REQUEST: &str =
-    "core.user.work_instruction_load.request";
+pub const CORE_TOPIC_WORK_INSTRUCTION_LOAD: &str = "core.work_instruction_load";
 static TOPIC_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,6 +327,14 @@ pub struct CoreModelResponseTopic {
     pub final_answer: String,
     pub continue_work: bool,
     pub global: CoreGlobalWorkerStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreWorkInstructionLoadTopic {
+    pub status: String,
+    pub directory: String,
+    pub file_names: Vec<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -642,6 +651,29 @@ impl CoreTopicEvent {
             request,
         })
     }
+
+    pub fn as_work_instruction_load(&self) -> Option<CoreWorkInstructionLoadTopic> {
+        if self.topic.name != CORE_TOPIC_WORK_INSTRUCTION_LOAD {
+            return None;
+        }
+        if self.payload.get("status").is_none() {
+            return None;
+        }
+        Some(CoreWorkInstructionLoadTopic {
+            status: self.payload["status"].as_str()?.to_string(),
+            directory: self.payload["directory"].as_str()?.to_string(),
+            file_names: self.payload["file_names"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            error: self.payload["error"].as_str().map(str::to_string),
+        })
+    }
 }
 
 pub fn core_initialized_topic_event(
@@ -709,6 +741,33 @@ pub fn core_initialized_topic_event_with_worker(
             "worker": worker.map(worker_identity_payload),
             "workspace": workspace.map(worker_workspace_payload),
             "context": context.map(dynamic_context_summary_payload),
+        }),
+    )
+}
+
+pub fn work_instruction_load_topic_event(
+    session_id: impl Into<String>,
+    report: &WorkInstructionLoadReport,
+) -> CoreTopicEvent {
+    let status = match report.status {
+        WorkInstructionLoadStatus::Loaded => "loaded",
+        WorkInstructionLoadStatus::NotFound => "not_found",
+        WorkInstructionLoadStatus::Failed => "failed",
+    };
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+            json!({
+                "name": CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "status": status,
+            "directory": report.directory.display().to_string(),
+            "file_names": report.file_names.clone(),
+            "error": report.error.clone(),
         }),
     )
 }
@@ -989,7 +1048,7 @@ impl HostDecisionRequest {
             Self::RoundLimitContinue(_) => CORE_TOPIC_ROUND_LIMIT_REQUEST,
             Self::OutputExpansion(_) => CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
             Self::StaleContextContinue(_) => CORE_TOPIC_STALE_CONTEXT_REQUEST,
-            Self::WorkInstructionLoad(_) => CORE_TOPIC_WORK_INSTRUCTION_LOAD_REQUEST,
+            Self::WorkInstructionLoad(_) => CORE_TOPIC_WORK_INSTRUCTION_LOAD,
         }
     }
 
@@ -1666,7 +1725,7 @@ mod tests {
 
         let event = request.topic_event_with_request_id("session_a", "request_1");
         assert_eq!(event.session_id, "session_a");
-        assert_eq!(event.topic.name, "core.user.work_instruction_load.request");
+        assert_eq!(event.topic.name, "core.work_instruction_load");
         assert_eq!(event.topic.attributes["name"], event.topic.name);
         assert_eq!(event.topic.attributes["expects_reply"], true);
         assert_eq!(event.request_id(), Some("request_1"));
@@ -1696,9 +1755,9 @@ mod tests {
             json!({
                 "session_id": "session_a",
                 "topic": {
-                    "name": CORE_TOPIC_WORK_INSTRUCTION_LOAD_REQUEST,
+                    "name": CORE_TOPIC_WORK_INSTRUCTION_LOAD,
                     "attributes": {
-                        "name": CORE_TOPIC_WORK_INSTRUCTION_LOAD_REQUEST,
+                        "name": CORE_TOPIC_WORK_INSTRUCTION_LOAD,
                         "kind": "work_instruction_load",
                         "expects_reply": true,
                     },
@@ -1730,6 +1789,53 @@ mod tests {
                 safe_default: HostDecisionDefault::Decline,
                 timeout: Some(DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT),
                 request,
+            })
+        );
+    }
+
+    #[test]
+    fn work_instruction_load_status_can_be_published_as_topic_event() {
+        let report = WorkInstructionLoadReport {
+            status: WorkInstructionLoadStatus::Loaded,
+            directory: "/tmp/project".into(),
+            file_names: vec!["AGENTS.md".to_string()],
+            context: Some("guide".to_string()),
+            error: None,
+        };
+
+        let event = work_instruction_load_topic_event("session_a", &report);
+        assert_eq!(event.session_id, "session_a");
+        assert_eq!(event.topic.name, CORE_TOPIC_WORK_INSTRUCTION_LOAD);
+        assert_eq!(event.state, CoreSessionState::Running);
+        assert!(!event.expects_reply());
+        assert_eq!(
+            event.wire_payload(),
+            json!({
+                "session_id": "session_a",
+                "topic": {
+                    "name": CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+                    "attributes": {
+                        "name": CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+                    },
+                },
+                "state": {
+                    "name": "running",
+                },
+                "payload": {
+                    "status": "loaded",
+                    "directory": "/tmp/project",
+                    "file_names": ["AGENTS.md"],
+                    "error": null,
+                },
+            })
+        );
+        assert_eq!(
+            event.as_work_instruction_load(),
+            Some(CoreWorkInstructionLoadTopic {
+                status: "loaded".to_string(),
+                directory: "/tmp/project".to_string(),
+                file_names: vec!["AGENTS.md".to_string()],
+                error: None,
             })
         );
     }
@@ -1796,14 +1902,14 @@ mod tests {
             .expect("blocking request should accept a topic reply");
 
         assert_eq!(reply.session_id, "session_a");
-        assert_eq!(reply.topic_name, CORE_TOPIC_WORK_INSTRUCTION_LOAD_REQUEST);
+        assert_eq!(reply.topic_name, CORE_TOPIC_WORK_INSTRUCTION_LOAD);
         assert_eq!(reply.request_id.as_deref(), Some("request_1"));
         assert_eq!(reply.decision, HostDecision::Accept);
         assert_eq!(
             reply.wire_payload(),
             json!({
                 "session_id": "session_a",
-                "topic_name": CORE_TOPIC_WORK_INSTRUCTION_LOAD_REQUEST,
+                "topic_name": CORE_TOPIC_WORK_INSTRUCTION_LOAD,
                 "request_id": "request_1",
                 "decision": "accept",
                 "payload": {

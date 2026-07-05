@@ -330,6 +330,9 @@ pub fn observation_events_from_core_topic_events(
             }
             continue;
         }
+        if event.as_work_instruction_load().is_some() {
+            continue;
+        }
         if let Some(action) = event.as_action() {
             let child_style = if action.active {
                 ObservationLineStyle::ActiveBlink
@@ -567,7 +570,7 @@ mod tests {
     use super::*;
     use agent_core::{
         CoreMemoryActivity, CoreSessionState, CoreTopic, CORE_TOPIC_ACTION,
-        CORE_TOPIC_MODEL_RESPONSE,
+        CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     };
     use serde_json::json;
 
@@ -642,6 +645,25 @@ mod tests {
                 "global": {
                     "working_worker_count": working_worker_count,
                 },
+            }),
+        )
+    }
+
+    fn work_instruction_load_topic(status: &str, file_names: Vec<&str>) -> CoreTopicEvent {
+        CoreTopicEvent::new(
+            "session_test",
+            CoreTopic::new(
+                CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+                json!({
+                    "name": CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+                }),
+            ),
+            CoreSessionState::Running,
+            json!({
+                "status": status,
+                "directory": "/tmp/project",
+                "file_names": file_names,
+                "error": null,
             }),
         )
     }
@@ -802,6 +824,15 @@ mod tests {
                 ObservationEvent::Persistent("⚙️ 正在检查项目状态。".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn work_instruction_status_topic_is_not_mixed_into_observation_panel() {
+        let events = observation_events_from_core_topic_events(&[work_instruction_load_topic(
+            "loaded",
+            vec!["AGENTS.md"],
+        )]);
+        assert!(events.is_empty());
     }
 
     #[test]

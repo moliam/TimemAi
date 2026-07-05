@@ -20,11 +20,12 @@ pub use agent_core::{
     runtime_config_report, runtime_profile_report, runtime_retry_status_view, runtime_time_context,
     runtime_token_status_view, stale_context_decision_request, stale_context_prompt_needed,
     supporting_context, topic_event_status_hint, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_mode_from_sources, workspace_config_file,
-    workspace_menu_report, workspace_reference_context, ApiProtocol, CapabilityHostProfile,
-    CoreActionTopic, CoreLifecycleEvent, CoreLifecycleTopic, CoreMemoryActivity,
-    CoreModelResponseTopic, CoreTopicEvent, HostDecision, HostDecisionDefault, HostDecisionRequest,
-    HostStatusLevel, HostStatusMessage, LocalLLMKeyFile, ModelDirection, ModelProfile, NoopTurnUi,
+    work_instruction_load_request, work_instruction_load_topic_event,
+    work_instruction_mode_from_sources, workspace_config_file, workspace_menu_report,
+    workspace_reference_context, ApiProtocol, CapabilityHostProfile, CoreActionTopic,
+    CoreLifecycleEvent, CoreLifecycleTopic, CoreMemoryActivity, CoreModelResponseTopic,
+    CoreTopicEvent, HostDecision, HostDecisionDefault, HostDecisionRequest, HostStatusLevel,
+    HostStatusMessage, LocalLLMKeyFile, ModelDirection, ModelProfile, NoopTurnUi,
     OutputExpansionRequest, ProviderConfig, RoundLimitDecisionRequest, RuntimeConfigApplyError,
     RuntimeConfigApplyMessage, RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport,
     RuntimeConfigEffect, RuntimeConfigField, RuntimeConfigMenuItem, RuntimeConfigMenuReport,
@@ -126,9 +127,23 @@ pub fn shell_status_message_from_lifecycle_topic(
 }
 
 pub fn shell_status_message_from_core_topic(event: &CoreTopicEvent) -> Option<HostStatusMessage> {
-    event
-        .as_lifecycle()
-        .map(|lifecycle| shell_status_message_from_lifecycle_topic(&lifecycle))
+    if let Some(lifecycle) = event.as_lifecycle() {
+        return Some(shell_status_message_from_lifecycle_topic(&lifecycle));
+    }
+    let work = event.as_work_instruction_load()?;
+    match work.status.as_str() {
+        "loaded" => {
+            let names = work.file_names.join(", ");
+            Some(HostStatusMessage::info(format!(
+                "已加载当前工作目录指令：{names}"
+            )))
+        }
+        "failed" => Some(HostStatusMessage::warning(format!(
+            "工作目录指令加载失败：{}",
+            work.error.unwrap_or_else(|| "unknown_error".to_string())
+        ))),
+        _ => None,
+    }
 }
 
 pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str) -> String {
@@ -1661,6 +1676,27 @@ mod tests {
         let rendered = render_shell_status_bar(&message);
         assert!(rendered.contains("ⓘ"));
         assert!(rendered.contains("Timem Core 启动成功"));
+    }
+
+    #[test]
+    fn shell_renders_work_instruction_load_topic_as_status() {
+        let report = agent_core::WorkInstructionLoadReport {
+            status: agent_core::WorkInstructionLoadStatus::Loaded,
+            directory: "/tmp/project".into(),
+            file_names: vec!["AGENTS.md".to_string()],
+            context: Some("guide".to_string()),
+            error: None,
+        };
+        let event = agent_core::work_instruction_load_topic_event("session_a", &report);
+
+        let message = shell_status_message_from_core_topic(&event)
+            .expect("shell should understand work instruction status topic");
+        assert_eq!(message.level, HostStatusLevel::Info);
+        assert_eq!(message.text, "已加载当前工作目录指令：AGENTS.md");
+
+        let rendered = render_shell_status_bar(&message);
+        assert!(rendered.contains("ⓘ"));
+        assert!(rendered.contains("已加载当前工作目录指令：AGENTS.md"));
     }
 
     #[test]

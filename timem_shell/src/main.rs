@@ -31,17 +31,17 @@ use timem_shell::{
     render_thinking_view_at, render_turn_outcome_text, run_session_turn,
     runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
     stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_mode_from_sources, workspace_config_file,
-    workspace_reference_context, CoreMemoryActivity, CoreTopicEvent, HostDecision,
-    HostDecisionRequest, HostStatusMessage, ModelDirection, NoopTurnUi, ObservationEvent,
-    ObservationPanel, OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
-    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
-    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot,
-    StaleContextDecisionRequest, ThinkingViewSnapshot, TurnInput, TurnUi,
-    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
-    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
-    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, SPINNER_ICONS,
-    TIMEM_LOGO,
+    work_instruction_load_request, work_instruction_load_topic_event,
+    work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
+    CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
+    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
+    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
+    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
+    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
+    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
+    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
+    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
+    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -1187,7 +1187,11 @@ fn resolve_work_instruction_context_for_turn(
     ui: &mut dyn TurnUi,
 ) -> Option<String> {
     match mode {
-        WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(current_work_dir).0,
+        WorkInstructionLoadMode::Silent => {
+            let report = work_instruction_load_report(current_work_dir);
+            ui.on_core_topic_events(&[work_instruction_load_topic_event(session, &report)]);
+            work_instruction_shell_load_result(report).0
+        }
         WorkInstructionLoadMode::Ask => {
             let request = work_instruction_load_request(current_work_dir)?;
             if ui
@@ -1197,7 +1201,9 @@ fn resolve_work_instruction_context_for_turn(
                 )
                 .as_bool()
             {
-                load_work_instructions_for_shell(current_work_dir).0
+                let report = work_instruction_load_report(current_work_dir);
+                ui.on_core_topic_events(&[work_instruction_load_topic_event(session, &report)]);
+                work_instruction_shell_load_result(report).0
             } else {
                 None
             }
@@ -4714,7 +4720,10 @@ mod static_prompt_tests {
         assert_eq!(ui.requests, 1);
         assert_eq!(
             ui.topics,
-            vec!["core.user.work_instruction_load.request".to_string()]
+            vec![
+                "core.work_instruction_load".to_string(),
+                "core.work_instruction_load".to_string()
+            ]
         );
         assert!(context.contains("Run the focused tests before final answer."));
         assert!(context.contains("AGENTS.md"));
@@ -4744,7 +4753,7 @@ mod static_prompt_tests {
         assert_eq!(decline_ui.requests, 1);
         assert_eq!(
             decline_ui.topics,
-            vec!["core.user.work_instruction_load.request".to_string()]
+            vec!["core.work_instruction_load".to_string()]
         );
 
         let mut silent_ui = WorkInstructionDecisionUi {
@@ -4760,7 +4769,10 @@ mod static_prompt_tests {
         )
         .unwrap();
         assert!(silent.contains("Prefer small commits."));
-        assert!(silent_ui.topics.is_empty());
+        assert_eq!(
+            silent_ui.topics,
+            vec!["core.work_instruction_load".to_string()]
+        );
         assert_eq!(silent_ui.requests, 0);
 
         let mut off_ui = WorkInstructionDecisionUi {
