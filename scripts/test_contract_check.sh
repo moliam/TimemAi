@@ -24,6 +24,16 @@ search_fixed() {
   fi
 }
 
+search_lines_regex() {
+  local pattern="$1"
+  shift
+  if command -v rg >/dev/null 2>&1; then
+    rg -n -- "$pattern" "$@"
+  else
+    grep -R -n -E --exclude-dir=target --exclude-dir=.git -- "$pattern" "$@"
+  fi
+}
+
 required_patterns=(
   "session_turn_forced_shrink_runs_to_final_without_repeated_shrink"
   "session_turn_truncated_output_expands_limit_and_retries_same_turn"
@@ -60,6 +70,9 @@ required_patterns=(
   "turn_ui_decision_requests_are_structured_and_ui_neutral"
   "stale_context_decision_request_is_structured_and_ui_neutral"
   "config_apply_report_is_ui_neutral_command_data"
+  "performance_guard_large_context_prompt_render_is_bounded"
+  "performance_guard_topic_generation_for_many_actions_is_bounded"
+  "performance_guard_many_observation_events_render_bounded"
 )
 
 for pattern in "${required_patterns[@]}"; do
@@ -76,6 +89,7 @@ ci_required=(
   "scripts/real_tty_supplement_smoke.expect"
   "scripts/sensitive_scan.sh --current"
   "scripts/update_static_prompt_snapshot.sh --check"
+  "scripts/performance_guard.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
@@ -153,9 +167,9 @@ for file in resources/capabilities/tools/*.yaml; do
 done
 
 legacy_action_input_hits="$(
-  rg -n 'next_actions.*"input"[[:space:]]*:' \
+  search_lines_regex 'next_actions.*"input"[[:space:]]*:' \
     agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs \
-    | rg -v 'allow_legacy_input_negative_test' || true
+    | grep -v 'allow_legacy_input_negative_test' || true
 )"
 if [ -n "$legacy_action_input_hits" ]; then
   echo "mock model outputs must use args, not legacy input:" >&2
@@ -167,11 +181,11 @@ if ! search_fixed "allow_legacy_input_negative_test" agent_core/tests/core_tests
   exit 1
 fi
 string_args_hits="$(
-  rg -n '"args"[[:space:]]*:[[:space:]]*"' \
+  search_lines_regex '"args"[[:space:]]*:[[:space:]]*"' \
     agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
-    | rg -v 'allow_string_args_negative_test' \
-    | rg -v 'response_schema_summary.json' \
-    | rg -v 'resources/protocol/.*/expanded.md' \
+    | grep -v 'allow_string_args_negative_test' \
+    | grep -v 'response_schema_summary.json' \
+    | grep -v -E 'resources/protocol/.*/expanded.md' \
     || true
 )"
 if [ -n "$string_args_hits" ]; then
@@ -185,9 +199,9 @@ if ! search_fixed "allow_string_args_negative_test" agent_core/tests/core_tests.
 fi
 
 private_fixture_hits="$(
-  rg -n '默默|李默|儿子|son birthday|6月12|蓝色雨伞|绿色雨衣|fangchang|/Users/limo3|/Users/fangchang|v0\.6 发布检查|AURORA' \
+  search_lines_regex '默默|李默|儿子|son birthday|6月12|蓝色雨伞|绿色雨衣|fangchang|/Users/limo3|/Users/fangchang|v0\.6 发布检查|AURORA' \
     agent_core/tests timem_shell/src resources docs README.md CHANGELOG.md scripts \
-    | rg -v 'scripts/test_contract_check.sh' \
+    | grep -v 'scripts/test_contract_check.sh' \
     || true
 )"
 if [ -n "$private_fixture_hits" ]; then

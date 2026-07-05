@@ -19,6 +19,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   rewriting large JSON audit documents on every event.
 - Added streaming JSONL entry counting for `/prof` storage metrics so large
   memory/scratch files are not loaded fully into memory.
+- Added `scripts/performance_guard.sh` and CI coverage for large prompt render,
+  topic fan-out, and long Thought / Action panel rendering hot paths.
 
 ### Changed
 
@@ -29,11 +31,15 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   topic semantics.
 - Startup notices are grouped into a startup status block, and runtime command
   help is routed through `/help`.
+- Agent core now caches the fully expanded static prompt and refreshes it only
+  when response protocol or capability registry changes.
 
 ### Fixed
 
 - Malformed model responses that require protocol repair no longer publish a
   model-response topic from the invalid response before the repair round.
+- Observation panel row trimming avoids front-removal loops on long wrapped
+  content.
 - Model responses with more than two actions now publish observation metadata
   for every action the core will execute, so the UI does not hide later actions.
 - Repeated `思考中...` updates now use idempotent transient rendering and do not

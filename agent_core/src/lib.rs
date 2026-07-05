@@ -626,6 +626,7 @@ fn default_self_tool_process() -> SelfToolProcess {
 #[derive(Debug)]
 pub struct AgentCore {
     static_prompt: String,
+    rendered_static_prompt: String,
     profile: CoreProfile,
     pub(crate) capabilities: CapabilityRegistry,
     response_protocol: ResponseProtocolKind,
@@ -665,11 +666,20 @@ impl AgentCore {
             default_self_tool_about(),
             default_self_tool_process(),
         );
+        let static_prompt = static_prompt.into();
+        let capabilities = CapabilityRegistry::builtin();
+        let response_protocol = ResponseProtocolKind::Markdown;
+        let rendered_static_prompt = prompt_render::render_static_prompt(
+            &static_prompt,
+            &capabilities,
+            response_protocol.suite(),
+        );
         Self {
-            static_prompt: static_prompt.into(),
+            static_prompt,
+            rendered_static_prompt,
             profile,
-            capabilities: CapabilityRegistry::builtin(),
-            response_protocol: ResponseProtocolKind::Markdown,
+            capabilities,
+            response_protocol,
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
@@ -741,11 +751,20 @@ impl AgentCore {
         self.configured_round_budget = max_rounds.max(1);
         self.round_budget = self.configured_round_budget;
     }
+    fn refresh_rendered_static_prompt(&mut self) {
+        self.rendered_static_prompt = prompt_render::render_static_prompt(
+            &self.static_prompt,
+            &self.capabilities,
+            self.response_protocol.suite(),
+        );
+    }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
         self.capabilities = capabilities;
+        self.refresh_rendered_static_prompt();
     }
     pub fn set_response_protocol(&mut self, protocol: ResponseProtocolKind) {
         self.response_protocol = protocol;
+        self.refresh_rendered_static_prompt();
     }
     pub fn set_self_tool_state(&mut self, self_tool: SelfToolState) {
         self.self_tool = self_tool;
@@ -1420,10 +1439,8 @@ impl AgentCore {
     }
 
     pub fn render_prompt(&self) -> String {
-        prompt_render::render_prompt(
-            &self.static_prompt,
-            &self.capabilities,
-            self.response_protocol.suite(),
+        prompt_render::render_prompt_with_rendered_static(
+            &self.rendered_static_prompt,
             &self.deltas,
         )
     }

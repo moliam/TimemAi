@@ -135,7 +135,8 @@ scripts/ci.sh
 
 This runs script syntax checks, install logic tests, feature/test contract
 checks, sensitive scan, Rust formatting, full workspace tests, repeated edge
-regression, release build, real TTY smoke, and whitespace checks.
+regression, performance guard, release build, real TTY smoke, and whitespace
+checks.
 
 GitHub Actions runs the same `scripts/ci.sh` gate on pushes and pull requests
 for Linux and macOS. Feature coverage is tracked in

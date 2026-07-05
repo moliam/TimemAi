@@ -32,11 +32,10 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
     }
 }
 
-pub(crate) fn render_prompt(
+pub(crate) fn render_static_prompt(
     static_prompt: &str,
     capabilities: &CapabilityRegistry,
     protocol_suite: &dyn ResponseProtocolSuite,
-    deltas: &[PromptDelta],
 ) -> String {
     // 1. Fill {{RESPONSE_PROTOCOL_SECTION}} from protocol suite
     let with_protocol = static_prompt.replace(
@@ -51,10 +50,17 @@ pub(crate) fn render_prompt(
         protocol_suite.response_schema_summary(),
     );
 
-    let mut out = format!(
+    format!(
         "[BEGIN SYSTEM PROMPT]\n{}\n[END SYSTEM PROMPT]",
         static_prompt
-    );
+    )
+}
+
+pub(crate) fn render_prompt_with_rendered_static(
+    rendered_static_prompt: &str,
+    deltas: &[PromptDelta],
+) -> String {
+    let mut out = format!("{}", rendered_static_prompt);
 
     for delta in deltas {
         let slices = render_delta_slices(delta);
@@ -136,14 +142,14 @@ mod tests {
                 },
             ],
         };
-        let rendered = render_prompt(
+        let rendered_static = render_static_prompt(
             "{{RESPONSE_PROTOCOL_SECTION}}
 {{TOOL_CATALOG}}
 {{SKILL_HEADERS}}",
             &CapabilityRegistry::builtin(),
             &MarkdownSuiteV1,
-            &[delta],
         );
+        let rendered = render_prompt_with_rendered_static(&rendered_static, &[delta]);
         assert!(rendered.contains("Response Protocol"));
         assert!(rendered.contains("memmgr"));
         assert!(rendered.contains("hello"));

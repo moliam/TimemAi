@@ -65,6 +65,11 @@ checks. If a dimension is not applicable, record that residual decision in
 - Real TTY stress: compiled release binary driven through a pseudo terminal
   while a fake provider causes repeated model/action redraws, long
   Thought/Action rows, and mid-turn user supplements.
+- Performance guard: `scripts/performance_guard.sh` runs bounded hot-path
+  checks for large prompt rendering, topic fan-out, and observation panel
+  rendering with long rows. Thresholds are intentionally broad enough for CI
+  stability, but tight enough to catch accidental full static-prompt
+  re-expansion, quadratic row trimming, or topic fan-out regressions.
 - Repeated edge regression: high-risk state machines run multiple times in CI
   through `scripts/edge_regression.sh`.
 
@@ -92,6 +97,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time user supplement capture | real TTY multiline/paste/config/workspace smokes plus local fake-provider supplement smoke and stress smoke | real TTY smoke/stress in CI |
 | Observation panel | observation event/rendering tests | thinking view tests including retry, repair-count status, model-response topics, and global working-worker count | full CI |
 | Profiling | profiler aggregation and storage tests | `session_turn_records_cached_tokens_in_profiler_and_latest_usage`, `/prof` real TTY smoke | real TTY smoke |
+| Runtime performance | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded` | real TTY stress covers redraw under fake-provider delay and mid-turn supplement | `scripts/performance_guard.sh` in full CI |
 | Audit and secrets | append audit, action grouping, redaction tests, sensitive scan | session tests assert turn/action/retry/repair audit records | sensitive scan + full CI |
 | Install/update scripts | install logic tests, install run-hint contract | CI script syntax and install logic | full CI |
 
@@ -104,10 +110,11 @@ checks. If a dimension is not applicable, record that residual decision in
 3. sensitive scan over tracked files
 4. `cargo fmt --check`
 5. `cargo test --workspace`
-6. repeated edge regression via `scripts/edge_regression.sh`
-7. release build
-8. real TTY smoke through `expect`
-9. whitespace check
+6. performance guard via `scripts/performance_guard.sh`
+7. repeated edge regression via `scripts/edge_regression.sh`
+8. release build
+9. real TTY smoke through `expect`
+10. whitespace check
 
 `scripts/edge_regression.sh` defaults to two iterations. Increase pressure with:
 

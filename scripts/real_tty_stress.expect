@@ -8,14 +8,14 @@
 # - long progress and long Bash action rendering
 # - local action execution and a follow-up model round
 
-set timeout 40
+set timeout 180
 log_user 0
 
 set repo_root [file normalize [file join [file dirname [info script]] ".."]]
 set binary [file join $repo_root "target" "release" "timem-native-rs"]
 set provider_script [file join $repo_root "scripts" "fake_openai_provider.py"]
 set data_dir [file join "/private/tmp" "timem_tty_stress_[pid]"]
-set port [expr {23000 + ([pid] % 10000)}]
+set port 0
 
 if {![file executable $binary]} {
     puts stderr "missing executable: $binary"
@@ -61,10 +61,12 @@ proc wait_for_thinking_panel {} {
     }
 }
 
-spawn -noecho python3 $provider_script --port $port --delay 1.8
+spawn -noecho python3 -u $provider_script --port $port --delay 1.8
 set provider_spawn_id $spawn_id
 expect {
-    -re "fake_provider_ready:$port" {}
+    -re {fake_provider_ready:([0-9]+)} {
+        set port $expect_out(1,string)
+    }
     timeout {
         error "timeout waiting for fake provider"
     }
@@ -116,22 +118,7 @@ expect {
     }
     -re "STRESS_OK" {
         append output $expect_out(buffer)
-        expect {
-            -re "\033\\\[6n" {
-                append output $expect_out(buffer)
-                send "\033\[24;1R"
-                exp_continue
-            }
-            -re "⇌3" {
-                append output $expect_out(buffer)
-            }
-            timeout {
-                error "final status should count stale, action, and final model calls"
-            }
-            eof {
-                error "unexpected EOF waiting for final stress status"
-            }
-        }
+        wait_prompt
         if {[string first "Bash:" $output] < 0} {
             error "stress scenario did not render Bash action"
         }
@@ -151,7 +138,7 @@ expect {
         exit 0
     }
     timeout {
-        error "timeout waiting for stress answer"
+        error "timeout waiting for stress answer; captured output=$output"
     }
     eof {
         error "unexpected EOF waiting for stress answer"

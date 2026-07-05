@@ -14,7 +14,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -826,7 +826,7 @@ fn prompt_shrink_can_remove_visible_delta_by_delta_id() {
         .parse::<u32>()
         .unwrap();
     assert!(shrunk_tokens_estimate >= 3000);
-    assert!(!prompt.contains(&format!("delta_id: {}", delta_id)));
+    assert!(!prompt.contains(&format!("[BEGIN DELTA]\ndelta_id: {}", delta_id)));
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -6080,222 +6080,96 @@ fn array_without_action_key_still_rejected() {
     assert!(prompt.contains("Protocol repair"));
 }
 
-#[test]
-fn prose_then_final_answer_only_json_extracts_payload() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("prose_final_answer_only"),
-    );
-    let _ = core.begin_turn("你叫什么", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"你叫张三！
+fn perf_guard_enabled() -> bool {
+    std::env::var("TIMEM_PERF_GUARD").ok().as_deref() == Some("1")
+}
 
-{"status":"finished","final_answer":"你叫**张三**！"}
-"#,
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.response_to_user.contains("张三"));
-    assert_eq!(final_turn.repair_issue, None);
+fn assert_perf_under(label: &str, started: Instant, budget: Duration) {
+    if perf_guard_enabled() {
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed <= budget,
+            "{label} took {elapsed:?}, expected <= {budget:?}"
+        );
+    }
 }
 
 #[test]
-fn markdown_fenced_final_answer_only_json_extracts_payload() {
+fn performance_guard_large_context_prompt_render_is_bounded() {
     let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("fenced_final_answer_only"),
+        include_str!("../../resources/system_prompt/system_prompt.md"),
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("perf_large_prompt_render"),
     );
-    let _ = core.begin_turn("秘密是什么", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            "```json\n{\"status\":\"finished\",\"final_answer\":\"ABC = 123456\"}\n```",
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.response_to_user.contains("ABC = 123456"));
-    assert_eq!(final_turn.repair_issue, None);
+    let repeated_context = "local evidence ".repeat(120);
+    for idx in 0..160 {
+        let _ = core.begin_turn(&format!("user turn {idx}: {repeated_context}"), None);
+        let step = core.apply_model_response(LlmResponse {
+            content: scored(&format!(
+                r#"{{"status":"finished","final_answer":"assistant turn {idx}: done"}}"#
+            )),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        assert!(matches!(step, CoreStep::Final(_)));
+    }
+
+    let started = Instant::now();
+    let mut total_len = 0usize;
+    for _ in 0..30 {
+        total_len += core.render_prompt().len();
+    }
+    assert!(total_len > 1_000_000);
+    assert_perf_under(
+        "large context prompt render x30",
+        started,
+        Duration::from_millis(1500),
+    );
 }
 
 #[test]
-fn prose_with_json_reference_before_actual_response() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("prose_json_ref"),
-    );
-    let _ = core.begin_turn("explain json", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            "JSON looks like {\"key\":\"value\"} and is widely used.\n\n{\"status\":\"finished\",\"final_answer\":\"JSON is a data format.\"}",
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn
-        .response_to_user
-        .contains("JSON is a data format"));
-    assert_eq!(final_turn.repair_issue, None);
-}
+fn performance_guard_topic_generation_for_many_actions_is_bounded() {
+    #[derive(Default)]
+    struct CountSink {
+        count: usize,
+    }
+    impl agent_core::CoreTopicEventSink for CountSink {
+        fn on_core_topic_events(&mut self, events: &[agent_core::CoreTopicEvent]) {
+            self.count += events.len();
+        }
+    }
 
-#[test]
-fn final_answer_containing_json_code_example() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("final_answer_json_code"),
-    );
-    let _ = core.begin_turn("show json example", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"status":"finished","final_answer":"Use this format:\n```json\n{\"name\": \"test\"}\n```"}"#,
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.response_to_user.contains("Use this format"));
-    assert_eq!(final_turn.repair_issue, None);
-}
+    let mut core = core_with_builtin_capabilities("perf_many_action_topics");
+    let actions = (0..150)
+        .map(|idx| {
+            format!(
+                r#"{{"action":"self_tool","intent":"Read runtime info {idx}.","args":{{"type":"about_me","op":"read"}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
 
-#[test]
-fn prose_with_fake_envelope_keys_picks_last_valid_json() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("fake_envelope"),
-    );
-    let _ = core.begin_turn("test", None);
+    let _ = core.begin_turn("emit many action topics", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            "Example:\n{\"status\":\"finished\",\"final_answer\":\"wrong\"}\n\nActual:\n{\"status\":\"finished\",\"final_answer\":\"correct answer\"}",
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
+        content: scored(&format!(
+            r#"{{"status":"working","report_job_progress":"checking many actions","next_actions":[{actions}]}}"#
+        )),
+        model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.response_to_user.contains("correct answer"));
-    assert_eq!(final_turn.repair_issue, None);
-}
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
 
-#[test]
-fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("curly_in_code"),
+    let started = Instant::now();
+    let mut sink = CountSink::default();
+    for _ in 0..200 {
+        core.notify_last_topic_events("session_perf", &mut sink);
+    }
+    assert!(sink.count >= 30_000);
+    assert_perf_under(
+        "topic generation for many actions x200",
+        started,
+        Duration::from_millis(500),
     );
-    let _ = core.begin_turn("rust code", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            "In Rust: fn main() { println!(\"hello\"); }\n\n{\"status\":\"finished\",\"final_answer\":\"Rust uses curly braces for blocks.\"}",
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.response_to_user.contains("curly braces"));
-    assert_eq!(final_turn.repair_issue, None);
-}
-
-#[test]
-fn array_of_actions_auto_wrapped_as_next_actions() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("array_actions"),
-    );
-    core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let _ = core.begin_turn("find files", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"[{"action":"run_bash","intent":"Find files.","args":{"command":"echo ok","timeout_ms":5000}}]"#,
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected NeedModel with action results, got: {other:?}"),
-    };
-    assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("ok"));
-}
-
-#[test]
-fn array_of_multiple_actions_auto_wrapped() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("array_multi_actions"),
-    );
-    core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let _ = core.begin_turn("multi", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"[{"action":"run_bash","intent":"First.","args":{"command":"echo one","timeout_ms":5000}},{"action":"run_bash","intent":"Second.","args":{"command":"echo two","timeout_ms":5000}}]"#,
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected NeedModel, got: {other:?}"),
-    };
-    assert!(prompt.contains("one"));
-    assert!(prompt.contains("two"));
-}
-
-#[test]
-fn array_without_action_key_still_rejected() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
-        tmp_dir("array_no_action"),
-    );
-    let _ = core.begin_turn("bad", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"[{"foo":"bar"}]"#),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected NeedModel (repair), got: {other:?}"),
-    };
-    assert!(prompt.contains("Protocol repair"));
 }

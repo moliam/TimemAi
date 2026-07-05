@@ -142,8 +142,9 @@ impl ObservationPanel {
                 prefix: OBSERVATION_LINE_PREFIX.to_string(),
             });
         }
-        while lines.len() > self.max_lines {
-            lines.remove(0);
+        if lines.len() > self.max_lines {
+            let overflow = lines.len() - self.max_lines;
+            lines.drain(0..overflow);
         }
         lines
     }
@@ -267,8 +268,9 @@ pub fn render_observation_panel_at_with_elapsed(
             render_rows.push((line.style, format!("{prefix}{wrapped}")));
         }
     }
-    while render_rows.len() > panel.max_lines {
-        render_rows.remove(0);
+    if render_rows.len() > panel.max_lines {
+        let overflow = render_rows.len() - panel.max_lines;
+        render_rows.drain(0..overflow);
     }
     for (style, content) in render_rows {
         let padded = pad_display_width(&content, line_width);
@@ -573,6 +575,21 @@ mod tests {
         CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     };
     use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    fn perf_guard_enabled() -> bool {
+        std::env::var("TIMEM_PERF_GUARD").ok().as_deref() == Some("1")
+    }
+
+    fn assert_perf_under(label: &str, started: Instant, budget: Duration) {
+        if perf_guard_enabled() {
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed <= budget,
+                "{label} took {elapsed:?}, expected <= {budget:?}"
+            );
+        }
+    }
 
     fn action_topic(
         action: &str,
@@ -1315,5 +1332,41 @@ mod tests {
         assert!(rendered.contains('…'));
         assert!(!rendered.contains("run_bash"));
         assert!(!rendered.contains("tail-marker-should-not-render-after-limit"));
+    }
+
+    #[test]
+    fn performance_guard_many_observation_events_render_bounded() {
+        let long_text = "这是一个很长的观察窗口内容 with ascii and 中文 ".repeat(80);
+        let mut events = Vec::new();
+        for idx in 0..600 {
+            events.push(model_response_topic(
+                &format!("计划 {idx}: {long_text}"),
+                &format!("进度 {idx}: {long_text}"),
+            ));
+            events.push(action_topic(
+                "run_bash",
+                Some(&format!("执行第 {idx} 个本地检查")),
+                CoreActionKind::Bash {
+                    command: format!("printf '{long_text}'"),
+                },
+                true,
+            ));
+        }
+
+        let started = Instant::now();
+        let mut panel = ObservationPanel::new(20, 96);
+        for chunk in events.chunks(8) {
+            let observation_events = observation_events_from_core_topic_events(chunk);
+            panel.apply_all(observation_events);
+            panel.apply(ObservationEvent::SettleActive);
+            let rendered = render_observation_panel_at_with_elapsed(&panel, 1, Some("09:59"));
+            assert!(rendered.len() < 12_000);
+            assert!(!rendered.contains("run_bash"));
+        }
+        assert_perf_under(
+            "many observation events render bounded",
+            started,
+            Duration::from_millis(1200),
+        );
     }
 }

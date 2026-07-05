@@ -83,6 +83,7 @@ quality.
 | Boundary | Limits and edge values are exercised. | token thresholds, long wrapped lines, empty query listing, CRLF paste, narrow terminal width. |
 | Error | Bad input or external failure is safe and user-readable. | protocol repair, provider HTTP errors, invalid SQL/action fields, denied approval, Ctrl+C/Esc cancel. |
 | Stress / repetition | Repeated, concurrent, or real-terminal-like paths remain stable. | `scripts/edge_regression.sh`, memory guard multi-process tests, real TTY smoke, repeated shrink/session loops. |
+| Performance guard | Hot paths stay bounded as prompt context, topics, and terminal rows grow. | `scripts/performance_guard.sh`, `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded`. |
 
 If a feature cannot reasonably cover all four dimensions, the row's
 `Status / supplement needed` column must state the residual risk and the next

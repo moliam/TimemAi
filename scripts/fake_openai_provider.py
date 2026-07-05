@@ -100,12 +100,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--delay", type=float, default=2.0)
     args = parser.parse_args()
     Handler.response_delay = args.delay
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"fake_provider_ready:{args.port}", flush=True)
+    print(f"fake_provider_ready:{server.server_port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
