@@ -1,33 +1,90 @@
 use crate::capability::CapabilityRegistry;
 use crate::prompt_spec;
+use crate::response_protocol::ResponseProtocolSuite;
 use crate::{PromptDelta, PromptSlice};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisiblePromptRole {
+    User,
+    You,
+    Actions,
+    System,
+}
+
+impl VisiblePromptRole {
+    fn heading(self) -> &'static str {
+        match self {
+            VisiblePromptRole::User => "USER",
+            VisiblePromptRole::You => "TIMEM_ASSISTANT",
+            VisiblePromptRole::Actions => "ACTIONS",
+            VisiblePromptRole::System => "SYSTEM",
+        }
+    }
+}
+
+fn visible_role(prompt_type: &str) -> VisiblePromptRole {
+    match prompt_type {
+        "user_question" | "user_supplement" => VisiblePromptRole::User,
+        "llm_response" | "llm_free_talk" => VisiblePromptRole::You,
+        "result_of_llm_action" => VisiblePromptRole::Actions,
+        "response_repair" | "context_compacted" => VisiblePromptRole::System,
+        _ => VisiblePromptRole::System,
+    }
+}
 
 pub(crate) fn render_prompt(
     static_prompt: &str,
     capabilities: &CapabilityRegistry,
+    protocol_suite: &dyn ResponseProtocolSuite,
     deltas: &[PromptDelta],
 ) -> String {
-    let static_prompt = prompt_spec::enrich_static_prompt_with_response_schema(
-        &capabilities.enrich_static_prompt(static_prompt),
+    // 1. Fill {{RESPONSE_PROTOCOL_SECTION}} from protocol suite
+    let with_protocol = static_prompt.replace(
+        "{{RESPONSE_PROTOCOL_SECTION}}",
+        &protocol_suite.protocol_prompt_section(),
     );
+    // 2. Fill {{TOOL_CATALOG}} and {{SKILL_HEADERS}} from capabilities
+    let with_caps = capabilities.enrich_static_prompt(&with_protocol);
+    // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
+    let static_prompt = prompt_spec::enrich_static_prompt_with_response_schema(
+        &with_caps,
+        protocol_suite.response_schema_summary(),
+    );
+
     let mut out = format!(
-        "[BEGIN SEGMENT 0: prompt_0]\n{}\n[END SEGMENT 0: prompt_0]",
+        "[BEGIN SYSTEM PROMPT]\n{}\n[END SYSTEM PROMPT]",
         static_prompt
     );
-    let slices = render_prompt_slices(deltas);
-    for (idx, slice) in slices.iter().enumerate() {
+
+    for delta in deltas {
+        let slices = render_delta_slices(delta);
+        if slices.is_empty() {
+            continue;
+        }
         out.push('\n');
-        out.push_str(&format!("[BEGIN SEGMENT {}: prompt_delta]\n", idx + 1));
+        out.push_str("[BEGIN DELTA]\n");
         out.push_str(&format!(
-            "delta_id: {}\nslice_id: {}\nslice: {}/{}\n",
-            slice.delta_id, slice.slice_id, slice.slice_index, slice.slice_count
+            "delta_id: {}\ntime: {}\n",
+            delta.delta_id, delta.time_ms
         ));
-        out.push_str(&format!(
-            "prompt_type: {}\n{}\ntime: {}\n",
-            slice.prompt_type, slice.text, slice.time_ms
-        ));
-        out.push_str(&format!("[END SEGMENT {}: prompt_delta]", idx + 1));
+        let mut last_role = None;
+        for slice in slices {
+            let role = visible_role(&slice.prompt_type);
+            if last_role != Some(role) {
+                out.push('\n');
+                out.push_str(&format!("## {}\n", role.heading()));
+                if role == VisiblePromptRole::Actions {
+                    out.push_str("You initiated actions. The results are:\n");
+                }
+                last_role = Some(role);
+            }
+            out.push('\n');
+            out.push_str(slice.text.trim());
+            out.push('\n');
+        }
+        out.push_str("\n[END DELTA]");
     }
+
     out
 }
 
@@ -50,9 +107,10 @@ pub(crate) fn render_delta_slices(delta: &PromptDelta) -> Vec<PromptSlice> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::response_protocol::markdown_suite::MarkdownSuiteV1;
 
     #[test]
-    fn prompt_renderer_injects_schema_catalog_and_visible_slices() {
+    fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         let delta = PromptDelta {
             delta_id: "pd_test_1".to_string(),
             time_ms: 1,
@@ -72,29 +130,27 @@ mod tests {
                     slice_id: "ps_test_1_s002".to_string(),
                     prompt_type: "llm_response".to_string(),
                     time_ms: 3,
-                    text: "UNIQUE_HIDDEN_SLICE_SENTINEL".to_string(),
+                    text: "HIDDEN".to_string(),
                     slice_index: 2,
                     slice_count: 2,
                 },
             ],
         };
-
         let rendered = render_prompt(
-            "## Response Protocol\n{{RESPONSE_V1_SCHEMA}}\n## Tools\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+            "{{RESPONSE_PROTOCOL_SECTION}}
+{{TOOL_CATALOG}}
+{{SKILL_HEADERS}}",
             &CapabilityRegistry::builtin(),
+            &MarkdownSuiteV1,
             &[delta],
         );
-
-        assert!(rendered.contains("[BEGIN SEGMENT 0: prompt_0]"));
-        assert!(!rendered.contains("\"$id\""));
-        assert!(rendered.contains("\"fields\""));
-        assert!(rendered.contains("\"status?\""));
-        assert!(rendered.contains("#### `memmgr`"));
-        assert!(rendered.contains("**Options**"));
-        assert!(!rendered.contains("\"tool_catalog\""));
-        assert!(!rendered.contains("```"));
-        assert!(rendered.contains("delta_id: pd_test_1"));
+        assert!(rendered.contains("Response Protocol"));
+        assert!(rendered.contains("memmgr"));
         assert!(rendered.contains("hello"));
-        assert!(!rendered.contains("UNIQUE_HIDDEN_SLICE_SENTINEL"));
+        assert!(rendered.contains("[BEGIN DELTA]"));
+        assert!(rendered.contains("## USER"));
+        assert!(!rendered.contains("slice_id:"));
+        assert!(!rendered.contains("prompt_type:"));
+        assert!(!rendered.contains("HIDDEN"));
     }
 }

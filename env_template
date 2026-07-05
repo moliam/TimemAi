@@ -20,6 +20,7 @@
 # anthropic, and other providers default to openai-compatible. For custom
 # gateways, set this explicitly.
 # export TIMEM_API_PROTOCOL=openai-compatible
+# export TIMEM_RESPONSE_PROTOCOL=markdown
 
 # Generic API key. Prefer env/source over command-line flags so secrets do not
 # land in shell history.
@@ -55,6 +56,12 @@
 # ask: prompt before bash execution.
 # approve: execute requested bash actions directly.
 # export TIMEM_BASH_APPROVAL=ask
+
+# Work directory instruction files.
+# silent: automatically load AGENTS.md/CLAUDE.md from the current working directory and notify.
+# ask: ask before loading.
+# off: do not load them.
+# export TIMEM_WORK_INSTRUCTIONS=silent
 
 # Vendor-specific fallback keys.
 # export DASHSCOPE_API_KEY=

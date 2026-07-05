@@ -2,20 +2,24 @@ kind: tool
 id: shell_job_status
 binding_type: builtin
 binding_name: shell_job_status
+requires_host: local_command_execution
 summary: Check a background shell job.
 description: |
-  Check a background shell job previously started by run_bash.
+  Check or cancel a background shell job previously started by run_bash.
 prompt_input: |
-  Requires job_id from the previous run_bash result and timeout_ms chosen by
-  you for this check; 0 means immediate check, max 15000.
+  Requires job_id from the previous run_bash result. Use op=status to check, or
+  op=cancel to stop the job. op defaults to status. For status checks,
+  timeout_ms is chosen by you; 0 means immediate check, max 15000.
 prompt_result: |
-  Returns running with partial output, or finished with exit code and bounded
-  output. job_not_found means the job id is unknown.
+  Status returns running with partial output, finished with exit code and
+  bounded output, or cancelled. Cancel returns cancelled, already_completed, or
+  job_not_found.
 input_schema: |
   {
     "type": "object",
-    "required": ["job_id", "timeout_ms"],
+    "required": ["job_id"],
     "properties": {
+      "op": {"type": "string", "enum": ["status", "cancel"], "description": "Operation. Defaults to status."},
       "job_id": {"type": "string", "description": "Background job id returned by run_bash."},
       "timeout_ms": {"type": "integer", "description": "Wait budget for this status check; 0 means immediate check, max 15000."}
     }
@@ -25,7 +29,7 @@ output_schema: |
     "type": "object",
     "properties": {
       "job_id": {"type": "string", "description": "Echoed background job id."},
-      "state": {"type": "string", "enum": ["running", "finished"], "description": "Current job state."},
+      "state": {"type": "string", "enum": ["running", "finished", "cancelled"], "description": "Current job state."},
       "exit_code": {"type": "integer", "description": "Process exit code when finished."},
       "waited_ms": {"type": "integer", "description": "Actual wait time."},
       "output_file": {"type": "string", "description": "Path where background output is stored."},
@@ -39,6 +43,7 @@ example_json: |
     "action": "shell_job_status",
     "intent": "Check whether the background build finished.",
     "args": {
+      "op": "status",
       "job_id": "job_1782200000000_1",
       "timeout_ms": 10000
     }

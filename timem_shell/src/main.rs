@@ -1,6 +1,6 @@
 use agent_core::capability::CapabilityRegistry;
-use agent_core::self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
-use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, UsageStats};
+use agent_core::self_tool::SelfToolPaths;
+use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, ResponseProtocolKind, UsageStats};
 use crossterm::event::Event;
 use reedline::{
     default_emacs_keybindings, EditCommand, EditMode, Emacs, FileBackedHistory, Highlighter,
@@ -17,40 +17,50 @@ use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
-    action_audit_path, action_status_hint, append_audit, audit_path, data_root,
-    estimate_prompt_context_tokens, format_token_count, load_workspace_dirs, local_time_label,
-    memory_path, observation_events_from_model_response, observation_panel_width_for_terminal,
-    parse_cli_args, provider_config_from_env, render_final_response_at, render_prof_report,
-    render_shell_status_bar, render_thinking_view_at, run_session_turn, save_workspace_dirs,
-    ApiProtocol, ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, RuntimeProfiler,
-    ShellStatusMessage, ShellStatusSnapshot, ShellStatusTone, ThinkingViewSnapshot, TurnRequest,
-    TurnUi, SPINNER_ICONS, TIMEM_LOGO,
+    append_audit, apply_workspace_command_to_path, bash_approval_mode_from_sources,
+    capabilities_dir_from_sources, combine_additional_contexts, default_data_root,
+    estimate_prompt_context_tokens, format_token_count, host_start_audit_event, layout_for_space,
+    load_workspace_dirs_from_path, local_time_label, observation_events_from_core_topic_events,
+    observation_panel_width_for_terminal, parse_cli_args, provider_config_from_env,
+    render_final_response_at, render_prof_report_data, render_shell_status_bar,
+    render_thinking_view_at, render_turn_outcome_text, run_session_turn,
+    runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
+    stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
+    work_instruction_load_request, work_instruction_mode_from_sources, workspace_config_file,
+    workspace_reference_context, CoreMemoryActivity, CoreTopicEvent, HostDecision,
+    HostDecisionRequest, HostStatusMessage, ModelDirection, NoopTurnUi, ObservationEvent,
+    ObservationPanel, OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
+    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
+    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot,
+    StaleContextDecisionRequest, ThinkingViewSnapshot, TurnInput, TurnUi,
+    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
+    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
+    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, SPINNER_ICONS,
+    TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const STATIC_PROMPT: &str = include_str!("../../resources/static_v1.md");
+const STATIC_PROMPT: &str = include_str!("../../resources/system_prompt/system_prompt.md");
 const ANSI_RESET: &str = timem_shell::ANSI_RESET;
 const ANSI_BOLD: &str = timem_shell::ANSI_BOLD;
 const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
 const PASTE_START_MARKER: char = '\u{2063}';
 const PASTE_END_MARKER: char = '\u{2064}';
 static TURN_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
-const STALE_CONTEXT_IDLE: Duration = Duration::from_secs(3 * 60 * 60);
-const STALE_CONTEXT_TOKEN_THRESHOLD: u32 = 10_000;
-
 struct ConfigRow {
     key: String,
     value: String,
-    desc: &'static str,
+    desc: String,
     highlight: bool,
 }
 
 enum ConfigTableItem {
-    Section(&'static str),
+    Section(String),
     Row(ConfigRow),
 }
 
@@ -77,37 +87,45 @@ fn main() {
         .clone()
         .or_else(|| env.get("TIMEM_SPACE").cloned())
         .unwrap_or_else(|| ".test_mem".to_string());
-    let audit_file = audit_path(&space);
-    let action_audit_file = action_audit_path(&space);
-    let memory_dir = memory_path(&space);
-    let mut bash_approval_mode = bash_approval_mode_from_options(&options, &env);
+    let data_root = default_data_root();
+    let layout = layout_for_space(&space);
+    let audit_file = layout.api_audit_file();
+    let action_audit_file = layout.action_audit_file();
+    let memory_dir = layout.memory_dir();
+    let workspace_config = workspace_config_file(&data_root);
+    let mut bash_approval_mode =
+        bash_approval_mode_from_sources(options.bash_approval.as_deref(), &env);
+    let mut work_instruction_mode =
+        work_instruction_mode_from_sources(options.work_instructions.as_deref(), &env);
+    let current_work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (mut work_instruction_context, work_instruction_notice) = match work_instruction_mode {
+        WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(&current_work_dir),
+        WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => (None, None),
+    };
     let mut profiler = RuntimeProfiler::default();
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
-    core.set_self_tool_state(SelfToolState::new(
+    let response_protocol = options
+        .response_protocol
+        .as_deref()
+        .or_else(|| env.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str))
+        .map(ResponseProtocolKind::from_name)
+        .unwrap_or(ResponseProtocolKind::Markdown);
+    config.response_protocol = response_protocol;
+    core.set_response_protocol(response_protocol);
+    core.configure_self_tool_runtime(
         env.clone().into_iter().collect(),
         SelfToolPaths {
-            space_dir: absolute_path(data_root().join(&space)),
+            space_dir: absolute_path(layout.space_dir()),
             memory_dir: absolute_path(memory_dir.clone()),
             memory_file: absolute_path(memory_dir.join("memory.jsonl")),
             scratch_file: absolute_path(memory_dir.join("scratch_notes.jsonl")),
             api_audit_file: absolute_path(audit_file.clone()),
             action_audit_file: absolute_path(action_audit_file.clone()),
         },
-        SelfToolAbout {
-            name: "TimemAi".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            author: "TimemAi <phylimo@163.com>".to_string(),
-            summary: "A lightweight local agent with Bash capability and multidimensional, time-aware memory.".to_string(),
-            project: "https://github.com/moliam/TimemAi".to_string(),
-            star_message: "Please star https://github.com/moliam/TimemAi".to_string(),
-        },
-        SelfToolProcess {
-            pid: std::process::id(),
-            current_dir: absolute_path(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-            executable: absolute_path(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("timem"))),
-        },
-    ));
-    if let Some(capabilities_dir) = capabilities_dir_from_options(&options, &env) {
+    );
+    if let Some(capabilities_dir) =
+        capabilities_dir_from_sources(options.capabilities_dir.as_deref(), &env)
+    {
         match CapabilityRegistry::builtin_with_overlay_dir(&capabilities_dir) {
             Ok(registry) => core.set_capability_registry(registry),
             Err(err) => {
@@ -116,22 +134,26 @@ fn main() {
             }
         }
     }
-    core.set_bash_approval_mode(bash_approval_mode);
-    core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+    core.configure_runtime_from_host(&config, bash_approval_mode);
     let session = session_id();
-    let mut workspace_pending = !load_workspace_dirs().is_empty();
+    let mut workspace_pending = !load_workspace_dirs_from_path(&workspace_config).is_empty();
 
     if let Some(input) = options.once_json_input.as_deref() {
-        let context = options.supporting_context.as_deref();
+        let context = combine_additional_contexts([
+            work_instruction_context.as_deref(),
+            options.supporting_context.as_deref(),
+        ]);
         let mut ui = NoopTurnUi;
         let outcome = run_session_turn(
             &mut core,
             &mut config,
-            TurnRequest {
+            TurnInput {
                 input,
                 session: &session,
                 audit_file: &audit_file,
-                additional_context: context,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: context.as_deref(),
             },
             &mut ui,
             Some(&mut profiler),
@@ -139,7 +161,7 @@ fn main() {
         println!(
             "{}",
             json!({
-                "output": outcome.text,
+                "output": render_turn_outcome_text(&outcome),
                 "session_id": session,
                 "stats": outcome.stats,
                 "status": "done",
@@ -151,18 +173,17 @@ fn main() {
 
     let _ = append_audit(
         &audit_file,
-        &json!({
-            "type":"shell_start",
-            "session":session,
-            "space":space,
-            "gateway_provider":config.provider,
-            "provider":config.provider,
-            "base_url":config.base_url,
-            "api_protocol":config.api_protocol.label(),
-            "model":config.model,
-            "max_llm_input_tokens":config.max_llm_input_tokens,
-            "bash_approval":bash_approval_mode_label(bash_approval_mode)
-        }),
+        &host_start_audit_event(
+            "shell",
+            &session,
+            &space,
+            &config.provider,
+            &config.base_url,
+            &config.api_protocol,
+            &config.model,
+            config.max_llm_input_tokens,
+            bash_approval_mode,
+        ),
     );
 
     println!("Timem native shell");
@@ -171,12 +192,25 @@ fn main() {
         render_startup_banner(
             &space,
             &config,
+            &data_root,
             &audit_file,
             &action_audit_file,
             bash_approval_mode,
+            work_instruction_mode,
         )
     );
-    println!("输入 /prof 查看运行 profiling；输入 /workspace 管理工作区；输入 /exit 退出；Ctrl+C/Esc 取消输入或菜单；模型思考中 Ctrl+C 取消本轮。\n");
+    let mut startup_messages = Vec::new();
+    let init_event = core.init_lifecycle_topic_event(&session);
+    if let Some(message) = shell_status_message_from_core_topic(&init_event) {
+        startup_messages.push(message);
+    }
+    if let Some(message) = work_instruction_notice.as_ref() {
+        startup_messages.push(message.clone());
+    }
+    if !startup_messages.is_empty() {
+        print!("{}", render_startup_status_block(&startup_messages));
+    }
+    println!("{}\n", startup_control_hint());
 
     let history_file = audit_file.with_file_name("shell_history.txt");
     let mut editor = ShellLineEditor::new(history_file);
@@ -225,25 +259,38 @@ fn main() {
             println!("Bye.");
             break;
         }
+        if input == "/help" {
+            prompt_status.clear_before_exit();
+            print!("{}", runtime_help_text());
+            continue;
+        }
         if input == "/prof" {
             prompt_status.clear_before_exit();
-            println!(
-                "{}",
-                render_prof_report(&profiler, &memory_dir, &audit_file, &action_audit_file)
-            );
+            let report =
+                runtime_profile_report(&profiler, &memory_dir, &audit_file, &action_audit_file);
+            println!("{}", render_prof_report_data(&report));
             continue;
         }
         if input == "/config" {
             prompt_status.clear_before_exit();
-            if run_config_menu(&mut config, &mut core, &mut bash_approval_mode) {
+            if run_config_menu(
+                &mut config,
+                &mut core,
+                &mut bash_approval_mode,
+                &mut work_instruction_mode,
+                &mut work_instruction_context,
+                &current_work_dir,
+            ) {
                 println!(
                     "{}",
                     render_startup_banner(
                         &space,
                         &config,
+                        &data_root,
                         &audit_file,
                         &action_audit_file,
                         bash_approval_mode,
+                        work_instruction_mode,
                     )
                 );
             }
@@ -252,7 +299,7 @@ fn main() {
 
         if input == "/workspace" {
             prompt_status.clear_before_exit();
-            if run_workspace_menu() {
+            if run_workspace_menu(&workspace_config) {
                 workspace_pending = true;
                 println!("工作区已更新。");
             }
@@ -263,35 +310,19 @@ fn main() {
 
         let idle = last_dialog_activity.elapsed();
         let dynamic_context_tokens = core.dynamic_context_estimated_tokens();
-        if stale_context_prompt_needed(idle, dynamic_context_tokens) {
-            let continue_old_context = request_stale_context_continue(idle, dynamic_context_tokens);
-            let _ = append_audit(
+        if let Some(stale_request) = stale_context_decision_request(idle, dynamic_context_tokens) {
+            let continue_old_context = request_stale_context_continue(stale_request);
+            core.resolve_stale_context_with_audit(
+                stale_request,
+                continue_old_context,
                 &audit_file,
-                &json!({
-                    "type":"stale_context_choice",
-                    "session":session,
-                    "idle_secs":idle.as_secs(),
-                    "dynamic_context_tokens":dynamic_context_tokens,
-                    "continue_old_context":continue_old_context
-                }),
+                &session,
             );
-            if !continue_old_context {
-                core.clear_dynamic_context();
-            }
         }
 
         let workspace_ctx: Option<String> = if workspace_pending {
             workspace_pending = false;
-            let dirs = load_workspace_dirs();
-            if dirs.is_empty() {
-                None
-            } else {
-                let lines: Vec<String> = dirs.iter().map(|d| format!("- {d}")).collect();
-                Some(format!(
-                    "workspace_dirs (model reference; not a shell restriction):\n{}",
-                    lines.join("\n")
-                ))
-            }
+            workspace_reference_context(&load_workspace_dirs_from_path(&workspace_config))
         } else {
             None
         };
@@ -302,22 +333,36 @@ fn main() {
         let mut turn_ui = CliTurnUi {
             status: Some(&mut status),
             interactive_approval: true,
+            supplement_input: ThinkingSupplementInput::new(),
         };
+        let turn_work_instruction_context = resolve_work_instruction_context_for_turn(
+            work_instruction_mode,
+            &current_work_dir,
+            &session,
+            &mut turn_ui,
+        );
+        let turn_additional_context = combine_additional_contexts([
+            turn_work_instruction_context.as_deref(),
+            workspace_ctx.as_deref(),
+        ]);
         let outcome = run_session_turn(
             &mut core,
             &mut config,
-            TurnRequest {
+            TurnInput {
                 input: &input,
                 session: &session,
                 audit_file: &audit_file,
-                additional_context: workspace_ctx.as_deref(),
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: turn_additional_context.as_deref(),
             },
             &mut turn_ui,
             Some(&mut profiler),
         );
+        drop(turn_ui);
         status.finish();
         print_final_response(
-            &outcome.text,
+            &render_turn_outcome_text(&outcome),
             &outcome.stats,
             outcome.latest_usage.as_ref(),
             &config.provider,
@@ -346,15 +391,33 @@ fn absolute_path(path: PathBuf) -> PathBuf {
 struct CliTurnUi<'a> {
     status: Option<&'a mut ThinkingStatus>,
     interactive_approval: bool,
+    supplement_input: Option<ThinkingSupplementInput>,
 }
 
 impl TurnUi for CliTurnUi<'_> {
     fn is_cancel_requested(&mut self) -> bool {
+        if let Some(input) = self.supplement_input.as_mut() {
+            let _ = input.poll();
+        }
         TURN_CANCEL_REQUESTED.load(Ordering::SeqCst)
     }
 
     fn take_cancel_request(&mut self) -> bool {
         consume_turn_cancel_request()
+    }
+
+    fn drain_user_supplements(&mut self) -> Vec<String> {
+        let supplements = self
+            .supplement_input
+            .as_mut()
+            .map(ThinkingSupplementInput::drain)
+            .unwrap_or_default();
+        if !supplements.is_empty() {
+            if let Some(status) = self.status.as_deref_mut() {
+                status.add_user_supplement_notice(supplements.len());
+            }
+        }
+        supplements
     }
 
     fn on_model_request(&mut self, round: u32, prompt: &str) {
@@ -365,15 +428,27 @@ impl TurnUi for CliTurnUi<'_> {
         }
     }
 
-    fn on_model_response(&mut self, round: u32, usage: &UsageStats, content: &str) {
+    fn on_model_response(&mut self, round: u32, usage: &UsageStats, _content: &str) {
         if let Some(status) = self.status.as_deref_mut() {
             status.clear_transient_observation();
             status.set_usage(usage.clone());
             status.set_model_direction(round, ModelDirection::Downstream);
-            if let Some(hint) = action_status_hint(content) {
-                status.set_intent(&hint.intent, &hint.memory_marker);
+        }
+    }
+
+    fn on_model_response_discarded(&mut self, _round: u32, _reason: &str) {
+        if let Some(status) = self.status.as_deref_mut() {
+            status.clear_transient_observation();
+        }
+    }
+
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        if let Some(status) = self.status.as_deref_mut() {
+            if let Some(hint) = topic_event_status_hint(events) {
+                let intent = hint.intent.as_deref().unwrap_or(&hint.action);
+                status.set_intent(intent, hint.memory_activity);
             }
-            status.apply_observation_events(observation_events_from_model_response(content));
+            status.apply_observation_events(observation_events_from_core_topic_events(events));
             status.settle_active_observations();
         }
     }
@@ -391,31 +466,47 @@ impl TurnUi for CliTurnUi<'_> {
     }
 
     fn pause_for_user_decision(&mut self) {
+        self.supplement_input = None;
         if let Some(status) = self.status.as_deref_mut() {
             status.pause_for_user_approval();
         }
     }
 
     fn resume_after_user_decision(&mut self) {
+        if self.supplement_input.is_none() {
+            self.supplement_input = ThinkingSupplementInput::new();
+        }
         if let Some(status) = self.status.as_deref_mut() {
             status.resume_after_user_approval();
         }
-    }
-
-    fn request_user_approval(&mut self, request: &ApprovalRequest) -> bool {
-        self.interactive_approval && request_user_approval(request)
-    }
-
-    fn request_round_limit_continue(&mut self, max_rounds: u32) -> bool {
-        self.interactive_approval && request_round_limit_continue(max_rounds)
     }
 
     fn can_request_output_expansion(&mut self) -> bool {
         self.interactive_approval
     }
 
-    fn request_expand_output_tokens(&mut self, current_tokens: u32) -> bool {
-        self.interactive_approval && request_expand_output_tokens(current_tokens)
+    fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
+        if !self.interactive_approval {
+            return request.safe_default().into();
+        }
+        let accepted = match request {
+            HostDecisionRequest::UserApproval(request) => request_user_approval(&request),
+            HostDecisionRequest::RoundLimitContinue(request) => {
+                request_round_limit_continue(request)
+            }
+            HostDecisionRequest::OutputExpansion(request) => request_expand_output_tokens(request),
+            HostDecisionRequest::StaleContextContinue(request) => {
+                request_stale_context_continue(request)
+            }
+            HostDecisionRequest::WorkInstructionLoad(request) => {
+                choose_work_instructions_load(&request) == ApprovalChoice::Allow
+            }
+        };
+        if accepted {
+            HostDecision::Accept
+        } else {
+            HostDecision::Decline
+        }
     }
 }
 
@@ -424,6 +515,7 @@ struct ThinkingStatus {
     running: Arc<AtomicBool>,
     rendered_lines: Arc<Mutex<usize>>,
     handle: Option<JoinHandle<()>>,
+    stop_tx: Option<Sender<()>>,
     started_at: Instant,
     paused_total: Arc<Mutex<Duration>>,
     paused_since: Option<Instant>,
@@ -438,7 +530,7 @@ impl ThinkingStatus {
                 provider: provider.to_string(),
                 model: model.to_string(),
                 intent: "思考中".to_string(),
-                memory_marker: String::new(),
+                memory_activity: CoreMemoryActivity::None,
                 model_round: 1,
                 direction: ModelDirection::Upstream,
                 usage: UsageStats::zero(),
@@ -446,37 +538,30 @@ impl ThinkingStatus {
                 tick: random_spinner_tick(),
                 elapsed_secs: 0,
                 max_llm_input_tokens,
-                retry_notice: None,
-                retry_until_epoch_ms: None,
-                retry_error: None,
-                retry_attempt: None,
-                retry_max_attempts: None,
+                retry: None,
             },
-            observations: ObservationPanel::default(),
+            observations: {
+                let mut panel = ObservationPanel::default();
+                panel.apply(ObservationEvent::EnsureTransient("思考中...".to_string()));
+                panel
+            },
         }));
         let running = Arc::new(AtomicBool::new(true));
         let rendered_lines = Arc::new(Mutex::new(0));
         render_thinking(&state.lock().unwrap(), &rendered_lines);
-        let thread_state = Arc::clone(&state);
-        let thread_running = Arc::clone(&running);
-        let thread_rendered_lines = Arc::clone(&rendered_lines);
-        let thread_paused_total = Arc::clone(&paused_total);
-        let handle = thread::spawn(move || {
-            while thread_running.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(1000));
-                if let Ok(mut snapshot) = thread_state.lock() {
-                    snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
-                    snapshot.status.elapsed_secs =
-                        active_elapsed_secs(started_at, &thread_paused_total);
-                    rerender_thinking(&snapshot, &thread_rendered_lines);
-                }
-            }
-        });
+        let (handle, stop_tx) = spawn_thinking_renderer(
+            Arc::clone(&state),
+            Arc::clone(&running),
+            Arc::clone(&rendered_lines),
+            Arc::clone(&paused_total),
+            started_at,
+        );
         Self {
             state,
             running,
             rendered_lines,
             handle: Some(handle),
+            stop_tx: Some(stop_tx),
             started_at,
             paused_total,
             paused_since: None,
@@ -487,11 +572,7 @@ impl ThinkingStatus {
         if let Ok(mut state) = self.state.lock() {
             state.status.model_round = round;
             state.status.direction = direction;
-            state.status.retry_notice = None;
-            state.status.retry_until_epoch_ms = None;
-            state.status.retry_error = None;
-            state.status.retry_attempt = None;
-            state.status.retry_max_attempts = None;
+            state.status.retry = None;
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -514,13 +595,14 @@ impl ThinkingStatus {
         }
     }
 
-    fn set_intent(&mut self, intent: &str, memory_marker: &str) {
+    fn set_intent(&mut self, intent: &str, memory_activity: CoreMemoryActivity) {
         if let Ok(mut state) = self.state.lock() {
             state.status.intent = intent
                 .trim_end_matches('…')
                 .trim_end_matches("...")
+                .trim()
                 .to_string();
-            state.status.memory_marker = memory_marker.to_string();
+            state.status.memory_activity = memory_activity;
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -529,7 +611,7 @@ impl ThinkingStatus {
         if let Ok(mut state) = self.state.lock() {
             state
                 .observations
-                .apply(ObservationEvent::Transient(text.to_string()));
+                .apply(ObservationEvent::EnsureTransient(text.to_string()));
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -543,19 +625,31 @@ impl ThinkingStatus {
         }
     }
 
+    fn add_user_supplement_notice(&mut self, count: usize) {
+        let text = if count == 1 {
+            "已收到用户补充指示，下一轮会使用。".to_string()
+        } else {
+            format!("已收到 {count} 条用户补充指示，下一轮会使用。")
+        };
+        if let Ok(mut state) = self.state.lock() {
+            state.observations.apply(ObservationEvent::Persistent(text));
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
     fn set_network_retry(&mut self, attempt: u32, max_attempts: u32, delay: Duration, error: &str) {
         if let Ok(mut state) = self.state.lock() {
-            state.status.retry_notice = None;
-            state.status.retry_until_epoch_ms = Some(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .saturating_add(delay)
-                    .as_millis(),
-            );
-            state.status.retry_error = Some(error.to_string());
-            state.status.retry_attempt = Some(attempt);
-            state.status.retry_max_attempts = Some(max_attempts);
+            let until_epoch_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .saturating_add(delay)
+                .as_millis();
+            state.status.retry = Some(RuntimeRetryStatus {
+                until_epoch_ms: Some(until_epoch_ms),
+                error: Some(error.to_string()),
+                attempt: Some(attempt),
+                max_attempts: Some(max_attempts),
+            });
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -579,17 +673,13 @@ impl ThinkingStatus {
 
     fn finish(&mut self) {
         self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        self.stop_renderer_thread();
         clear_thinking_block(&self.rendered_lines);
     }
 
     fn pause_for_user_approval(&mut self) {
         self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        self.stop_renderer_thread();
         self.paused_since = Some(Instant::now());
         clear_thinking_block(&self.rendered_lines);
     }
@@ -608,23 +698,52 @@ impl ThinkingStatus {
             state.status.elapsed_secs = active_elapsed_secs(self.started_at, &self.paused_total);
             render_thinking(&state, &self.rendered_lines);
         }
-        let thread_state = Arc::clone(&self.state);
-        let thread_running = Arc::clone(&self.running);
-        let thread_rendered_lines = Arc::clone(&self.rendered_lines);
-        let thread_paused_total = Arc::clone(&self.paused_total);
-        let started_at = self.started_at;
-        self.handle = Some(thread::spawn(move || {
-            while thread_running.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(1000));
-                if let Ok(mut snapshot) = thread_state.lock() {
-                    snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
-                    snapshot.status.elapsed_secs =
-                        active_elapsed_secs(started_at, &thread_paused_total);
-                    rerender_thinking(&snapshot, &thread_rendered_lines);
-                }
-            }
-        }));
+        let (handle, stop_tx) = spawn_thinking_renderer(
+            Arc::clone(&self.state),
+            Arc::clone(&self.running),
+            Arc::clone(&self.rendered_lines),
+            Arc::clone(&self.paused_total),
+            self.started_at,
+        );
+        self.handle = Some(handle);
+        self.stop_tx = Some(stop_tx);
     }
+
+    fn stop_renderer_thread(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_thinking_renderer(
+    state: Arc<Mutex<ThinkingViewSnapshot>>,
+    running: Arc<AtomicBool>,
+    rendered_lines: Arc<Mutex<usize>>,
+    paused_total: Arc<Mutex<Duration>>,
+    started_at: Instant,
+) -> (JoinHandle<()>, Sender<()>) {
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        while running.load(Ordering::Relaxed) {
+            match stop_rx.recv_timeout(Duration::from_millis(1000)) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if !running.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Ok(mut snapshot) = state.lock() {
+                snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
+                snapshot.status.elapsed_secs = active_elapsed_secs(started_at, &paused_total);
+                rerender_thinking(&snapshot, &rendered_lines);
+            }
+        }
+    });
+    (handle, stop_tx)
 }
 
 fn active_elapsed_secs(started_at: Instant, paused_total: &Arc<Mutex<Duration>>) -> u64 {
@@ -632,7 +751,7 @@ fn active_elapsed_secs(started_at: Instant, paused_total: &Arc<Mutex<Duration>>)
         .lock()
         .map(|duration| *duration)
         .unwrap_or(Duration::ZERO);
-    started_at.elapsed().saturating_sub(paused).as_secs()
+    runtime_active_elapsed_secs(started_at.elapsed(), paused)
 }
 
 fn request_user_approval(request: &ApprovalRequest) -> bool {
@@ -642,29 +761,25 @@ fn request_user_approval(request: &ApprovalRequest) -> bool {
     }
 }
 
-fn request_round_limit_continue(max_rounds: u32) -> bool {
-    match choose_round_limit_continue(max_rounds) {
+fn request_round_limit_continue(request: RoundLimitDecisionRequest) -> bool {
+    match choose_round_limit_continue(request) {
         ApprovalChoice::Allow => true,
         ApprovalChoice::Deny => false,
     }
 }
 
-fn request_expand_output_tokens(current: u32) -> bool {
-    match choose_expand_output_tokens(current) {
+fn request_expand_output_tokens(request: OutputExpansionRequest) -> bool {
+    match choose_expand_output_tokens(request) {
         ApprovalChoice::Allow => true,
         ApprovalChoice::Deny => false,
     }
 }
 
-fn request_stale_context_continue(idle: Duration, dynamic_context_tokens: u32) -> bool {
-    match choose_stale_context_continue(idle, dynamic_context_tokens) {
+fn request_stale_context_continue(request: StaleContextDecisionRequest) -> bool {
+    match choose_stale_context_continue(request) {
         ApprovalChoice::Allow => true,
         ApprovalChoice::Deny => false,
     }
-}
-
-fn stale_context_prompt_needed(idle: Duration, dynamic_context_tokens: u32) -> bool {
-    idle >= STALE_CONTEXT_IDLE && dynamic_context_tokens > STALE_CONTEXT_TOKEN_THRESHOLD
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -719,9 +834,15 @@ fn render_approval_choices(selected: ApprovalChoice) -> String {
     }
 }
 
-fn render_round_limit_prompt(max_rounds: u32) -> String {
+fn render_round_limit_prompt(request: RoundLimitDecisionRequest) -> String {
+    let context_text = if request.keep_task_context {
+        "当前任务上下文保持不变"
+    } else {
+        "当前任务上下文不会保持"
+    };
     format!(
-        "\n本轮已达到最大交互次数 {max_rounds}。\n继续后会为模型重新充值 rounds_remaining 为 {max_rounds}，当前任务上下文保持不变。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n"
+        "\n本轮已达到最大交互次数 {}。\n继续后会为模型重新充值 rounds_remaining 为 {}，{}。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        request.max_rounds, request.recharge_rounds, context_text
     )
 }
 
@@ -734,10 +855,17 @@ fn render_round_limit_choices(selected: ApprovalChoice) -> String {
     }
 }
 
-fn render_expand_output_prompt(current: u32) -> String {
+fn render_expand_output_prompt(request: OutputExpansionRequest) -> String {
+    let retry_text = if request.retry_same_turn {
+        "并自动重试本轮请求"
+    } else {
+        "但不自动重试本轮请求"
+    };
     format!(
-        "\n模型输出达到当前上限 {}，导致 JSON 被截断。\n是否将 TIMEM_MAX_LLM_OUTPUT 临时增加 10K 并自动重试本轮请求？\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
-        format_token_count(current)
+        "\n模型输出达到当前上限 {}，导致 JSON 被截断。\n是否将 TIMEM_MAX_LLM_OUTPUT 临时增加 {}{}？\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        format_token_count(request.current_tokens),
+        format_token_count(request.increment_tokens),
+        retry_text
     )
 }
 
@@ -750,11 +878,144 @@ fn render_expand_output_choices(selected: ApprovalChoice) -> String {
     }
 }
 
-fn render_stale_context_prompt(idle: Duration, dynamic_context_tokens: u32) -> String {
+struct ThinkingSupplementInput {
+    input: ShellInputSource,
+    terminal_mode: TerminalModeGuard,
+    nonblocking_mode: NonblockingGuard,
+    buffer: Vec<u8>,
+    pending: Vec<String>,
+}
+
+impl ThinkingSupplementInput {
+    fn new() -> Option<Self> {
+        let input = ShellInputSource::open().ok()?;
+        let fd = input.as_raw_fd();
+        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+            return None;
+        }
+        let mode = thinking_supplement_terminal_mode(original);
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &mode) } != 0 {
+            return None;
+        }
+        let terminal_mode = TerminalModeGuard::new(fd, original);
+        let nonblocking_mode = NonblockingGuard::new(fd).ok()?;
+        Some(Self {
+            input,
+            terminal_mode,
+            nonblocking_mode,
+            buffer: Vec::new(),
+            pending: Vec::new(),
+        })
+    }
+
+    fn poll(&mut self) -> io::Result<()> {
+        let mut bytes = [0u8; 256];
+        loop {
+            match self.input.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(n) => self.push_bytes(&bytes[..n]),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Vec<String> {
+        let _ = self.poll();
+        let mut supplements = std::mem::take(&mut self.pending);
+        let queued = drain_queued_tty_input(
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+            Duration::from_millis(120),
+        );
+        if queued.interrupted {
+            TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+        }
+        supplements.extend(queued_text_to_supplements(&queued.text));
+        supplements
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        push_thinking_supplement_bytes(&mut self.buffer, &mut self.pending, bytes);
+    }
+}
+
+impl Drop for ThinkingSupplementInput {
+    fn drop(&mut self) {
+        let _ = self.poll();
+        self.nonblocking_mode.restore();
+        self.terminal_mode.restore();
+    }
+}
+
+fn thinking_supplement_terminal_mode(mut mode: libc::termios) -> libc::termios {
+    mode.c_lflag &= !(libc::ICANON | libc::ECHO);
+    // Keep ISIG enabled so Ctrl+C still reaches the process-level turn cancel
+    // handler while ordinary text can be polled as a supplement line.
+    mode.c_cc[libc::VMIN] = 0;
+    mode.c_cc[libc::VTIME] = 0;
+    mode
+}
+
+fn push_thinking_supplement_bytes(buffer: &mut Vec<u8>, pending: &mut Vec<String>, bytes: &[u8]) {
+    for &byte in bytes {
+        match byte {
+            b'\r' | b'\n' => finish_thinking_supplement_line(buffer, pending),
+            3 | 4 | 27 => {}
+            8 | 127 => pop_last_utf8_char_bytes(buffer),
+            byte if byte.is_ascii_control() => {}
+            byte => buffer.push(byte),
+        }
+    }
+}
+
+fn finish_thinking_supplement_line(buffer: &mut Vec<u8>, pending: &mut Vec<String>) {
+    let bytes = std::mem::take(buffer);
+    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+    if !text.is_empty() {
+        pending.push(text);
+    }
+}
+
+fn queued_text_to_supplements(text: &str) -> Vec<String> {
+    normalize_newlines(text)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn pop_last_utf8_char_bytes(buffer: &mut Vec<u8>) {
+    if buffer.is_empty() {
+        return;
+    }
+    if let Ok(text) = std::str::from_utf8(buffer) {
+        if let Some((idx, _)) = text.char_indices().next_back() {
+            buffer.truncate(idx);
+            return;
+        }
+    }
+    buffer.pop();
+    while !buffer.is_empty() && std::str::from_utf8(buffer).is_err() {
+        buffer.pop();
+    }
+}
+
+fn render_stale_context_prompt(request: StaleContextDecisionRequest) -> String {
+    let no_effect = if request.decline_clears_dynamic_context {
+        "选择 NO 会清空旧动态上下文，从当前问题重新开始。"
+    } else {
+        "选择 NO 不会清空旧动态上下文。"
+    };
     format!(
-        "\n距离上次对话已经过去 {}，当前旧任务上下文约 {} tokens。\n是否继续使用上次对话任务上下文？选择 NO 会清空旧动态上下文，从当前问题重新开始。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
-        format_idle_duration(idle),
-        timem_shell::compact_count(dynamic_context_tokens)
+        "\n距离上次对话已经过去 {}，当前旧任务上下文约 {} tokens。\n是否继续使用上次对话任务上下文？{}\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        format_idle_duration(request.idle),
+        timem_shell::compact_count(request.dynamic_context_tokens),
+        no_effect
     )
 }
 
@@ -790,6 +1051,21 @@ fn render_paste_recovery_prompt(summary: &PasteRecoverySummary) -> String {
         format!("原始粘贴内容共 {} 行。", summary.total_lines),
     ];
     format!("\n{}", render_note_box("Note", &lines))
+}
+
+fn render_startup_status_block(messages: &[timem_shell::HostStatusMessage]) -> String {
+    let lines = messages
+        .iter()
+        .map(|message| {
+            let label = match message.level {
+                timem_shell::HostStatusLevel::Info => "\x1b[1;32m[INFO]\x1b[0m",
+                timem_shell::HostStatusLevel::Warning => "\x1b[1;33m[WARN]\x1b[0m",
+                timem_shell::HostStatusLevel::Error => "\x1b[1;31m[ERROR]\x1b[0m",
+            };
+            format!("{label} {}", message.text.trim())
+        })
+        .collect::<Vec<_>>();
+    render_note_box("Startup", &lines)
 }
 
 fn ansi_inverse(text: &str) -> String {
@@ -883,22 +1159,111 @@ fn choose_user_approval(request: &ApprovalRequest) -> ApprovalChoice {
     choose_with_keyboard(render_approval_choices, ApprovalChoice::Deny)
 }
 
-fn choose_round_limit_continue(max_rounds: u32) -> ApprovalChoice {
-    print!("{}", render_round_limit_prompt(max_rounds));
+fn choose_round_limit_continue(request: RoundLimitDecisionRequest) -> ApprovalChoice {
+    print!("{}", render_round_limit_prompt(request));
     choose_with_keyboard(render_round_limit_choices, ApprovalChoice::Allow)
 }
 
-fn choose_expand_output_tokens(current: u32) -> ApprovalChoice {
-    print!("{}", render_expand_output_prompt(current));
+fn choose_expand_output_tokens(request: OutputExpansionRequest) -> ApprovalChoice {
+    print!("{}", render_expand_output_prompt(request));
     choose_with_keyboard(render_expand_output_choices, ApprovalChoice::Allow)
 }
 
-fn choose_stale_context_continue(idle: Duration, dynamic_context_tokens: u32) -> ApprovalChoice {
-    print!(
-        "{}",
-        render_stale_context_prompt(idle, dynamic_context_tokens)
-    );
+fn choose_stale_context_continue(request: StaleContextDecisionRequest) -> ApprovalChoice {
+    print!("{}", render_stale_context_prompt(request));
     choose_with_keyboard(render_stale_context_choices, ApprovalChoice::Allow)
+}
+
+fn load_work_instructions_for_shell(
+    dir: &std::path::Path,
+) -> (Option<String>, Option<HostStatusMessage>) {
+    work_instruction_shell_load_result(work_instruction_load_report(dir))
+}
+
+fn resolve_work_instruction_context_for_turn(
+    mode: WorkInstructionLoadMode,
+    current_work_dir: &Path,
+    session: &str,
+    ui: &mut dyn TurnUi,
+) -> Option<String> {
+    match mode {
+        WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(current_work_dir).0,
+        WorkInstructionLoadMode::Ask => {
+            let request = work_instruction_load_request(current_work_dir)?;
+            if ui
+                .request_host_decision_topic(
+                    session,
+                    HostDecisionRequest::WorkInstructionLoad(request),
+                )
+                .as_bool()
+            {
+                load_work_instructions_for_shell(current_work_dir).0
+            } else {
+                None
+            }
+        }
+        WorkInstructionLoadMode::Off => None,
+    }
+}
+
+fn work_instruction_shell_load_result(
+    report: WorkInstructionLoadReport,
+) -> (Option<String>, Option<HostStatusMessage>) {
+    let message = report.message();
+    match message.kind {
+        WorkInstructionLoadMessageKind::Loaded => {
+            let names = message.file_names.join(", ");
+            (
+                report.context,
+                Some(HostStatusMessage {
+                    level: message.level.unwrap_or(timem_shell::HostStatusLevel::Info),
+                    text: format!("已加载当前工作目录指令：{names}"),
+                }),
+            )
+        }
+        WorkInstructionLoadMessageKind::NotFound => (None, None),
+        WorkInstructionLoadMessageKind::Failed => (
+            None,
+            Some(HostStatusMessage {
+                level: message
+                    .level
+                    .unwrap_or(timem_shell::HostStatusLevel::Warning),
+                text: format!(
+                    "工作目录指令加载失败：{}",
+                    message.error.unwrap_or_else(|| "unknown_error".to_string())
+                ),
+            }),
+        ),
+    }
+}
+
+fn render_work_instructions_load_prompt(request: &WorkInstructionLoadRequest) -> String {
+    let names = request.file_names.join(", ");
+    format!(
+        "\n发现当前工作目录下存在指令文件：{}\n目录：{}\n是否加载到本轮 agent context？\n使用 ←/→ 或 ↑/↓ 选择，回车确认，Ctrl+C/Esc 跳过；30s 不操作自动跳过。\n",
+        names,
+        request.directory.display()
+    )
+}
+
+fn render_work_instructions_load_choices(selected: ApprovalChoice) -> String {
+    match selected {
+        ApprovalChoice::Allow => "\x1b[7m[ 加载 ]\x1b[0m   跳过".to_string(),
+        ApprovalChoice::Deny => "  加载   \x1b[7m[ 跳过 ]\x1b[0m".to_string(),
+    }
+}
+
+fn choose_work_instructions_load(request: &WorkInstructionLoadRequest) -> ApprovalChoice {
+    print!("{}", render_work_instructions_load_prompt(request));
+    let timeout = HostDecisionRequest::WorkInstructionLoad(request.clone()).timeout();
+    match choose_with_keyboard_decision_timeout(
+        render_work_instructions_load_choices,
+        ApprovalChoice::Allow,
+        timeout,
+    ) {
+        ApprovalDecision::Choice(choice) => choice,
+        ApprovalDecision::Cancel => ApprovalChoice::Deny,
+    }
 }
 
 fn choose_paste_recovery(summary: &PasteRecoverySummary) -> PasteRecoveryOutcome {
@@ -1005,51 +1370,22 @@ fn paste_recovery_return_edit_clear_lines(
     rendered_recovery_lines + submitted_input_rows(prompt_width, &displayed_input, terminal_width)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConfigField {
-    Model,
-    GatewayProvider,
-    ApiProtocol,
-    BaseUrl,
-    MaxInput,
-    MaxOutput,
-    BashApproval,
-}
-
-impl ConfigField {
-    fn label(self) -> &'static str {
-        match self {
-            ConfigField::Model => "TIMEM_MODEL",
-            ConfigField::GatewayProvider => "TIMEM_GATEWAY_PROVIDER",
-            ConfigField::ApiProtocol => "TIMEM_API_PROTOCOL",
-            ConfigField::BaseUrl => "TIMEM_BASE_URL",
-            ConfigField::MaxInput => "TIMEM_MAX_LLM_INPUT",
-            ConfigField::MaxOutput => "TIMEM_MAX_LLM_OUTPUT",
-            ConfigField::BashApproval => "TIMEM_BASH_APPROVAL",
-        }
-    }
-}
-
-const CONFIG_FIELDS: [ConfigField; 7] = [
-    ConfigField::Model,
-    ConfigField::GatewayProvider,
-    ConfigField::ApiProtocol,
-    ConfigField::BaseUrl,
-    ConfigField::MaxInput,
-    ConfigField::MaxOutput,
-    ConfigField::BashApproval,
-];
+type ConfigField = RuntimeConfigField;
 
 fn run_config_menu(
     config: &mut timem_shell::ProviderConfig,
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
+    work_instruction_mode: &mut WorkInstructionLoadMode,
+    work_instruction_context: &mut Option<String>,
+    current_work_dir: &Path,
 ) -> bool {
-    let Some(field) = choose_config_field(config, *bash_approval_mode) else {
+    let Some(field) = choose_config_field(config, *bash_approval_mode, *work_instruction_mode)
+    else {
         println!("已取消配置修改。");
         return false;
     };
-    let current = config_field_value(config, *bash_approval_mode, field);
+    let current = config_field_value(config, *bash_approval_mode, *work_instruction_mode, field);
     println!("\n{} 当前值：{}", field.label(), current);
     print!("请输入新值（留空取消）：");
     let _ = io::stdout().flush();
@@ -1062,22 +1398,87 @@ fn run_config_menu(
         println!("已取消配置修改。");
         return false;
     }
-    match apply_config_value(config, core, bash_approval_mode, field, value) {
-        Ok(()) => {
-            println!("已更新 {}。", field.label());
+    match apply_config_value(
+        config,
+        core,
+        bash_approval_mode,
+        work_instruction_mode,
+        field,
+        value,
+    ) {
+        Ok(report) => {
+            println!("{}", render_config_apply_report(&report));
+            if field == RuntimeConfigField::WorkInstructions {
+                if let Some(message) = apply_work_instruction_mode_after_config(
+                    *work_instruction_mode,
+                    current_work_dir,
+                    work_instruction_context,
+                ) {
+                    println!("{}", render_startup_status_block(&[message]));
+                }
+            }
             true
         }
         Err(err) => {
-            println!("配置无效：{err}");
+            println!("{}", render_config_apply_error(err));
             false
         }
     }
 }
 
-fn run_workspace_menu() -> bool {
+fn apply_work_instruction_mode_after_config(
+    mode: WorkInstructionLoadMode,
+    current_work_dir: &Path,
+    work_instruction_context: &mut Option<String>,
+) -> Option<timem_shell::HostStatusMessage> {
+    match mode {
+        WorkInstructionLoadMode::Silent => {
+            let (context, notice) = load_work_instructions_for_shell(current_work_dir);
+            *work_instruction_context = context;
+            notice.or_else(|| {
+                Some(timem_shell::HostStatusMessage {
+                    level: timem_shell::HostStatusLevel::Info,
+                    text: "当前工作目录未发现 AGENTS.md/CLAUDE.md 指令。".to_string(),
+                })
+            })
+        }
+        WorkInstructionLoadMode::Ask => {
+            if let Some(request) = work_instruction_load_request(current_work_dir) {
+                if choose_work_instructions_load(&request) == ApprovalChoice::Allow {
+                    let (context, notice) = load_work_instructions_for_shell(current_work_dir);
+                    *work_instruction_context = context;
+                    notice
+                } else {
+                    *work_instruction_context = None;
+                    Some(timem_shell::HostStatusMessage {
+                        level: timem_shell::HostStatusLevel::Info,
+                        text: "已跳过当前工作目录的 AGENTS.md/CLAUDE.md 指令。".to_string(),
+                    })
+                }
+            } else {
+                *work_instruction_context = None;
+                Some(timem_shell::HostStatusMessage {
+                    level: timem_shell::HostStatusLevel::Info,
+                    text: "当前工作目录未发现 AGENTS.md/CLAUDE.md 指令。".to_string(),
+                })
+            }
+        }
+        WorkInstructionLoadMode::Off => {
+            *work_instruction_context = None;
+            Some(timem_shell::HostStatusMessage {
+                level: timem_shell::HostStatusLevel::Info,
+                text: "已关闭当前工作目录指令的后续注入；历史上下文中的既有内容不会被删除。"
+                    .to_string(),
+            })
+        }
+    }
+}
+
+fn run_workspace_menu(workspace_config: &Path) -> bool {
     loop {
-        let mut dirs = load_workspace_dirs();
-        let Some(selection) = choose_workspace_item(&dirs) else {
+        let report =
+            timem_shell::workspace_menu_report(&load_workspace_dirs_from_path(workspace_config));
+        let Some(selection) = choose_workspace_item(&report) else {
             println!("已退出 workspace 配置。");
             return false;
         };
@@ -1089,37 +1490,32 @@ fn run_workspace_menu() -> bool {
                     println!("\n已取消 workspace 修改。");
                     return false;
                 };
-                let value = raw_value.trim();
-                if value.is_empty() {
-                    continue;
+                let report = apply_workspace_command_to_path(
+                    workspace_config,
+                    WorkspaceCommand::AddDir {
+                        value: raw_value.trim().to_string(),
+                        home_dir: home_dir(),
+                    },
+                );
+                println!("{}", render_workspace_command_report(&report));
+                match report.outcome {
+                    WorkspaceCommandOutcome::EmptyInput | WorkspaceCommandOutcome::Duplicate => {
+                        continue
+                    }
+                    _ => return report.changed,
                 }
-                let normalized = normalize_workspace_dir(value);
-                if dirs.iter().any(|dir| dir == &normalized) {
-                    println!("目录已存在：{normalized}");
-                    continue;
-                }
-                dirs.push(normalized.clone());
-                dirs.sort();
-                if let Err(err) = save_workspace_dirs(&dirs) {
-                    println!("保存 workspace 失败：{err}");
-                    return false;
-                }
-                println!("已加入 workspace：{normalized}");
-                return true;
             }
             WorkspaceSelection::Dir(index) => {
-                if index >= dirs.len() {
+                let Some(dir) = report.dirs.get(index).cloned() else {
                     continue;
-                }
-                let dir = dirs[index].clone();
+                };
                 if confirm_workspace_delete(&dir) {
-                    dirs.remove(index);
-                    if let Err(err) = save_workspace_dirs(&dirs) {
-                        println!("保存 workspace 失败：{err}");
-                        return false;
-                    }
-                    println!("已从 workspace 移除：{dir}");
-                    return true;
+                    let report = apply_workspace_command_to_path(
+                        workspace_config,
+                        WorkspaceCommand::RemoveIndex(index),
+                    );
+                    println!("{}", render_workspace_command_report(&report));
+                    return report.changed;
                 }
             }
         }
@@ -1132,7 +1528,7 @@ enum WorkspaceSelection {
     Add,
 }
 
-fn choose_workspace_item(dirs: &[String]) -> Option<WorkspaceSelection> {
+fn choose_workspace_item(report: &WorkspaceMenuReport) -> Option<WorkspaceSelection> {
     let mut input = ShellInputSource::open().ok()?;
     let fd = input.as_raw_fd();
     let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
@@ -1151,16 +1547,16 @@ fn choose_workspace_item(dirs: &[String]) -> Option<WorkspaceSelection> {
     println!("\nWorkspace 目录用于提示模型参考资料位置，不限制模型只能在这些目录工作。");
     println!("使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 返回。\n");
     let mut selected = 0usize;
-    print!("{}", render_workspace_menu(dirs, selected));
+    print!("{}", render_workspace_menu(report, selected));
     let _ = io::stdout().flush();
-    let item_count = dirs.len() + 1;
-    let rendered_line_count = workspace_menu_line_count(dirs);
+    let item_count = report.dirs.len() + 1;
+    let rendered_line_count = workspace_menu_line_count(report);
     let result = loop {
         match read_menu_key(&mut input) {
             MenuKey::Up => selected = selected.saturating_sub(1),
             MenuKey::Down => selected = (selected + 1).min(item_count.saturating_sub(1)),
             MenuKey::Enter => {
-                break if selected < dirs.len() {
+                break if selected < report.dirs.len() {
                     Some(WorkspaceSelection::Dir(selected))
                 } else {
                     Some(WorkspaceSelection::Add)
@@ -1172,7 +1568,7 @@ fn choose_workspace_item(dirs: &[String]) -> Option<WorkspaceSelection> {
         print!(
             "\x1b[{}F{}",
             rendered_line_count,
-            render_workspace_menu(dirs, selected)
+            render_workspace_menu(report, selected)
         );
         let _ = io::stdout().flush();
     };
@@ -1182,16 +1578,16 @@ fn choose_workspace_item(dirs: &[String]) -> Option<WorkspaceSelection> {
     result
 }
 
-fn workspace_menu_line_count(dirs: &[String]) -> usize {
-    dirs.len().max(1) + 1
+fn workspace_menu_line_count(report: &WorkspaceMenuReport) -> usize {
+    report.dirs.len().max(1) + 1
 }
 
-fn render_workspace_menu(dirs: &[String], selected: usize) -> String {
+fn render_workspace_menu(report: &WorkspaceMenuReport, selected: usize) -> String {
     let mut lines = Vec::new();
-    if dirs.is_empty() {
+    if report.is_empty {
         lines.push("  （暂无 workspace 目录）".to_string());
     } else {
-        for (idx, dir) in dirs.iter().enumerate() {
+        for (idx, dir) in report.dirs.iter().enumerate() {
             let marker = if idx == selected { "▶" } else { " " };
             let line = format!("{marker} {dir}");
             if idx == selected {
@@ -1201,8 +1597,7 @@ fn render_workspace_menu(dirs: &[String], selected: usize) -> String {
             }
         }
     }
-    let add_idx = dirs.len();
-    let add_line = if add_idx == selected {
+    let add_line = if report.add_index == selected {
         "\x1b[7m▶ Add...\x1b[0m".to_string()
     } else {
         "  Add...".to_string()
@@ -1227,22 +1622,31 @@ fn render_workspace_delete_choices(selected: ApprovalChoice) -> String {
     }
 }
 
-fn normalize_workspace_dir(value: &str) -> String {
-    let expanded = expand_tilde(value.trim());
-    std::fs::canonicalize(&expanded)
-        .unwrap_or(expanded)
-        .to_string_lossy()
-        .to_string()
-}
-
-fn expand_tilde(value: &str) -> PathBuf {
-    if value == "~" {
-        return home_dir();
+fn render_workspace_command_report(report: &WorkspaceCommandReport) -> String {
+    let message = report.message();
+    match message.kind {
+        WorkspaceCommandMessageKind::Added => {
+            format!(
+                "已加入 workspace：{}",
+                message.subject.as_deref().unwrap_or("")
+            )
+        }
+        WorkspaceCommandMessageKind::Removed => {
+            format!(
+                "已从 workspace 移除：{}",
+                message.subject.as_deref().unwrap_or("")
+            )
+        }
+        WorkspaceCommandMessageKind::Cancelled => "已取消 workspace 修改。".to_string(),
+        WorkspaceCommandMessageKind::Duplicate => "目录已存在。".to_string(),
+        WorkspaceCommandMessageKind::SelectionInvalid => "workspace 选择已失效。".to_string(),
+        WorkspaceCommandMessageKind::SaveFailed => {
+            format!(
+                "保存 workspace 失败：{}",
+                message.error.as_deref().unwrap_or("unknown error")
+            )
+        }
     }
-    if let Some(rest) = value.strip_prefix("~/") {
-        return home_dir().join(rest);
-    }
-    Path::new(value).to_path_buf()
 }
 
 fn home_dir() -> PathBuf {
@@ -1254,6 +1658,7 @@ fn home_dir() -> PathBuf {
 fn choose_config_field(
     config: &timem_shell::ProviderConfig,
     bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
 ) -> Option<ConfigField> {
     let mut input = ShellInputSource::open().ok()?;
     let fd = input.as_raw_fd();
@@ -1272,23 +1677,22 @@ fn choose_config_field(
     let mut nonblocking_mode = NonblockingGuard::new(fd).ok()?;
     println!("\n选择要修改的配置，使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 取消。\n");
     let mut selected = 0usize;
-    print!(
-        "{}",
-        render_config_menu(config, bash_approval_mode, selected)
-    );
+    let report =
+        timem_shell::runtime_config_menu_report(config, bash_approval_mode, work_instruction_mode);
+    print!("{}", render_config_menu(&report, selected));
     let _ = io::stdout().flush();
     let result = loop {
         match read_menu_key(&mut input) {
             MenuKey::Up => selected = selected.saturating_sub(1),
-            MenuKey::Down => selected = (selected + 1).min(CONFIG_FIELDS.len() - 1),
-            MenuKey::Enter => break Some(CONFIG_FIELDS[selected]),
+            MenuKey::Down => selected = (selected + 1).min(report.items.len().saturating_sub(1)),
+            MenuKey::Enter => break report.items.get(selected).map(|item| item.field),
             MenuKey::Cancel => break None,
             MenuKey::Other => {}
         }
         print!(
             "\x1b[{}F{}",
-            CONFIG_FIELDS.len(),
-            render_config_menu(config, bash_approval_mode, selected)
+            report.items.len(),
+            render_config_menu(&report, selected)
         );
         let _ = io::stdout().flush();
     };
@@ -1298,21 +1702,15 @@ fn choose_config_field(
     result
 }
 
-fn render_config_menu(
-    config: &timem_shell::ProviderConfig,
-    bash_approval_mode: BashApprovalMode,
-    selected: usize,
-) -> String {
-    CONFIG_FIELDS
+fn render_config_menu(report: &RuntimeConfigMenuReport, selected: usize) -> String {
+    report
+        .items
         .iter()
         .enumerate()
-        .map(|(idx, field)| {
+        .map(|(idx, item)| {
             let marker = if idx == selected { "▶" } else { " " };
-            let line = format!(
-                "{marker} {:<22} {}",
-                field.label(),
-                config_field_value(config, bash_approval_mode, *field)
-            );
+            let value = config_display_value(config_field_row_kind(item.field), &item.value);
+            let line = format!("{marker} {:<22} {value}", item.key);
             if idx == selected {
                 format!("\x1b[7m{line}\x1b[0m\n")
             } else {
@@ -1320,6 +1718,44 @@ fn render_config_menu(
             }
         })
         .collect()
+}
+
+fn render_config_apply_report(report: &RuntimeConfigApplyReport) -> String {
+    let message = report.message();
+    match message.kind {
+        RuntimeConfigApplyMessageKind::Updated => format!("已更新 {}。", message.key),
+    }
+}
+
+fn render_config_apply_error(error: RuntimeConfigApplyError) -> String {
+    match error {
+        RuntimeConfigApplyError::EmptyGatewayProvider => {
+            "配置无效：TIMEM_GATEWAY_PROVIDER 不能为空。".to_string()
+        }
+        RuntimeConfigApplyError::CustomGatewayRequiresBaseUrl => {
+            "配置无效：自定义 gateway provider 需要先设置 TIMEM_BASE_URL，避免沿用旧平台默认 URL。"
+                .to_string()
+        }
+        RuntimeConfigApplyError::InvalidApiProtocol => {
+            "配置无效：API protocol 只能是 openai-compatible、openai-responses 或 anthropic。"
+                .to_string()
+        }
+        RuntimeConfigApplyError::InvalidTokenCount {
+            field: RuntimeConfigField::MaxInput,
+        } => "配置无效：请输入数字，或 100K/1M 这类格式。".to_string(),
+        RuntimeConfigApplyError::InvalidTokenCount {
+            field: RuntimeConfigField::MaxOutput,
+        } => "配置无效：请输入数字，或 10K 这类格式。".to_string(),
+        RuntimeConfigApplyError::InvalidTokenCount { field } => {
+            format!("配置无效：{} 不接受 token 数值。", field.label())
+        }
+        RuntimeConfigApplyError::InvalidBashApproval => {
+            "配置无效：bash 允许策略只能是 approve 或 ask。".to_string()
+        }
+        RuntimeConfigApplyError::InvalidWorkInstructions => {
+            "配置无效：工作目录指令加载策略只能是 silent、ask 或 off。".to_string()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1357,16 +1793,41 @@ fn read_menu_key(input: &mut impl Read) -> MenuKey {
 fn config_field_value(
     config: &timem_shell::ProviderConfig,
     bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
     field: ConfigField,
 ) -> String {
+    config_display_value(
+        config_field_row_kind(field),
+        &timem_shell::runtime_config_field_value(
+            config,
+            bash_approval_mode,
+            work_instruction_mode,
+            field,
+        ),
+    )
+}
+
+fn config_display_value(kind: timem_shell::RuntimeConfigRowKind, value: &str) -> String {
+    match kind {
+        timem_shell::RuntimeConfigRowKind::MaxLlmInput
+        | timem_shell::RuntimeConfigRowKind::MaxLlmOutput => value
+            .parse::<u32>()
+            .map(format_token_count)
+            .unwrap_or_else(|_| value.to_string()),
+        _ => value.to_string(),
+    }
+}
+
+fn config_field_row_kind(field: ConfigField) -> timem_shell::RuntimeConfigRowKind {
     match field {
-        ConfigField::Model => config.model.clone(),
-        ConfigField::GatewayProvider => config.provider.clone(),
-        ConfigField::ApiProtocol => config.api_protocol.label().to_string(),
-        ConfigField::BaseUrl => config.base_url.clone(),
-        ConfigField::MaxInput => format_token_count(config.max_llm_input_tokens),
-        ConfigField::MaxOutput => format_token_count(config.max_llm_output_tokens),
-        ConfigField::BashApproval => bash_approval_mode_label(bash_approval_mode).to_string(),
+        RuntimeConfigField::Model => timem_shell::RuntimeConfigRowKind::Model,
+        RuntimeConfigField::GatewayProvider => timem_shell::RuntimeConfigRowKind::GatewayProvider,
+        RuntimeConfigField::ApiProtocol => timem_shell::RuntimeConfigRowKind::ApiProtocol,
+        RuntimeConfigField::BaseUrl => timem_shell::RuntimeConfigRowKind::BaseUrl,
+        RuntimeConfigField::MaxInput => timem_shell::RuntimeConfigRowKind::MaxLlmInput,
+        RuntimeConfigField::MaxOutput => timem_shell::RuntimeConfigRowKind::MaxLlmOutput,
+        RuntimeConfigField::BashApproval => timem_shell::RuntimeConfigRowKind::BashApproval,
+        RuntimeConfigField::WorkInstructions => timem_shell::RuntimeConfigRowKind::WorkInstructions,
     }
 }
 
@@ -1374,79 +1835,17 @@ fn apply_config_value(
     config: &mut timem_shell::ProviderConfig,
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
+    work_instruction_mode: &mut WorkInstructionLoadMode,
     field: ConfigField,
     value: &str,
-) -> Result<(), String> {
-    match field {
-        ConfigField::Model => config.model = value.to_string(),
-        ConfigField::GatewayProvider => {
-            let old_provider = config.provider.clone();
-            let next_provider = value.to_lowercase();
-            if next_provider.trim().is_empty() {
-                return Err("TIMEM_GATEWAY_PROVIDER 不能为空".to_string());
-            }
-            if let Some(default_base_url) =
-                timem_shell::known_default_base_url_for_provider(&next_provider)
-            {
-                config.provider = next_provider.clone();
-                config.api_protocol =
-                    timem_shell::default_api_protocol_for_provider(&next_provider);
-                config.base_url = default_base_url;
-            } else {
-                let old_default_base_url =
-                    timem_shell::known_default_base_url_for_provider(&old_provider);
-                let using_old_default = old_default_base_url
-                    .as_deref()
-                    .map(|default| {
-                        config.base_url.trim_end_matches('/') == default.trim_end_matches('/')
-                    })
-                    .unwrap_or(false);
-                if using_old_default {
-                    return Err(
-                        "自定义 gateway provider 需要先设置 TIMEM_BASE_URL，避免沿用旧平台默认 URL"
-                            .to_string(),
-                    );
-                }
-                config.provider = next_provider;
-            }
-        }
-        ConfigField::ApiProtocol => {
-            config.api_protocol = parse_api_protocol_for_config(value)?;
-        }
-        ConfigField::BaseUrl => config.base_url = value.to_string(),
-        ConfigField::MaxInput => {
-            let tokens = timem_shell::parse_token_count(value)
-                .ok_or_else(|| "请输入数字，或 100K/1M 这类格式".to_string())?;
-            config.max_llm_input_tokens = tokens.max(3_000);
-            core.set_max_llm_input_tokens(config.max_llm_input_tokens);
-        }
-        ConfigField::MaxOutput => {
-            let tokens = timem_shell::parse_token_count(value)
-                .ok_or_else(|| "请输入数字，或 10K 这类格式".to_string())?;
-            config.max_llm_output_tokens = tokens.max(512);
-        }
-        ConfigField::BashApproval => {
-            let mode = match value.trim().to_lowercase().as_str() {
-                "approve" => BashApprovalMode::Approve,
-                "ask" => BashApprovalMode::Ask,
-                _ => return Err("bash 允许策略只能是 approve 或 ask".to_string()),
-            };
-            *bash_approval_mode = mode;
-            core.set_bash_approval_mode(mode);
-        }
-    }
-    Ok(())
-}
-
-fn parse_api_protocol_for_config(value: &str) -> Result<ApiProtocol, String> {
-    match value.trim().to_lowercase().as_str() {
-        "openai-compatible" | "openai_compatible" | "chat-completions" | "chat_completions" => {
-            Ok(ApiProtocol::OpenAiCompatible)
-        }
-        "openai-responses" | "openai_responses" | "responses" => Ok(ApiProtocol::OpenAiResponses),
-        "anthropic" | "claude" | "messages" => Ok(ApiProtocol::Anthropic),
-        _ => Err("API protocol 只能是 openai-compatible、openai-responses 或 anthropic".into()),
-    }
+) -> Result<RuntimeConfigApplyReport, RuntimeConfigApplyError> {
+    core.apply_runtime_config_update(
+        config,
+        bash_approval_mode,
+        work_instruction_mode,
+        field,
+        value,
+    )
 }
 
 fn read_tty_line_cancelable() -> Option<String> {
@@ -1567,6 +1966,14 @@ fn choose_with_keyboard_decision(
     render_choices: fn(ApprovalChoice) -> String,
     initial: ApprovalChoice,
 ) -> ApprovalDecision {
+    choose_with_keyboard_decision_timeout(render_choices, initial, None)
+}
+
+fn choose_with_keyboard_decision_timeout(
+    render_choices: fn(ApprovalChoice) -> String,
+    initial: ApprovalChoice,
+    timeout: Option<Duration>,
+) -> ApprovalDecision {
     let mut selected = initial;
 
     let Ok(mut input) = ShellInputSource::open() else {
@@ -1598,9 +2005,19 @@ fn choose_with_keyboard_decision(
     };
     print!("{}", render_choices(selected));
     let _ = io::stdout().flush();
+    let deadline = timeout.map(|duration| Instant::now() + duration);
 
     let result = loop {
-        match read_approval_key(&mut input) {
+        let key = match deadline {
+            Some(deadline) => {
+                if Instant::now() >= deadline {
+                    break ApprovalDecision::Cancel;
+                }
+                read_approval_key_until(&mut input, deadline)
+            }
+            None => read_approval_key(&mut input),
+        };
+        match key {
             ApprovalKey::Toggle => {
                 selected = match selected {
                     ApprovalChoice::Allow => ApprovalChoice::Deny,
@@ -1713,6 +2130,17 @@ fn read_approval_key(input: &mut impl Read) -> ApprovalKey {
     let Some(byte) = read_key_byte_wait(input) else {
         return ApprovalKey::Cancel;
     };
+    approval_key_from_byte(input, byte)
+}
+
+fn read_approval_key_until(input: &mut impl Read, deadline: Instant) -> ApprovalKey {
+    let Some(byte) = read_key_byte_until(input, deadline) else {
+        return ApprovalKey::Cancel;
+    };
+    approval_key_from_byte(input, byte)
+}
+
+fn approval_key_from_byte(input: &mut impl Read, byte: u8) -> ApprovalKey {
     match byte {
         b'\r' | b'\n' => ApprovalKey::Enter,
         3 | 4 | 27 => {
@@ -2568,13 +2996,13 @@ struct PromptStatusBar {
 
 impl PromptStatusBar {
     fn show_info(&mut self, text: &str) {
-        self.replace_with(ShellStatusMessage {
-            tone: ShellStatusTone::Info,
+        self.replace_with(HostStatusMessage {
+            level: timem_shell::HostStatusLevel::Info,
             text: text.to_string(),
         });
     }
 
-    fn replace_with(&mut self, message: ShellStatusMessage) {
+    fn replace_with(&mut self, message: HostStatusMessage) {
         if self.visible {
             print!("\x1b[1A\r\x1b[2K");
         }
@@ -2705,86 +3133,70 @@ fn print_final_response(
 fn render_startup_banner(
     space: &str,
     config: &timem_shell::ProviderConfig,
+    data_root: &std::path::Path,
     audit_file: &std::path::Path,
     action_audit_file: &std::path::Path,
     bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
 ) -> String {
-    let default_protocol = timem_shell::default_api_protocol_for_provider(&config.provider);
-    let items = [
-        ConfigTableItem::Section("MODEL"),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_MODEL".to_string(),
-            value: config.model.clone(),
-            desc: "模型名称",
-            highlight: !timem_shell::is_default_model_for_provider(&config.provider, &config.model),
-        }),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_GATEWAY_PROVIDER".to_string(),
-            value: config.provider.clone(),
-            desc: "流量平台，决定默认 base url",
-            highlight: false,
-        }),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_API_PROTOCOL".to_string(),
-            value: config.api_protocol.label().to_string(),
-            desc: "API 提交网络包格式",
-            highlight: config.api_protocol != default_protocol,
-        }),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_BASE_URL".to_string(),
-            value: config.base_url.clone(),
-            desc: "网关 base url",
-            highlight: !timem_shell::is_default_base_url_for_provider(
-                &config.provider,
-                &config.base_url,
-            ),
-        }),
-        ConfigTableItem::Section("RUNTIME"),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_MAX_LLM_INPUT".to_string(),
-            value: format_token_count(config.max_llm_input_tokens),
-            desc: "最大输入 token",
-            highlight: false,
-        }),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_MAX_LLM_OUTPUT".to_string(),
-            value: format_token_count(config.max_llm_output_tokens),
-            desc: "最大输出 token",
-            highlight: false,
-        }),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_BASH_APPROVAL".to_string(),
-            value: bash_approval_mode_label(bash_approval_mode).to_string(),
-            desc: "bash 允许策略，approve/ask",
-            highlight: false,
-        }),
-        ConfigTableItem::Section("DATA"),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_SPACE".to_string(),
-            value: space.to_string(),
-            desc: "记忆空间",
-            highlight: false,
-        }),
-        ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_DATA_DIR".to_string(),
-            value: absolute_display_path(&data_root()),
-            desc: "运行时记忆、日志存储",
-            highlight: false,
-        }),
-        ConfigTableItem::Row(ConfigRow {
-            key: "local_audit".to_string(),
-            value: absolute_display_path(audit_file),
-            desc: "payload 记录",
-            highlight: false,
-        }),
-        ConfigTableItem::Row(ConfigRow {
-            key: "".to_string(),
-            value: absolute_display_path(action_audit_file),
-            desc: "action 记录",
-            highlight: false,
-        }),
-    ];
+    let report = timem_shell::runtime_config_report(
+        config,
+        timem_shell::RuntimeConfigReportInput {
+            space: space.to_string(),
+            data_dir: absolute_display_path(data_root),
+            api_audit_path: absolute_display_path(audit_file),
+            action_audit_path: absolute_display_path(action_audit_file),
+            bash_approval_mode,
+            work_instruction_mode,
+        },
+    );
+    let items = report
+        .items
+        .into_iter()
+        .map(config_report_item_to_table_item)
+        .collect::<Vec<_>>();
     boxed_config_table(&items)
+}
+
+fn config_report_item_to_table_item(item: timem_shell::RuntimeConfigReportItem) -> ConfigTableItem {
+    match item {
+        timem_shell::RuntimeConfigReportItem::Section(section) => {
+            ConfigTableItem::Section(config_section_label(section).to_string())
+        }
+        timem_shell::RuntimeConfigReportItem::Row(row) => ConfigTableItem::Row(ConfigRow {
+            desc: config_row_description(row.kind).to_string(),
+            key: row.key,
+            value: config_display_value(row.kind, &row.value),
+            highlight: row.not_default,
+        }),
+    }
+}
+
+fn config_section_label(section: timem_shell::RuntimeConfigSection) -> &'static str {
+    match section {
+        timem_shell::RuntimeConfigSection::Model => "MODEL",
+        timem_shell::RuntimeConfigSection::Runtime => "RUNTIME",
+        timem_shell::RuntimeConfigSection::Data => "DATA",
+    }
+}
+
+fn config_row_description(kind: timem_shell::RuntimeConfigRowKind) -> &'static str {
+    match kind {
+        timem_shell::RuntimeConfigRowKind::Model => "模型名称",
+        timem_shell::RuntimeConfigRowKind::GatewayProvider => "流量平台，决定默认 base url",
+        timem_shell::RuntimeConfigRowKind::ApiProtocol => "API 提交网络包格式",
+        timem_shell::RuntimeConfigRowKind::BaseUrl => "网关 base url",
+        timem_shell::RuntimeConfigRowKind::MaxLlmInput => "最大输入 token",
+        timem_shell::RuntimeConfigRowKind::MaxLlmOutput => "最大输出 token",
+        timem_shell::RuntimeConfigRowKind::BashApproval => "bash 允许策略，approve/ask",
+        timem_shell::RuntimeConfigRowKind::WorkInstructions => {
+            "AGENTS/CLAUDE 自动加载，silent/ask/off"
+        }
+        timem_shell::RuntimeConfigRowKind::Space => "记忆空间",
+        timem_shell::RuntimeConfigRowKind::DataDir => "运行时记忆、日志存储",
+        timem_shell::RuntimeConfigRowKind::ApiAudit => "payload 记录",
+        timem_shell::RuntimeConfigRowKind::ActionAudit => "action 记录",
+    }
 }
 
 fn boxed_config_table(items: &[ConfigTableItem]) -> String {
@@ -2811,7 +3223,7 @@ fn boxed_config_table_at_width(items: &[ConfigTableItem], terminal_width: usize)
             ConfigTableItem::Row(row) => {
                 let key_lines = wrap_display(&row.key, key_width);
                 let value_lines = wrap_display(&row.value, value_width);
-                let desc_lines = wrap_display(row.desc, desc_width);
+                let desc_lines = wrap_display(&row.desc, desc_width);
                 let row_height = key_lines
                     .len()
                     .max(value_lines.len())
@@ -2847,7 +3259,7 @@ fn boxed_config_table_at_width(items: &[ConfigTableItem], terminal_width: usize)
 
 fn config_column_widths(inner_width: usize) -> (usize, usize, usize) {
     let content_width = inner_width.saturating_sub(8).max(30);
-    let key_floor = 22.min(content_width.saturating_sub(20).max(6));
+    let key_floor = 24.min(content_width.saturating_sub(20).max(6));
     let key_width = (content_width * 2 / 10).max(key_floor);
     let remaining = content_width.saturating_sub(key_width);
     let value_width = (remaining * 5 / 8).max(12).min(remaining.saturating_sub(8));
@@ -3023,47 +3435,19 @@ fn absolute_display_path(path: &std::path::Path) -> String {
 }
 
 fn print_help() {
-    print!("{}", help_text());
+    print!("{}", cli_help_text());
 }
 
-fn help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; openai-compatible|openai-responses|anthropic\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+fn cli_help_text() -> &'static str {
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; provider wire format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; model response parser: markdown|json, default markdown\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n  Response protocol: markdown\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
-fn bash_approval_mode_from_options(
-    options: &timem_shell::CliOptions,
-    env: &HashMap<String, String>,
-) -> BashApprovalMode {
-    let raw = options
-        .bash_approval
-        .clone()
-        .or_else(|| env.get("TIMEM_BASH_APPROVAL").cloned())
-        .unwrap_or_else(|| "ask".to_string())
-        .trim()
-        .to_lowercase();
-    match raw.as_str() {
-        "approve" => BashApprovalMode::Approve,
-        "ask" => BashApprovalMode::Ask,
-        _ => BashApprovalMode::Ask,
-    }
+fn runtime_help_text() -> &'static str {
+    "\x1b[1mInteractive commands\x1b[0m\n  /help       show runtime help\n  /config     edit runtime model and token settings\n  /workspace  manage workspace directories shown to the model as reference context\n  /prof       show runtime profiling for tokens, model wait/local time, and storage size\n  /exit       leave the shell intentionally\n\n\x1b[1mInteractive keys\x1b[0m\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Ctrl+D exits the shell intentionally.\n\n\x1b[1mRuntime system\x1b[0m\n  Timem keeps a local memory space, runtime context, action audit, and API audit under the configured data directory.\n  Use /prof to inspect token usage, KVC stats, model wait time, local execution time, and storage size.\n  Use /config for changes that can take effect without restarting this Timem process.\n"
 }
 
-fn capabilities_dir_from_options(
-    options: &timem_shell::CliOptions,
-    env: &HashMap<String, String>,
-) -> Option<PathBuf> {
-    options
-        .capabilities_dir
-        .clone()
-        .or_else(|| env.get("TIMEM_CAPABILITIES_DIR").cloned())
-        .map(PathBuf::from)
-}
-
-fn bash_approval_mode_label(mode: BashApprovalMode) -> &'static str {
-    match mode {
-        BashApprovalMode::Ask => "ask",
-        BashApprovalMode::Approve => "approve",
-    }
+fn startup_control_hint() -> &'static str {
+    "输入 /help 查看控制命令。"
 }
 
 fn epoch_millis() -> u128 {
@@ -3084,33 +3468,44 @@ fn time_label() -> String {
 #[cfg(test)]
 mod static_prompt_tests {
     use super::{
-        active_elapsed_secs, apply_config_value, bash_approval_mode_from_options,
-        boxed_config_table_at_width, capabilities_dir_from_options, config_field_value,
-        consume_turn_cancel_request, display_width, epoch_millis, help_text, merge_queued_input,
-        next_paste_recovery_choice, normalize_newlines, normalize_workspace_dir,
-        paste_marker_ranges, paste_marker_segments, paste_recovery_return_edit_clear_lines,
+        active_elapsed_secs, apply_config_value, boxed_config_table_at_width, cli_help_text,
+        config_field_value, consume_turn_cancel_request, display_width, epoch_millis,
+        merge_queued_input, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
+        paste_marker_segments, paste_recovery_return_edit_clear_lines,
         paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
-        queued_input_drain_from_bytes, random_spinner_tick, raw_multiline_paste_display,
-        raw_multiline_paste_needs_confirmation, read_approval_key, read_menu_key,
-        read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
-        reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_menu,
+        push_thinking_supplement_bytes, queued_input_drain_from_bytes, queued_text_to_supplements,
+        random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
+        read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
+        reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
+        render_approval_choices, render_config_apply_report, render_config_menu,
         render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
         render_paste_recovery_choices, render_paste_recovery_prompt,
         render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
         render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
-        render_stale_context_prompt, render_startup_banner, render_submitted_user_line_rewrite,
-        render_user_approval_prompt, render_user_input_prompt, render_workspace_delete_choices,
-        render_workspace_menu, rendered_terminal_rows, resolve_paste_markers, sanitize_user_input,
-        stale_context_prompt_needed, strip_paste_markers, submitted_input_rows,
-        timem_reedline_keybindings, utf8_expected_len, workspace_menu_line_count,
-        wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField, ConfigRow,
-        ConfigTableItem, MenuKey, PasteRecord, PasteRecoveryChoice, PasteRecoveryKey,
-        PasteRecoverySummary, QueuedInputDrain, SharedPasteRecords, SharedPrefillInput,
-        TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, ANSI_HIGHLIGHT,
-        PASTE_END_MARKER, PASTE_START_MARKER, STALE_CONTEXT_IDLE, STALE_CONTEXT_TOKEN_THRESHOLD,
-        STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+        render_stale_context_prompt, render_startup_banner, render_startup_status_block,
+        render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
+        render_work_instructions_load_choices, render_work_instructions_load_prompt,
+        render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
+        rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
+        runtime_help_text, sanitize_user_input, startup_control_hint, strip_ansi,
+        strip_paste_markers, submitted_input_rows, thinking_supplement_terminal_mode,
+        timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
+        workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
+        ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey,
+        PasteRecord, PasteRecoveryChoice, PasteRecoveryKey, PasteRecoverySummary, QueuedInputDrain,
+        SharedPasteRecords, SharedPrefillInput, ThinkingStatus, TimemEditMode,
+        TimemPasteHighlighter, TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER,
+        PASTE_START_MARKER, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
     };
-    use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile};
+    use agent_core::{
+        stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
+        OutputExpansionRequest, ResponseProtocolKind, RoundLimitDecisionRequest,
+        RuntimeConfigApplyError, StaleContextDecisionRequest, WorkInstructionLoadMode,
+        WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
+        WorkspaceChange, WorkspaceCommandOutcome, WorkspaceCommandReport,
+        DEFAULT_STALE_CONTEXT_IDLE as STALE_CONTEXT_IDLE,
+        DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD as STALE_CONTEXT_TOKEN_THRESHOLD,
+    };
     use crossterm::event::Event;
     use crossterm::event::KeyEvent;
     use reedline::{
@@ -3125,7 +3520,9 @@ mod static_prompt_tests {
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
-    use timem_shell::{ApiProtocol, ProviderConfig, SPINNER_ICONS};
+    use timem_shell::{
+        workspace_menu_report, ApiProtocol, HostStatusLevel, ProviderConfig, SPINNER_ICONS,
+    };
     use unicode_width::UnicodeWidthChar;
 
     #[test]
@@ -3134,17 +3531,10 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("## Role"));
         assert!(STATIC_PROMPT.contains("## Memory"));
         assert!(STATIC_PROMPT.contains("## Tools And Skills"));
-        assert!(STATIC_PROMPT.contains("## Response Protocol"));
-        assert!(STATIC_PROMPT.contains("{{RESPONSE_V1_SCHEMA}}"));
+        assert!(STATIC_PROMPT.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
+        // Response schema is now inside protocol section file
         assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));
         assert!(STATIC_PROMPT.contains("{{SKILL_HEADERS}}"));
-        assert!(STATIC_PROMPT.contains(
-            "output things MUST BE enclosed in EXACTLY ONE JSON object starting/ending with {/}"
-        ));
-        assert!(STATIC_PROMPT.contains("DO NOT leave or add anything outside"));
-        assert!(STATIC_PROMPT.contains("descriptive schema summary, not an example response"));
-        assert!(!STATIC_PROMPT.contains("```json\n{{RESPONSE_V1_SCHEMA}}"));
-        assert!(!STATIC_PROMPT.contains("```text\n{{RESPONSE_V1_SCHEMA}}"));
         assert!(!STATIC_PROMPT.contains("resources/response_v1_summary.json"));
         assert!(!STATIC_PROMPT.contains("response_v1` schema summary"));
         assert!(!STATIC_PROMPT.contains("\"acceptance_check?\""));
@@ -3172,12 +3562,7 @@ mod static_prompt_tests {
         assert!(!STATIC_PROMPT.contains("Every model response must score"));
         assert!(STATIC_PROMPT.contains("Context maintenance"));
         assert!(STATIC_PROMPT.contains("`memmgr` actions"));
-        assert!(STATIC_PROMPT.contains("never target this Timem Static Prompt"));
-        assert!(STATIC_PROMPT.contains("omit `status` or use `status:\"working\"`"));
-        assert!(STATIC_PROMPT
-            .contains("`status:\"finished\"` can include one final `run_bash` command"));
-        assert!(STATIC_PROMPT.contains("The command's exit code"));
-        assert!(STATIC_PROMPT.contains("final_answer"));
+        assert!(STATIC_PROMPT.contains("never targets this system prompt"));
         assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
         assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));
         assert!(!STATIC_PROMPT.contains("\"action_result_guard\""));
@@ -3195,12 +3580,74 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn thinking_supplement_collects_utf8_lines() {
+        let mut buffer = Vec::new();
+        let mut pending = Vec::new();
+
+        push_thinking_supplement_bytes(
+            &mut buffer,
+            &mut pending,
+            "补充：请优先修复 UI\r".as_bytes(),
+        );
+
+        assert!(buffer.is_empty());
+        assert_eq!(pending, vec!["补充：请优先修复 UI"]);
+    }
+
+    #[test]
+    fn thinking_supplement_backspace_removes_one_utf8_char() {
+        let mut buffer = Vec::new();
+        let mut pending = Vec::new();
+
+        push_thinking_supplement_bytes(&mut buffer, &mut pending, "中文".as_bytes());
+        push_thinking_supplement_bytes(&mut buffer, &mut pending, &[127]);
+        push_thinking_supplement_bytes(&mut buffer, &mut pending, b"\n");
+
+        assert_eq!(pending, vec!["中"]);
+    }
+
+    #[test]
+    fn thinking_supplement_ignores_empty_and_control_lines() {
+        let mut buffer = Vec::new();
+        let mut pending = Vec::new();
+
+        push_thinking_supplement_bytes(&mut buffer, &mut pending, b"   \n");
+        push_thinking_supplement_bytes(&mut buffer, &mut pending, &[3, 4, 27]);
+        push_thinking_supplement_bytes(&mut buffer, &mut pending, b" keep \n");
+
+        assert_eq!(pending, vec!["keep"]);
+    }
+
+    #[test]
+    fn queued_thinking_supplement_text_splits_nonempty_lines() {
+        assert_eq!(
+            queued_text_to_supplements("\n 补充一 \r\n\n补充二\n"),
+            vec!["补充一", "补充二"]
+        );
+    }
+
+    #[test]
+    fn thinking_supplement_terminal_mode_is_noncanonical_but_keeps_sigint() {
+        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+        original.c_lflag = libc::ICANON | libc::ECHO | libc::ISIG;
+        original.c_cc[libc::VMIN] = 1;
+        original.c_cc[libc::VTIME] = 1;
+
+        let mode = thinking_supplement_terminal_mode(original);
+
+        assert_eq!(mode.c_lflag & libc::ICANON, 0);
+        assert_eq!(mode.c_lflag & libc::ECHO, 0);
+        assert_ne!(mode.c_lflag & libc::ISIG, 0);
+        assert_eq!(mode.c_cc[libc::VMIN], 0);
+        assert_eq!(mode.c_cc[libc::VTIME], 0);
+    }
+
+    #[test]
     fn public_repo_sources_do_not_contain_private_gateway_markers() {
         let source_text = [
             include_str!("../../README.md"),
             include_str!("../../env_template"),
-            include_str!("../../resources/static_v1.json"),
-            include_str!("../../resources/static_v1.md"),
+            include_str!("../../resources/system_prompt/system_prompt.md"),
             include_str!("../src/lib.rs"),
             include_str!("../src/main.rs"),
         ]
@@ -3237,6 +3684,46 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn thinking_status_finish_wakes_renderer_without_waiting_for_tick() {
+        let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+
+        let start = Instant::now();
+        status.finish();
+
+        assert!(
+            start.elapsed() < Duration::from_millis(250),
+            "finish waited for renderer tick: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn thinking_status_initial_frame_includes_thought_panel() {
+        let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+        let snapshot = status.state.lock().unwrap().clone();
+        let rendered = timem_shell::render_thinking_view_at(&snapshot, "12:00:00");
+
+        assert!(rendered.contains("Thought / Action"));
+        assert!(rendered.contains("思考中"));
+        assert!(!rendered.contains("x2"));
+
+        status.finish();
+    }
+
+    #[test]
+    fn thinking_status_model_request_does_not_duplicate_initial_thinking_line() {
+        let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+        status.set_transient_observation("思考中...");
+        let snapshot = status.state.lock().unwrap().clone();
+        let rendered = timem_shell::render_thinking_view_at(&snapshot, "12:00:00");
+
+        assert_eq!(rendered.matches("思考中...").count(), 1);
+        assert!(!rendered.contains("x2"));
+
+        status.finish();
+    }
+
+    #[test]
     fn cancelable_tty_line_reader_understands_utf8_widths() {
         assert_eq!(utf8_expected_len(b'a'), 1);
         assert_eq!(utf8_expected_len("é".as_bytes()[0]), 2);
@@ -3247,17 +3734,25 @@ mod static_prompt_tests {
 
     #[test]
     fn cancelled_turn_message_does_not_look_like_model_failure() {
-        let (text, stats, latest_usage, issue) = timem_shell::cancelled_turn_result();
-        assert_eq!(text, "已取消本轮。");
-        assert!(!text.contains("模型调用失败"));
+        let (text, stats, latest_usage, issue, stop_reason) = timem_shell::cancelled_turn_result();
+        assert!(text.is_empty());
         assert_eq!(stats.llm_calls, 0);
         assert!(latest_usage.is_none());
         assert_eq!(issue.as_deref(), Some("cancelled_by_user"));
+        assert_eq!(
+            stop_reason,
+            Some(timem_shell::TurnStopReason::CancelledByUser)
+        );
+        let rendered = timem_shell::render_turn_stop_summary(
+            &timem_shell::TurnStopSummary::cancelled_by_user(),
+        );
+        assert_eq!(rendered, "已取消本轮。");
+        assert!(!rendered.contains("模型调用失败"));
     }
 
     #[test]
     fn expand_output_prompt_is_keyboard_driven_and_mentions_retry() {
-        let prompt = render_expand_output_prompt(10_000);
+        let prompt = render_expand_output_prompt(OutputExpansionRequest::new(10_000));
         assert!(prompt.contains("10K"));
         assert!(prompt.contains("TIMEM_MAX_LLM_OUTPUT"));
         assert!(prompt.contains("自动重试"));
@@ -3280,7 +3775,12 @@ mod static_prompt_tests {
             STALE_CONTEXT_TOKEN_THRESHOLD + 1
         ));
 
-        let prompt = render_stale_context_prompt(Duration::from_secs(3 * 60 * 60 + 5 * 60), 12_300);
+        let prompt = render_stale_context_prompt(StaleContextDecisionRequest {
+            idle: Duration::from_secs(3 * 60 * 60 + 5 * 60),
+            dynamic_context_tokens: 12_300,
+            continue_keeps_dynamic_context: true,
+            decline_clears_dynamic_context: true,
+        });
         assert!(prompt.contains("3 小时 5 分钟"));
         assert!(prompt.contains("12.3K"));
         assert!(prompt.contains("是否继续使用上次对话任务上下文"));
@@ -3297,22 +3797,31 @@ mod static_prompt_tests {
 
     #[test]
     fn workspace_menu_renders_dirs_placeholder_and_delete_choices() {
-        let empty = render_workspace_menu(&[], 0);
+        let empty_report = workspace_menu_report(&[]);
+        let empty = render_workspace_menu(&empty_report, 0);
         assert!(empty.contains("（暂无 workspace 目录）"));
         assert!(empty.contains("\x1b[7m▶ Add...\x1b[0m"));
-        assert_eq!(workspace_menu_line_count(&[]), 2);
+        assert_eq!(workspace_menu_line_count(&empty_report), 2);
 
         let dirs = vec![
             "/tmp/timem_shell_fixture".to_string(),
             "/tmp/other".to_string(),
         ];
-        let selected_dir = render_workspace_menu(&dirs, 1);
+        let report = workspace_menu_report(&dirs);
+        assert_eq!(
+            report.dirs,
+            vec![
+                "/tmp/other".to_string(),
+                "/tmp/timem_shell_fixture".to_string()
+            ]
+        );
+        let selected_dir = render_workspace_menu(&report, 1);
         assert!(selected_dir.contains("/tmp/timem_shell_fixture"));
-        assert!(selected_dir.contains("\x1b[7m▶ /tmp/other\x1b[0m"));
+        assert!(selected_dir.contains("\x1b[7m▶ /tmp/timem_shell_fixture\x1b[0m"));
         assert!(selected_dir.contains("  Add..."));
-        assert_eq!(workspace_menu_line_count(&dirs), 3);
+        assert_eq!(workspace_menu_line_count(&report), 3);
 
-        let selected_add = render_workspace_menu(&dirs, 2);
+        let selected_add = render_workspace_menu(&report, 2);
         assert!(selected_add.contains("\x1b[7m▶ Add...\x1b[0m"));
         assert_eq!(
             render_workspace_delete_choices(ApprovalChoice::Allow),
@@ -3325,13 +3834,47 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn workspace_command_report_renderer_uses_core_outcome() {
+        assert_eq!(
+            render_workspace_command_report(&WorkspaceCommandReport {
+                outcome: WorkspaceCommandOutcome::Added("/tmp/project".to_string()),
+                dirs: vec!["/tmp/project".to_string()],
+                changed: true,
+            }),
+            "已加入 workspace：/tmp/project"
+        );
+        assert_eq!(
+            render_workspace_command_report(&WorkspaceCommandReport {
+                outcome: WorkspaceCommandOutcome::Duplicate,
+                dirs: vec!["/tmp/project".to_string()],
+                changed: false,
+            }),
+            "目录已存在。"
+        );
+        assert_eq!(
+            render_workspace_command_report(&WorkspaceCommandReport {
+                outcome: WorkspaceCommandOutcome::SaveFailed {
+                    attempted_change: WorkspaceChange::Removed("/tmp/project".to_string()),
+                    error: "disk_full".to_string(),
+                },
+                dirs: Vec::new(),
+                changed: false,
+            }),
+            "保存 workspace 失败：disk_full"
+        );
+    }
+
+    #[test]
     fn workspace_path_normalization_canonicalizes_existing_paths() {
         let dir = std::env::temp_dir().join(format!("timem_workspace_{}", epoch_millis()));
         fs::create_dir_all(&dir).unwrap();
         let nested = dir.join(".").join("child").join("..");
         fs::create_dir_all(dir.join("child")).unwrap();
 
-        let normalized = normalize_workspace_dir(nested.to_str().unwrap());
+        let normalized = timem_shell::normalize_workspace_dir(
+            nested.to_str().unwrap(),
+            std::path::Path::new("/"),
+        );
         assert_eq!(
             normalized,
             dir.canonicalize().unwrap().to_string_lossy().to_string()
@@ -3339,7 +3882,10 @@ mod static_prompt_tests {
 
         let missing = dir.join("missing").join("path");
         assert_eq!(
-            normalize_workspace_dir(missing.to_str().unwrap()),
+            timem_shell::normalize_workspace_dir(
+                missing.to_str().unwrap(),
+                std::path::Path::new("/")
+            ),
             missing.to_string_lossy().to_string()
         );
         fs::remove_dir_all(dir).unwrap();
@@ -3356,6 +3902,7 @@ mod static_prompt_tests {
             timeout_secs: 120,
             max_llm_output_tokens: 10_000,
             max_llm_input_tokens: 100_000,
+            response_protocol: ResponseProtocolKind::Markdown,
         };
         let mut core = AgentCore::new(
             "STATIC",
@@ -3367,36 +3914,59 @@ mod static_prompt_tests {
             std::env::temp_dir().join(format!("timem_config_test_{}", epoch_millis())),
         );
         let mut bash = BashApprovalMode::Ask;
+        let mut work = WorkInstructionLoadMode::Silent;
 
-        let menu = render_config_menu(&config, bash, 5);
+        let menu_report = timem_shell::runtime_config_menu_report(&config, bash, work);
+        let menu = render_config_menu(&menu_report, 5);
         assert!(menu.contains("TIMEM_MAX_LLM_OUTPUT"));
+        assert!(menu.contains("TIMEM_WORK_INSTRUCTIONS"));
         assert!(menu.contains("10K"));
         assert!(menu.contains("\x1b[7m"));
         assert_eq!(
-            config_field_value(&config, bash, ConfigField::MaxInput),
+            config_field_value(&config, bash, work, ConfigField::MaxInput),
             "100K"
         );
 
-        apply_config_value(
+        let output_report = apply_config_value(
             &mut config,
             &mut core,
             &mut bash,
+            &mut work,
             ConfigField::MaxOutput,
             "20K",
         )
         .unwrap();
+        assert_eq!(output_report.key, "TIMEM_MAX_LLM_OUTPUT");
+        assert_eq!(output_report.value, "20000");
+        assert_eq!(
+            render_config_apply_report(&output_report),
+            "已更新 TIMEM_MAX_LLM_OUTPUT。"
+        );
+        let input_report = apply_config_value(
+            &mut config,
+            &mut core,
+            &mut bash,
+            &mut work,
+            ConfigField::MaxInput,
+            "120K",
+        )
+        .unwrap();
+        assert_eq!(input_report.key, "TIMEM_MAX_LLM_INPUT");
+        assert_eq!(input_report.value, "120000");
         apply_config_value(
             &mut config,
             &mut core,
             &mut bash,
-            ConfigField::MaxInput,
-            "120K",
+            &mut work,
+            ConfigField::WorkInstructions,
+            "off",
         )
         .unwrap();
         apply_config_value(
             &mut config,
             &mut core,
             &mut bash,
+            &mut work,
             ConfigField::BashApproval,
             "approve",
         )
@@ -3405,6 +3975,7 @@ mod static_prompt_tests {
         assert_eq!(config.max_llm_output_tokens, 20_000);
         assert_eq!(config.max_llm_input_tokens, 120_000);
         assert_eq!(bash, BashApprovalMode::Approve);
+        assert_eq!(work, WorkInstructionLoadMode::Off);
     }
 
     #[test]
@@ -3418,6 +3989,7 @@ mod static_prompt_tests {
             timeout_secs: 120,
             max_llm_output_tokens: 10_000,
             max_llm_input_tokens: 100_000,
+            response_protocol: ResponseProtocolKind::Markdown,
         };
         let mut core = AgentCore::new(
             "STATIC",
@@ -3429,11 +4001,13 @@ mod static_prompt_tests {
             std::env::temp_dir().join(format!("timem_config_provider_test_{}", epoch_millis())),
         );
         let mut bash = BashApprovalMode::Ask;
+        let mut work = WorkInstructionLoadMode::Silent;
 
         apply_config_value(
             &mut config,
             &mut core,
             &mut bash,
+            &mut work,
             ConfigField::GatewayProvider,
             "anthropic",
         )
@@ -3447,16 +4021,18 @@ mod static_prompt_tests {
             &mut config,
             &mut core,
             &mut bash,
+            &mut work,
             ConfigField::GatewayProvider,
             "private",
         )
         .unwrap_err();
-        assert!(err.contains("TIMEM_BASE_URL"));
+        assert_eq!(err, RuntimeConfigApplyError::CustomGatewayRequiresBaseUrl);
 
         apply_config_value(
             &mut config,
             &mut core,
             &mut bash,
+            &mut work,
             ConfigField::BaseUrl,
             "https://private.example/v1",
         )
@@ -3465,6 +4041,7 @@ mod static_prompt_tests {
             &mut config,
             &mut core,
             &mut bash,
+            &mut work,
             ConfigField::GatewayProvider,
             "private",
         )
@@ -3484,6 +4061,7 @@ mod static_prompt_tests {
             timeout_secs: 120,
             max_llm_output_tokens: 10_000,
             max_llm_input_tokens: 100_000,
+            response_protocol: ResponseProtocolKind::Markdown,
         };
         let mut core = AgentCore::new(
             "STATIC",
@@ -3498,11 +4076,13 @@ mod static_prompt_tests {
             )),
         );
         let mut bash = BashApprovalMode::Ask;
+        let mut work = WorkInstructionLoadMode::Silent;
 
         apply_config_value(
             &mut config,
             &mut core,
             &mut bash,
+            &mut work,
             ConfigField::GatewayProvider,
             "aliyun",
         )
@@ -3550,13 +4130,16 @@ mod static_prompt_tests {
             timeout_secs: 120,
             max_llm_output_tokens: 4096,
             max_llm_input_tokens: 100_000,
+            response_protocol: ResponseProtocolKind::Markdown,
         };
         let banner = render_startup_banner(
             ".xxx_mem",
             &config,
+            std::path::Path::new("data"),
             std::path::Path::new(".xxx_mem/audit/api_audit.json"),
             std::path::Path::new(".xxx_mem/audit/action_audit.json"),
             BashApprovalMode::Approve,
+            WorkInstructionLoadMode::Silent,
         );
 
         assert!(banner.starts_with('┌'));
@@ -3631,17 +4214,23 @@ mod static_prompt_tests {
     #[test]
     fn config_table_uses_window_width_ratio_and_wraps_long_values() {
         let items = [
-            ConfigTableItem::Section("MODEL"),
+            ConfigTableItem::Section("MODEL".to_string()),
             ConfigTableItem::Row(ConfigRow {
                 key: "TIMEM_GATEWAY_PROVIDER".to_string(),
                 value: "aliyun".to_string(),
-                desc: "流量平台，决定默认 base url",
+                desc: "流量平台，决定默认 base url".to_string(),
                 highlight: false,
             }),
             ConfigTableItem::Row(ConfigRow {
                 key: "TIMEM_BASE_URL".to_string(),
                 value: "https://very-long-provider.example.com/compatible-mode/v1/with/a/path/that/wraps".to_string(),
-                desc: "网关 base url",
+                desc: "网关 base url".to_string(),
+                highlight: false,
+            }),
+            ConfigTableItem::Row(ConfigRow {
+                key: "TIMEM_WORK_INSTRUCTIONS".to_string(),
+                value: "silent".to_string(),
+                desc: "AGENTS/CLAUDE 自动加载，silent/ask/off".to_string(),
                 highlight: false,
             }),
         ];
@@ -3657,6 +4246,8 @@ mod static_prompt_tests {
             .next()
             .is_some_and(|line| display_width(line) == 80));
         assert!(banner.contains("very-long-provider"));
+        assert!(banner.contains("TIMEM_WORK_INSTRUCTIONS"));
+        assert!(!banner.contains("│ S "));
         let data_rows = banner
             .lines()
             .filter(|line| line.starts_with('│'))
@@ -3682,13 +4273,16 @@ mod static_prompt_tests {
             timeout_secs: 120,
             max_llm_output_tokens: 4096,
             max_llm_input_tokens: 100_000,
+            response_protocol: ResponseProtocolKind::Markdown,
         };
         let default_banner = render_startup_banner(
             ".test_mem",
             &default_config,
+            std::path::Path::new("data"),
             std::path::Path::new(".test_mem/audit/api_audit.json"),
             std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
+            WorkInstructionLoadMode::Silent,
         );
         assert!(!default_banner.contains(ANSI_HIGHLIGHT));
 
@@ -3701,13 +4295,16 @@ mod static_prompt_tests {
             timeout_secs: 120,
             max_llm_output_tokens: 4096,
             max_llm_input_tokens: 100_000,
+            response_protocol: ResponseProtocolKind::Markdown,
         };
         let override_banner = render_startup_banner(
             ".test_mem",
             &override_config,
+            std::path::Path::new("data"),
             std::path::Path::new(".test_mem/audit/api_audit.json"),
             std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
+            WorkInstructionLoadMode::Silent,
         );
         assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}anthropic")));
         assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}https://example.com/v1")));
@@ -3733,13 +4330,16 @@ mod static_prompt_tests {
             timeout_secs: 120,
             max_llm_output_tokens: 4096,
             max_llm_input_tokens: 100_000,
+            response_protocol: ResponseProtocolKind::Markdown,
         };
         let banner = render_startup_banner(
             ".test_mem",
             &config,
+            std::path::Path::new("data"),
             std::path::Path::new(".test_mem/audit/api_audit.json"),
             std::path::Path::new(".test_mem/audit/action_audit.json"),
             BashApprovalMode::Ask,
+            WorkInstructionLoadMode::Silent,
         );
 
         assert!(!banner.contains(&format!(
@@ -3749,8 +4349,8 @@ mod static_prompt_tests {
     }
 
     #[test]
-    fn help_lists_all_env_backed_options() {
-        let help = help_text();
+    fn cli_help_lists_all_env_backed_options() {
+        let help = cli_help_text();
         for expected in [
             "\x1b[1mPrecedence:",
             "command line options override process env values; process env overrides defaults.\x1b[0m",
@@ -3780,7 +4380,10 @@ mod static_prompt_tests {
             "TIMEM_CAPABILITIES_DIR",
             "--bash-approval",
             "TIMEM_BASH_APPROVAL",
+            "--work-instructions",
+            "TIMEM_WORK_INSTRUCTIONS",
             "Interactive commands:",
+            "/help",
             "/workspace",
             "/prof",
             "Ctrl+C or Esc cancels the current input, menu, or confirmation prompt",
@@ -3804,6 +4407,58 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn runtime_help_omits_startup_options_and_highlights_sections() {
+        let help = runtime_help_text();
+        for expected in [
+            "\x1b[1mInteractive commands\x1b[0m",
+            "\x1b[1mInteractive keys\x1b[0m",
+            "\x1b[1mRuntime system\x1b[0m",
+            "/help",
+            "/config",
+            "/workspace",
+            "/prof",
+            "/exit",
+            "Ctrl+C or Esc cancels",
+            "While Timem is thinking",
+            "Use /prof to inspect token usage",
+            "Use /config for changes that can take effect without restarting",
+        ] {
+            assert!(
+                help.contains(expected),
+                "missing runtime help item: {expected}"
+            );
+        }
+        for startup_only in [
+            "Usage:",
+            "Precedence:",
+            "Command line override example:",
+            "Create a private env file",
+            "cp env_template env",
+            "source /path/to/your/env",
+            "--space",
+            "--gateway-provider",
+            "--api-key",
+            "TIMEM_API_KEY",
+            "Vendor fallback key env vars",
+        ] {
+            assert!(
+                !help.contains(startup_only),
+                "runtime help leaked startup help item: {startup_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_control_hint_points_to_help_instead_of_listing_commands() {
+        let hint = startup_control_hint();
+        assert_eq!(hint, "输入 /help 查看控制命令。");
+        assert!(!hint.contains("/prof"));
+        assert!(!hint.contains("/workspace"));
+        assert!(!hint.contains("/exit"));
+        assert!(!hint.contains("Ctrl+C"));
+    }
+
+    #[test]
     fn env_template_exports_values_for_plain_source() {
         let template = include_str!("../../env_template");
         for key in [
@@ -3819,6 +4474,7 @@ mod static_prompt_tests {
             "TIMEM_MAX_LLM_INPUT",
             "TIMEM_CAPABILITIES_DIR",
             "TIMEM_BASH_APPROVAL",
+            "TIMEM_WORK_INSTRUCTIONS",
             "DASHSCOPE_API_KEY",
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
@@ -3848,11 +4504,18 @@ mod static_prompt_tests {
         };
 
         assert_eq!(
-            capabilities_dir_from_options(&options, &env).as_deref(),
+            timem_shell::capabilities_dir_from_sources(options.capabilities_dir.as_deref(), &env)
+                .as_deref(),
             Some(Path::new("/cli/capabilities"))
         );
         assert_eq!(
-            capabilities_dir_from_options(&timem_shell::CliOptions::default(), &env).as_deref(),
+            timem_shell::capabilities_dir_from_sources(
+                timem_shell::CliOptions::default()
+                    .capabilities_dir
+                    .as_deref(),
+                &env
+            )
+            .as_deref(),
             Some(Path::new("/env/capabilities"))
         );
     }
@@ -3882,21 +4545,27 @@ mod static_prompt_tests {
         let options = timem_shell::CliOptions::default();
         let empty = HashMap::new();
         assert_eq!(
-            bash_approval_mode_from_options(&options, &empty),
+            timem_shell::bash_approval_mode_from_sources(options.bash_approval.as_deref(), &empty),
             BashApprovalMode::Ask
         );
 
         let mut approve_env = HashMap::new();
         approve_env.insert("TIMEM_BASH_APPROVAL".to_string(), " APPROVE ".to_string());
         assert_eq!(
-            bash_approval_mode_from_options(&options, &approve_env),
+            timem_shell::bash_approval_mode_from_sources(
+                options.bash_approval.as_deref(),
+                &approve_env
+            ),
             BashApprovalMode::Approve
         );
 
         let mut stale_env = HashMap::new();
         stale_env.insert("TIMEM_BASH_APPROVAL".to_string(), "approval".to_string());
         assert_eq!(
-            bash_approval_mode_from_options(&options, &stale_env),
+            timem_shell::bash_approval_mode_from_sources(
+                options.bash_approval.as_deref(),
+                &stale_env
+            ),
             BashApprovalMode::Ask
         );
 
@@ -3905,7 +4574,10 @@ mod static_prompt_tests {
             ..timem_shell::CliOptions::default()
         };
         assert_eq!(
-            bash_approval_mode_from_options(&stale_option, &empty),
+            timem_shell::bash_approval_mode_from_sources(
+                stale_option.bash_approval.as_deref(),
+                &empty
+            ),
             BashApprovalMode::Ask
         );
     }
@@ -3917,7 +4589,7 @@ mod static_prompt_tests {
             action: "run_bash".to_string(),
             command: "uname -s".to_string(),
             reason: "run_bash_requires_user_approval".to_string(),
-            risk: "local_shell_command".to_string(),
+            risk: "local_command_execution".to_string(),
             intent: "Inspect OS identity.".to_string(),
         });
 
@@ -3927,7 +4599,7 @@ mod static_prompt_tests {
         assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
         assert!(!prompt.contains("输入 yes"));
         assert!(!prompt.contains("action: run_bash"));
-        assert!(!prompt.contains("risk: local_shell_command"));
+        assert!(!prompt.contains("risk: local_command_execution"));
         assert!(!prompt.contains("read_back_command"));
     }
 
@@ -3944,8 +4616,174 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn work_instruction_prompt_and_choices_are_keyboard_driven() {
+        let prompt = render_work_instructions_load_prompt(&WorkInstructionLoadRequest {
+            directory: "/tmp/project".into(),
+            file_names: vec!["AGENTS.md".to_string(), "CLAUDE.md".to_string()],
+        });
+        assert!(prompt.contains("AGENTS.md, CLAUDE.md"));
+        assert!(prompt.contains("/tmp/project"));
+        assert!(prompt.contains("30s 不操作自动跳过"));
+        assert_eq!(
+            render_work_instructions_load_choices(ApprovalChoice::Allow),
+            "\x1b[7m[ 加载 ]\x1b[0m   跳过"
+        );
+        assert_eq!(
+            render_work_instructions_load_choices(ApprovalChoice::Deny),
+            "  加载   \x1b[7m[ 跳过 ]\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn work_instruction_shell_adapter_renders_core_report() {
+        let (context, notice) = work_instruction_shell_load_result(WorkInstructionLoadReport {
+            status: WorkInstructionLoadStatus::Loaded,
+            directory: std::path::PathBuf::from("/tmp/project"),
+            file_names: vec!["AGENTS.md".to_string(), "CLAUDE.md".to_string()],
+            context: Some("loaded context".to_string()),
+            error: None,
+        });
+        assert_eq!(context.as_deref(), Some("loaded context"));
+        let notice = notice.unwrap();
+        assert_eq!(notice.level, HostStatusLevel::Info);
+        assert!(notice.text.contains("AGENTS.md, CLAUDE.md"));
+
+        let (context, notice) = work_instruction_shell_load_result(WorkInstructionLoadReport {
+            status: WorkInstructionLoadStatus::Failed,
+            directory: std::path::PathBuf::from("/tmp/project"),
+            file_names: vec!["AGENTS.md".to_string()],
+            context: None,
+            error: Some("read_work_instruction_failed".to_string()),
+        });
+        assert_eq!(context, None);
+        let notice = notice.unwrap();
+        assert_eq!(notice.level, HostStatusLevel::Warning);
+        assert!(notice.text.contains("read_work_instruction_failed"));
+    }
+
+    struct WorkInstructionDecisionUi {
+        accept: bool,
+        topics: Vec<String>,
+        requests: usize,
+    }
+
+    impl TurnUi for WorkInstructionDecisionUi {
+        fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+            self.topics
+                .extend(events.iter().map(|event| event.topic.name.clone()));
+        }
+
+        fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
+            assert!(matches!(
+                request,
+                HostDecisionRequest::WorkInstructionLoad(_)
+            ));
+            self.requests += 1;
+            if self.accept {
+                HostDecision::Accept
+            } else {
+                HostDecision::Decline
+            }
+        }
+    }
+
+    #[test]
+    fn work_instruction_context_for_turn_ask_uses_core_request_topic() {
+        let dir =
+            std::env::temp_dir().join(format!("timem_work_instruction_turn_{}", epoch_millis()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("AGENTS.md"),
+            "Run the focused tests before final answer.\n",
+        )
+        .unwrap();
+        let mut ui = WorkInstructionDecisionUi {
+            accept: true,
+            topics: Vec::new(),
+            requests: 0,
+        };
+
+        let context = resolve_work_instruction_context_for_turn(
+            WorkInstructionLoadMode::Ask,
+            &dir,
+            "session_test",
+            &mut ui,
+        )
+        .unwrap();
+
+        assert_eq!(ui.requests, 1);
+        assert_eq!(
+            ui.topics,
+            vec!["core.user.work_instruction_load.request".to_string()]
+        );
+        assert!(context.contains("Run the focused tests before final answer."));
+        assert!(context.contains("AGENTS.md"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn work_instruction_context_for_turn_respects_decline_silent_and_off_modes() {
+        let dir =
+            std::env::temp_dir().join(format!("timem_work_instruction_modes_{}", epoch_millis()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("CLAUDE.md"), "Prefer small commits.\n").unwrap();
+
+        let mut decline_ui = WorkInstructionDecisionUi {
+            accept: false,
+            topics: Vec::new(),
+            requests: 0,
+        };
+        let declined = resolve_work_instruction_context_for_turn(
+            WorkInstructionLoadMode::Ask,
+            &dir,
+            "session_test",
+            &mut decline_ui,
+        );
+        assert!(declined.is_none());
+        assert_eq!(decline_ui.requests, 1);
+        assert_eq!(
+            decline_ui.topics,
+            vec!["core.user.work_instruction_load.request".to_string()]
+        );
+
+        let mut silent_ui = WorkInstructionDecisionUi {
+            accept: false,
+            topics: Vec::new(),
+            requests: 0,
+        };
+        let silent = resolve_work_instruction_context_for_turn(
+            WorkInstructionLoadMode::Silent,
+            &dir,
+            "session_test",
+            &mut silent_ui,
+        )
+        .unwrap();
+        assert!(silent.contains("Prefer small commits."));
+        assert!(silent_ui.topics.is_empty());
+        assert_eq!(silent_ui.requests, 0);
+
+        let mut off_ui = WorkInstructionDecisionUi {
+            accept: true,
+            topics: Vec::new(),
+            requests: 0,
+        };
+        let off = resolve_work_instruction_context_for_turn(
+            WorkInstructionLoadMode::Off,
+            &dir,
+            "session_test",
+            &mut off_ui,
+        );
+        assert!(off.is_none());
+        assert!(off_ui.topics.is_empty());
+        assert_eq!(off_ui.requests, 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn round_limit_prompt_uses_keyboard_choices_and_defaults_to_continue() {
-        let prompt = render_round_limit_prompt(50);
+        let prompt = render_round_limit_prompt(RoundLimitDecisionRequest::new(50));
         assert!(prompt.contains("本轮已达到最大交互次数 50"));
         assert!(prompt.contains("重新充值 rounds_remaining 为 50"));
         assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
@@ -4004,6 +4842,10 @@ mod static_prompt_tests {
         );
         assert_eq!(
             read_approval_key(&mut Cursor::new(vec![27])),
+            ApprovalKey::Cancel
+        );
+        assert_eq!(
+            read_approval_key_until(&mut Cursor::new(Vec::<u8>::new()), Instant::now()),
             ApprovalKey::Cancel
         );
     }
@@ -4377,6 +5219,24 @@ mod static_prompt_tests {
         assert!(rendered.contains("\x1b[7m[ pasted 9 linas;djf ;j ]\x1b[0m"));
         assert!(rendered.contains("继续/恢复粘贴/返回编辑"));
         assert!(rendered.lines().all(|line| display_width(line) == 62));
+    }
+
+    #[test]
+    fn startup_status_block_groups_core_topics_away_from_help_text() {
+        let rendered = render_startup_status_block(&[
+            timem_shell::HostStatusMessage::info(
+                "Timem Core 启动成功：aliyun:qwen-plus，response protocol=markdown，tools=6，skills=0",
+            ),
+            timem_shell::HostStatusMessage::info("已加载当前工作目录指令：AGENTS.md"),
+        ]);
+
+        assert!(rendered.contains("┏━ Startup"));
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("[INFO] Timem Core 启动成功"));
+        assert!(plain.contains("[INFO] 已加载当前工作目录指令：AGENTS.md"));
+        assert!(!rendered.contains("Info:"));
+        assert!(!rendered.contains("输入 /prof"));
+        assert!(rendered.lines().all(|line| display_width(line) <= 88));
     }
 
     #[test]

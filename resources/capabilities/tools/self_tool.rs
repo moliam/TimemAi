@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::response_protocol::ParsedAction;
+use crate::AgentCore;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfToolPaths {
     pub space_dir: PathBuf,
@@ -168,6 +171,15 @@ impl SelfToolState {
             self.process.executable.display()
         )
     }
+}
+
+pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> String {
+    core.self_tool.execute(SelfToolInput {
+        self_type: &action.input_lower("type"),
+        op: &action.input_lower("op"),
+        key: &action.input_str("key"),
+        value: &action.input_raw_str("value"),
+    })
 }
 
 pub fn is_sensitive_env_key(key: &str) -> bool {

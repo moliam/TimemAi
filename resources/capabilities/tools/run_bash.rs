@@ -1,4 +1,6 @@
+use crate::response_protocol::ParsedAction;
 use crate::MemGuard;
+use crate::{ActionExecution, AgentCore, ApprovalRequest, BashApprovalMode, PendingApproval};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -7,6 +9,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -53,13 +58,18 @@ impl FileShellJobStore {
             shell_quote_path(&output_file),
             shell_quote_path(&status_file)
         );
-        let spawn = Command::new("/bin/sh")
+        let mut command = Command::new("/bin/sh");
+        command
             .arg("-lc")
             .arg(script)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
+        let spawn = command.spawn();
         let child = match spawn {
             Ok(child) => child,
             Err(_) => {
@@ -104,6 +114,15 @@ impl FileShellJobStore {
                 .filter(|text| !text.is_empty())
             {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                if code == "cancelled" {
+                    return format!(
+                        "Action result: shell_job_status\njob_id: {}\nstate: cancelled\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
+                        record.id,
+                        started.elapsed().as_millis(),
+                        record.output_file,
+                        compact_text(&output, 2000)
+                    );
+                }
                 return format!(
                     "Action result: shell_job_status\njob_id: {}\nstate: finished\nexit_code: {}\nwaited_ms: {}\noutput_file: {}\noutput:\n{}",
                     record.id,
@@ -126,6 +145,45 @@ impl FileShellJobStore {
             }
             thread::sleep(Duration::from_millis(200));
         }
+    }
+
+    pub fn cancel(&self, job_id: &str) -> String {
+        let clean_id = job_id.trim();
+        if clean_id.is_empty() {
+            return "Action result: shell_job_status\nerror: job_id_required".to_string();
+        }
+        let Some(record) = self.find(clean_id) else {
+            return format!(
+                "Action result: shell_job_status\njob_id: {}\nerror: job_not_found",
+                clean_id
+            );
+        };
+        if let Some(code) = fs::read_to_string(&record.status_file)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+        {
+            let state = if code == "cancelled" {
+                "cancelled"
+            } else {
+                "finished"
+            };
+            return format!(
+                "Action result: shell_job_status\njob_id: {}\nstate: {}\nstatus: already_completed",
+                record.id, state
+            );
+        }
+
+        terminate_process(record.pid);
+        let _ = fs::write(&record.status_file, "cancelled");
+        let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+        format!(
+            "Action result: shell_job_status\njob_id: {}\nstate: cancelled\npid: {}\noutput_file: {}\npartial_output:\n{}",
+            record.id,
+            record.pid,
+            record.output_file,
+            compact_text(&output, 2000)
+        )
     }
 
     fn append(&self, record: &ShellJobRecord) -> std::io::Result<()> {
@@ -174,6 +232,82 @@ pub fn validate_bash_request(command: &str) -> Result<(), String> {
         return Err("command_too_long".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn execute_run_bash_action(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+) -> ActionExecution {
+    let command_to_run = action.input_str("command");
+    execute_run_bash(
+        &command_to_run,
+        action.background(),
+        action.shell_timeout_ms(),
+        core.bash_approval_mode,
+        &action.intent,
+        &core.shell_jobs,
+    )
+}
+
+pub(crate) fn execute_run_bash(
+    command: &str,
+    background: bool,
+    timeout_ms: u64,
+    approval_mode: BashApprovalMode,
+    intent: &str,
+    shell_jobs: &FileShellJobStore,
+) -> ActionExecution {
+    let command_to_run = command.trim();
+    if command_to_run.is_empty() {
+        return ActionExecution::Completed(
+            "Action result: run_bash\nerror: command_required".to_string(),
+        );
+    }
+    if let Err(reason) = validate_bash_request(command_to_run) {
+        return ActionExecution::Completed(format!(
+            "Action result: run_bash\ncommand: {}\nerror: {}",
+            command_to_run, reason
+        ));
+    }
+    if approval_mode == BashApprovalMode::Ask {
+        return ActionExecution::NeedsApproval(PendingApproval {
+            request: ApprovalRequest {
+                approval_id: format!("approval_{}", now_ms()),
+                action: "run_bash".to_string(),
+                command: command_to_run.to_string(),
+                reason: "run_bash_requires_user_approval".to_string(),
+                risk: "local_command_execution".to_string(),
+                intent: intent.to_string(),
+            },
+            command: command_to_run.to_string(),
+            background,
+            timeout_ms,
+            intent: intent.to_string(),
+        });
+    }
+    if background {
+        return ActionExecution::Completed(shell_jobs.spawn(command_to_run));
+    }
+    ActionExecution::Completed(execute_one_bash(command_to_run, timeout_ms))
+}
+
+pub(crate) fn execute_approved_bash(
+    command: &str,
+    background: bool,
+    timeout_ms: u64,
+    request: &ApprovalRequest,
+    shell_jobs: &FileShellJobStore,
+) -> String {
+    let mut result = if background {
+        shell_jobs.spawn(command.trim())
+    } else {
+        execute_one_bash(command.trim(), timeout_ms)
+    };
+    result.push_str(&format!(
+        "\napproval_id: {}\napproval_status: approved_by_user",
+        request.approval_id
+    ));
+    result
 }
 
 pub fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
@@ -251,6 +385,21 @@ fn shell_quote_path(path: &Path) -> String {
     format!("'{}'", raw.replace('\'', "'\\''"))
 }
 
+fn terminate_process(pid: u32) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", pid);
+        let status = Command::new("/bin/kill").arg("-TERM").arg(&group).status();
+        if status.as_ref().is_ok_and(|s| s.success()) {
+            return;
+        }
+    }
+    let _ = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status();
+}
+
 fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {
@@ -326,6 +475,28 @@ mod tests {
         let empty = store.status("", 0);
         assert!(empty.contains("error: job_id_required"));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn background_job_can_be_cancelled() {
+        let dir = tmp_memory_dir("background_cancel");
+        let store = FileShellJobStore::new(&dir);
+
+        let started = store.spawn("printf started; sleep 10; printf done");
+        let job_id = started
+            .lines()
+            .find_map(|line| line.strip_prefix("job_id: "))
+            .expect("job id");
+        let cancelled = store.cancel(job_id);
+
+        assert!(
+            cancelled.contains("Action result: shell_job_status"),
+            "{cancelled}"
+        );
+        assert!(cancelled.contains("state: cancelled"), "{cancelled}");
+        let status = store.status(job_id, 0);
+        assert!(status.contains("state: cancelled"), "{status}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

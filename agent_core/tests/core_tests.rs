@@ -1,8 +1,13 @@
-use agent_core::capability::CapabilityRegistry;
+use agent_core::capability::{CapabilityHostProfile, CapabilityRegistry};
+use agent_core::self_tool::SelfToolPaths;
 use agent_core::{
-    AgentCore, BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard, UsageStats,
+    read_audit_doc, AgentCore, BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard,
+    OutputExpansionRequest, OutputExpansionResolution, ProviderConfig, ResponseProtocolKind,
+    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail,
+    TurnStopReason, UsageStats,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -146,19 +151,18 @@ fn prompt_is_append_only_and_segmented() {
         }
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(first.contains("[BEGIN SEGMENT 0: prompt_0]"));
+    assert!(first.contains("[BEGIN SYSTEM PROMPT]"));
     assert!(!first.contains("________"));
-    assert!(first.contains("[END SEGMENT 0: prompt_0]\n[BEGIN SEGMENT 1: prompt_delta]"));
+    assert!(first.contains("[END SYSTEM PROMPT]\n[BEGIN DELTA]"));
     assert!(first.contains("delta_id: pd_"));
-    assert!(first.contains("slice_id: ps_"));
-    assert!(first.contains("_s001"));
-    assert!(first.contains("slice: 1/1"));
-    assert!(first.contains("prompt_type: user_question\n"));
+    assert!(first.contains("## USER"));
+    assert!(!first.contains("slice_id: ps_"));
+    assert!(!first.contains("prompt_type: user_question"));
     assert!(first.contains("\ntime: "));
     assert!(!first.contains("{\"segment_type\""));
 
     let second = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"你好","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"status":"finished","final_answer":"你好"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -166,9 +170,10 @@ fn prompt_is_append_only_and_segmented() {
         CoreStep::Final(_) => core.render_prompt(),
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(second.contains("[BEGIN SEGMENT 0: prompt_0]\nSTATIC\n[END SEGMENT 0: prompt_0]"));
+    assert!(second.contains("[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]"));
     assert!(second.contains("User question:\n你好"));
-    assert!(second.contains("prompt_type: llm_response"));
+    assert!(second.contains("## TIMEM_ASSISTANT"));
+    assert!(second.contains("final_answer:\n你好"));
 }
 
 #[test]
@@ -212,7 +217,18 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     let limited_prompt = core.render_prompt();
     assert!(limited_prompt.contains("Action result: memmgr"));
 
-    let step = core.continue_after_round_limit();
+    let audit_file = tmp_dir("round_limit_continue_audit").join("audit.json");
+    let resolution = core.resolve_round_limit_with_audit(
+        RoundLimitDecisionRequest::new(max_rounds),
+        true,
+        None,
+        &audit_file,
+        "session_1",
+        "turn_1",
+    );
+    let RoundLimitResolution::Continue(step) = resolution else {
+        panic!("unexpected round limit resolution");
+    };
     let CoreStep::NeedModel {
         prompt,
         rounds_remaining,
@@ -220,6 +236,14 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     else {
         panic!("unexpected step: {step:?}");
     };
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let events = audit["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["type"], "round_limit");
+    assert_eq!(events[0]["session"], "session_1");
+    assert_eq!(events[0]["turn_id"], "turn_1");
+    assert_eq!(events[0]["max_rounds"], 1);
+    assert_eq!(events[0]["continued"], true);
     assert_eq!(rounds_remaining, 50);
     assert!(prompt.contains("User question:\n需要两步完成"));
     assert!(prompt.contains("Action result: memmgr"));
@@ -244,6 +268,262 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
 }
 
 #[test]
+fn round_limit_stop_resolution_is_core_owned() {
+    let dir = tmp_dir("round_limit_stop_resolution");
+    let audit_file = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    core.set_max_rounds(1);
+    let _ = core.begin_turn("需要两步完成", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Need evidence.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let CoreStep::RoundLimitReached { max_rounds } = step else {
+        panic!("unexpected step: {step:?}");
+    };
+    let latest = UsageStats {
+        prompt_tokens: 12,
+        completion_tokens: 3,
+        ..UsageStats::zero()
+    };
+
+    let resolution = core.resolve_round_limit_with_audit(
+        RoundLimitDecisionRequest::new(max_rounds),
+        false,
+        Some(latest.clone()),
+        &audit_file,
+        "session_1",
+        "turn_1",
+    );
+    let RoundLimitResolution::Stop(stop) = resolution else {
+        panic!("unexpected round limit resolution");
+    };
+    assert_eq!(
+        stop.stop_reason,
+        agent_core::TurnStopReason::RoundLimitReached
+    );
+    assert_eq!(stop.latest_usage, Some(latest));
+    assert_eq!(stop.repair_issue.as_deref(), Some("round_limit_reached"));
+    assert!(stop.stats.llm_calls > 0);
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let events = audit["events"].as_array().unwrap();
+    assert_eq!(events[0]["type"], "round_limit");
+    assert_eq!(events[0]["continued"], false);
+}
+
+#[test]
+fn output_expansion_resolution_is_core_owned() {
+    let dir = tmp_dir("output_expansion_resolution");
+    let audit_file = dir.join("audit.json");
+    let core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://example.test/v1".to_string(),
+        api_key: "test-key".to_string(),
+        timeout_secs: 30,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
+        response_protocol: agent_core::ResponseProtocolKind::Markdown,
+    };
+
+    let resolution = core.resolve_output_expansion_with_audit(
+        &mut config,
+        OutputExpansionRequest::new(10_000),
+        true,
+        UsageStats::zero(),
+        &audit_file,
+        "session_1",
+        "turn_1",
+    );
+    let OutputExpansionResolution::RetryWithExpandedLimit {
+        max_llm_output_tokens,
+    } = resolution
+    else {
+        panic!("unexpected output expansion resolution");
+    };
+    assert_eq!(max_llm_output_tokens, 20_000);
+    assert_eq!(config.max_llm_output_tokens, 20_000);
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let events = audit["events"].as_array().unwrap();
+    assert_eq!(events[0]["type"], "max_llm_output_increased");
+    assert_eq!(events[0]["session"], "session_1");
+    assert_eq!(events[0]["turn_id"], "turn_1");
+    assert_eq!(events[0]["max_llm_output_tokens"], 20_000);
+}
+
+#[test]
+fn output_expansion_decline_returns_core_stop_summary() {
+    let dir = tmp_dir("output_expansion_decline");
+    let core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://example.test/v1".to_string(),
+        api_key: "test-key".to_string(),
+        timeout_secs: 30,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
+        response_protocol: agent_core::ResponseProtocolKind::Markdown,
+    };
+    let usage = UsageStats {
+        prompt_tokens: 80,
+        completion_tokens: 10_000,
+        ..UsageStats::zero()
+    };
+
+    let resolution = core.resolve_output_expansion_with_audit(
+        &mut config,
+        OutputExpansionRequest::new(10_000),
+        false,
+        usage.clone(),
+        &dir.join("audit.json"),
+        "session_1",
+        "turn_1",
+    );
+    let OutputExpansionResolution::Stop(stop) = resolution else {
+        panic!("unexpected output expansion resolution");
+    };
+    assert_eq!(
+        stop.stop_reason,
+        agent_core::TurnStopReason::OutputLimitStoppedByUser
+    );
+    assert_eq!(stop.latest_usage, Some(usage));
+    assert_eq!(
+        stop.repair_issue.as_deref(),
+        Some("truncated_output_stopped_by_user")
+    );
+    assert_eq!(config.max_llm_output_tokens, 10_000);
+}
+
+#[test]
+fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
+    let dir = tmp_dir("runtime_config_update_core_owned");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://example.test/v1".to_string(),
+        api_key: "test-key".to_string(),
+        timeout_secs: 30,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
+        response_protocol: agent_core::ResponseProtocolKind::Markdown,
+    };
+    let mut bash = BashApprovalMode::Ask;
+    let mut work = agent_core::WorkInstructionLoadMode::Silent;
+
+    let report = core
+        .apply_runtime_config_update(
+            &mut config,
+            &mut bash,
+            &mut work,
+            RuntimeConfigField::MaxInput,
+            "3K",
+        )
+        .unwrap();
+
+    assert_eq!(report.key, "TIMEM_MAX_LLM_INPUT");
+    assert_eq!(report.value, "3000");
+    assert_eq!(config.max_llm_input_tokens, 3_000);
+
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(2_700),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("max_llm_input_tokens=3000"));
+    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
+
+    let report = core
+        .apply_runtime_config_update(
+            &mut config,
+            &mut bash,
+            &mut work,
+            RuntimeConfigField::BashApproval,
+            "approve",
+        )
+        .unwrap();
+    assert_eq!(report.key, "TIMEM_BASH_APPROVAL");
+    assert_eq!(report.value, "approve");
+    assert_eq!(bash, BashApprovalMode::Approve);
+
+    let report = core
+        .apply_runtime_config_update(
+            &mut config,
+            &mut bash,
+            &mut work,
+            RuntimeConfigField::WorkInstructions,
+            "off",
+        )
+        .unwrap();
+    assert_eq!(report.key, "TIMEM_WORK_INSTRUCTIONS");
+    assert_eq!(report.value, "off");
+    assert_eq!(work, agent_core::WorkInstructionLoadMode::Off);
+}
+
+#[test]
+fn runtime_host_configuration_sync_is_core_owned() {
+    let dir = tmp_dir("runtime_host_configuration_sync");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://example.test/v1".to_string(),
+        api_key: "test-key".to_string(),
+        timeout_secs: 30,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 3_000,
+        api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
+        response_protocol: agent_core::ResponseProtocolKind::Markdown,
+    };
+
+    core.configure_runtime_from_host(&config, BashApprovalMode::Approve);
+
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(2_700),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("max_llm_input_tokens=3000"));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Run local command under configured approval policy.","args":{"command":"printf configured"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("configured"));
+}
+
+#[test]
 fn one_prompt_delta_can_render_to_multiple_slices() {
     let mut core = AgentCore::new(
         "STATIC",
@@ -256,13 +536,12 @@ fn one_prompt_delta_can_render_to_multiple_slices() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("[BEGIN SEGMENT 1: prompt_delta]"));
-    assert!(prompt.contains("[BEGIN SEGMENT 2: prompt_delta]"));
+    assert!(prompt.contains("[BEGIN DELTA]"));
     assert!(prompt.contains("delta_id: pd_"));
-    assert!(prompt.contains("slice_id: ps_"));
-    assert!(prompt.contains("slice: 1/"));
-    assert!(prompt.contains("slice: 2/"));
-    assert!(prompt.matches("prompt_type: user_question").count() > 1);
+    assert!(!prompt.contains("slice_id: ps_"));
+    assert!(!prompt.contains("prompt_type: user_question"));
+    assert_eq!(prompt.matches("[BEGIN DELTA]").count(), 1);
+    assert!(prompt.contains("## USER"));
 }
 
 #[test]
@@ -274,7 +553,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     );
     let _ = core.begin_turn("需要推理一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"thought":"先分析","report_job_progress":"结论","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"free_talk":"先分析","status":"finished","final_answer":"结论"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -282,19 +561,77 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
     let delta_ids = field_values(&prompt, "delta_id");
-    let slice_ids = field_values(&prompt, "slice_id");
-    let slice_markers = field_values(&prompt, "slice");
 
-    assert_eq!(delta_ids.len(), 3);
-    assert_eq!(slice_ids.len(), 3);
+    assert_eq!(delta_ids.len(), 2);
     assert_ne!(delta_ids[0], delta_ids[1]);
-    assert_eq!(delta_ids[1], delta_ids[2]);
-    assert!(slice_ids[1].ends_with("_s001"));
-    assert!(slice_ids[2].ends_with("_s002"));
-    assert_eq!(slice_markers[1], "1/2");
-    assert_eq!(slice_markers[2], "2/2");
-    assert!(prompt.contains("prompt_type: llm_thought"));
-    assert!(prompt.contains("prompt_type: llm_response"));
+    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains("Free_talk:\n先分析"));
+    assert!(prompt.contains("final_answer:\n结论"));
+}
+
+#[test]
+fn user_supplement_appends_to_latest_delta_as_slice() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("user_supplement_slice"),
+    );
+    let first_prompt = match core.begin_turn("先分析这个问题", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let original_delta = first_field_value(&first_prompt, "delta_id");
+    assert!(first_prompt.contains("## USER"));
+
+    let step = core
+        .append_user_supplement("补充：优先考虑跨平台实现")
+        .expect("non-empty supplement should produce prompt");
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_ids = field_values(&prompt, "delta_id");
+
+    assert_eq!(delta_ids, vec![original_delta]);
+    assert!(prompt.contains("## USER"));
+    assert!(prompt.contains("User supplement during current turn:"));
+    assert!(prompt.contains("补充：优先考虑跨平台实现"));
+}
+
+#[test]
+fn user_supplements_with_audit_are_core_owned_turn_updates() {
+    let dir = tmp_dir("user_supplement_with_audit");
+    let audit_file = dir.join("audit/action_audit.json");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("先分析这个问题", None);
+
+    let step = core
+        .append_user_supplements_with_audit(
+            vec![
+                "  ".to_string(),
+                "补充：优先考虑跨平台实现".to_string(),
+                "补充：保持 UI 无关的数据结构".to_string(),
+            ],
+            &audit_file,
+            "session_1",
+            "turn_1",
+        )
+        .expect("non-empty supplements should produce prompt");
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert!(prompt.contains("补充：优先考虑跨平台实现"));
+    assert!(prompt.contains("补充：保持 UI 无关的数据结构"));
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let events = audit["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["type"], "user_supplement");
+    assert_eq!(events[0]["session"], "session_1");
+    assert_eq!(events[0]["turn_id"], "turn_1");
+    assert_eq!(events[0]["text"], "补充：优先考虑跨平台实现");
+    assert_eq!(events[1]["text"], "补充：保持 UI 无关的数据结构");
 }
 
 #[test]
@@ -310,7 +647,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
     let _ = core.begin_turn("我的测试代号是什么？", None);
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查找已确认的测试代号记忆。","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["已确认的测试代号记忆"]}}"#.to_string(),
+        content: r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查找已确认的测试代号记忆。","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#.to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -355,7 +692,7 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -375,7 +712,7 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
     assert!(!prompt.contains("REMOVE_THIS_DELTA"));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"done","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"status":"finished","final_answer":"done"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -402,7 +739,7 @@ fn memmgr_context_shrink_removes_whole_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -421,7 +758,41 @@ fn memmgr_context_shrink_removes_whole_delta_by_delta_id() {
 }
 
 #[test]
-fn prompt_shrink_can_hide_specific_slice_by_slice_id() {
+fn response_context_compact_hides_refs_and_appends_summary_slice() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("response_context_compact"),
+    );
+    let prompt = match core.begin_turn("OLD_DYNAMIC_CONTEXT_TO_COMPACT", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_id = first_field_value(&prompt, "delta_id");
+    assert!(!delta_id.is_empty());
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            "## Progress\n整理旧上下文。\n\n## Context Compact\ndelta_ids: {delta_id}\nsummary:\n旧任务已经完成，只保留 compact 后的测试摘要。"
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
+    assert!(prompt.contains("Action result: context_compact"));
+    assert!(prompt.contains("removed_delta_count: 1"));
+    assert!(!prompt.contains("OLD_DYNAMIC_CONTEXT_TO_COMPACT"));
+}
+
+#[test]
+fn prompt_shrink_can_remove_visible_delta_by_delta_id() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -432,14 +803,14 @@ fn prompt_shrink_can_hide_specific_slice_by_slice_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let slice_id = first_field_value(&prompt, "slice_id");
-    assert!(slice_id.ends_with("_s001"));
+    let delta_id = first_field_value(&prompt, "delta_id");
+    assert!(!delta_id.is_empty());
     assert!(prompt.contains("SLICE_ONE_ONLY"));
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Hide one rendered prompt slice.","args":{{"type":"context","op":"shrink","slice_ids":["{}"]}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
-            slice_id
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Hide one rendered prompt delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
+            delta_id
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -450,16 +821,16 @@ fn prompt_shrink_can_hide_specific_slice_by_slice_id() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("hidden_slice_count: 1"));
+    assert!(prompt.contains("removed_delta_count: 1"));
     let shrunk_tokens_estimate = first_field_value(&prompt, "shrunk_tokens_estimate")
         .parse::<u32>()
         .unwrap();
-    assert_eq!(shrunk_tokens_estimate, 3000);
-    assert!(!prompt.contains(&format!("slice_id: {}", slice_id)));
+    assert!(shrunk_tokens_estimate >= 3000);
+    assert!(!prompt.contains(&format!("delta_id: {}", delta_id)));
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"done","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"status":"finished","final_answer":"done"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -481,10 +852,7 @@ fn prompt0_is_static_global_only() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let prompt0 = prompt
-        .split("[END SEGMENT 0: prompt_0]")
-        .next()
-        .unwrap_or("");
+    let prompt0 = prompt.split("[END SYSTEM PROMPT]").next().unwrap_or("");
 
     assert!(prompt0.contains("STATIC_GLOBAL"));
     assert!(!prompt0.contains("secret user question"));
@@ -509,11 +877,55 @@ fn dynamic_context_can_be_estimated_and_cleared_without_touching_static_prompt()
 
     assert_eq!(core.dynamic_context_estimated_tokens(), 0);
     let prompt = core.render_prompt();
-    assert!(
-        prompt.contains("[BEGIN SEGMENT 0: prompt_0]\nSTATIC_GLOBAL\n[END SEGMENT 0: prompt_0]")
-    );
+    assert!(prompt.contains("[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]"));
     assert!(!prompt.contains("old task context"));
-    assert!(!prompt.contains("[BEGIN SEGMENT 1: prompt_delta]"));
+    assert!(!prompt.contains("[BEGIN DELTA]"));
+}
+
+#[test]
+fn stale_context_decision_resolution_is_core_owned() {
+    let dir = tmp_dir("stale_context_resolution");
+    let audit_file = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("seed stale context", None);
+    assert!(core.dynamic_context_estimated_tokens() > 0);
+    let request = agent_core::StaleContextDecisionRequest {
+        idle: Duration::from_secs(3 * 60 * 60 + 1),
+        dynamic_context_tokens: core.dynamic_context_estimated_tokens(),
+        continue_keeps_dynamic_context: true,
+        decline_clears_dynamic_context: true,
+    };
+
+    assert!(!core.resolve_stale_context_with_audit(request, false, &audit_file, "session_1"));
+    assert_eq!(core.dynamic_context_estimated_tokens(), 0);
+
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let event = &audit["events"][0];
+    assert_eq!(event["type"], "stale_context_choice");
+    assert_eq!(event["session"], "session_1");
+    assert_eq!(event["continue_old_context"], false);
+    assert!(event["dynamic_context_tokens"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn stale_context_continue_keeps_dynamic_context() {
+    let dir = tmp_dir("stale_context_continue");
+    let audit_file = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("seed stale context", None);
+    let before = core.dynamic_context_estimated_tokens();
+    assert!(before > 0);
+    let request = agent_core::StaleContextDecisionRequest {
+        idle: Duration::from_secs(3 * 60 * 60 + 1),
+        dynamic_context_tokens: before,
+        continue_keeps_dynamic_context: true,
+        decline_clears_dynamic_context: true,
+    };
+
+    assert!(core.resolve_stale_context_with_audit(request, true, &audit_file, "session_1"));
+    assert_eq!(core.dynamic_context_estimated_tokens(), before);
+    let audit = read_audit_doc(&audit_file).unwrap();
+    assert_eq!(audit["events"][0]["continue_old_context"], true);
 }
 
 #[test]
@@ -526,9 +938,7 @@ fn long_context_does_not_inject_shrink_review_below_ninety_percent_window() {
     core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"report_job_progress":"seeded","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
-        ),
+        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_600),
         truncated: false,
@@ -552,9 +962,7 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
     core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"report_job_progress":"seeded","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
-        ),
+        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_700),
         truncated: false,
@@ -581,9 +989,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"report_job_progress":"seeded","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
-        ),
+        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_700),
         truncated: false,
@@ -598,6 +1004,11 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
     assert!(prompt.contains("target_dynamic_context_ratio=10%-20%"));
     assert!(prompt.contains("summarize all dynamic prompt deltas into about 10%-20%"));
+    assert!(prompt.contains("task description"));
+    assert!(prompt.contains("working environment facts"));
+    assert!(prompt.contains("current progress"));
+    assert!(prompt.contains("todo/next steps"));
+    assert!(prompt.contains("high-level work principles"));
     assert!(prompt.contains("memmgr type=scratch op=write kind=context_offload"));
     assert!(prompt.contains("kind=notes"));
     assert!(prompt.contains("memmgr type=context op=shrink"));
@@ -619,9 +1030,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     core.set_max_llm_input_tokens(10_000);
     let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"report_job_progress":"seeded","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
-        ),
+        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(13_253),
         truncated: false,
@@ -639,7 +1048,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!delta_ids.is_empty());
 
     let shrink_response = format!(
-        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["shrink result"]}}}}"#,
+        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
         serde_json::to_string(&delta_ids).unwrap()
     );
     let step = core.apply_model_response(LlmResponse {
@@ -659,9 +1068,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!next_prompt.contains("mode=force_shrink_required"));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"report_job_progress":"压缩已完成，可以继续对话。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
-        ),
+        content: scored(r#"{"status":"finished","final_answer":"压缩已完成，可以继续对话。"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(1_200),
         truncated: false,
@@ -670,7 +1077,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         CoreStep::Final(final_turn) => final_turn,
         other => panic!("unexpected step after shrink follow-up: {other:?}"),
     };
-    assert_eq!(final_turn.response_to_user, "压缩已完成，可以继续对话。");
+    assert_eq!(final_turn.final_answer, "压缩已完成，可以继续对话。");
 }
 
 #[test]
@@ -695,7 +1102,7 @@ fn memory_candidates_are_persisted() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是 ALPHA-42", None);
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"记住了","continue":false,"memory_candidates":[{"content":"测试代号是 ALPHA-42"}],"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"status":"finished","final_answer":"记住了","memory_candidates":[{"content":"测试代号是 ALPHA-42"}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -809,13 +1216,14 @@ fn action_input_field_is_rejected_instead_of_compatibly_executed() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("next_actions[0].args_required"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
 #[test]
-fn protocol_examples_cover_normal_guarded_and_corner_flows() {
+fn protocol_examples_cover_normal_and_corner_flows() {
     let dir = tmp_dir("protocol_valid_examples");
     fs::write(
         dir.join("memory.jsonl"),
@@ -839,12 +1247,12 @@ fn protocol_examples_cover_normal_guarded_and_corner_flows() {
         CoreStep::Final(turn) => turn,
         other => panic!("expected direct final answer, got {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("/tmp/timem_fixture"));
+    assert!(final_turn.final_answer.contains("/tmp/timem_fixture"));
 
     let _ = core.begin_turn("查项目代号并统计文件", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"正在检索长期记忆，并统计当前目录的文件总数...","thought":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"next_actions":[{"action":"memmgr","intent":"查询持久化记忆中与项目代号相关的信息","args":{"type":"durable","op":"query","query":"project codename","limit":5}},{"action":"run_bash","intent":"统计当前工作目录的文件数量以辅助确认上下文","args":{"command":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","report_job_progress":"正在检索长期记忆，并统计当前目录的文件总数...","free_talk":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"next_actions":[{"action":"memmgr","intent":"查询持久化记忆中与项目代号相关的信息","args":{"type":"durable","op":"query","query":"project codename","limit":5}},{"action":"run_bash","intent":"统计当前工作目录的文件数量以辅助确认上下文","args":{"command":"rg --files | wc -l","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -853,32 +1261,30 @@ fn protocol_examples_cover_normal_guarded_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected action results, got {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: llm_thought"));
+    assert!(prompt.contains("Free_talk:"));
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("Action result: run_bash"));
 
-    fs::create_dir_all("target/timem_protocol_examples").unwrap();
-    fs::write("target/timem_protocol_examples/release.tar.gz", "ok").unwrap();
     let _ = core.begin_turn("最终确认发布包", None);
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"项目编译并打包成功，目标文件已生成在 `target/timem_protocol_examples/release.tar.gz` 路径下。","next_actions":[{"action":"run_bash","intent":"在最终确认前，验证生成的发布压缩包是否存在且非空","args":{"command":"test -s target/timem_protocol_examples/release.tar.gz","timeout_ms":5000}}]}"#,
+            r#"{"status":"finished","final_answer":"项目编译并打包成功，目标文件已生成在 `target/timem_protocol_examples/release.tar.gz` 路径下。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     }) {
         CoreStep::Final(turn) => turn,
-        other => panic!("expected guarded final answer, got {other:?}"),
+        other => panic!("expected final answer, got {other:?}"),
     };
     assert!(final_turn
-        .response_to_user
+        .final_answer
         .contains("target/timem_protocol_examples/release.tar.gz"));
 
     let _ = core.begin_turn("更新冲突后的事实", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"检测到持久化记忆版本冲突，正在尝试带版本号重写...","thought":{"content":"使用查询得到的 expected_version=3 更新测试事实。","keep_in_context":false},"next_actions":[{"action":"memmgr","intent":"更新测试事实，指定预期版本号以防止并发冲突","args":{"type":"durable","op":"update","id":"fact_992","expected_version":3,"content":"测试项目代号为：Project-Alpha"}}]}"#,
+            r#"{"status":"working","report_job_progress":"检测到持久化记忆版本冲突，正在尝试带版本号重写...","free_talk":{"content":"使用查询得到的 expected_version=3 更新测试事实。","keep_in_context":false},"next_actions":[{"action":"memmgr","intent":"更新测试事实，指定预期版本号以防止并发冲突","args":{"type":"durable","op":"update","id":"fact_992","expected_version":3,"content":"测试项目代号为：Project-Alpha"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -893,7 +1299,7 @@ fn protocol_examples_cover_normal_guarded_and_corner_flows() {
     let _ = core.begin_turn("读取受保护路径", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"尝试修改启动变量被系统拦截，正在转换为只读查询...","thought":{"content":"启动变量不可运行期修改，改为读取路径。","keep_in_context":false},"next_actions":[{"action":"self_tool","intent":"既然无法直接修改启动环境，先读取当前内存路径以便向用户说明现状","args":{"type":"mem_path","op":"read"}}]}"#,
+            r#"{"status":"working","report_job_progress":"尝试修改启动变量被系统拦截，正在转换为只读查询...","free_talk":{"content":"启动变量不可运行期修改，改为读取路径。","keep_in_context":false},"next_actions":[{"action":"self_tool","intent":"既然无法直接修改启动环境，先读取当前内存路径以便向用户说明现状","args":{"type":"mem_path","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -908,7 +1314,7 @@ fn protocol_examples_cover_normal_guarded_and_corner_flows() {
     let _ = core.begin_turn("上下文收缩", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"为了保证响应效率，正在对历史冗余上下文进行清理和暂存...","thought":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"next_actions":[{"action":"memmgr","intent":"将过期的 Prompt Delta 离线暂存到临时便签中","args":{"type":"scratch","op":"write","kind":"context_offload","label":"test offload","delta_ids":"pd_001,pd_002"}},{"action":"memmgr","intent":"从当前活跃 Prompt Context 中裁剪掉已暂存的 delta_ids","args":{"type":"context","op":"shrink","delta_ids":"pd_001,pd_002"}}]}"#,
+            r#"{"status":"working","report_job_progress":"为了保证响应效率，正在对历史冗余上下文进行清理和暂存...","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"next_actions":[{"action":"memmgr","intent":"将过期的 Prompt Delta 离线暂存到临时便签中","args":{"type":"scratch","op":"write","kind":"context_offload","label":"test offload","delta_ids":"pd_001,pd_002"}},{"action":"memmgr","intent":"从当前活跃 Prompt Context 中裁剪掉已暂存的 delta_ids","args":{"type":"context","op":"shrink","delta_ids":"pd_001,pd_002"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1002,8 +1408,8 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
             other => panic!("{name}: expected response repair, got {other:?}"),
         };
         assert!(
-            prompt.contains("prompt_type: response_repair"),
-            "{name}: missing repair slice"
+            prompt.contains("## SYSTEM") && prompt.contains("Protocol repair request"),
+            "{name}: missing repair system block"
         );
         assert!(
             prompt.contains(expected_issue),
@@ -1017,7 +1423,7 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
 }
 
 #[test]
-fn protocol_examples_handle_finished_with_work_action_and_reject_string_args() {
+fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
     let mut core = core_with_builtin_capabilities("protocol_semantic_edges");
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("既结束又工作", None);
@@ -1030,11 +1436,13 @@ fn protocol_examples_handle_finished_with_work_action_and_reject_string_args() {
         truncated: false,
     }) {
         CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected downgrade to working with action evidence, got {other:?}"),
+        other => panic!("expected repair, got {other:?}"),
     };
-    assert!(prompt.contains("Runtime 已丢弃提前 final_answer"));
-    assert!(prompt.contains("job_id:"));
-    assert!(!prompt.contains("Response shown to user:\n这是给用户的最终回答。"));
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("status_finished_must_not_include_next_actions"));
+    assert!(!prompt.contains("job_id:"));
+    assert!(!prompt.contains("Action result: run_bash"));
+    assert!(!prompt.contains("final_answer:\n这是给用户的最终回答。"));
 
     let _ = core.begin_turn("字符串 args 应被拒绝", None);
     let prompt = match core.apply_model_response(LlmResponse {
@@ -1048,7 +1456,8 @@ fn protocol_examples_handle_finished_with_work_action_and_reject_string_args() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected string args to request protocol repair, got {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("next_actions[0].args_must_be_object"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
@@ -1088,21 +1497,9 @@ fn memmgr_raw_chat_query_reads_persisted_chat_records() {
 fn plain_text_after_repair_failure_is_shown_as_final_answer() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("repair"));
     let _ = core.begin_turn("你好", None);
+    // Pure prose (no braces) is auto-wrapped as final_answer
     let step = core.apply_model_response(LlmResponse {
         content: "not json".to_string(),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(prompt.contains("Protocol repair request"));
-
-    let step = core.apply_model_response(LlmResponse {
-        content: "提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`"
-            .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1111,18 +1508,12 @@ fn plain_text_after_repair_failure_is_shown_as_final_answer() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(
-        final_turn.response_to_user,
-        "提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`"
-    );
-    assert_eq!(
-        final_turn.repair_issue.as_deref(),
-        Some("invalid_json_plain_text_fallback")
-    );
+    assert_eq!(final_turn.final_answer, "not json");
+    assert_eq!(final_turn.repair_issue, None);
 }
 
 #[test]
-fn status_finished_uses_final_answer_as_user_response() {
+fn status_finished_uses_final_answer_as_host_final_answer() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -1139,7 +1530,48 @@ fn status_finished_uses_final_answer_as_user_response() {
         CoreStep::Final(turn) => turn,
         other => panic!("expected final, got {other:?}"),
     };
-    assert_eq!(final_turn.response_to_user, "这是最终结论。");
+    assert_eq!(final_turn.final_answer, "这是最终结论。");
+}
+
+#[test]
+fn final_turn_wire_shape_uses_semantic_final_answer_field() {
+    let step = CoreStep::Final(TurnFinal {
+        final_answer: "这是最终结论。".to_string(),
+        stats: UsageStats::zero(),
+        profile_label: "aliyun:qwen-plus".to_string(),
+        repair_issue: None,
+        stop_summary: None,
+    });
+
+    let payload = serde_json::to_value(&step).unwrap();
+    assert_eq!(payload["Final"]["final_answer"], "这是最终结论。");
+    assert!(
+        payload["Final"].get("response_to_user").is_none()
+            && payload["Final"].get("text").is_none()
+    );
+}
+
+#[test]
+fn fields_wrapped_finished_answer_is_accepted_without_repair() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("fields_wrapped_finished_answer"),
+    );
+    let _ = core.begin_turn("hello", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"fields":{"status":"finished","final_answer":"你好。"}}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final without repair, got {other:?}"),
+    };
+    assert_eq!(final_turn.final_answer, "你好。");
+    assert_eq!(core.current_stats().repair_calls, 0);
+    assert!(!core.render_prompt().contains("Protocol repair request"));
 }
 
 #[test]
@@ -1160,11 +1592,13 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("shrink_priority: discard_first"));
     assert!(prompt.contains("issue: final_answer_requires_status_finished"));
-    assert!(prompt.contains("缺少 status:\"finished\""));
-    assert!(prompt.contains("同时提供 status:\"finished\" 和 final_answer"));
+    assert!(prompt.contains("没有明确完成状态"));
+    assert!(prompt.contains("请写 `## Status` 为 `finished`"));
+    assert!(prompt.contains("并写 `## Final_Answer`"));
     assert!(prompt.contains("Previous model response to repair:"));
     assert!(prompt.contains(r#"{"final_answer":"这是最终结论。"}"#));
     assert_eq!(core.current_stats().repair_calls, 1);
@@ -1188,11 +1622,12 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("shrink_priority: discard_first"));
     assert!(prompt.contains("issue: final_answer_required_when_status_finished"));
-    assert!(prompt.contains("缺少 final_answer"));
-    assert!(prompt.contains("同时提供 status:\"finished\" 和 final_answer"));
+    assert!(prompt.contains("缺少 `## Final_Answer`"));
+    assert!(prompt.contains("同时提供 `## Status` 和 `## Final_Answer`"));
     assert!(prompt.contains(r#"{"status":"finished","report_job_progress":"完成了"}"#));
 }
 
@@ -1219,7 +1654,8 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("[BEGIN PREVIOUS_LLM_RESPONSE]"));
     assert!(prompt.contains("[FOCUSED previous response: chars"));
     assert!(prompt.contains("BAD_JSON_FOCUS"));
@@ -1247,8 +1683,11 @@ fn status_working_requires_next_actions_and_keeps_progress_separate() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(prompt.contains("Job progress shown to user:\n正在查询。"));
+    assert!(!prompt.contains("prompt_type: llm_progress"));
+    assert!(!prompt.contains("report_job_progress:\n正在查询。"));
+    assert!(!prompt.contains("正在查询。"));
     assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("intent: Find evidence."));
 }
 
 #[test]
@@ -1293,31 +1732,10 @@ fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected protocol repair, got {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("final_answer_must_not_start_with_runtime_progress_marker"));
-}
-
-#[test]
-fn final_command_check_with_runtime_progress_marker_requests_protocol_repair() {
-    let mut core = core_with_builtin_capabilities("guarded_final_progress_marker_repair");
-    let _ = core.begin_turn("测试并汇报", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"status":"finished","final_answer":"▰▱ 准备汇报结果...","next_actions":[{"action":"run_bash","intent":"Verify result before finalizing.","args":{"command":"echo done","timeout_ms":1000}}]}"#,
-        ),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected protocol repair, got {other:?}"),
-    };
-    assert!(prompt.contains("prompt_type: response_repair"));
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("final_answer_must_not_start_with_runtime_progress_marker"));
-    assert!(!prompt.contains("Expect check:"));
 }
 
 #[test]
@@ -1328,8 +1746,9 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
         tmp_dir("repair_action_like"),
     );
     let _ = core.begin_turn("你好", None);
+    // Contains braces but invalid JSON -> triggers repair
     let step = core.apply_model_response(LlmResponse {
-        content: "not json".to_string(),
+        content: "{not valid json}".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1347,11 +1766,21 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(
-        final_turn.response_to_user,
-        "模型的回复不符合本地协议，已拦截原始报文展示。原因：invalid_json。请重试或换一个更具体的问题。"
-    );
+    assert_eq!(final_turn.final_answer, "");
     assert_eq!(final_turn.repair_issue.as_deref(), Some("invalid_json"));
+    let stop = final_turn
+        .stop_summary
+        .as_ref()
+        .expect("protocol repair failure should be structured stop data");
+    assert_eq!(stop.stop_reason, TurnStopReason::ProtocolRepairFailed);
+    assert_eq!(
+        stop.detail,
+        TurnStopDetail::ProtocolRepairFailure {
+            first_issue: "invalid_json".to_string(),
+            final_issue: "invalid_json".to_string(),
+            truncated: false,
+        }
+    );
 }
 
 #[test]
@@ -1372,11 +1801,79 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: response_repair"));
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("Protocol repair request"));
     assert!(prompt.contains("truncated_model_output"));
-    assert!(prompt.contains("max output token limit"));
+    assert!(prompt.contains("max output token"));
+    assert!(prompt.contains("Markdown response protocol"));
     assert!(prompt.contains(r#"{"report_job_progress":"partial"#));
+}
+
+#[test]
+fn model_repair_audit_is_core_owned_when_applying_response() {
+    let dir = tmp_dir("model_repair_audit_core_owned");
+    let audit_file = dir.join("audit").join("api_audit.json");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("写一个很长的报告", None);
+
+    let step = core.apply_model_response_with_repair_audit(
+        LlmResponse {
+            content: "{\"report_job_progress\":\"partial".to_string(),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: true,
+        },
+        &audit_file,
+        "session_1",
+        "turn_1",
+    );
+
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let events = audit["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["type"], "model_repair_request");
+    assert_eq!(events[0]["session"], "session_1");
+    assert_eq!(events[0]["turn_id"], "turn_1");
+    assert_eq!(events[0]["issue"], "truncated_model_output");
+    assert_eq!(events[0]["model"], "qwen-plus");
+    assert_eq!(events[0]["truncated"], true);
+    assert_eq!(events[0]["repair_calls"], 1);
+    assert_eq!(events[0]["repair_calls_delta"], 1);
+    assert_eq!(events[0]["usage"]["prompt_tokens"], 10);
+}
+
+#[test]
+fn turn_lifecycle_audit_is_core_owned() {
+    let dir = tmp_dir("turn_lifecycle_audit_core_owned");
+    let audit_file = dir.join("audit").join("api_audit.json");
+    let core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let outcome = agent_core::TurnOutcome::final_response(
+        "done",
+        usage(),
+        Some(usage_with_prompt_tokens(25)),
+        Some("invalid_json".to_string()),
+        Duration::from_millis(1234),
+    );
+
+    core.record_turn_start_audit(&audit_file, "session_1", "turn_1", "hello");
+    core.record_turn_error_audit(&audit_file, "session_1", "turn_1", "provider_network_error");
+    core.record_turn_final_audit(&audit_file, "session_1", "turn_1", &outcome);
+
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let events = audit["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["type"], "turn_start");
+    assert_eq!(events[0]["user_input"], "hello");
+    assert_eq!(events[1]["type"], "turn_error");
+    assert_eq!(events[1]["error"], "provider_network_error");
+    assert_eq!(events[2]["type"], "turn_final");
+    assert_eq!(events[2]["assistant_output"], "done");
+    assert_eq!(events[2]["repair_issue"], "invalid_json");
+    assert_eq!(events[2]["stop_summary"], Value::Null);
+    assert_eq!(events[2]["elapsed_ms"], 1234);
+    assert_eq!(events[2]["latest_usage"]["prompt_tokens"], 25);
 }
 
 #[test]
@@ -1405,12 +1902,21 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("API 提供商"));
-    assert!(final_turn
-        .response_to_user
-        .contains("stop_reason=max_tokens"));
-    assert!(final_turn.response_to_user.contains("TIMEM_MAX_LLM_OUTPUT"));
+    assert_eq!(final_turn.final_answer, "");
     assert_eq!(final_turn.repair_issue.as_deref(), Some("invalid_json"));
+    let stop = final_turn
+        .stop_summary
+        .as_ref()
+        .expect("truncated repair failure should be structured stop data");
+    assert_eq!(stop.stop_reason, TurnStopReason::ProtocolRepairFailed);
+    assert_eq!(
+        stop.detail,
+        TurnStopDetail::ProtocolRepairFailure {
+            first_issue: "truncated_model_output".to_string(),
+            final_issue: "invalid_json".to_string(),
+            truncated: true,
+        }
+    );
 }
 
 #[test]
@@ -1422,22 +1928,23 @@ fn mixed_protocol_transcript_extracts_final_json_without_leaking_raw_segments() 
     );
     let _ = core.begin_turn("展示一个耗尽 8 步交互的操作", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"thought":"Round 7","report_job_progress":"","next_actions":[{"action":"run_bash","intent":"old action","args":{"command":"uptime"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["final"]}}
+        content: scored(r#"{"free_talk":"Round 7","report_job_progress":"","next_actions":[{"action":"run_bash","intent":"old action","args":{"command":"uptime"}}]}
 
-[BEGIN SEGMENT 18: prompt_delta]
-prompt_type: result_of_llm_action
+[BEGIN DELTA]
+delta_id: pd_18
+
+## ACTIONS
 Action result: run_bash
 command: uptime
 status: 0
 output:
 ok
-[END SEGMENT 18: prompt_delta]
+[END DELTA]
 
 {
-  "thought": "Final summary",
-  "report_job_progress": "只展示最终摘要。","continue":false,"acceptance_check": {
-    "is_satisfied": true
-  }
+  "free_talk": "Final summary",
+  "status": "finished",
+  "final_answer": "只展示最终摘要。"
 }"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1447,9 +1954,9 @@ ok
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(final_turn.response_to_user, "只展示最终摘要。");
-    assert!(!final_turn.response_to_user.contains("[BEGIN SEGMENT"));
-    assert!(!final_turn.response_to_user.contains("next_actions"));
+    assert_eq!(final_turn.final_answer, "只展示最终摘要。");
+    assert!(!final_turn.final_answer.contains("[BEGIN SEGMENT"));
+    assert!(!final_turn.final_answer.contains("next_actions"));
 }
 
 #[test]
@@ -1466,9 +1973,8 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
 
 ```json
 {
-  "report_job_progress": "转码已在后台顺利运行，输出文件：`~/Videos/example_3x.mp4`。","continue":false,"acceptance_check": {
-    "is_satisfied": true
-  }
+  "status": "finished",
+  "final_answer": "转码已在后台顺利运行，输出文件：`~/Videos/example_3x.mp4`。"
 }
 ```"#,
         ),
@@ -1480,8 +1986,8 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("example_3x.mp4"));
-    assert!(!final_turn.response_to_user.contains("```json"));
+    assert!(final_turn.final_answer.contains("example_3x.mp4"));
+    assert!(!final_turn.final_answer.contains("```json"));
     assert_eq!(final_turn.repair_issue, None);
 }
 
@@ -1498,12 +2004,9 @@ fn response_text_with_unescaped_inner_quotes_is_repaired() {
     );
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{
-  "thought": "The answer is available from chat history.",
-  "report_job_progress": "根据聊天记录，你问"当前目录的代码量，rust 代码有多少行？"这个问题的时间是今天（2026-06-23）17:46:36 左右。",
-  "continue": false,
-  "acceptance_check": {
-    "is_satisfied": true
-  }
+  "free_talk": "The answer is available from chat history.",
+  "status": "finished",
+  "final_answer": "根据聊天记录，你问"当前目录的代码量，rust 代码有多少行？"这个问题的时间是今天（2026-06-23）17:46:36 左右。"
 }"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
@@ -1513,8 +2016,8 @@ fn response_text_with_unescaped_inner_quotes_is_repaired() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("17:46:36"));
-    assert!(final_turn.response_to_user.contains("\"当前目录的代码量"));
+    assert!(final_turn.final_answer.contains("17:46:36"));
+    assert!(final_turn.final_answer.contains("\"当前目录的代码量"));
     assert_eq!(final_turn.repair_issue, None);
 }
 
@@ -1529,10 +2032,9 @@ fn response_text_preserves_valid_complex_symbols_and_quotes() {
     let text = r#"中文“引号”、English 'single quotes'、escaped \"double quotes\"、`code`、```fence```、JSON-ish {a:1} [x] (y)、路径 C:\\tmp\\file、URL https://a.example?q=1&x="y"、箭头 -> => --->、emoji 🤖、换行
 第二行。"#;
     let payload = serde_json::json!({
-        "thought": "Symbols should remain normal text.",
-        "report_job_progress": text,
-        "continue": false,
-        "acceptance_check": {"is_satisfied": true}
+        "free_talk": "Symbols should remain normal text.",
+        "status": "finished",
+        "final_answer": text
     });
     let step = core.apply_model_response(LlmResponse {
         content: payload.to_string(),
@@ -1544,7 +2046,7 @@ fn response_text_preserves_valid_complex_symbols_and_quotes() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(final_turn.response_to_user, text);
+    assert_eq!(final_turn.final_answer, text);
     assert_eq!(final_turn.repair_issue, None);
 }
 
@@ -1557,7 +2059,7 @@ fn response_text_decodes_common_json_escape_sequences() {
     );
     let _ = core.begin_turn("展示 escape 符号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"status":"finished","final_answer":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
@@ -1567,7 +2069,7 @@ fn response_text_decodes_common_json_escape_sequences() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert_eq!(
-        final_turn.response_to_user,
+        final_turn.final_answer,
         "tab:\tend\nline2\r\nunicode:你好 path:C:\\Users\\me\\file quote:\"ok\" slash:/ regex:\\d+"
     );
     assert_eq!(final_turn.repair_issue, None);
@@ -1582,7 +2084,7 @@ fn action_input_decodes_common_json_escape_sequences() {
     );
     let _ = core.begin_turn("记住一段 escape 文本", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Store escaped text exactly after JSON decoding.","args":{"type":"durable","op":"insert","content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory write result"]}}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Store escaped text exactly after JSON decoding.","args":{"type":"durable","op":"insert","content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}]}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
@@ -1615,11 +2117,7 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
       "intent": "查找用户说过的"当前目录"相关问题",
       "args":{"type":"raw_chat","op":"query","query":"当前目录的代码量，\"rust\" 代码有多少行？","limit":5}
     }
-  ],
-  "acceptance_check": {
-    "is_satisfied": false,
-    "missing_info": ["chat history evidence"]
-  }
+  ]
 }"#,
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
@@ -1665,9 +2163,18 @@ fn malformed_complex_protocol_is_blocked_without_raw_leak() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("已拦截原始报文展示"));
-    assert!(!final_turn.response_to_user.contains("dangling"));
-    assert!(!final_turn.response_to_user.contains("```"));
+    assert_eq!(final_turn.final_answer, "");
+    assert!(!final_turn.final_answer.contains("dangling"));
+    assert!(!final_turn.final_answer.contains("```"));
+    let stop = final_turn
+        .stop_summary
+        .as_ref()
+        .expect("malformed protocol failure should be structured stop data");
+    assert_eq!(stop.stop_reason, TurnStopReason::ProtocolRepairFailed);
+    assert!(matches!(
+        stop.detail,
+        TurnStopDetail::ProtocolRepairFailure { .. }
+    ));
 }
 
 #[test]
@@ -1713,7 +2220,7 @@ fn progress_and_next_actions_continue_with_implicit_continue_note() {
     let _ = core.begin_turn("请一直完成任务，不要停止", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"备份完成。现在继续查证。","next_actions":[{"action":"memmgr","intent":"查找相关记忆。","args":{"type":"durable","op":"query","query":"项目状态","limit":1}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory evidence"]}}"#,
+            r#"{"report_job_progress":"备份完成。现在继续查证。","next_actions":[{"action":"memmgr","intent":"查找相关记忆。","args":{"type":"durable","op":"query","query":"项目状态","limit":1}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1723,8 +2230,8 @@ fn progress_and_next_actions_continue_with_implicit_continue_note() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: llm_progress"));
-    assert!(prompt.contains("备份完成。现在继续查证。"));
+    assert!(!prompt.contains("prompt_type: llm_progress"));
+    assert!(!prompt.contains("备份完成。现在继续查证。"));
     assert!(!prompt.contains("上轮回复没有写 status"));
     assert!(prompt.contains("Action result: memmgr"));
 }
@@ -2068,7 +2575,7 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt delta by id.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"large investigation context","delta_ids":["{}"]}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch write result"]}}}}"#,
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt delta by id.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"large investigation context","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2095,7 +2602,7 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Read offloaded prompt context.","args":{{"type":"scratch","op":"read","id":"{}"}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["scratch content"]}}}}"#,
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Read offloaded prompt context.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#,
             scratch_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2120,7 +2627,7 @@ fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
     );
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Attempt invalid offload.","args":{"type":"scratch","op":"write","kind":"context_offload","label":"bad refs","delta_ids":["pd_missing"]}}],"acceptance_check":{"is_satisfied":false,"missing_info":["scratch write result"]}}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Attempt invalid offload.","args":{"type":"scratch","op":"write","kind":"context_offload","label":"bad refs","delta_ids":["pd_missing"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2152,8 +2659,8 @@ fn scratch_context_offload_requires_prompt_refs_in_protocol() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("Missing prompt references"));
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("input.any_required_when_delta_ids"));
 }
 
 #[test]
@@ -2250,8 +2757,8 @@ fn memory_lookup_context_triggers_runtime_precheck_before_model_reply() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("prompt_type: user_question"));
-    assert!(prompt.contains("prompt_type: result_of_llm_action"));
+    assert!(prompt.contains("## USER"));
+    assert!(prompt.contains("## ACTIONS"));
     assert!(prompt.contains("Action result: runtime_memory_precheck"));
     assert!(prompt.contains("lexical_results: none"));
     assert!(prompt.contains("recent_memory_evidence"));
@@ -2671,7 +3178,7 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
     );
     let _ = core.begin_turn("第一轮我说了测试物品 BLUE-17", None);
     let _ = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"收到","continue":false}"#),
+        content: scored(r#"{"status":"finished","final_answer":"收到"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2802,7 +3309,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
         let mut core = AgentCore::new("STATIC", profile("custom", "aws-claude-sonnet-4-6"), &dir);
         let _ = core.begin_turn("我今天和你聊过什么？", None);
         let content = scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"查询今天的聊天记录",{}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["今天的聊天记录内容"]}}}}"#,
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"查询今天的聊天记录",{}}}]}}"#,
             action_fields
         ));
         let step = core.apply_model_response(LlmResponse {
@@ -2966,7 +3473,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("operation: update"));
+    assert!(prompt.contains("op: update"));
     assert!(prompt.contains("version: 2"));
     let stored = fs::read_to_string(core.memory_file()).unwrap();
     assert!(stored.contains("测试代号是 BETA-43"));
@@ -2983,7 +3490,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("operation: delete"));
+    assert!(prompt.contains("op: delete"));
     assert!(!fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("user_name"));
@@ -3082,7 +3589,7 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
         .collect::<Vec<_>>();
     let success_count = prompts
         .iter()
-        .filter(|prompt| prompt.contains("operation: update") && prompt.contains("version: 2"))
+        .filter(|prompt| prompt.contains("op: update") && prompt.contains("version: 2"))
         .count();
     let conflict_count = prompts
         .iter()
@@ -3414,11 +3921,34 @@ fn run_bash_can_start_and_poll_background_job() {
 }
 
 #[test]
-fn shell_job_status_missing_timeout_returns_tool_input_error() {
+fn shell_job_status_missing_job_id_returns_tool_input_error() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_background_timeout_required"),
+        tmp_dir("bash_background_job_id_required"),
+    );
+    let _ = core.begin_turn("poll a long task", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"shell_job_status","intent":"Poll background task.","args":{"op":"status"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("issue: next_actions[0].input.job_id_required"));
+    assert!(!prompt.contains("Action result: shell_job_status"));
+}
+
+#[test]
+fn shell_job_status_missing_timeout_uses_immediate_check() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_background_timeout_optional"),
     );
     let _ = core.begin_turn("poll a long task", None);
     let step = core.apply_model_response(LlmResponse {
@@ -3431,9 +3961,9 @@ fn shell_job_status_missing_timeout_returns_tool_input_error() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.timeout_ms_required"));
-    assert!(!prompt.contains("Action result: shell_job_status"));
+    assert!(!prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("Action result: shell_job_status"));
+    assert!(prompt.contains("error: job_not_found"));
 }
 
 #[test]
@@ -3543,14 +4073,29 @@ fn run_bash_requires_approval_for_mutating_commands() {
     assert_eq!(request.action, "run_bash");
     assert_eq!(request.command, "rm not_allowed");
     assert_eq!(request.reason, "run_bash_requires_user_approval");
-    assert_eq!(request.risk, "local_shell_command");
+    assert_eq!(request.risk, "local_command_execution");
 
-    let prompt = match core.resolve_user_approval(&request.approval_id, false) {
+    let turn_audit = dir.join("audit/turn_audit.json");
+    let prompt = match core.resolve_user_approval_with_audit(
+        &request,
+        false,
+        &turn_audit,
+        "session_1",
+        "turn_1",
+    ) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("status: denied_by_user"));
     assert!(prompt.contains(&request.approval_id));
+    let turn_audit_doc = read_audit_doc(&turn_audit).unwrap();
+    let events = turn_audit_doc["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["type"], "user_approval");
+    assert_eq!(events[0]["session"], "session_1");
+    assert_eq!(events[0]["turn_id"], "turn_1");
+    assert_eq!(events[0]["approval_id"], request.approval_id);
+    assert_eq!(events[0]["approved"], false);
 
     let audit_text = fs::read_to_string(dir.join("audit").join("action_audit.json")).unwrap();
     let audit: serde_json::Value = serde_json::from_str(&audit_text).unwrap();
@@ -3612,7 +4157,7 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
     };
     assert_eq!(request.command, "pwd && rm not_allowed");
     assert_eq!(request.reason, "run_bash_requires_user_approval");
-    assert_eq!(request.risk, "local_shell_command");
+    assert_eq!(request.risk, "local_command_execution");
 }
 
 #[test]
@@ -3688,7 +4233,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
     };
     assert_eq!(request.command, "cat /etc/passwd");
     assert_eq!(request.reason, "run_bash_requires_user_approval");
-    assert_eq!(request.risk, "local_shell_command");
+    assert_eq!(request.risk, "local_command_execution");
 }
 
 #[test]
@@ -3711,6 +4256,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("intent: Read system identity."));
     assert!(prompt.contains("command: uname -s"));
     assert!(prompt.contains("status: 0"));
     assert!(!prompt.contains("approval_status: approved_by_user"));
@@ -3731,7 +4277,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(first_prompt.contains("User question:\n测试项目纪念日是 2099-06-12"));
     assert!(first_prompt.contains("Supporting context:\nruntime_time:"));
     let write_final = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"已记录。","continue":false,"memory_candidates":[{"content":"测试项目纪念日是 2099-06-12"}],"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"status":"finished","final_answer":"已记录。","memory_candidates":[{"content":"测试项目纪念日是 2099-06-12"}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3743,7 +4289,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 
     let _ = core.begin_turn("2099-06-12 是什么测试日期", None);
     let recall_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Find durable birthday memory before answering.","args":{"type":"durable","op":"query","query":"测试项目 纪念日 2099-06-12","limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["durable memory evidence"]}}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Find durable birthday memory before answering.","args":{"type":"durable","op":"query","query":"测试项目 纪念日 2099-06-12","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3754,7 +4300,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(recall_prompt.contains("Action result: memmgr"));
     assert!(recall_prompt.contains("测试项目纪念日是 2099-06-12"));
     let recall_final = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"2099-06-12是测试项目纪念日。","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"status":"finished","final_answer":"2099-06-12是测试项目纪念日。"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3762,12 +4308,12 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(recall_final.response_to_user.contains("测试项目"));
+    assert!(recall_final.final_answer.contains("测试项目"));
     assert!(recall_final.stats.mem_reads >= 1);
 
     let _ = core.begin_turn("删除测试项目纪念日这条记忆", None);
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Delete the user-requested birthday memory.","args":{"type":"durable","op":"delete","id":"mem_0"}}],"acceptance_check":{"is_satisfied":false,"missing_info":["delete result"]}}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Delete the user-requested birthday memory.","args":{"type":"durable","op":"delete","id":"mem_0"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3779,7 +4325,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(delete_prompt.contains("error: id_not_found"));
 
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Find exact memory id before deleting.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%测试项目纪念日%"],"limit":5}}],"acceptance_check":{"is_satisfied":false,"missing_info":["memory id"]}}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Find exact memory id before deleting.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%测试项目纪念日%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3803,7 +4349,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         })
         .expect("memory id should exist");
     let delete_final_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Delete exact durable birthday memory.","args":{{"type":"durable","op":"delete","id":"{}","expected_version":1}}}}],"acceptance_check":{{"is_satisfied":false,"missing_info":["delete confirmation"]}}}}"#, memory_id)),
+        content: scored(format!(r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Delete exact durable birthday memory.","args":{{"type":"durable","op":"delete","id":"{}","expected_version":1}}}}]}}"#, memory_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3811,15 +4357,13 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(delete_final_prompt.contains("operation: delete"));
+    assert!(delete_final_prompt.contains("op: delete"));
     assert!(!fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("测试项目纪念日"));
 
     let delete_final = match core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"report_job_progress":"已删除。","continue":false,"acceptance_check":{"is_satisfied":true}}"#,
-        ),
+        content: scored(r#"{"status":"finished","final_answer":"已删除。"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3832,7 +4376,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("请统计当前目录文件数量", None);
     let shell_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Count files in current project folder.","args":{"command":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["file count"]}}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Count files in current project folder.","args":{"command":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3846,7 +4390,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("把 /etc/passwd 读出来", None);
     let security_request = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","args":{"command":"cat /etc/passwd","timeout_ms":5000}}],"acceptance_check":{"is_satisfied":false,"missing_info":["file content"]}}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","args":{"command":"cat /etc/passwd","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3864,7 +4408,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         );
         let step = core.apply_model_response(LlmResponse {
             content: scored(format!(
-                r#"{{"report_job_progress":"ok {}","continue":false,"acceptance_check":{{"is_satisfied":true}}}}"#,
+                r#"{{"status":"finished","final_answer":"ok {}"}}"#,
                 index
             )),
             model_name: "qwen-plus".to_string(),
@@ -3877,7 +4421,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(long_prompt.starts_with("[BEGIN SEGMENT 0: prompt_0]\nSTATIC_GLOBAL_RULES"));
+    assert!(long_prompt.starts_with("[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL_RULES"));
     assert!(long_prompt.contains("Long-context maintenance:"));
     assert!(long_prompt.contains("mode=force_shrink_required"));
     assert!(long_prompt.contains("force_shrink_threshold_tokens=2700"));
@@ -3922,7 +4466,7 @@ fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
         CoreStep::Final(turn) => turn,
         other => panic!("expected final coding answer, got {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("本地检查结果"));
+    assert!(final_turn.final_answer.contains("本地检查结果"));
     let _ = fs::remove_file("target/timem_scenario_files.txt");
     let _ = fs::remove_file("target/timem_scenario_tests.rs");
 }
@@ -3978,7 +4522,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
         CoreStep::Final(turn) => turn,
         other => panic!("expected final memory answer, got {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("测试代号是 ALPHA-42"));
+    assert!(final_turn.final_answer.contains("测试代号是 ALPHA-42"));
 }
 
 #[test]
@@ -4020,8 +4564,8 @@ fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
         CoreStep::Final(turn) => turn,
         other => panic!("expected final self answer, got {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("TimemAi"));
-    assert!(final_turn.response_to_user.contains("enabled"));
+    assert!(final_turn.final_answer.contains("TimemAi"));
+    assert!(final_turn.final_answer.contains("enabled"));
 }
 
 #[test]
@@ -4067,12 +4611,12 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
         CoreStep::Final(turn) => turn,
         other => panic!("expected final file-writing answer, got {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("release_check.md"));
+    assert!(final_turn.final_answer.contains("release_check.md"));
     let _ = fs::remove_dir_all("target/timem_scenario_output");
 }
 
 #[test]
-fn thought_field_is_persisted_as_llm_thought_slice() {
+fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -4080,19 +4624,19 @@ fn thought_field_is_persisted_as_llm_thought_slice() {
     );
     let _ = core.begin_turn("需要推理一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"thought":"推导一下","report_job_progress":"好的","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"free_talk":"推导一下","status":"finished","final_answer":"好的"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
-    assert!(prompt.contains("prompt_type: llm_thought"));
-    assert!(prompt.contains("Thought:\n推导一下"));
+    assert!(prompt.contains("Free_talk:"));
+    assert!(prompt.contains("Free_talk:\n推导一下"));
 }
 
 #[test]
-fn thought_field_optional_does_not_trigger_repair() {
+fn free_talk_field_optional_does_not_trigger_repair() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -4100,7 +4644,7 @@ fn thought_field_optional_does_not_trigger_repair() {
     );
     let _ = core.begin_turn("简单问答", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"好的","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"status":"finished","final_answer":"好的"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4109,13 +4653,13 @@ fn thought_field_optional_does_not_trigger_repair() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(final_turn.response_to_user, "好的");
+    assert_eq!(final_turn.final_answer, "好的");
     let prompt = core.render_prompt();
-    assert!(!prompt.contains("prompt_type: llm_thought"));
+    assert!(!prompt.contains("Free_talk:"));
 }
 
 #[test]
-fn thought_object_keep_in_context_true_is_persisted_as_llm_thought_slice() {
+fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -4123,19 +4667,19 @@ fn thought_object_keep_in_context_true_is_persisted_as_llm_thought_slice() {
     );
     let _ = core.begin_turn("需要推理", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"thought":{"content":"对象形式的思考","keep_in_context":true},"report_job_progress":"好的","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"free_talk":{"content":"对象形式的思考","keep_in_context":true},"status":"finished","final_answer":"好的"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
-    assert!(prompt.contains("prompt_type: llm_thought"));
-    assert!(prompt.contains("Thought:\n对象形式的思考"));
+    assert!(prompt.contains("Free_talk:"));
+    assert!(prompt.contains("Free_talk:\n对象形式的思考"));
 }
 
 #[test]
-fn thought_object_keep_in_context_false_is_not_persisted() {
+fn free_talk_object_keep_in_context_false_is_still_persisted() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -4143,73 +4687,45 @@ fn thought_object_keep_in_context_false_is_not_persisted() {
     );
     let _ = core.begin_turn("需要推理", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"thought":{"content":"临时思考不保留","keep_in_context":false},"report_job_progress":"好的","continue":false,"acceptance_check":{"is_satisfied":true}}"#),
+        content: scored(r#"{"free_talk":{"content":"临时思考不保留","keep_in_context":false},"status":"finished","final_answer":"好的"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
-    assert!(!prompt.contains("prompt_type: llm_thought"));
+    assert!(prompt.contains("Free_talk:"));
+    assert!(prompt.contains("Free_talk:\n临时思考不保留"));
 }
 
 #[test]
 fn static_prompt_keeps_contracts_concise() {
-    let static_prompt = include_str!("../../resources/static_v1.md");
-    assert!(static_prompt.contains("# Timem Static Prompt"));
-    assert!(static_prompt.contains("exactly one protocol-compliant JSON response"));
-    assert!(static_prompt.contains("Answer from visible evidence"));
-    assert!(static_prompt.contains("omit `status` or use `status:\"working\"`"));
-    assert!(
-        static_prompt.contains("`status:\"finished\"` can include one final `run_bash` command")
-    );
-    assert!(static_prompt.contains("The command's exit code"));
-    assert!(static_prompt.contains("final_answer"));
-    assert!(static_prompt.contains(
-        "output things MUST BE enclosed in EXACTLY ONE JSON object starting/ending with {/}"
-    ));
-    assert!(static_prompt.contains("DO NOT leave or add anything outside"));
-    assert!(static_prompt.contains("descriptive schema summary, not an example response"));
-    assert!(!static_prompt.contains("```json\n{{RESPONSE_V1_SCHEMA}}"));
-    assert!(!static_prompt.contains("```text\n{{RESPONSE_V1_SCHEMA}}"));
-    assert!(!static_prompt.contains("resources/response_v1_summary.json"));
-    assert!(!static_prompt.contains("response_v1` schema summary"));
-    assert!(static_prompt.contains("Context maintenance"));
-    assert!(!static_prompt.contains("memmgr type=scratch op=write kind=context_offload"));
-    assert!(!static_prompt.contains("memmgr type=context op=shrink"));
-    assert!(static_prompt.contains("{{RESPONSE_V1_SCHEMA}}"));
-    assert!(static_prompt.contains("{{TOOL_CATALOG}}"));
-    assert!(static_prompt.contains("{{SKILL_HEADERS}}"));
-    assert!(static_prompt.contains("Do not expose internal mechanisms"));
-    assert!(static_prompt.contains("memory/storage structure"));
-    assert!(static_prompt.contains("tool/capability catalog"));
-    assert!(!static_prompt.contains("runtime implementation details"));
-    assert!(
-        !static_prompt.contains("\"$id\": \"https://timem.local/schemas/response_v1.schema.json\"")
-    );
-    assert!(!static_prompt.contains("\"report_job_progress?\""));
-    assert!(!static_prompt.contains("durable_ctx_score"));
-    assert!(!static_prompt.contains("delta_scores"));
-    assert!(!static_prompt.contains("no_result_terminate"));
-    assert!(!static_prompt.contains("long_running_shell"));
-    assert!(!static_prompt.contains("lang_retry"));
-    assert!(!static_prompt.contains("theme_workflow"));
-    assert!(!static_prompt.contains("rounds_guard"));
-    assert!(!static_prompt.contains("\"tool_policy\""));
-    assert!(!static_prompt.contains("row version changed"));
-    assert!(!static_prompt.contains("\"memory_candidates?\""));
-    assert!(!static_prompt.contains("\"acceptance_check?\""));
-    assert!(!static_prompt.contains("\"continuation?\""));
-    assert!(!static_prompt.contains("\"diagnostics.intent_inference?\""));
-    assert!(!static_prompt.contains("\"diagnostics.self_audit?\""));
-    assert!(!static_prompt.contains("\"Self_audit\""));
-    assert!(!static_prompt.contains("continue:false"));
+    let template = include_str!("../../resources/system_prompt/system_prompt.md");
+    let protocol_section = include_str!("../../resources/protocol/json/response_protocol.md");
+    // Template-level checks
+    assert!(template.contains("# Timem Static Prompt"));
+    assert!(template.contains("exactly protocol-compliant response"));
+    assert!(template.contains("Answer based on collected evidence"));
+    assert!(template.contains("Context maintenance"));
+    assert!(template.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
+    assert!(template.contains("{{TOOL_CATALOG}}"));
+    assert!(template.contains("{{SKILL_HEADERS}}"));
+    assert!(template.contains("Do not expose internal mechanisms"));
+    assert!(template.contains("memory/storage structure"));
+    assert!(template.contains("tool/capability catalog"));
+    assert!(!template.contains("runtime implementation details"));
+    assert!(!template.contains("resources/response_v1_summary.json"));
+    // Protocol section content checks
+    assert!(protocol_section.contains("## Response Protocol"));
+    assert!(protocol_section.contains("final_answer"));
+    assert!(protocol_section.contains("{{RESPONSE_V1_SCHEMA}}"));
+    assert!(protocol_section.contains("DO NOT leave or add anything outside"));
 }
 
 #[test]
 fn rendered_prompt_response_schema_is_injected_from_resource() {
     let mut core = AgentCore::new(
-        r#"{"Response_rule":{"json_schema_summary":"stale"}}"#,
+        "## Protocol\n{{RESPONSE_V1_SCHEMA}}",
         profile("aliyun", "qwen-plus"),
         tmp_dir("response_schema_prompt_injection"),
     );
@@ -4219,21 +4735,94 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     };
 
     assert!(!prompt.contains("\"$id\""));
-    assert!(prompt.contains("\"fields\""));
-    assert!(prompt.find("\"status?\"").unwrap() < prompt.find("\"thought?\"").unwrap());
-    assert!(prompt.contains("\"report_job_progress?\""));
-    assert!(prompt.contains("\"keep_in_context\""));
+    assert!(prompt.contains("Markdown response sections."));
+    assert!(prompt.find("`## Status`").unwrap() < prompt.find("`## Free_talk`").unwrap());
+    assert!(prompt.contains("`## Progress`"));
+    assert!(prompt.contains("`## Context Compact`"));
+    assert!(prompt.contains("`delta_ids`"));
+    assert!(!prompt.contains("`slice_ids`"));
+    assert!(!prompt.contains("\"context_compact?\""));
+    assert!(!prompt.contains("object or array<object>"));
+    assert!(!prompt.contains("`## Thought`"));
     assert!(!prompt.contains(
         "\"durable\": \"boolean; optional. Default false. Set true only when this reasoning draft"
     ));
-    assert!(prompt.contains("\"intent\""));
+    assert!(prompt.contains("`intent`"));
+    assert!(prompt.contains("The top-level response is Markdown, not JSON."));
+    assert!(prompt.contains("the individual action blocks"));
+    assert!(prompt.contains("inside `## Intermediate_Actions` use JSON objects."));
+    assert!(!prompt.contains("`## Thought`"));
+    assert!(prompt.contains("`## Intermediate_Actions`"));
     assert!(!prompt.contains("\"json_schema_summary\": \"stale\""));
+}
+
+#[test]
+fn work_directory_instructions_are_loaded_once_even_if_host_repeats_context() {
+    let mut core = AgentCore::new(
+        "static",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("work_instruction_dedupe"),
+    );
+    let supporting_context = r#"work_directory_instructions:
+These instructions were loaded from files in the current working directory. Follow them while working in that directory.
+
+[BEGIN WORK_DIRECTORY_INSTRUCTION file="AGENTS.md" directory="/tmp/project"]
+unique_agents_rule_do_not_repeat_7f9a
+[END WORK_DIRECTORY_INSTRUCTION file="AGENTS.md"]
+
+workspace_reference:
+unique_workspace_reference_should_remain_visible
+"#;
+
+    let first_prompt = match core.begin_turn("first", Some(supporting_context)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert_eq!(
+        first_prompt
+            .matches("unique_agents_rule_do_not_repeat_7f9a")
+            .count(),
+        1
+    );
+    assert!(first_prompt.contains("unique_workspace_reference_should_remain_visible"));
+
+    let second_prompt = match core.begin_turn("second", Some(supporting_context)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert_eq!(
+        second_prompt
+            .matches("unique_agents_rule_do_not_repeat_7f9a")
+            .count(),
+        1,
+        "repeated AGENTS.md/CLAUDE.md content should not be injected into a later prompt delta"
+    );
+    assert_eq!(
+        second_prompt
+            .matches("unique_workspace_reference_should_remain_visible")
+            .count(),
+        2,
+        "non-work-instruction supporting context should not be dropped by the dedupe"
+    );
+
+    core.clear_dynamic_context();
+    let prompt_after_clear = match core.begin_turn("third", Some(supporting_context)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert_eq!(
+        prompt_after_clear
+            .matches("unique_agents_rule_do_not_repeat_7f9a")
+            .count(),
+        1,
+        "after clearing dynamic context, work instructions must be visible again"
+    );
 }
 
 #[test]
 fn rendered_static_prompt_preserves_source_rule_order() {
     let mut core = AgentCore::new(
-        include_str!("../../resources/static_v1.md"),
+        include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("static_prompt_order"),
     );
@@ -4243,9 +4832,7 @@ fn rendered_static_prompt_preserves_source_rule_order() {
     };
 
     let role_pos = prompt.find("## Role").expect("role section should render");
-    let style_pos = prompt
-        .find("## User-Facing Style")
-        .expect("style section should render");
+    let style_pos = prompt.find("## Soul").expect("Soul section should render");
     let memory_pos = prompt
         .find("## Memory")
         .expect("memory section should render");
@@ -4257,13 +4844,78 @@ fn rendered_static_prompt_preserves_source_rule_order() {
 }
 
 #[test]
+fn response_protocol_kind_controls_rendered_protocol_section() {
+    let template = include_str!("../../resources/system_prompt/system_prompt.md");
+    let mut markdown_core = AgentCore::new(
+        template,
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("response_protocol_markdown"),
+    );
+    let markdown_prompt = match markdown_core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(markdown_prompt.contains("The top-level response is Markdown, not JSON."));
+    assert!(markdown_prompt.contains("## Intermediate_Actions"));
+    assert!(!markdown_prompt.contains("All your output things MUST BE enclosed"));
+
+    let mut json_core = AgentCore::new(
+        template,
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("response_protocol_json"),
+    );
+    json_core.set_response_protocol(ResponseProtocolKind::Json);
+    let json_prompt = match json_core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(json_prompt.contains("All your output things MUST BE enclosed"));
+}
+
+#[test]
 fn static_prompt_does_not_handwrite_tool_catalog() {
-    let static_prompt = include_str!("../../resources/static_v1.md");
+    let static_prompt = include_str!("../../resources/system_prompt/system_prompt.md");
     assert!(static_prompt.contains("{{TOOL_CATALOG}}"));
     assert!(
         !static_prompt.contains("\"run_bash\":"),
         "static prompt must not hand-maintain executable tool specs; registry injects tool catalog"
     );
+}
+
+#[test]
+fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
+    let mut core = AgentCore::new(
+        include_str!("../../resources/system_prompt/system_prompt.md"),
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("no_local_command_host"),
+    );
+    core.set_capability_registry(CapabilityRegistry::builtin_for_host(
+        CapabilityHostProfile::without_local_command_execution(),
+    ));
+
+    let prompt = match core.begin_turn("count files", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(!prompt.contains("#### `run_bash`"));
+    assert!(!prompt.contains("#### `shell_job_status`"));
+    assert!(prompt.contains("#### `memmgr`"));
+
+    let repair_prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"checking files","next_actions":[{"action":"run_bash","intent":"Count files.","args":{"command":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected repair NeedModel, got {other:?}"),
+    };
+    assert!(repair_prompt.contains("Protocol repair request"));
+    assert!(repair_prompt.contains("unsupported_action:run_bash"));
+    assert!(!repair_prompt.contains("status: 0"));
+    assert!(!repair_prompt.contains("output:\n"));
 }
 
 #[test]
@@ -4308,12 +4960,203 @@ fn agent_core_stays_terminal_ui_free_for_host_adapters() {
             && lib_rs.contains("pub extern \"C\" fn timem_core_apply_model_response"),
         "agent_core should keep a host-adapter ABI for iOS/Web integrations"
     );
+    assert!(
+        !lib_rs.contains("RuntimeProfileView")
+            && !lib_rs.contains("ModelProfileView")
+            && !lib_rs.contains("StorageProfileView"),
+        "agent_core should export raw profiler data, not shell-specific profiler view strings"
+    );
+
+    let profiler_rs = fs::read_to_string(root.join("src").join("profiler.rs")).unwrap();
+    for forbidden in [
+        "RuntimeProfileView",
+        "ModelProfileView",
+        "StorageProfileView",
+        "format_count(",
+        "format_bytes(",
+        "format_percent(",
+        "format_wait_per_1k_output(",
+    ] {
+        assert!(
+            !profiler_rs.contains(forbidden),
+            "agent_core profiler should keep raw structured data; `{forbidden}` belongs in host UI rendering"
+        );
+    }
+
+    let status_summary_rs = fs::read_to_string(root.join("src").join("status_summary.rs")).unwrap();
+    for forbidden in ["compact_token_count", "trim_decimal(", "\"K\"", "\"M\""] {
+        assert!(
+            !status_summary_rs.contains(forbidden),
+            "agent_core status summary should expose raw token values; `{forbidden}` belongs in host UI rendering"
+        );
+    }
+
+    let lib_rs = fs::read_to_string(root.join("src").join("lib.rs")).unwrap();
+    for forbidden in [
+        "模型的回复不符合本地协议",
+        "请调大 TIMEM_MAX_LLM_OUTPUT",
+        "请重试或换一个更具体的问题",
+    ] {
+        assert!(
+            !lib_rs.contains(forbidden),
+            "agent_core should keep protocol failure causes structured; terminal copy `{forbidden}` belongs in host UI rendering"
+        );
+    }
+}
+
+#[test]
+fn architecture_docs_do_not_bind_bash_capability_to_shell_ui() {
+    let docs = include_str!("../../docs/architecture.md");
+
+    assert!(
+        !docs.contains("run_bash` is for shell sessions only"),
+        "run_bash capability must be gated by host capability, not shell UI type"
+    );
+    assert!(docs.contains("active host profile"));
+    assert!(docs.contains("local command execution"));
+    assert!(docs.contains("independent of UI type"));
+}
+
+#[test]
+fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
+    let mut core = core_with_builtin_capabilities("notification_sink");
+    let _ = core.begin_turn("检查项目", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","free_talk":"先说明一下检查思路。","report_job_progress":"正在检查项目结构","next_actions":[{"action":"run_bash","intent":"列出 Rust 文件","args":{"command":"rg --files -g '*.rs'","timeout_ms":5000}}]}"#,
+        ),
+        usage: usage(),
+        model_name: "qwen-plus".to_string(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedsUserApproval { .. }));
+
+    let mut received = Vec::new();
+    core.notify_last_topic_events(
+        "session_a",
+        &mut |events: &[agent_core::CoreTopicEvent]| {
+            received.extend_from_slice(events);
+        },
+    );
+
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].session_id, "session_a");
+    assert_eq!(
+        received[0].topic.name,
+        agent_core::CORE_TOPIC_MODEL_RESPONSE
+    );
+    let model_response = received[0].as_model_response().unwrap();
+    assert_eq!(model_response.free_talk, "先说明一下检查思路。");
+    assert_eq!(model_response.report_job_progress, "正在检查项目结构");
+    assert_eq!(model_response.status, "working");
+    assert_eq!(model_response.global.working_worker_count, 1);
+
+    let action = received[1].as_action().unwrap();
+    assert_eq!(received[1].session_id, "session_a");
+    assert_eq!(received[1].topic.name, agent_core::CORE_TOPIC_ACTION);
+    assert_eq!(action.intent.as_deref(), Some("列出 Rust 文件"));
+    assert_eq!(action.action, "run_bash");
+    assert_eq!(action.input["command"], "rg --files -g '*.rs'");
+    assert_eq!(action.input["timeout_ms"], 5000);
+    assert_eq!(
+        action.kind,
+        agent_core::CoreActionKind::Bash {
+            command: "rg --files -g '*.rs'".to_string(),
+        }
+    );
+    assert!(action.active);
+    assert_eq!(action.memory_activity, agent_core::CoreMemoryActivity::None);
+
+    let queued_for_later = received;
+    assert_eq!(
+        queued_for_later[1].as_action().unwrap().input["command"],
+        "rg --files -g '*.rs'"
+    );
+}
+
+#[test]
+fn protocol_repair_does_not_publish_invalid_model_response_topic() {
+    let mut core = core_with_builtin_capabilities("repair_no_topic");
+    let _ = core.begin_turn("检查项目", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"正在检查","next_actions":[{"action":"run_bash","intent":"List.""#,
+        ),
+        usage: usage(),
+        model_name: "qwen-plus".to_string(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let mut received = Vec::new();
+    core.notify_last_topic_events(
+        "session_a",
+        &mut |events: &[agent_core::CoreTopicEvent]| {
+            received.extend_from_slice(events);
+        },
+    );
+    assert!(
+        received.is_empty(),
+        "repair request should not publish model response topics from malformed output: {received:?}"
+    );
+}
+
+#[test]
+fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
+    let mut core = AgentCore::new(
+        include_str!("../../resources/system_prompt/system_prompt.md"),
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("static_prompt_examples_not_task_like"),
+    );
+    let prompt = match core.begin_turn("请只回答 ok", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Examples below are format examples ONLY"));
+    for leaked_example_task in [
+        "project codename",
+        "Get the OS version",
+        "Find confirmed memory evidence before answering",
+    ] {
+        assert!(
+            !prompt.contains(leaked_example_task),
+            "static prompt example still contains task-like action text: {leaked_example_task}"
+        );
+    }
+}
+
+#[test]
+fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
+    let mut core = AgentCore::new(
+        include_str!("../../resources/system_prompt/system_prompt.md"),
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("static_prompt_example_heading_levels"),
+    );
+    let prompt = match core.begin_turn("请只回答 ok", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+
+    assert!(prompt.contains("## -------- Example: receive a new input and need actions --------"));
+    assert!(prompt
+        .contains("## -------- Example:  receive a user task, plan, and start doing --------"));
+    assert!(prompt
+        .contains("## -------- Example: finish one of user's tasks, compact context --------"));
+    assert!(
+        !prompt.contains("### Example:"),
+        "example headings must not be lower-level than protocol headings such as ## Progress"
+    );
+    assert!(
+        !prompt.contains("\n## Example:"),
+        "example headings should have visual separators to avoid ambiguity with protocol sections"
+    );
 }
 
 #[test]
 fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
     let mut core = AgentCore::new(
-        r#"{"Tool_capability":{"tool_catalog":{"stale_tool":{"when":"old"}}}}"#,
+        "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
         profile("aliyun", "qwen-plus"),
         tmp_dir("capability_prompt_catalog"),
     );
@@ -4322,14 +5165,12 @@ fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
 
-    assert!(prompt.contains("\"memmgr\""));
-    assert!(prompt.contains("\"capmgr\""));
-    assert!(prompt.contains("\"run_bash\""));
-    assert!(prompt.contains("\"shell_job_status\""));
-    assert!(prompt.contains("\"skill_headers\""));
+    assert!(prompt.contains("#### `memmgr`"));
+    assert!(prompt.contains("#### `capmgr`"));
+    assert!(prompt.contains("#### `run_bash`"));
+    assert!(prompt.contains("#### `shell_job_status`"));
     assert!(!prompt.contains("\"release_quality_gate\""));
     assert!(prompt.contains("Unified local memory manager"));
-    assert!(!prompt.contains("stale_tool"));
 }
 
 #[test]
@@ -4342,7 +5183,7 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"正在查询记忆。","continue":true,"next_actions":[{"action":"memmgr","intent":"Query durable memory through manifest-backed tool.","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#,
+            r#"{"report_job_progress":"正在查询记忆。","next_actions":[{"action":"memmgr","intent":"Query durable memory through manifest-backed tool.","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4362,7 +5203,7 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
 #[test]
 fn legacy_actions_are_not_visible_or_executable() {
     let mut core = AgentCore::new(
-        include_str!("../../resources/static_v1.md"),
+        include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("legacy_action_fallback_boundary"),
     );
@@ -4370,12 +5211,12 @@ fn legacy_actions_are_not_visible_or_executable() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(prompt.contains("\"memmgr\""));
+    assert!(prompt.contains("`memmgr`") || prompt.contains("\"memmgr\""));
     assert!(!prompt.contains("\"query_memory\""));
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"旧动作应被拒绝。","continue":true,"next_actions":[{"action":"query_memory","intent":"Legacy fallback check.","args":{"query":"测试代号","limit":1}}]}"#,
+            r#"{"report_job_progress":"旧动作应被拒绝。","next_actions":[{"action":"query_memory","intent":"Legacy fallback check.","args":{"query":"测试代号","limit":1}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4405,7 +5246,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
     let _ = core.begin_turn("准备发布", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"加载发布检查 skill。","continue":true,"next_actions":[{"action":"capmgr","intent":"Load release quality instructions before auditing.","args":{"op":"load","kind":"skill","id":"release_quality_gate"}}]}"#,
+            r#"{"report_job_progress":"加载发布检查 skill。","next_actions":[{"action":"capmgr","intent":"Load release quality instructions before auditing.","args":{"op":"load","kind":"skill","id":"release_quality_gate"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4464,7 +5305,58 @@ fn self_tool_reads_mem_paths_and_about_info() {
         CoreStep::Final(turn) => turn,
         other => panic!("expected final after self_tool evidence, got {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("TimemAi"));
+    assert!(final_turn.final_answer.contains("TimemAi"));
+}
+
+#[test]
+fn self_tool_runtime_configuration_keeps_core_owned_identity() {
+    let dir = tmp_dir("self_tool_runtime_config");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let configured_space = dir.join("custom_space");
+    let configured_memory = configured_space.join("memory");
+    let configured_api_audit = configured_space.join("audit").join("api_audit.json");
+    let configured_action_audit = configured_space.join("audit").join("action_audit.json");
+    let mut env = BTreeMap::new();
+    env.insert("TIMEM_SPACE".to_string(), ".custom_mem".to_string());
+    core.configure_self_tool_runtime(
+        env,
+        SelfToolPaths {
+            space_dir: configured_space.clone(),
+            memory_dir: configured_memory.clone(),
+            memory_file: configured_memory.join("memory.jsonl"),
+            scratch_file: configured_memory.join("scratch_notes.jsonl"),
+            api_audit_file: configured_api_audit.clone(),
+            action_audit_file: configured_action_audit.clone(),
+        },
+    );
+
+    let _ = core.begin_turn("查看运行时信息", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","report_job_progress":"查询 Timem 运行时信息。","next_actions":[{"action":"self_tool","intent":"读取运行时路径。","args":{"type":"mem_path","op":"read"}},{"action":"self_tool","intent":"读取 Timem 软件身份。","args":{"type":"about_me","op":"read"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+
+    assert!(prompt.contains(&format!("space_dir: {}", configured_space.display())));
+    assert!(prompt.contains(&format!("memory_dir: {}", configured_memory.display())));
+    assert!(prompt.contains(&format!(
+        "api_audit_file: {}",
+        configured_api_audit.display()
+    )));
+    assert!(prompt.contains(&format!(
+        "action_audit_file: {}",
+        configured_action_audit.display()
+    )));
+    assert!(prompt.contains("name: TimemAi"));
+    assert!(prompt.contains("author: TimemAi <phylimo@163.com>"));
+    assert!(prompt.contains("project: https://github.com/moliam/TimemAi"));
 }
 
 #[test]
@@ -4566,9 +5458,9 @@ fn self_tool_supports_identity_and_process_qa_replay() {
         CoreStep::Final(turn) => turn,
         other => panic!("expected final identity answer, got {other:?}"),
     };
-    assert!(final_turn.response_to_user.contains("TimemAi"));
-    assert!(final_turn.response_to_user.contains("pid"));
-    assert!(final_turn.response_to_user.contains("executable"));
+    assert!(final_turn.final_answer.contains("TimemAi"));
+    assert!(final_turn.final_answer.contains("pid"));
+    assert!(final_turn.final_answer.contains("executable"));
 }
 
 #[test]
@@ -4581,7 +5473,7 @@ fn capmgr_load_missing_kind_requests_protocol_repair_from_manifest_idl() {
     let _ = core.begin_turn("准备发布", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"加载 skill。","continue":true,"next_actions":[{"action":"capmgr","intent":"Load missing skill.","args":{"op":"load"}}]}"#,
+            r#"{"report_job_progress":"加载 skill。","next_actions":[{"action":"capmgr","intent":"Load missing skill.","args":{"op":"load"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4602,12 +5494,12 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
     for (case, payload, expected_issue) in [
         (
             "bad_op",
-            r#"{"report_job_progress":"检查 capability。","continue":true,"next_actions":[{"action":"capmgr","intent":"Use an unsupported capability operation.","args":{"op":"remove","kind":"skill","id":"release_quality_gate"}}]}"#,
+            r#"{"report_job_progress":"检查 capability。","next_actions":[{"action":"capmgr","intent":"Use an unsupported capability operation.","args":{"op":"remove","kind":"skill","id":"release_quality_gate"}}]}"#,
             "issue: next_actions[0].input.op_unsupported:remove",
         ),
         (
             "bad_kind",
-            r#"{"report_job_progress":"检查 capability。","continue":true,"next_actions":[{"action":"capmgr","intent":"Use an unsupported capability kind.","args":{"op":"load","kind":"resource","id":"release_quality_gate"}}]}"#,
+            r#"{"report_job_progress":"检查 capability。","next_actions":[{"action":"capmgr","intent":"Use an unsupported capability kind.","args":{"op":"load","kind":"resource","id":"release_quality_gate"}}]}"#,
             "issue: next_actions[0].input.kind_unsupported:resource",
         ),
     ] {
@@ -4676,7 +5568,7 @@ example_json: |
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"运行 overlay command。","continue":true,"next_actions":[{"action":"echo_payload","intent":"Echo runtime payload.","args":{"text":"hello"}}]}"#,
+            r#"{"report_job_progress":"运行 overlay command。","next_actions":[{"action":"echo_payload","intent":"Echo runtime payload.","args":{"text":"hello"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4693,161 +5585,499 @@ example_json: |
 }
 
 #[test]
-fn final_command_check_success_finalizes_when_command_exits_zero() {
-    let memory_dir = tmp_dir("final_command_check_ok");
+fn overlay_command_background_requires_manifest_declared_fields() {
+    let memory_dir = tmp_dir("overlay_command_background_reject_memory");
+    let overlay_dir = tmp_dir("overlay_command_background_reject_capabilities");
+    let tools_dir = overlay_dir.join("tools");
+    let scripts_dir = overlay_dir.join("scripts");
+    fs::create_dir_all(&tools_dir).unwrap();
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::write(
+        tools_dir.join("echo_payload.yaml"),
+        r#"kind: tool
+id: echo_payload
+binding_type: command
+binding_name: scripts/echo_payload.sh
+summary: Echo the action JSON payload.
+description: |
+  Use to echo a bounded payload during capability tests.
+input_properties:
+  text: string
+required:
+  - text
+example_json: |
+  {
+    "action": "echo_payload",
+    "intent": "Echo payload.",
+    "args":{"text":"hello"}
+  }
+"#,
+    )
+    .unwrap();
+    fs::write(scripts_dir.join("echo_payload.sh"), "cat\n").unwrap();
+    let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
-    core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let _ = core.begin_turn("完成任务", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"run_bash","intent":"Verify.","args":{"command":"true","timeout_ms":2000}}]}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_ = match step {
-        CoreStep::Final(f) => f,
-        other => panic!("expected Final, got {other:?}"),
-    };
-    assert_eq!(final_.response_to_user, "任务已完成");
-    let prompt = core.render_prompt();
-    assert!(prompt.contains("prompt_type: llm_response"));
-    assert!(prompt.contains("Final run_bash command:"));
-    assert!(prompt.contains("verdict: PASS") || prompt.contains("status: 0"));
-    let audit = fs::read_to_string(memory_dir.join("audit").join("action_audit.json")).unwrap();
-    assert!(audit.contains("final_command_check_command"));
-    assert!(audit.contains("final_command_check_command_pass"));
-    assert!(audit.contains("\"command\""));
-    assert!(audit.contains("\"true\""));
-    assert!(audit.contains("verdict: PASS"));
-}
+    core.set_capability_registry(registry);
+    let _ = core.begin_turn("echo in background", None);
 
-#[test]
-fn final_command_check_blocks_final_when_command_nonzero() {
-    let mut core = core_with_builtin_capabilities("final_command_check_fail");
-    core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let _ = core.begin_turn("完成任务", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"run_bash","intent":"Verify.","args":{"command":"false","timeout_ms":2000}}]}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    assert!(
-        !matches!(step, CoreStep::Final(_)),
-        "command exit!=0 must not finalize, got {step:?}"
-    );
-    let prompt = core.render_prompt();
-    assert!(
-        prompt.contains("命令返回非 0"),
-        "missing runtime_note about guarded command failure"
-    );
-    assert!(
-        !prompt.contains("prompt_type: llm_response"),
-        "must not emit llm_response slice on guarded command failure"
-    );
-}
-
-#[test]
-fn final_command_check_command_respects_bash_approval_mode() {
-    let mut core = core_with_builtin_capabilities("final_command_check_approval");
-    let _ = core.begin_turn("完成任务", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"run_bash","intent":"Verify.","args":{"command":"true","timeout_ms":2000}}]}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let request = match step {
-        CoreStep::NeedsUserApproval { request } => request,
-        other => panic!("expected approval before final run_bash command, got {other:?}"),
-    };
-    assert_eq!(request.command, "true");
-    assert_eq!(request.intent, "Verify final answer before showing it.");
-}
-
-#[test]
-fn finished_with_removed_readback_field_requests_repair() {
-    let mut core = core_with_builtin_capabilities("final_command_check_removed_readback");
-    core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let _ = core.begin_turn("完成任务", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"Verify.","args":{"read_back_command":"true","timeout_ms":2000}}]}"#),
+        content: scored(
+            r#"{"report_job_progress":"运行 overlay command。","next_actions":[{"action":"echo_payload","intent":"Echo runtime payload in background.","args":{"text":"hello","background":true}}]}"#
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected repair, got {other:?}"),
+        other => panic!("expected manifest repair prompt, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("next_actions[0].input.background_unsupported"));
+    assert!(!prompt.contains("background_started"));
+}
+
+#[test]
+fn overlay_command_background_job_uses_core_tool_job_status() {
+    let memory_dir = tmp_dir("overlay_command_background_memory");
+    let overlay_dir = tmp_dir("overlay_command_background_capabilities");
+    let tools_dir = overlay_dir.join("tools");
+    let scripts_dir = overlay_dir.join("scripts");
+    fs::create_dir_all(&tools_dir).unwrap();
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::write(
+        tools_dir.join("echo_payload.yaml"),
+        r#"kind: tool
+id: echo_payload
+binding_type: command
+binding_name: scripts/echo_payload.sh
+summary: Echo the action JSON payload.
+description: |
+  Use to echo a bounded payload during capability tests.
+input_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "text": {"type": "string"},
+      "background": {"type": "boolean"},
+      "mode": {"type": "string", "enum": ["foreground", "background"]},
+      "timeout_ms": {"type": "integer"}
+    },
+    "required": ["text"]
+  }
+example_json: |
+  {
+    "action": "echo_payload",
+    "intent": "Echo payload.",
+    "args":{"text":"hello","background":true}
+  }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        scripts_dir.join("echo_payload.sh"),
+        "payload=$(cat)\nprintf 'registered_background_ok %s\\n' \"$payload\"\n",
+    )
+    .unwrap();
+    let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    core.set_capability_registry(registry);
+    let _ = core.begin_turn("echo in background", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"report_job_progress":"后台运行 overlay command。","next_actions":[{"action":"echo_payload","intent":"Echo runtime payload in background.","args":{"text":"hello","background":true,"timeout_ms":5000}}]}"#
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected background job result, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: echo_payload"));
+    assert!(prompt.contains("status: background_started"));
+    assert!(prompt.contains("next_action: tool_job_status"));
+    let job_id = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("job_id: "))
+        .expect("job id in action result")
+        .trim()
+        .to_string();
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"report_job_progress":"检查后台工具任务。","next_actions":[{{"action":"tool_job_status","intent":"Wait for registered background tool.","args":{{"job_id":"{}","timeout_ms":3000}}}}]}}"#,
+            job_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected tool job status result, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: tool_job_status"));
+    assert!(prompt.contains("action: echo_payload"));
+    assert!(prompt.contains("state: finished"));
+    assert!(prompt.contains("registered_background_ok"));
+}
+
+#[test]
+fn overlay_command_background_job_can_be_cancelled_through_core_tool_status() {
+    let memory_dir = tmp_dir("overlay_command_cancel_memory");
+    let overlay_dir = tmp_dir("overlay_command_cancel_capabilities");
+    let tools_dir = overlay_dir.join("tools");
+    let scripts_dir = overlay_dir.join("scripts");
+    fs::create_dir_all(&tools_dir).unwrap();
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::write(
+        tools_dir.join("slow_payload.yaml"),
+        r#"kind: tool
+id: slow_payload
+binding_type: command
+binding_name: scripts/slow_payload.sh
+summary: Slow payload command.
+description: |
+  Use to exercise background cancellation in capability tests.
+input_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "background": {"type": "boolean"},
+      "timeout_ms": {"type": "integer"}
+    }
+  }
+example_json: |
+  {
+    "action": "slow_payload",
+    "intent": "Run slowly.",
+    "args":{"background":true}
+  }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        scripts_dir.join("slow_payload.sh"),
+        "printf 'slow-start\\n'; sleep 10; printf 'slow-done\\n'\n",
+    )
+    .unwrap();
+    let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    core.set_capability_registry(registry);
+    let _ = core.begin_turn("run slow tool in background", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"report_job_progress":"后台运行慢工具。","next_actions":[{"action":"slow_payload","intent":"Start slow registered tool.","args":{"background":true,"timeout_ms":5000}}]}"#
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected background job result, got {other:?}"),
+    };
+    let job_id = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("job_id: "))
+        .expect("job id in action result")
+        .trim()
+        .to_string();
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"report_job_progress":"取消后台工具任务。","next_actions":[{{"action":"tool_job_status","intent":"Cancel registered background tool.","args":{{"op":"cancel","job_id":"{}"}}}}]}}"#,
+            job_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected tool job cancel result, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: tool_job_status"));
+    assert!(prompt.contains("action: slow_payload"));
+    assert!(prompt.contains("state: cancelled"));
+}
+
+#[test]
+fn finished_with_actions_requests_repair_and_executes_nothing() {
+    let memory_dir = tmp_dir("finished_actions_repair");
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("完成任务", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"Verify.","args":{"command":"true","timeout_ms":2000}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected protocol repair, got {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("read_back_command_unsupported"));
+    assert!(prompt.contains("status_finished_must_not_include_next_actions"));
+    assert!(prompt.contains("不能同时包含"));
     assert!(!prompt.contains("Action result: run_bash"));
+    let action_audit_text =
+        fs::read_to_string(memory_dir.join("audit").join("action_audit.json")).unwrap();
+    assert!(!action_audit_text.contains(r#""action":"run_bash""#));
+    assert!(!action_audit_text.contains(r#""status":"completed""#));
 }
 
 #[test]
-fn finished_with_multiple_commands_is_downgraded_to_working() {
-    let mut core = core_with_builtin_capabilities("final_command_check_non_last");
-    core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let _ = core.begin_turn("完成任务", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"任务已完成","continue":false,"next_actions":[{"action":"run_bash","intent":"First.","args":{"command":"true","timeout_ms":2000}},{"action":"run_bash","intent":"Last.","args":{"command":"true","timeout_ms":2000}}]}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected working continuation with action evidence, got {other:?}"),
-    };
-    assert!(prompt.contains("Runtime 已丢弃提前 final_answer"));
-    assert!(prompt.matches("Action result: run_bash").count() >= 2);
+fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
+    for (case, payload) in [
+        (
+            "multiple",
+            r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"First.","args":{"command":"true","timeout_ms":2000}},{"action":"run_bash","intent":"Last.","args":{"command":"true","timeout_ms":2000}}]}"#,
+        ),
+        (
+            "self_tool",
+            r#"{"status":"finished","final_answer":"好的，以下是我的版本信息。","next_actions":[{"action":"self_tool","intent":"获取 Timem 的版本和运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
+        ),
+    ] {
+        let mut core = core_with_builtin_capabilities(&format!("finished_actions_repair_{case}"));
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let _ = core.begin_turn("完成任务", None);
+        let step = core.apply_model_response(LlmResponse {
+            content: scored(payload),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        let prompt = match step {
+            CoreStep::NeedModel { prompt, .. } => prompt,
+            other => panic!("expected protocol repair for {case}, got {other:?}"),
+        };
+        assert!(prompt.contains("Protocol repair request"));
+        assert!(prompt.contains("status_finished_must_not_include_next_actions"));
+        assert!(!prompt.contains("Action result: run_bash"));
+        assert!(!prompt.contains("Action result: self_tool"));
+    }
 }
 
 #[test]
-fn finished_with_primary_command_is_downgraded_to_working_before_answering() {
-    let mut core = core_with_builtin_capabilities("finished_primary_command_downgrade");
-    core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let _ = core.begin_turn(
-        "测试 /tmp 目录下是否有 timem_nonexistent_user_fixture",
-        None,
+fn prose_then_final_answer_only_json_extracts_payload() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("prose_final_answer_only"),
     );
+    let _ = core.begin_turn("你叫什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"让我帮你检查一下。","next_actions":[{"action":"run_bash","intent":"检查 /users 目录下是否存在 example_user 目录","args":{"command":"ls -ld /tmp/timem_nonexistent_user_fixture","timeout_ms":5000}}]}"#),
-        model_name: "qwen-plus".to_string(),
+        content: scored(
+            r#"你叫张三！
+
+{"status":"finished","final_answer":"你叫**张三**！"}
+"#,
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
     });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected model continuation with shell evidence, got {other:?}"),
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Final run_bash command"));
-    assert!(prompt.contains("No such file"));
-    assert!(prompt.contains("verdict: FAIL"));
-    assert!(!prompt.contains("Protocol repair request"));
-    assert!(!prompt.contains("Response shown to user:\n让我帮你检查一下。"));
+    assert!(final_turn.final_answer.contains("张三"));
+    assert_eq!(final_turn.repair_issue, None);
 }
 
 #[test]
-fn finished_with_self_tool_action_does_not_preserve_hallucinated_final_answer() {
-    let mut core = core_with_builtin_capabilities("finished_self_tool_downgrade");
-    let _ = core.begin_turn("可以", None);
+fn markdown_fenced_final_answer_only_json_extracts_payload() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("fenced_final_answer_only"),
+    );
+    let _ = core.begin_turn("秘密是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"好的，以下是我的版本信息：\n\n| 项目 | 值 |\n| 当前目录 | /tmp/timem_nonexistent_user_fixture |","next_actions":[{"action":"self_tool","intent":"获取 Timem 的版本和运行时信息","args":{"type":"about_me","op":"read"}}]}"#),
-        model_name: "qwen-plus".to_string(),
+        content: scored(
+            "```json\n{\"status\":\"finished\",\"final_answer\":\"ABC = 123456\"}\n```",
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.final_answer.contains("ABC = 123456"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn prose_with_json_reference_before_actual_response() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("prose_json_ref"),
+    );
+    let _ = core.begin_turn("explain json", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            "JSON looks like {\"key\":\"value\"} and is widely used.\n\n{\"status\":\"finished\",\"final_answer\":\"JSON is a data format.\"}",
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.final_answer.contains("JSON is a data format"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn final_answer_containing_json_code_example() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("final_answer_json_code"),
+    );
+    let _ = core.begin_turn("show json example", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"finished","final_answer":"Use this format:\n```json\n{\"name\": \"test\"}\n```"}"#,
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.final_answer.contains("Use this format"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn prose_with_fake_envelope_keys_picks_last_valid_json() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("fake_envelope"),
+    );
+    let _ = core.begin_turn("test", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            "Example:\n{\"status\":\"finished\",\"final_answer\":\"wrong\"}\n\nActual:\n{\"status\":\"finished\",\"final_answer\":\"correct answer\"}",
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.final_answer.contains("correct answer"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("curly_in_code"),
+    );
+    let _ = core.begin_turn("rust code", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            "In Rust: fn main() { println!(\"hello\"); }\n\n{\"status\":\"finished\",\"final_answer\":\"Rust uses curly braces for blocks.\"}",
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(final_turn.final_answer.contains("curly braces"));
+    assert_eq!(final_turn.repair_issue, None);
+}
+
+#[test]
+fn array_of_actions_auto_wrapped_as_next_actions() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("array_actions"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("find files", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"[{"action":"run_bash","intent":"Find files.","args":{"command":"echo ok","timeout_ms":5000}}]"#,
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected model continuation with self_tool evidence, got {other:?}"),
+        other => panic!("expected NeedModel with action results, got: {other:?}"),
     };
-    assert!(prompt.contains("Runtime 已丢弃提前 final_answer"));
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: about_me"));
-    assert!(!prompt.contains("Protocol repair request"));
-    assert!(!prompt.contains("/tmp/timem_nonexistent_user_fixture"));
+    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("ok"));
+}
+
+#[test]
+fn array_of_multiple_actions_auto_wrapped() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("array_multi_actions"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("multi", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"[{"action":"run_bash","intent":"First.","args":{"command":"echo one","timeout_ms":5000}},{"action":"run_bash","intent":"Second.","args":{"command":"echo two","timeout_ms":5000}}]"#,
+        ),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got: {other:?}"),
+    };
+    assert!(prompt.contains("one"));
+    assert!(prompt.contains("two"));
+}
+
+#[test]
+fn array_without_action_key_still_rejected() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("custom", "aws-claude-sonnet-4-6"),
+        tmp_dir("array_no_action"),
+    );
+    let _ = core.begin_turn("bad", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"[{"foo":"bar"}]"#),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel (repair), got: {other:?}"),
+    };
+    assert!(prompt.contains("Protocol repair"));
 }
 
 #[test]

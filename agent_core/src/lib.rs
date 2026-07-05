@@ -1,7 +1,7 @@
 use rusqlite::{params_from_iter, types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -13,18 +13,166 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod audit;
 pub mod capability;
+#[path = "../../resources/capabilities/tools/capmgr.rs"]
 pub mod capmgr;
+pub use capability::CapabilityHostProfile;
 use capability::CapabilityRegistry;
+pub mod config_edit;
+pub mod config_report;
+pub mod context;
+pub mod context_policy;
+pub mod data_layout;
 pub mod executor;
+pub mod host;
+#[path = "../../resources/capabilities/tools/memmgr.rs"]
 pub mod memmgr;
+mod notification;
+pub mod profiler;
+pub mod prompt_cache;
 pub mod prompt_render;
 pub mod prompt_spec;
+pub mod provider;
+pub mod provider_config;
+pub mod provider_transport;
+pub mod redaction;
+pub mod response_protocol;
+pub mod retry_policy;
+pub mod runtime_context;
+#[path = "../../resources/capabilities/tools/self_tool.rs"]
 pub mod self_tool;
+pub mod session_runtime;
+pub mod session_worker;
+#[path = "../../resources/capabilities/tools/run_bash.rs"]
 pub mod shell_exec;
-use self_tool::{SelfToolAbout, SelfToolInput, SelfToolPaths, SelfToolProcess, SelfToolState};
+#[path = "../../resources/capabilities/tools/shell_job_status.rs"]
+pub mod shell_job_status;
+pub mod status_summary;
+pub mod status_view;
+#[path = "../../resources/capabilities/tools/tool_job_status.rs"]
+pub mod tool_job_status;
+pub mod tool_jobs;
+#[path = "../../resources/capabilities/tools/registry.rs"]
+pub(crate) mod tool_registry;
+pub mod work_instructions;
+pub mod workspace;
+pub use audit::{
+    append_audit_event, host_start_audit_event, max_llm_output_increased_audit_event,
+    model_repair_request_audit_event, model_retry_audit_event, read_audit_doc,
+    round_limit_audit_event, stale_context_choice_audit_event, turn_error_audit_event,
+    turn_final_audit_event, turn_start_audit_event, user_approval_audit_event,
+    user_supplement_audit_event,
+};
+pub use config_edit::{
+    apply_runtime_config_value, bash_approval_mode_from_sources, capabilities_dir_from_sources,
+    parse_token_count, runtime_config_apply_report, runtime_config_field_value,
+    runtime_config_menu_report, work_instruction_mode_label, RuntimeConfigApplyError,
+    RuntimeConfigApplyMessage, RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport,
+    RuntimeConfigEffect, RuntimeConfigField, RuntimeConfigMenuItem, RuntimeConfigMenuReport,
+    RUNTIME_CONFIG_FIELDS,
+};
+pub use config_report::{
+    bash_approval_mode_label, runtime_config_report, RuntimeConfigReport, RuntimeConfigReportInput,
+    RuntimeConfigReportItem, RuntimeConfigReportRow, RuntimeConfigRowKind, RuntimeConfigSection,
+};
+pub use context::estimate_prompt_context_tokens;
+pub use context_policy::{
+    stale_context_decision_request, stale_context_prompt_needed, StaleContextDecisionRequest,
+    StaleContextPolicy, DEFAULT_STALE_CONTEXT_IDLE, DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD,
+};
+pub use data_layout::{
+    default_data_root, layout_for_space, workspace_config_file, RuntimeDataLayout,
+};
+pub use host::{
+    core_initialized_topic_event, core_initialized_topic_event_with_worker,
+    normalize_user_supplements, resolve_topic_reply, session_worker_default_display_name,
+    topic_event_status_hint, CoreActionTopic, CoreDynamicContextSummary, CoreGlobalWorkerStatus,
+    CoreHostDecisionRequestTopic, CoreLifecycleEvent, CoreLifecycleTopic, CoreModelResponseTopic,
+    CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
+    CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, HostDecision, HostDecisionDefault,
+    HostDecisionRequest, NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution,
+    RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError,
+    TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi,
+    CORE_TOPIC_ACTION, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_MODEL_RESPONSE,
+    CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
+    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD_REQUEST, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+};
+use notification::CoreNotification;
+pub use notification::{CoreActionKind, CoreMemoryActivity};
+pub use profiler::{
+    collect_storage_profile, profile_cache_hit_percent_tenths, profile_wait_per_1k_output,
+    runtime_profile_report, ModelProfile, ModelProfileReport, RuntimeProfileReport,
+    RuntimeProfiler, StorageProfile,
+};
+pub use prompt_cache::{
+    plan_incremental_cache, plan_prompt_cache, prompt_parts_from_rendered_prompt,
+    split_old_and_new_delta, split_prompt, stable_text_fingerprint, CacheControl, PromptBlock,
+    PromptBlockRole, PromptParts,
+};
+pub use provider::{
+    build_provider_request, default_api_protocol_for_provider, default_base_url_for_provider,
+    default_model_for_provider, interpret_provider_http_response, is_default_base_url_for_provider,
+    is_default_model_for_provider, known_default_base_url_for_provider, parse_api_protocol,
+    parse_provider_response, plan_structured_output, prepare_provider_http_request,
+    prepare_provider_request, prompt_cache_plan_audit, provider_http_error_message,
+    provider_prompt_blocks, provider_request_audit_event, provider_response_audit_event,
+    ApiProtocol, PreparedProviderHttpRequest, PreparedProviderRequest, ProviderCacheControl,
+    ProviderConfig, ProviderHttpResponseInterpretation, ProviderPromptBlock, ProviderPromptRole,
+    StructuredOutputHint,
+};
+pub use provider_config::{
+    provider_config_from_sources, validate_provider_api_key, LocalLLMKeyFile, ProviderConfigSource,
+};
+pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
+pub use redaction::{redact_value, REDACTED};
+use response_protocol::ParsedAction;
+pub use response_protocol::ResponseProtocolKind;
+pub use retry_policy::{
+    is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
+    ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
+    DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
+};
+pub use runtime_context::{
+    format_supporting_context, local_time_label, runtime_time_context, supporting_context,
+    turn_supporting_context, LocalTimeParts, SupportingContextInput,
+};
+use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
+pub use session_runtime::{
+    cancelled_turn_result, run_session_turn, run_session_turn_with_model_client, ModelClient,
+};
+pub use session_worker::{
+    CoreSessionWorker, CoreSessionWorkerConfig, CoreSessionWorkerEvent, CoreSessionWorkerHandle,
+    CoreSessionWorkerRuntime,
+};
 use shell_exec::FileShellJobStore;
 pub use shell_exec::ShellJobRecord;
+pub use status_summary::{
+    context_bar_filled, context_percent, meaningful_latest_usage, runtime_token_status_view,
+    token_status_summary, RuntimeTokenStatusView, TokenStatusSummary, TokenUsageBreakdown,
+};
+pub use status_view::{
+    compact_runtime_status_text, runtime_active_elapsed_secs, runtime_retry_status_view,
+    HostStatusLevel, HostStatusMessage, ModelDirection, RuntimeRetryStatus, RuntimeRetryStatusView,
+    RuntimeStatusSnapshot,
+};
+use tool_jobs::FileToolJobStore;
+pub use work_instructions::{
+    combine_additional_contexts, discover_work_instruction_files, load_work_instruction_context,
+    parse_work_instruction_mode, work_instruction_load_report, work_instruction_load_request,
+    work_instruction_mode_from_sources, WorkInstructionContext, WorkInstructionFile,
+    WorkInstructionLoadMessage, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
+    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
+    WORK_INSTRUCTION_FILENAMES,
+};
+pub use workspace::{
+    apply_workspace_command_to_path, load_workspace_dirs_from_path, normalize_workspace_dir,
+    save_workspace_dirs_to_path, workspace_menu_report, workspace_reference_context,
+    WorkspaceChange, WorkspaceCommand, WorkspaceCommandMessage, WorkspaceCommandMessageKind,
+    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, WorkspaceState,
+    WorkspaceUnchangedReason,
+};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -94,11 +242,18 @@ pub struct LlmResponse {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnFinal {
-    pub response_to_user: String,
+    pub final_answer: String,
     pub stats: UsageStats,
     pub profile_label: String,
     pub repair_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_summary: Option<TurnStopSummary>,
 }
+
+fn llm_final_answer_slice_text(final_answer: &str) -> String {
+    format!("final_answer:\n{final_answer}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApprovalRequest {
     pub approval_id: String,
@@ -166,7 +321,7 @@ pub struct ScratchNoteRecord {
     pub prompt_slice_ids: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ScratchContextOffload {
+pub(crate) struct ScratchContextOffload {
     content: String,
     delta_ids: Vec<String>,
     slice_ids: Vec<String>,
@@ -181,135 +336,7 @@ pub struct ChatHistoryRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedAction {
-    action: String,
-    intent: String,
-    raw_input: Value,
-}
-impl ParsedAction {
-    fn audit_input(&self) -> Value {
-        let mut input = self.raw_input.clone();
-        if self.action == "self_tool" {
-            if let Some(object) = input.as_object_mut() {
-                if let Some(key) = object.get("key").and_then(Value::as_str) {
-                    if self_tool::is_sensitive_env_key(key)
-                        || self_tool::is_memory_path_env_key(key)
-                    {
-                        object.insert("value".to_string(), json!("<redacted>"));
-                    }
-                }
-            }
-        }
-        input
-    }
-
-    fn input_str(&self, key: &str) -> String {
-        self.raw_input
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string()
-    }
-
-    fn input_raw_str(&self, key: &str) -> String {
-        self.raw_input
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    }
-
-    fn input_lower(&self, key: &str) -> String {
-        self.input_str(key).to_lowercase()
-    }
-
-    fn input_u64(&self, key: &str) -> Option<u64> {
-        self.raw_input.get(key).and_then(json_u64)
-    }
-
-    fn input_i64(&self, key: &str) -> Option<i64> {
-        self.raw_input.get(key).and_then(json_i64)
-    }
-
-    fn input_bool(&self, key: &str) -> bool {
-        self.raw_input
-            .get(key)
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    fn input_list(&self, key: &str) -> Vec<String> {
-        self.raw_input
-            .get(key)
-            .map(json_string_list)
-            .unwrap_or_default()
-    }
-
-    fn input_params(&self) -> Vec<String> {
-        self.raw_input
-            .get("params")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(json_sql_param_to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    }
-
-    fn timeout_ms(&self, default_ms: u64) -> u64 {
-        self.input_u64("timeout_ms")
-            .or_else(|| {
-                self.input_u64("timeout_sec")
-                    .map(|seconds| seconds.saturating_mul(1000))
-            })
-            .unwrap_or(default_ms)
-    }
-
-    fn shell_timeout_ms(&self) -> u64 {
-        self.timeout_ms(5000).clamp(1000, 15000)
-    }
-
-    fn status_timeout_ms(&self) -> u64 {
-        self.timeout_ms(0).min(15000)
-    }
-
-    fn background(&self) -> bool {
-        self.input_bool("background")
-            || self
-                .raw_input
-                .get("mode")
-                .and_then(Value::as_str)
-                .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("background"))
-    }
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedEnvelope {
-    report_job_progress: String,
-    final_answer: String,
-    continue_work: bool,
-    thought: String,
-    thought_keep_in_context: bool,
-    next_actions: Vec<ParsedAction>,
-    memory_candidates: Vec<String>,
-    runtime_note: Option<String>,
-    repair_issue: Option<String>,
-}
-
-impl ParsedEnvelope {
-    fn final_text(&self) -> String {
-        if self.final_answer.trim().is_empty() {
-            self.report_job_progress.trim().to_string()
-        } else {
-            self.final_answer.trim().to_string()
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingApproval {
+pub(crate) struct PendingApproval {
     request: ApprovalRequest,
     command: String,
     background: bool,
@@ -428,7 +455,7 @@ impl Drop for MemGuardLock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
-enum ActionExecution {
+pub(crate) enum ActionExecution {
     Completed(String),
     NeedsApproval(PendingApproval),
 }
@@ -599,26 +626,30 @@ fn default_self_tool_process() -> SelfToolProcess {
 pub struct AgentCore {
     static_prompt: String,
     profile: CoreProfile,
-    capabilities: CapabilityRegistry,
-    memory: FileMemoryStore,
-    scratch: FileScratchStore,
-    chat_history: FileChatHistoryStore,
-    shell_jobs: FileShellJobStore,
+    pub(crate) capabilities: CapabilityRegistry,
+    response_protocol: ResponseProtocolKind,
+    pub(crate) memory: FileMemoryStore,
+    pub(crate) scratch: FileScratchStore,
+    pub(crate) chat_history: FileChatHistoryStore,
+    pub(crate) shell_jobs: FileShellJobStore,
+    pub(crate) tool_jobs: FileToolJobStore,
     action_audit: FileActionAuditStore,
-    self_tool: SelfToolState,
+    pub(crate) self_tool: SelfToolState,
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
     configured_round_budget: u32,
     round_budget: u32,
     current_round: u32,
-    current_stats: UsageStats,
+    pub(crate) current_stats: UsageStats,
     repair_attempted: bool,
     last_repair_issue: Option<String>,
     pending_approval: Option<PendingApproval>,
-    bash_approval_mode: BashApprovalMode,
+    pub(crate) bash_approval_mode: BashApprovalMode,
     current_action_turn_id: Option<String>,
     current_action_user_question: String,
+    last_notifications: Vec<CoreNotification>,
+    loaded_work_instruction_fingerprints: HashSet<String>,
 }
 impl AgentCore {
     pub fn new(
@@ -637,10 +668,12 @@ impl AgentCore {
             static_prompt: static_prompt.into(),
             profile,
             capabilities: CapabilityRegistry::builtin(),
+            response_protocol: ResponseProtocolKind::Markdown,
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
             shell_jobs: FileShellJobStore::new(memory_dir),
+            tool_jobs: FileToolJobStore::new(memory_dir),
             action_audit: FileActionAuditStore::new(memory_dir),
             self_tool,
             deltas: Vec::new(),
@@ -656,6 +689,8 @@ impl AgentCore {
             bash_approval_mode: BashApprovalMode::Ask,
             current_action_turn_id: None,
             current_action_user_question: String::new(),
+            last_notifications: Vec::new(),
+            loaded_work_instruction_fingerprints: HashSet::new(),
         }
     }
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
@@ -664,6 +699,43 @@ impl AgentCore {
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
         self.max_llm_input_tokens = max_llm_input_tokens.max(3_000);
     }
+    pub fn configure_runtime_from_host(
+        &mut self,
+        config: &ProviderConfig,
+        bash_approval_mode: BashApprovalMode,
+    ) {
+        self.set_max_llm_input_tokens(config.max_llm_input_tokens);
+        self.set_bash_approval_mode(bash_approval_mode);
+    }
+    pub fn apply_runtime_config_update(
+        &mut self,
+        config: &mut ProviderConfig,
+        bash_approval_mode: &mut BashApprovalMode,
+        work_instruction_mode: &mut WorkInstructionLoadMode,
+        field: RuntimeConfigField,
+        value: &str,
+    ) -> Result<RuntimeConfigApplyReport, RuntimeConfigApplyError> {
+        let effect = apply_runtime_config_value(
+            config,
+            bash_approval_mode,
+            work_instruction_mode,
+            field,
+            value,
+        )?;
+        match effect {
+            RuntimeConfigEffect::None => {}
+            RuntimeConfigEffect::MaxInputChanged(tokens) => self.set_max_llm_input_tokens(tokens),
+            RuntimeConfigEffect::BashApprovalChanged(mode) => self.set_bash_approval_mode(mode),
+            RuntimeConfigEffect::WorkInstructionsChanged(_) => {}
+        }
+        Ok(runtime_config_apply_report(
+            config,
+            *bash_approval_mode,
+            *work_instruction_mode,
+            field,
+            effect,
+        ))
+    }
     pub fn set_max_rounds(&mut self, max_rounds: u32) {
         self.configured_round_budget = max_rounds.max(1);
         self.round_budget = self.configured_round_budget;
@@ -671,11 +743,41 @@ impl AgentCore {
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
         self.capabilities = capabilities;
     }
+    pub fn set_response_protocol(&mut self, protocol: ResponseProtocolKind) {
+        self.response_protocol = protocol;
+    }
     pub fn set_self_tool_state(&mut self, self_tool: SelfToolState) {
         self.self_tool = self_tool;
     }
+    pub fn configure_self_tool_runtime(
+        &mut self,
+        env: BTreeMap<String, String>,
+        paths: SelfToolPaths,
+    ) {
+        self.self_tool = SelfToolState::new(
+            env,
+            paths,
+            default_self_tool_about(),
+            default_self_tool_process(),
+        );
+    }
     pub fn profile(&self) -> &CoreProfile {
         &self.profile
+    }
+    pub fn response_protocol_name(&self) -> &'static str {
+        self.response_protocol.name()
+    }
+    pub fn max_llm_input_tokens(&self) -> u32 {
+        self.max_llm_input_tokens
+    }
+    pub fn configured_round_budget(&self) -> u32 {
+        self.configured_round_budget
+    }
+    pub fn capability_tool_count(&self) -> usize {
+        self.capabilities.tool_count()
+    }
+    pub fn capability_skill_count(&self) -> usize {
+        self.capabilities.skill_count()
     }
     pub fn memory_file(&self) -> PathBuf {
         self.memory.file.clone()
@@ -689,11 +791,54 @@ impl AgentCore {
     pub fn last_repair_issue(&self) -> Option<&str> {
         self.last_repair_issue.as_deref()
     }
+    pub fn last_topic_events(&self, session_id: &str) -> Vec<CoreTopicEvent> {
+        host::notification_topic_events(session_id, &self.last_notifications)
+    }
+    pub fn notify_last_topic_events(&self, session_id: &str, sink: &mut dyn CoreTopicEventSink) {
+        if !self.last_notifications.is_empty() {
+            let events = self.last_topic_events(session_id);
+            sink.on_core_topic_events(&events);
+        }
+    }
+    pub fn init_lifecycle_topic_event(&self, session_id: &str) -> CoreTopicEvent {
+        core_initialized_topic_event(
+            session_id,
+            &self.profile,
+            self.response_protocol.name(),
+            self.max_llm_input_tokens,
+            self.configured_round_budget,
+            self.capabilities.tool_count(),
+            self.capabilities.skill_count(),
+        )
+    }
+    pub fn dynamic_context_summary(&self) -> CoreDynamicContextSummary {
+        let mut delta_ids = BTreeSet::new();
+        let mut visible_slice_count = 0usize;
+        let mut estimated_tokens = 0_u32;
+        for delta in &self.deltas {
+            let hidden = delta.hidden_slice_ids.iter().collect::<HashSet<_>>();
+            let mut delta_visible = false;
+            for slice in &delta.slices {
+                if hidden.contains(&slice.slice_id) {
+                    continue;
+                }
+                delta_visible = true;
+                visible_slice_count += 1;
+                estimated_tokens =
+                    estimated_tokens.saturating_add(estimate_prompt_tokens(&slice.text));
+            }
+            if delta_visible {
+                delta_ids.insert(delta.delta_id.clone());
+            }
+        }
+        CoreDynamicContextSummary {
+            visible_delta_count: delta_ids.len(),
+            visible_slice_count,
+            estimated_tokens,
+        }
+    }
     pub fn dynamic_context_estimated_tokens(&self) -> u32 {
-        self.render_prompt_slices()
-            .iter()
-            .map(|slice| estimate_prompt_tokens(&slice.text))
-            .sum()
+        self.dynamic_context_summary().estimated_tokens
     }
     pub fn clear_dynamic_context(&mut self) {
         self.deltas.clear();
@@ -705,10 +850,56 @@ impl AgentCore {
         self.pending_approval = None;
         self.current_action_turn_id = None;
         self.current_action_user_question.clear();
+        self.last_notifications.clear();
+        self.loaded_work_instruction_fingerprints.clear();
+    }
+    pub fn resolve_stale_context_with_audit(
+        &mut self,
+        request: StaleContextDecisionRequest,
+        continue_old_context: bool,
+        audit_file: &Path,
+        session: &str,
+    ) -> bool {
+        let _ = append_audit_event(
+            audit_file,
+            &stale_context_choice_audit_event(
+                session,
+                request.idle,
+                request.dynamic_context_tokens,
+                continue_old_context,
+            ),
+        );
+        if !continue_old_context {
+            self.clear_dynamic_context();
+        }
+        continue_old_context
     }
     pub fn memory_git_commit_count(&self) -> usize {
         self.memory.git_commit_count()
     }
+
+    fn filter_repeated_work_instructions(&mut self, supporting_context: &str) -> String {
+        let Some((start, end, block)) = work_instruction_context_block(supporting_context) else {
+            return supporting_context.trim().to_string();
+        };
+        let fingerprint = stable_text_fingerprint(block);
+        if self
+            .loaded_work_instruction_fingerprints
+            .insert(fingerprint)
+        {
+            return supporting_context.trim().to_string();
+        }
+
+        let mut filtered = String::new();
+        filtered.push_str(supporting_context[..start].trim_end());
+        let tail = supporting_context[end..].trim_start();
+        if !filtered.trim().is_empty() && !tail.is_empty() {
+            filtered.push_str("\n\n");
+        }
+        filtered.push_str(tail);
+        filtered.trim().to_string()
+    }
+
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
         self.current_round = 0;
         self.round_budget = self.configured_round_budget;
@@ -716,6 +907,7 @@ impl AgentCore {
         self.repair_attempted = false;
         self.last_repair_issue = None;
         self.pending_approval = None;
+        self.last_notifications.clear();
         let action_turn_id = unique_id("action_turn");
         self.current_action_turn_id = Some(action_turn_id.clone());
         self.current_action_user_question = user_input.trim().to_string();
@@ -728,9 +920,12 @@ impl AgentCore {
             .map(should_run_memory_precheck)
             .unwrap_or(false);
         let mut text = format!("User question:\n{}", user_input.trim());
-        if let Some(ctx) = supporting_context.map(str::trim).filter(|x| !x.is_empty()) {
+        let filtered_supporting_context = supporting_context
+            .map(|ctx| self.filter_repeated_work_instructions(ctx))
+            .filter(|ctx| !ctx.trim().is_empty());
+        if let Some(ctx) = filtered_supporting_context.as_deref() {
             text.push_str("\n\nSupporting context:\n");
-            text.push_str(ctx);
+            text.push_str(ctx.trim());
         }
         let incoming_prompt_tokens = estimate_prompt_tokens(&text);
         if let Some(shrink_review) = self.consume_shrink_review_if_needed(incoming_prompt_tokens) {
@@ -749,155 +944,182 @@ impl AgentCore {
             rounds_remaining: self.round_budget,
         }
     }
+    pub fn append_user_supplement(&mut self, text: &str) -> Option<CoreStep> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        self.append_slice_to_latest_delta(
+            "user_supplement".to_string(),
+            format!(
+                "User supplement during current turn:\n{}\n\nNote: This supplement was entered while the model was already working on the current turn. Treat it as the latest user instruction/correction.",
+                text
+            ),
+        );
+        Some(CoreStep::NeedModel {
+            prompt: self.render_prompt(),
+            rounds_remaining: self.remaining_rounds(),
+        })
+    }
+
+    pub fn append_user_supplements_with_audit(
+        &mut self,
+        supplements: impl IntoIterator<Item = String>,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+    ) -> Option<CoreStep> {
+        let mut step = None;
+        for supplement in supplements {
+            let supplement = supplement.trim();
+            if supplement.is_empty() {
+                continue;
+            }
+            let _ = append_audit_event(
+                audit_file,
+                &user_supplement_audit_event(session, turn_id, supplement),
+            );
+            step = self.append_user_supplement(supplement);
+        }
+        step
+    }
+
     pub fn apply_model_response(&mut self, response: LlmResponse) -> CoreStep {
+        self.last_notifications.clear();
         self.current_round += 1;
         self.current_stats.add(&response.usage);
         self.last_observed_prompt_tokens = self
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
         if response.truncated && !self.repair_attempted {
+            let protocol_suite = self.response_protocol.suite();
             return self.request_protocol_repair(
                 "truncated_model_output",
-                "The previous model output was cut off by the max output token limit before a complete JSON object was produced. Return one short valid JSON object only. If the task needs a long report, use run_bash to write the full report to a file and keep report_job_progress concise.",
+                protocol_suite.repair_instruction("truncated_model_output"),
                 &response.content,
             );
         }
-        let parsed = parse_envelope(&response.content, &self.capabilities);
+        let protocol_suite = self.response_protocol.suite();
+        let parsed = protocol_suite.parse(&response.content, &self.capabilities);
         let mut slices = Vec::new();
         if !parsed.thought.is_empty() && parsed.thought_keep_in_context {
             slices.push((
-                "llm_thought".to_string(),
-                format!("Thought:\n{}", parsed.thought),
+                "llm_free_talk".to_string(),
+                format!("Free_talk:\n{}", parsed.thought),
             ));
         }
         if let Some(issue) = parsed.repair_issue.clone() {
             if !self.repair_attempted {
                 return self.request_protocol_repair(
                     &issue,
-                    protocol_repair_instruction(&issue),
+                    protocol_suite.repair_instruction(&issue),
                     &response.content,
                 );
             }
             if issue == "invalid_json"
-                && can_show_plain_text_after_repair_failure(&response.content)
+                && protocol_suite.can_show_plain_text_after_repair_failure(&response.content)
             {
                 let final_text = response.content.trim().to_string();
                 slices.push((
                     "llm_response".to_string(),
-                    format!("Response shown to user:\n{}", final_text),
+                    llm_final_answer_slice_text(&final_text),
                 ));
                 self.append_delta(slices);
                 return CoreStep::Final(TurnFinal {
-                    response_to_user: final_text,
+                    final_answer: final_text,
                     stats: self.current_stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: Some("invalid_json_plain_text_fallback".to_string()),
+                    stop_summary: None,
                 });
             }
-            let final_text = if parsed.final_text().is_empty() {
-                repair_failure_message(self.last_repair_issue.as_deref().unwrap_or(&issue), &issue)
-            } else {
-                parsed.final_text()
-            };
+            let final_text = parsed.final_text();
+            let first_issue = self.last_repair_issue.as_deref().unwrap_or(&issue);
+            if final_text.is_empty() {
+                return CoreStep::Final(TurnFinal {
+                    final_answer: String::new(),
+                    stats: self.current_stats.clone(),
+                    profile_label: self.profile.label(),
+                    repair_issue: Some(issue.clone()),
+                    stop_summary: Some(TurnStopSummary::protocol_repair_failed(
+                        first_issue,
+                        &issue,
+                        first_issue == "truncated_model_output"
+                            || issue == "truncated_model_output",
+                        self.current_stats.clone(),
+                        Some(response.usage.clone()),
+                    )),
+                });
+            }
             slices.push((
                 "llm_response".to_string(),
-                format!("Response shown to user:\n{}", final_text),
+                llm_final_answer_slice_text(&final_text),
             ));
             self.append_delta(slices);
             return CoreStep::Final(TurnFinal {
-                response_to_user: final_text,
+                final_answer: final_text,
                 stats: self.current_stats.clone(),
                 profile_label: self.profile.label(),
                 repair_issue: Some(issue),
+                stop_summary: None,
             });
         }
+        self.last_notifications = notification::notifications_from_envelope(&parsed);
+        for compact in &parsed.context_compacts {
+            let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
+            if missing.is_empty() {
+                let shrink_result = self.apply_prompt_shrink(
+                    "Action result: context_compact",
+                    &compact.delta_ids,
+                    &compact.slice_ids,
+                );
+                slices.push((
+                    "context_compacted".to_string(),
+                    format!(
+                        "Context compact summary replacing delta_ids=[{}]:\n{}",
+                        compact.delta_ids.join(","),
+                        compact.summary
+                    ),
+                ));
+                slices.push(("result_of_llm_action".to_string(), shrink_result));
+            } else {
+                slices.push((
+                    "result_of_llm_action".to_string(),
+                    format!(
+                        "Action result: context_compact\nerror: invalid_prompt_refs\nmissing_ids: {}",
+                        missing.join(", ")
+                    ),
+                ));
+            }
+        }
         if !parsed.continue_work {
-            if parsed.next_actions.is_empty() {
-                for candidate in &parsed.memory_candidates {
-                    if self.memory.write(candidate).is_ok() {
-                        self.current_stats.tool_calls += 1;
-                        self.current_stats.mem_writes += 1;
-                    }
+            for candidate in &parsed.memory_candidates {
+                if self.memory.write(candidate).is_ok() {
+                    self.current_stats.tool_calls += 1;
+                    self.current_stats.mem_writes += 1;
                 }
-                let final_text = parsed.final_text();
-                slices.push((
-                    "llm_response".to_string(),
-                    format!("Response shown to user:\n{}", final_text),
-                ));
-                self.append_delta(slices);
-                return CoreStep::Final(TurnFinal {
-                    response_to_user: final_text,
-                    stats: self.current_stats.clone(),
-                    profile_label: self.profile.label(),
-                    repair_issue: None,
-                });
             }
-            let pending_final_text = parsed.final_text();
-            let last_idx = parsed.next_actions.len() - 1;
-            let command = parsed.next_actions[last_idx].input_str("command");
-            let timeout_ms = parsed.next_actions[last_idx].shell_timeout_ms();
-            if !pending_final_text.is_empty() {
-                slices.push((
-                    "llm_progress".to_string(),
-                    format!("Job progress shown to user:\n{}", pending_final_text),
-                ));
-            }
-            let command_body = match self.run_finished_final_command(&command, timeout_ms) {
-                ActionExecution::Completed(result) => result,
-                ActionExecution::NeedsApproval(pending) => {
-                    self.append_delta(slices);
-                    let request = pending.request.clone();
-                    self.pending_approval = Some(pending);
-                    return CoreStep::NeedsUserApproval { request };
-                }
-            };
-            let pass = finished_final_command_passed(&command_body);
-            slices.push(("result_of_llm_action".to_string(), command_body));
-            if pass {
-                for candidate in parsed.memory_candidates {
-                    if self.memory.write(&candidate).is_ok() {
-                        self.current_stats.tool_calls += 1;
-                        self.current_stats.mem_writes += 1;
-                    }
-                }
-                slices.push((
-                    "llm_response".to_string(),
-                    format!("Response shown to user:\n{}", pending_final_text),
-                ));
-                self.append_delta(slices);
-                return CoreStep::Final(TurnFinal {
-                    response_to_user: pending_final_text,
-                    stats: self.current_stats.clone(),
-                    profile_label: self.profile.label(),
-                    repair_issue: None,
-                });
-            }
+            let final_text = parsed.final_text();
             slices.push((
-                "runtime_note".to_string(),
-                "Note: 你上轮用 status:finished + final_answer + 最终 run_bash command 声明完成，但命令返回非 0。Runtime 已忽略 final_answer，请根据以上命令输出修正后再回复。".to_string(),
+                "llm_response".to_string(),
+                llm_final_answer_slice_text(&final_text),
             ));
             self.append_delta(slices);
-            self.append_in_turn_shrink_review_if_needed();
-            if self.remaining_rounds() == 0 {
-                return CoreStep::RoundLimitReached {
-                    max_rounds: self.round_budget,
-                };
-            }
-            return CoreStep::NeedModel {
-                prompt: self.render_prompt(),
-                rounds_remaining: self.remaining_rounds(),
-            };
+            return CoreStep::Final(TurnFinal {
+                final_answer: final_text,
+                stats: self.current_stats.clone(),
+                profile_label: self.profile.label(),
+                repair_issue: if self.repair_attempted
+                    && parsed.runtime_note.as_deref() == Some("auto_wrapped_prose_as_final_answer")
+                {
+                    Some("invalid_json_plain_text_fallback".to_string())
+                } else {
+                    None
+                },
+                stop_summary: None,
+            });
         }
 
-        if !parsed.report_job_progress.trim().is_empty() {
-            slices.push((
-                "llm_progress".to_string(),
-                format!(
-                    "Job progress shown to user:\n{}",
-                    parsed.report_job_progress.trim()
-                ),
-            ));
-        }
         // Omitted status is an intentional shorthand for status:working.
         if let Some(note) = parsed.runtime_note.as_deref() {
             slices.push(("runtime_note".to_string(), note.to_string()));
@@ -940,6 +1162,19 @@ impl AgentCore {
                 rounds_remaining: self.remaining_rounds(),
             };
         }
+        if !parsed.context_compacts.is_empty() {
+            self.append_delta(slices);
+            self.append_in_turn_shrink_review_if_needed();
+            if self.remaining_rounds() == 0 {
+                return CoreStep::RoundLimitReached {
+                    max_rounds: self.round_budget,
+                };
+            }
+            return CoreStep::NeedModel {
+                prompt: self.render_prompt(),
+                rounds_remaining: self.remaining_rounds(),
+            };
+        }
         for candidate in &parsed.memory_candidates {
             if self.memory.write(candidate).is_ok() {
                 self.current_stats.tool_calls += 1;
@@ -954,16 +1189,101 @@ impl AgentCore {
         };
         slices.push((
             "llm_response".to_string(),
-            format!("Response shown to user:\n{}", final_text),
+            llm_final_answer_slice_text(&final_text),
         ));
         self.append_delta(slices);
         CoreStep::Final(TurnFinal {
-            response_to_user: final_text,
+            final_answer: final_text,
             stats: self.current_stats.clone(),
             profile_label: self.profile.label(),
             repair_issue: None,
+            stop_summary: None,
         })
     }
+
+    pub fn record_discarded_model_response_usage(&mut self, usage: &UsageStats) {
+        self.current_round += 1;
+        self.current_stats.add(usage);
+        self.last_observed_prompt_tokens =
+            self.last_observed_prompt_tokens.max(usage.prompt_tokens);
+    }
+
+    pub fn apply_model_response_with_repair_audit(
+        &mut self,
+        response: LlmResponse,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+    ) -> CoreStep {
+        let repair_calls_before = self.current_stats().repair_calls;
+        let response_model = response.model_name.clone();
+        let response_usage = response.usage.clone();
+        let response_truncated = response.truncated;
+        let step = self.apply_model_response(response);
+        let repair_calls_after = self.current_stats().repair_calls;
+        if repair_calls_after > repair_calls_before {
+            let _ = append_audit_event(
+                audit_file,
+                &model_repair_request_audit_event(
+                    session,
+                    turn_id,
+                    self.last_repair_issue(),
+                    &response_model,
+                    &response_usage,
+                    response_truncated,
+                    repair_calls_after,
+                    repair_calls_after.saturating_sub(repair_calls_before),
+                ),
+            );
+        }
+        step
+    }
+
+    pub fn record_turn_start_audit(
+        &self,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        user_input: &str,
+    ) {
+        let _ = append_audit_event(
+            audit_file,
+            &turn_start_audit_event(session, turn_id, user_input),
+        );
+    }
+
+    pub fn record_turn_error_audit(
+        &self,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        error: &str,
+    ) {
+        let _ = append_audit_event(audit_file, &turn_error_audit_event(session, turn_id, error));
+    }
+
+    pub fn record_turn_final_audit(
+        &self,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        outcome: &TurnOutcome,
+    ) {
+        let _ = append_audit_event(
+            audit_file,
+            &turn_final_audit_event(
+                session,
+                turn_id,
+                &outcome.text,
+                &outcome.stats,
+                outcome.latest_usage.as_ref(),
+                outcome.repair_issue.as_deref(),
+                outcome.stop_summary.as_ref(),
+                outcome.elapsed,
+            ),
+        );
+    }
+
     pub fn resolve_user_approval(&mut self, approval_id: &str, approved: bool) -> CoreStep {
         let Some(pending) = self.pending_approval.take() else {
             self.append_delta(vec![(
@@ -984,7 +1304,7 @@ impl AgentCore {
             return CoreStep::NeedsUserApproval { request };
         }
         let result = if approved {
-            execute_approved_bash(
+            shell_exec::execute_approved_bash(
                 &pending.command,
                 pending.background,
                 pending.timeout_ms,
@@ -997,6 +1317,7 @@ impl AgentCore {
                 pending.command, pending.request.approval_id, pending.request.reason
             )
         };
+        let result = annotate_action_result_with_intent(result, &pending.intent);
         self.record_pending_approval_audit(&pending, approved, &result);
         self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
         self.append_in_turn_shrink_review_if_needed();
@@ -1010,6 +1331,22 @@ impl AgentCore {
             rounds_remaining: self.remaining_rounds(),
         }
     }
+
+    pub fn resolve_user_approval_with_audit(
+        &mut self,
+        approval: &ApprovalRequest,
+        approved: bool,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+    ) -> CoreStep {
+        let _ = append_audit_event(
+            audit_file,
+            &user_approval_audit_event(session, turn_id, approval, approved),
+        );
+        self.resolve_user_approval(&approval.approval_id, approved)
+    }
+
     pub fn continue_after_round_limit(&mut self) -> CoreStep {
         self.current_round = 0;
         self.round_budget = DEFAULT_ROUND_BUDGET;
@@ -1025,8 +1362,69 @@ impl AgentCore {
             rounds_remaining: self.remaining_rounds(),
         }
     }
+
+    pub fn resolve_round_limit_with_audit(
+        &mut self,
+        request: RoundLimitDecisionRequest,
+        should_continue: bool,
+        latest_usage: Option<UsageStats>,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+    ) -> RoundLimitResolution {
+        let _ = append_audit_event(
+            audit_file,
+            &round_limit_audit_event(session, turn_id, request.max_rounds, should_continue),
+        );
+        if should_continue {
+            RoundLimitResolution::Continue(self.continue_after_round_limit())
+        } else {
+            RoundLimitResolution::Stop(TurnStopSummary::round_limit_stopped_by_user(
+                request.max_rounds,
+                self.current_stats().clone(),
+                latest_usage,
+            ))
+        }
+    }
+
+    pub fn resolve_output_expansion_with_audit(
+        &self,
+        config: &mut ProviderConfig,
+        request: OutputExpansionRequest,
+        should_expand: bool,
+        usage: UsageStats,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+    ) -> OutputExpansionResolution {
+        if should_expand {
+            config.max_llm_output_tokens = request.expanded_tokens();
+            let _ = append_audit_event(
+                audit_file,
+                &max_llm_output_increased_audit_event(
+                    session,
+                    turn_id,
+                    config.max_llm_output_tokens,
+                ),
+            );
+            OutputExpansionResolution::RetryWithExpandedLimit {
+                max_llm_output_tokens: config.max_llm_output_tokens,
+            }
+        } else {
+            OutputExpansionResolution::Stop(TurnStopSummary::output_limit_stopped_by_user(
+                config.max_llm_output_tokens,
+                usage,
+            ))
+        }
+    }
+
     pub fn render_prompt(&self) -> String {
-        prompt_render::render_prompt(&self.static_prompt, &self.capabilities, &self.deltas)
+        prompt_render::render_prompt(
+            &self.static_prompt,
+            &self.capabilities,
+            self.response_protocol.suite(),
+            &self.deltas,
+        )
     }
     fn render_prompt_slices(&self) -> Vec<PromptSlice> {
         prompt_render::render_prompt_slices(&self.deltas)
@@ -1049,9 +1447,11 @@ impl AgentCore {
             format!(
                 "Protocol repair request\nshrink_priority: discard_first\nissue: {}\nreason: {}\ninstruction:\n{}\n\nPrevious model response to repair:\n[BEGIN PREVIOUS_LLM_RESPONSE]\n{}\n[END PREVIOUS_LLM_RESPONSE]",
                 issue,
-                protocol_repair_reason(issue),
+                self.response_protocol.suite().repair_reason(issue),
                 instruction,
-                focused_repair_response_text(issue, raw_response),
+                self.response_protocol
+                    .suite()
+                    .focused_repair_text(issue, raw_response),
             ),
         )]);
         CoreStep::NeedModel {
@@ -1113,6 +1513,44 @@ impl AgentCore {
             hidden_slice_ids: Vec::new(),
         });
     }
+
+    fn append_slice_to_latest_delta(&mut self, prompt_type: String, text: String) {
+        if self.deltas.is_empty() {
+            self.append_delta(vec![(prompt_type, text)]);
+            return;
+        }
+        let Some(delta) = self.deltas.last_mut() else {
+            return;
+        };
+        let time_ms = now_ms();
+        let chunks = split_text_for_prompt_slices(&text, PROMPT_SLICE_TEXT_LIMIT);
+        for chunk in chunks {
+            let slice_index = delta.slices.len() + 1;
+            delta.slices.push(PromptSlice {
+                delta_id: delta.delta_id.clone(),
+                slice_id: format!(
+                    "ps_{}_s{:03}",
+                    delta.delta_id.trim_start_matches("pd_"),
+                    slice_index
+                ),
+                prompt_type: prompt_type.clone(),
+                time_ms,
+                text: chunk,
+                slice_index,
+                slice_count: 0,
+            });
+        }
+        let slice_count = delta.slices.len();
+        for (idx, slice) in delta.slices.iter_mut().enumerate() {
+            slice.slice_index = idx + 1;
+            slice.slice_count = slice_count;
+            slice.slice_id = format!(
+                "ps_{}_s{:03}",
+                delta.delta_id.trim_start_matches("pd_"),
+                idx + 1
+            );
+        }
+    }
     fn consume_shrink_review_if_needed(&mut self, incoming_prompt_tokens: u32) -> Option<String> {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
         let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
@@ -1133,7 +1571,6 @@ impl AgentCore {
             return None;
         }
         let current_count = self.deltas.len();
-        let slice_count = slices.len();
         let delta_refs = self
             .deltas
             .iter()
@@ -1155,26 +1592,9 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let recent_refs = slices
-            .iter()
-            .rev()
-            .take(8)
-            .map(|slice| {
-                format!(
-                    "- slice_id={} delta_id={} slice={}/{} prompt_type={} time_ms={}",
-                    slice.slice_id,
-                    slice.delta_id,
-                    slice.slice_index,
-                    slice.slice_count,
-                    slice.prompt_type,
-                    slice.time_ms
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, preserve only active work-relevant state, use memmgr type=scratch op=write kind=context_offload for important but lengthy existing delta/slice content or kind=notes for compact checkpoints, then use memmgr type=context op=shrink on covered delta_id/slice_id ranges. Do not target prompt_0.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use memmgr type=scratch op=write kind=context_offload for important but lengthy existing deltas or kind=notes for compact checkpoints, then use memmgr type=context op=shrink on covered delta_id ranges. Do not target prompt_0.";
         Some(format!(
-            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nprompt_slice_count={slice_count}\nrecent_prompt_delta_refs:\n{delta_refs}\nrecent_prompt_slice_refs:\n{recent_refs}\n{instruction}",
+            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{instruction}",
             self.max_llm_input_tokens
         ))
     }
@@ -1227,7 +1647,7 @@ impl AgentCore {
             ),
         }
     }
-    fn query_prompt_slices(
+    pub(crate) fn query_prompt_slices(
         &self,
         query: &str,
         limit: usize,
@@ -1259,13 +1679,33 @@ impl AgentCore {
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
             Err(err) => {
-                let result = format!("Action result: {}\nerror: {}", action.action, err);
+                let result = annotate_action_result_with_intent(
+                    format!("Action result: {}\nerror: {}", action.action, err),
+                    &action.intent,
+                );
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
                 return ActionExecution::Completed(result);
             }
         };
+        if let Err(issue) = self
+            .capabilities
+            .validate_action_input(&action.action, &action.raw_input)
+        {
+            let result = annotate_action_result_with_intent(
+                format!(
+                    "Action result: {}\nerror: invalid_input\nmessage: {}",
+                    action.action, issue
+                ),
+                &action.intent,
+            );
+            self.record_action_audit(&action_for_audit, "invalid_input", Some(&result));
+            return ActionExecution::Completed(result);
+        }
         if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
-            let result = self.execute_command_capability(&action, path);
+            let result = annotate_action_result_with_intent(
+                self.execute_command_capability(&action, path),
+                &action.intent,
+            );
             self.record_action_audit(&action_for_audit, "completed", Some(&result));
             return ActionExecution::Completed(result);
         }
@@ -1275,342 +1715,33 @@ impl AgentCore {
                 unreachable!("command target returned early")
             }
         };
-        let result = match dispatch_name {
-            "capmgr" => self.execute_capmgr_action(&action),
-            "memmgr" => self.execute_memmgr_action(&action),
-            "self_tool" => self.execute_self_tool_action(&action),
-            "shell_job_status" => {
-                self.current_stats.tool_calls += 1;
-                if action.raw_input.get("timeout_ms").is_none()
-                    && action.raw_input.get("timeout_sec").is_none()
-                {
-                    "Action result: shell_job_status\nerror: invalid_input\nmessage: Missing `timeout_ms`. Choose how long the runtime should wait for this status check, from 0 to 15000 ms.".to_string()
-                } else {
-                    self.shell_jobs
-                        .status(&action.input_str("job_id"), action.status_timeout_ms())
-                }
-            }
-            "run_bash" => {
-                self.current_stats.tool_calls += 1;
-                let execution = execute_guarded_bash(
-                    &action.input_str("command"),
-                    action.background(),
-                    action.shell_timeout_ms(),
-                    self.bash_approval_mode,
-                    &action.intent,
-                    &self.shell_jobs,
-                );
-                match &execution {
-                    ActionExecution::Completed(result) => {
-                        self.record_action_audit(&action_for_audit, "completed", Some(result));
-                    }
-                    ActionExecution::NeedsApproval(pending) => {
-                        let result = format!(
-                            "Action result: run_bash\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
-                            pending.command,
-                            pending.request.approval_id,
-                            pending.request.risk,
-                            pending.request.reason
-                        );
-                        self.record_action_audit(
-                            &action_for_audit,
-                            "needs_user_approval",
-                            Some(&result),
-                        );
-                    }
-                }
-                return execution;
-            }
-            other => format!("Action result: {}\nunsupported native action", other),
+        self.current_stats.tool_calls += 1;
+        let execution = match tool_registry::execute_builtin_tool(self, dispatch_name, &action) {
+            Some(execution) => execution,
+            None => ActionExecution::Completed(format!(
+                "Action result: {}\nunsupported native action",
+                dispatch_name
+            )),
         };
-        self.record_action_audit(&action_for_audit, "completed", Some(&result));
-        ActionExecution::Completed(result)
-    }
-
-    fn execute_memmgr_action(&mut self, action: &ParsedAction) -> String {
-        self.current_stats.tool_calls += 1;
-        let mem_type = action.input_lower("type");
-        let op = action.input_lower("op");
-        let query = action.input_str("query");
-        let content = action.input_str("content");
-        let scratch_type = action.input_str("kind");
-        let label = action.input_str("label");
-        let sql = action.input_str("sql");
-        let params = action.input_params();
-        let id = action.input_str("id");
-        let delta_ids = action.input_list("delta_ids");
-        let slice_ids = action.input_list("slice_ids");
-        let limit = action.input_u64("limit").unwrap_or(5) as usize;
-        let after_ms = action.input_i64("after_ms");
-        let before_ms = action.input_i64("before_ms");
-        let expected_version = action.input_u64("expected_version");
-        if let Err(issue) = memmgr::validate_action(memmgr::MemmgrActionInput {
-            idx: 0,
-            mem_type: &mem_type,
-            op: &op,
-            query: &query,
-            content: &content,
-            scratch_type: &scratch_type,
-            label: &label,
-            sql: &sql,
-            params: &params,
-            id: &id,
-            delta_ids: &delta_ids,
-            slice_ids: &slice_ids,
-        }) {
-            return format!(
-                "Action result: memmgr\ntype: {}\nop: {}\nerror: invalid_input\nmessage: {}",
-                empty_as_missing(&mem_type),
-                empty_as_missing(&op),
-                natural_tool_input_message(&issue)
-            );
+        match execution {
+            ActionExecution::Completed(result) => {
+                let result = annotate_action_result_with_intent(result, &action.intent);
+                self.record_action_audit(&action_for_audit, "completed", Some(&result));
+                ActionExecution::Completed(result)
+            }
+            ActionExecution::NeedsApproval(pending) => {
+                let result = annotate_action_result_with_intent(format!(
+                    "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
+                    action_for_audit.action,
+                    pending.command,
+                    pending.request.approval_id,
+                    pending.request.risk,
+                    pending.request.reason
+                ), &action_for_audit.intent);
+                self.record_action_audit(&action_for_audit, "needs_user_approval", Some(&result));
+                ActionExecution::NeedsApproval(pending)
+            }
         }
-        match (mem_type.as_str(), op.as_str()) {
-            ("durable", "query") => {
-                self.current_stats.mem_reads += 1;
-                let rows = self.memory.query(&query, limit).unwrap_or_default();
-                if rows.is_empty() {
-                    format!(
-                        "Action result: memmgr\ntype: durable\nop: query\nquery: {}\nresults: none",
-                        query
-                    )
-                } else {
-                    let lines = rows
-                        .into_iter()
-                        .map(|r| {
-                            format!(
-                                "- id={} version={} created_at_ms={} updated_at_ms={} content={}",
-                                r.id, r.version, r.created_at_ms, r.updated_at_ms, r.content
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!(
-                        "Action result: memmgr\ntype: durable\nop: query\nquery: {}\nresults:\n{}",
-                        query, lines
-                    )
-                }
-            }
-            ("durable", "schema") => {
-                self.current_stats.mem_reads += 1;
-                self.memory.schema_text(&self.chat_history)
-                    .replacen("Action result: memory_schema", "Action result: memmgr\ntype: durable\nop: schema", 1)
-            }
-            ("durable", "sql") | ("raw_chat", "sql") => {
-                self.current_stats.mem_reads += 1;
-                match self
-                    .memory
-                    .sql_read(&self.chat_history, &sql, &params, limit)
-                {
-                    Ok(rows) if rows.is_empty() => {
-                        format!(
-                            "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults: none",
-                            mem_type, sql
-                        )
-                    }
-                    Ok(rows) => {
-                        let lines = rows
-                            .into_iter()
-                            .map(|row| {
-                                let cells = row
-                                    .into_iter()
-                                    .map(|(column, value)| format!("{}={}", column, value))
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                                format!("- {}", cells)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!(
-                            "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults:\n{}",
-                            mem_type, sql, lines
-                        )
-                    }
-                    Err(err) => format!(
-                        "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nerror: {}",
-                        mem_type, sql, err
-                    ),
-                }
-            }
-            ("durable", "insert" | "update" | "upsert" | "delete") => {
-                match self.memory.update(&op, &id, &content, expected_version) {
-                    Ok(result) => {
-                        self.current_stats.mem_writes += 1;
-                        result
-                            .replacen("Action result: memory_update", "Action result: memmgr\ntype: durable", 1)
-                    }
-                    Err(err) => format!("Action result: memmgr\ntype: durable\nop: {}\nerror: {}", op, err),
-                }
-            }
-            ("raw_chat", "query") => {
-                let rows = self
-                    .chat_history
-                    .query(&query, limit, after_ms, before_ms)
-                    .unwrap_or_default();
-                let delta_rows = self.query_prompt_slices(&query, limit, after_ms, before_ms);
-                if rows.is_empty() && delta_rows.is_empty() {
-                    format!(
-                        "Action result: memmgr\ntype: raw_chat\nop: query\nquery: {}\nresults: none",
-                        query
-                    )
-                } else {
-                    let mut sections = Vec::new();
-                    if !rows.is_empty() {
-                        let lines = rows
-                            .into_iter()
-                            .map(|record| {
-                                format!(
-                                    "- source=chat_record time_ms={} session={} turn_id={} user={} assistant={}",
-                                    record.started_at_ms,
-                                    record.session,
-                                    record.turn_id,
-                                    compact_text(&record.user_input, 160),
-                                    compact_text(&record.assistant_output, 220)
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        sections.push(format!("chat_records:\n{}", lines));
-                    }
-                    if !delta_rows.is_empty() {
-                        let lines = delta_rows
-                            .into_iter()
-                            .map(|slice| {
-                                format!(
-                                    "- source=prompt_delta delta_id={} slice_id={} slice={}/{} prompt_type={} time_ms={} text={}",
-                                    slice.delta_id,
-                                    slice.slice_id,
-                                    slice.slice_index,
-                                    slice.slice_count,
-                                    slice.prompt_type,
-                                    slice.time_ms,
-                                    compact_text(&slice.text, 240)
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        sections.push(format!("current_prompt_deltas:\n{}", lines));
-                    }
-                    format!(
-                        "Action result: memmgr\ntype: raw_chat\nop: query\nquery: {}\nresults:\n{}",
-                        query,
-                        sections.join("\n")
-                    )
-                }
-            }
-            ("raw_chat", "delete") => match self.chat_history.delete(
-                &id,
-                &query,
-                limit,
-                after_ms,
-                before_ms,
-            ) {
-                Ok(deleted) => format!(
-                    "Action result: memmgr\ntype: raw_chat\nop: delete\nid: {}\nquery: {}\ndeleted_count: {}",
-                    id, query, deleted
-                ),
-                Err(err) => format!("Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}", err),
-            },
-            ("scratch", "write") => {
-                let scratch_type = memmgr::normalize_scratch_kind(&scratch_type);
-                let write_result = if scratch_type == "context_offload" {
-                    self.collect_prompt_context_for_scratch(&delta_ids, &slice_ids)
-                        .and_then(|offload| {
-                            self.scratch.write_record(
-                                &scratch_type,
-                                &label,
-                                &offload.content,
-                                &offload.delta_ids,
-                                &offload.slice_ids,
-                            )
-                        })
-                } else {
-                    self.scratch
-                        .write_record(&scratch_type, &label, &content, &[], &[])
-                };
-                match write_result {
-                    Ok(record) => format_scratch_write_result(&record)
-                        .replacen("Action result: scratch_write", "Action result: memmgr\ntype: scratch\nop: write", 1),
-                    Err(err) => format!("Action result: memmgr\ntype: scratch\nop: write\nerror: {}", err),
-                }
-            }
-            ("scratch", "read") => match self.scratch.read(&id) {
-                Ok(Some(record)) => format_scratch_read_result(&record)
-                    .replacen("Action result: scratch_read", "Action result: memmgr\ntype: scratch\nop: read", 1),
-                Ok(None) => format!(
-                    "Action result: memmgr\ntype: scratch\nop: read\nid: {}\nfound: false",
-                    id
-                ),
-                Err(err) => format!("Action result: memmgr\ntype: scratch\nop: read\nerror: {}", err),
-            },
-            ("scratch", "query") => match self.scratch.query(&query, limit) {
-                Ok(rows) if rows.is_empty() => format!(
-                    "Action result: memmgr\ntype: scratch\nop: query\nquery: {}\nresults: none",
-                    query
-                ),
-                Ok(rows) => {
-                    let lines = rows
-                        .into_iter()
-                        .map(|row| {
-                            format!(
-                                "- id={} label={} type={} time_ms={} content_preview={}",
-                                row.id,
-                                scratch_label_for_display(&row),
-                                memmgr::normalize_scratch_kind(&row.scratch_type),
-                                row.created_at_ms,
-                                compact_text(&row.content, 240)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!(
-                        "Action result: memmgr\ntype: scratch\nop: query\nquery: {}\nresults:\n{}",
-                        query, lines
-                    )
-                }
-                Err(err) => format!("Action result: memmgr\ntype: scratch\nop: query\nerror: {}", err),
-            },
-            ("scratch", "delete") => match self.scratch.delete(&id) {
-                Ok(true) => format!(
-                    "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: true",
-                    id
-                ),
-                Ok(false) => format!(
-                    "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: false",
-                    id
-                ),
-                Err(err) => format!("Action result: memmgr\ntype: scratch\nop: delete\nerror: {}", err),
-            },
-            ("context", "shrink") => self
-                .apply_prompt_shrink(&delta_ids, &slice_ids)
-                .replacen("Action result: prompt_shrink", "Action result: memmgr\ntype: context\nop: shrink", 1),
-            _ => format!(
-                "Action result: memmgr\ntype: {}\nop: {}\nerror: unsupported_type_or_op",
-                mem_type, op
-            ),
-        }
-    }
-
-    fn execute_capmgr_action(&mut self, action: &ParsedAction) -> String {
-        self.current_stats.tool_calls += 1;
-        capmgr::execute(
-            &self.capabilities,
-            capmgr::CapmgrActionInput {
-                op: &action.input_lower("op"),
-                kind: &action.input_str("kind"),
-                id: &action.input_str("id"),
-            },
-        )
-    }
-
-    fn execute_self_tool_action(&mut self, action: &ParsedAction) -> String {
-        self.current_stats.tool_calls += 1;
-        self.self_tool.execute(SelfToolInput {
-            self_type: &action.input_lower("type"),
-            op: &action.input_lower("op"),
-            key: &action.input_str("key"),
-            value: &action.input_raw_str("value"),
-        })
     }
 
     fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> String {
@@ -1620,6 +1751,9 @@ impl AgentCore {
             "intent": action.intent,
             "args": action.raw_input,
         });
+        if action.background() {
+            return self.tool_jobs.spawn(&action.action, path, &payload);
+        }
         executor::execute_command_action(&action.action, path, &payload, action.shell_timeout_ms())
     }
 
@@ -1679,73 +1813,7 @@ impl AgentCore {
         );
     }
 
-    fn run_finished_final_command(&mut self, command: &str, timeout_ms: u64) -> ActionExecution {
-        let timeout_ms = timeout_ms.clamp(1000, 15_000);
-        let execution = execute_guarded_bash(
-            command,
-            false,
-            timeout_ms,
-            self.bash_approval_mode,
-            "Verify final answer before showing it.",
-            &self.shell_jobs,
-        );
-        match execution {
-            ActionExecution::Completed(result) => {
-                let body = format_finished_final_command_result(command, &result);
-                let status = if finished_final_command_passed(&body) {
-                    "final_command_check_command_pass"
-                } else {
-                    "final_command_check_command_fail"
-                };
-                self.record_finished_final_command_audit(command, timeout_ms, status, Some(&body));
-                ActionExecution::Completed(body)
-            }
-            ActionExecution::NeedsApproval(pending) => {
-                let summary = format!(
-                    "Final run_bash command:\ncommand: {}\nstatus: needs_user_approval\napproval_id: {}\nverdict: PENDING",
-                    command, pending.request.approval_id
-                );
-                self.record_finished_final_command_audit(
-                    command,
-                    timeout_ms,
-                    "final_command_check_command_needs_user_approval",
-                    Some(&summary),
-                );
-                ActionExecution::NeedsApproval(pending)
-            }
-        }
-    }
-
-    fn record_finished_final_command_audit(
-        &self,
-        command: &str,
-        timeout_ms: u64,
-        status: &str,
-        result: Option<&str>,
-    ) {
-        let turn_id = self
-            .current_action_turn_id
-            .as_deref()
-            .unwrap_or("unknown_turn");
-        self.action_audit.record_action(
-            ActionAuditEntry {
-                time_ms: now_ms(),
-                round: self.current_round.max(1),
-                action: "final_command_check_command".to_string(),
-                intent: "Verify final answer before showing it.".to_string(),
-                status: status.to_string(),
-                input: json!({
-                    "command": command,
-                    "timeout_ms": timeout_ms,
-                }),
-                result_summary: result.map(|text| compact_text(text, 2_000)),
-            },
-            turn_id,
-            &self.current_action_user_question,
-        );
-    }
-
-    fn collect_prompt_context_for_scratch(
+    pub(crate) fn collect_prompt_context_for_scratch(
         &self,
         delta_ids: &[String],
         slice_ids: &[String],
@@ -1830,7 +1898,12 @@ impl AgentCore {
         })
     }
 
-    fn apply_prompt_shrink(&mut self, delta_ids: &[String], slice_ids: &[String]) -> String {
+    pub(crate) fn apply_prompt_shrink(
+        &mut self,
+        action_result_header: &str,
+        delta_ids: &[String],
+        slice_ids: &[String],
+    ) -> String {
         let delta_id_set = delta_ids
             .iter()
             .map(|id| id.trim().to_string())
@@ -1905,9 +1978,48 @@ impl AgentCore {
             missing.join(", ")
         };
         format!(
-            "Action result: prompt_shrink\nremoved_delta_count: {}\nhidden_slice_count: {}\nshrunk_tokens_estimate: {}\nmissing_ids: {}",
-            removed_delta_count, hidden_slice_count, shrunk_tokens_estimate, missing_text
+            "{}\nremoved_delta_count: {}\nhidden_slice_count: {}\nshrunk_tokens_estimate: {}\nmissing_ids: {}",
+            action_result_header,
+            removed_delta_count,
+            hidden_slice_count,
+            shrunk_tokens_estimate,
+            missing_text
         )
+    }
+
+    fn missing_prompt_refs(&self, delta_ids: &[String], slice_ids: &[String]) -> Vec<String> {
+        let existing_delta_ids = self
+            .deltas
+            .iter()
+            .map(|delta| delta.delta_id.clone())
+            .collect::<HashSet<_>>();
+        let existing_slice_ids = self
+            .render_prompt_slices()
+            .into_iter()
+            .map(|slice| slice.slice_id)
+            .collect::<HashSet<_>>();
+        let mut missing = Vec::new();
+        for id in delta_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+        {
+            if !existing_delta_ids.contains(id) {
+                missing.push(id.to_string());
+            }
+        }
+        for id in slice_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+        {
+            if !existing_slice_ids.contains(id) {
+                missing.push(id.to_string());
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        missing
     }
 }
 
@@ -2028,7 +2140,7 @@ impl FileMemoryStore {
                 self.write_clean_unlocked(clean)
                     .map_err(|_| "write_failed".to_string())?;
                 Ok(format!(
-                    "Action result: memory_update\noperation: insert\nstored: {}",
+                    "Action result: memmgr\ntype: durable\nop: insert\nstored: {}",
                     clean
                 ))
             }
@@ -2086,7 +2198,7 @@ impl FileMemoryStore {
                 self.write_all_unlocked(&rows)
                     .map_err(|_| "write_failed".to_string())?;
                 Ok(format!(
-                    "Action result: memory_update\noperation: {}\nid: {}\nversion: {}\nstored: {}",
+                    "Action result: memmgr\ntype: durable\nop: {}\nid: {}\nversion: {}\nstored: {}",
                     if found { "update" } else { "insert" },
                     clean_id,
                     rows.iter()
@@ -2130,7 +2242,7 @@ impl FileMemoryStore {
                 self.write_all_unlocked(&rows)
                     .map_err(|_| "write_failed".to_string())?;
                 Ok(format!(
-                    "Action result: memory_update\noperation: delete\nid: {}\ndeleted: true",
+                    "Action result: memmgr\ntype: durable\nop: delete\nid: {}\ndeleted: true",
                     clean_id
                 ))
             }
@@ -2237,7 +2349,7 @@ impl FileMemoryStore {
 
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memory_schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: query|schema|sql|insert|update|upsert|delete\n- raw_chat: query|sql|delete\n- scratch: query|write|read|delete\n- context: shrink\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids/slice_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat query lists recent chat records. loaded_chat_records={}.",
+            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: query|schema|sql|insert|update|upsert|delete\n- raw_chat: query|sql|delete\n- scratch: query|write|read|delete\n- context: shrink\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat query lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -2261,6 +2373,13 @@ impl FileMemoryStore {
         limit: usize,
     ) -> Result<Vec<Vec<(String, String)>>, String> {
         validate_memory_sql(sql)?;
+        let placeholder_count = sql.matches('?').count();
+        if params.len() != placeholder_count {
+            return Err(format!(
+                "SQL placeholder count does not match `params`: expected={placeholder_count} actual={}",
+                params.len()
+            ));
+        }
         let conn = Connection::open_in_memory().map_err(|_| "sqlite_open_failed".to_string())?;
         conn.execute(
             "CREATE TABLE memories(id TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL)",
@@ -2847,727 +2966,28 @@ fn split_text_for_prompt_slices(text: &str, limit: usize) -> Vec<String> {
     chunks
 }
 
+fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, usize, &str)> {
+    let start = supporting_context.find("work_directory_instructions:")?;
+    let relative_end_marker =
+        supporting_context[start..].rfind("[END WORK_DIRECTORY_INSTRUCTION")?;
+    let marker_start = start + relative_end_marker;
+    let after_marker = supporting_context[marker_start..]
+        .find(']')
+        .map(|idx| marker_start + idx + 1)?;
+    let end = supporting_context[after_marker..]
+        .find('\n')
+        .map(|idx| after_marker + idx + 1)
+        .unwrap_or(supporting_context.len());
+    let block = supporting_context[start..end].trim();
+    if block.contains("[BEGIN WORK_DIRECTORY_INSTRUCTION") {
+        Some((start, end, block))
+    } else {
+        None
+    }
+}
+
 fn estimate_prompt_tokens(text: &str) -> u32 {
     text.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
-}
-
-fn repair_failure_message(first_issue: &str, final_issue: &str) -> String {
-    if first_issue == "truncated_model_output" || final_issue == "truncated_model_output" {
-        return "模型回复被 API 提供商按最大输出 token 限制截断（例如 stop_reason=max_tokens），导致返回的 JSON 协议不完整。请调大 TIMEM_MAX_LLM_OUTPUT，或在交互提示中选择增加 10K 后重试。".to_string();
-    }
-    format!(
-        "模型的回复不符合本地协议，已拦截原始报文展示。原因：{final_issue}。请重试或换一个更具体的问题。"
-    )
-}
-
-fn can_show_plain_text_after_repair_failure(content: &str) -> bool {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if matches!(trimmed.chars().next(), Some('{') | Some('[')) {
-        return false;
-    }
-    if trimmed.contains("```") || trimmed.contains('{') || trimmed.contains('}') {
-        return false;
-    }
-    if extract_balanced_json_object(trimmed).is_some() {
-        return false;
-    }
-    let lowered = trimmed.to_lowercase();
-    ![
-        "next_actions",
-        "report_job_progress",
-        "memory_candidates",
-        "\"action\"",
-        "'action'",
-    ]
-    .iter()
-    .any(|needle| lowered.contains(needle))
-}
-
-fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
-    let value: Value = match parse_json_value_from_model_text(content) {
-        Ok(value) => value,
-        Err(_) => {
-            return ParsedEnvelope {
-                report_job_progress: String::new(),
-                final_answer: String::new(),
-                continue_work: true,
-                thought: String::new(),
-                thought_keep_in_context: false,
-                next_actions: vec![],
-                memory_candidates: vec![],
-                runtime_note: None,
-                repair_issue: Some("invalid_json".to_string()),
-            }
-        }
-    };
-    // Auto-wrap array of action objects into {"next_actions": [...]}
-    let value = if value.is_array() {
-        let arr = value.as_array().unwrap();
-        let all_actions = !arr.is_empty()
-            && arr.iter().all(|item| {
-                item.as_object()
-                    .is_some_and(|obj| obj.contains_key("action"))
-            });
-        if all_actions {
-            json!({"next_actions": value})
-        } else {
-            value
-        }
-    } else {
-        value
-    };
-    if !value.is_object() {
-        return ParsedEnvelope {
-            report_job_progress: String::new(),
-            final_answer: String::new(),
-            continue_work: true,
-            thought: String::new(),
-            thought_keep_in_context: false,
-            next_actions: vec![],
-            memory_candidates: vec![],
-            runtime_note: None,
-            repair_issue: Some("root_must_be_json_object".to_string()),
-        };
-    }
-    let mut repair_issue: Option<String> = None;
-    if let Some(object) = value.as_object() {
-        if let Some(extra_key) = object
-            .keys()
-            .find(|key| !is_allowed_response_top_level_key(key))
-        {
-            repair_issue = Some(format!("unexpected_top_level_field:{extra_key}"));
-        }
-    }
-    if value.get("response_to_user").is_some() {
-        repair_issue = Some("response_to_user_renamed_to_report_job_progress".to_string());
-    }
-    let report_job_progress = value
-        .get("report_job_progress")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let mut final_answer = value
-        .get("final_answer")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let status = value.get("status").and_then(Value::as_str);
-    let mut continue_work = match status {
-        Some("working") => true,
-        Some("finished") => false,
-        Some(_) => {
-            repair_issue =
-                repair_issue.or_else(|| Some("status_must_be_working_or_finished".to_string()));
-            true
-        }
-        None => match value.get("continue") {
-            Some(value) => match value.as_bool() {
-                Some(value) => value,
-                None => {
-                    repair_issue =
-                        repair_issue.or_else(|| Some("continue_must_be_boolean".to_string()));
-                    true
-                }
-            },
-            None => true,
-        },
-    };
-    if value.get("status").is_none()
-        && value.get("continue").and_then(Value::as_bool) == Some(false)
-        && final_answer.trim().is_empty()
-    {
-        final_answer = report_job_progress.trim().to_string();
-    }
-    let (thought, thought_keep_in_context) = {
-        let v = value.get("thought");
-        if let Some(obj) = v.and_then(Value::as_object) {
-            let content = obj
-                .get("content")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            let keep_in_context = obj
-                .get("keep_in_context")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            (content, keep_in_context)
-        } else {
-            // Plain string thought predates the explicit object form; keep it
-            // in context because the model had no separate retention flag.
-            let s = v
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            let keep_in_context = !s.is_empty();
-            (s, keep_in_context)
-        }
-    };
-    let mut runtime_note: Option<String> = None;
-
-    let mut next_actions = Vec::new();
-    let bare_action = value.get("action").and_then(Value::as_str).is_some();
-    let action_values = if let Some(next_actions_value) = value.get("next_actions") {
-        if let Some(actions) = next_actions_value.as_array() {
-            Some(actions.iter().collect::<Vec<_>>())
-        } else if !next_actions_value.is_null() {
-            repair_issue = Some("next_actions_must_be_array".to_string());
-            None
-        } else {
-            None
-        }
-    } else if bare_action {
-        Some(vec![&value])
-    } else {
-        None
-    };
-    if let Some(actions) = action_values {
-        for (idx, action) in actions.iter().enumerate() {
-            let name = action
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if name.is_empty() {
-                repair_issue = Some(format!("next_actions[{idx}].action_missing"));
-                break;
-            }
-            let parsed_input_holder;
-            let action_args = action.get("args");
-            let input = match action_args {
-                Some(Value::Object(_)) => {
-                    parsed_input_holder = action_args.cloned().unwrap_or(Value::Null);
-                    &parsed_input_holder
-                }
-                Some(_) => {
-                    repair_issue = Some(format!("next_actions[{idx}].args_must_be_object"));
-                    break;
-                }
-                None => {
-                    repair_issue = Some(format!("next_actions[{idx}].args_required"));
-                    break;
-                }
-            };
-            let intent = action
-                .get("intent")
-                .or_else(|| input.get("intent"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if intent.is_empty() {
-                repair_issue = Some(format!("next_actions[{idx}].intent_required"));
-                break;
-            }
-            let normalized_name = name.as_str();
-            if !capabilities.contains_tool(normalized_name) {
-                repair_issue = Some(format!("unsupported_action:{normalized_name}"));
-                break;
-            }
-            if let Err(issue) = capabilities.validate_action_input(normalized_name, input) {
-                repair_issue = Some(format!("next_actions[{idx}].{issue}"));
-                break;
-            }
-            next_actions.push(ParsedAction {
-                action: name,
-                intent: intent.to_string(),
-                raw_input: input.clone(),
-            });
-        }
-    }
-    let mut memory_candidates = Vec::new();
-    if let Some(candidates_value) = value.get("memory_candidates") {
-        if let Some(candidates) = candidates_value.as_array() {
-            for candidate in candidates {
-                if let Some(text) = candidate.as_str().map(str::trim).filter(|x| !x.is_empty()) {
-                    memory_candidates.push(text.to_string());
-                    continue;
-                }
-                for key in ["content", "fact", "summary", "memory", "text", "title"] {
-                    if let Some(text) = candidate
-                        .get(key)
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|x| !x.is_empty())
-                    {
-                        memory_candidates.push(text.to_string());
-                        break;
-                    }
-                }
-            }
-        } else if !candidates_value.is_null() {
-            repair_issue =
-                repair_issue.or_else(|| Some("memory_candidates_must_be_array".to_string()));
-        }
-    }
-    if repair_issue.is_none() && !continue_work && final_answer.trim().is_empty() {
-        repair_issue = Some("final_answer_required_when_status_finished".to_string());
-    }
-    if repair_issue.is_none()
-        && continue_work
-        && status != Some("finished")
-        && !final_answer.trim().is_empty()
-    {
-        repair_issue = Some("final_answer_requires_status_finished".to_string());
-    }
-    if repair_issue.is_none()
-        && !continue_work
-        && starts_with_runtime_progress_marker(&final_answer)
-    {
-        repair_issue = Some("final_answer_must_not_start_with_runtime_progress_marker".to_string());
-    }
-    if repair_issue.is_none()
-        && !continue_work
-        && !next_actions.is_empty()
-        && !is_valid_finished_final_command_actions(&next_actions)
-        && next_actions.iter().any(is_evidence_gathering_action)
-    {
-        continue_work = true;
-        final_answer.clear();
-        runtime_note = Some(
-            "Note: 上轮输出同时声明 status:finished/final_answer 和需要取证的 next_actions。Runtime 已丢弃提前 final_answer，并按 status:working 执行这些 actions。请只根据下面的 action results 给最终答案。"
-                .to_string(),
-        );
-    }
-    if repair_issue.is_none() && !continue_work && !next_actions.is_empty() {
-        let last_idx = next_actions.len() - 1;
-        if next_actions.len() > 1 {
-            repair_issue =
-                Some("status_finished_next_actions_must_only_contain_guard_command".to_string());
-        }
-        if repair_issue.is_none() {
-            let last = &next_actions[last_idx];
-            if last.action != "run_bash" {
-                repair_issue = Some("status_finished_guard_requires_run_bash_command".to_string());
-            } else if last.input_str("command").is_empty() {
-                repair_issue =
-                    Some("status_finished_next_actions_require_command_on_last_action".to_string());
-            } else if last.background() {
-                repair_issue = Some("status_finished_guard_must_only_use_command".to_string());
-            }
-        }
-    }
-    if repair_issue.is_none() && continue_work && next_actions.is_empty() {
-        repair_issue = Some("next_actions_required_when_status_working".to_string());
-    }
-    ParsedEnvelope {
-        report_job_progress,
-        final_answer,
-        continue_work,
-        thought,
-        thought_keep_in_context,
-        next_actions,
-        memory_candidates,
-        runtime_note,
-        repair_issue,
-    }
-}
-
-fn starts_with_runtime_progress_marker(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.starts_with('◉') || trimmed.starts_with("▰▱")
-}
-
-fn is_allowed_response_top_level_key(key: &str) -> bool {
-    matches!(
-        key,
-        "status"
-            | "report_job_progress"
-            | "final_answer"
-            | "next_actions"
-            | "thought"
-            | "memory_candidates"
-            | "continue"
-            | "acceptance_check"
-            | "action"
-            | "args"
-            | "intent"
-    )
-}
-
-fn is_valid_finished_final_command_actions(actions: &[ParsedAction]) -> bool {
-    let [action] = actions else {
-        return false;
-    };
-    action.action == "run_bash" && !action.input_str("command").is_empty() && !action.background()
-}
-
-fn is_evidence_gathering_action(action: &ParsedAction) -> bool {
-    action.action != "run_bash" || !action.input_str("command").is_empty() || action.background()
-}
-
-fn protocol_repair_instruction(issue: &str) -> &'static str {
-    match issue {
-        "final_answer_requires_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你提供了 final_answer，但缺少 status:\"finished\"。如果 job 确实已经 finished，请同时提供 status:\"finished\" 和 final_answer；如果仍在工作中，请去掉 final_answer，并提供 next_actions。Return exactly one valid JSON object. Do not use markdown fences."
-        }
-        "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你提供了 status:\"finished\"，但缺少 final_answer。如果 job 确实已经 finished，请同时提供 status:\"finished\" 和 final_answer；如果仍在工作中，请不要使用 status:\"finished\"，并提供 next_actions。Return exactly one valid JSON object. Do not use markdown fences."
-        }
-        "status_finished_guard_must_only_use_command" => {
-            "检查到刚刚的输出格式有点问题：status:\"finished\" + next_actions 只能包含一个最终 run_bash command，不能使用后台执行或其他额外字段。如果还需要查询证据，请省略 status 或使用 status:\"working\"；拿到 action result 后再给 status:\"finished\" + final_answer。Return exactly one valid JSON object. Do not use markdown fences."
-        }
-        "status_finished_next_actions_must_only_contain_guard_command" => {
-            "检查到刚刚的输出格式有点问题：status:\"finished\" + next_actions 只能包含一个最终 run_bash command。如果还需要多个动作或查询证据，请使用 status:\"working\"，执行 action 后再基于 action result 给出最终答案。Return exactly one valid JSON object. Do not use markdown fences."
-        }
-        "status_finished_guard_requires_run_bash_command" => {
-            "检查到刚刚的输出格式有点问题：status:\"finished\" + next_actions 的最终确认只能使用 action:\"run_bash\" 且 args.command 非空。如果需要查询记忆或执行其他工具，请使用 status:\"working\"。Return exactly one valid JSON object. Do not use markdown fences."
-        }
-        "status_finished_next_actions_require_command_on_last_action" => {
-            "检查到刚刚的输出格式有点问题：status:\"finished\" + next_actions 需要一个最终 run_bash command，用该 command 的返回值决定 final_answer 是否展示。Return exactly one valid JSON object. Do not use markdown fences."
-        }
-        _ => {
-            "Return exactly one valid JSON object. Omitted status defaults to working; include next_actions when working. Use status:\"finished\" together with final_answer only when the job is complete. Do not use markdown fences."
-        }
-    }
-}
-
-fn protocol_repair_reason(issue: &str) -> &'static str {
-    match issue {
-        "truncated_model_output" => {
-            "The provider stopped the model output before a complete response_v1 JSON object was produced."
-        }
-        "invalid_json" => "The previous model response could not be parsed as one JSON object.",
-        "root_must_be_json_object" => {
-            "The previous model response parsed as JSON, but the root value was not an object."
-        }
-        "final_answer_requires_status_finished" => {
-            "The previous model response included final_answer without status:\"finished\"."
-        }
-        "final_answer_required_when_status_finished" => {
-            "The previous model response included status:\"finished\" without final_answer."
-        }
-        "status_finished_guard_must_only_use_command" => {
-            "The previous model response used status:\"finished\" with a final run_bash action that included fields other than command/timeout_ms."
-        }
-        "status_finished_next_actions_must_only_contain_guard_command" => {
-            "The previous model response used status:\"finished\" with multiple next_actions. With status:\"finished\" and final_answer, next_actions may only contain one final run_bash command."
-        }
-        "status_finished_guard_requires_run_bash_command" => {
-            "The previous model response used status:\"finished\" with a final action that was not run_bash."
-        }
-        "status_finished_next_actions_require_command_on_last_action" => {
-            "The previous model response used status:\"finished\" with next_actions but without a run_bash command."
-        }
-        "final_answer_must_not_start_with_runtime_progress_marker" => {
-            "The final_answer started with a runtime UI progress marker instead of user-facing content."
-        }
-        _ => "The previous model response did not match the local response_v1 protocol.",
-    }
-}
-
-fn focused_repair_response_text(issue: &str, text: &str) -> String {
-    const REPAIR_CONTEXT_CHARS: usize = 6_000;
-    let trimmed = text.trim();
-    let char_count = trimmed.chars().count();
-    if char_count <= REPAIR_CONTEXT_CHARS * 2 {
-        return trimmed.to_string();
-    }
-    if let Some(focus) = repair_focus_char_index(issue, trimmed) {
-        return char_window_around_focus(trimmed, focus, REPAIR_CONTEXT_CHARS);
-    }
-    let head: String = trimmed.chars().take(REPAIR_CONTEXT_CHARS).collect();
-    let tail_start = char_count.saturating_sub(REPAIR_CONTEXT_CHARS);
-    let tail: String = trimmed.chars().skip(tail_start).collect();
-    format!(
-        "{head}\n[TRUNCATED previous response: omitted middle chars {}..{} of {} chars; no precise repair focus found]\n{tail}",
-        REPAIR_CONTEXT_CHARS, tail_start, char_count
-    )
-}
-
-fn repair_focus_char_index(issue: &str, text: &str) -> Option<usize> {
-    if matches!(issue, "invalid_json" | "truncated_model_output") {
-        let json_start_byte = text.find('{').unwrap_or(0);
-        let json_text = &text[json_start_byte..];
-        if let Err(err) = serde_json::from_str::<Value>(json_text) {
-            if let Some(relative_idx) =
-                line_column_to_char_index(json_text, err.line(), err.column())
-            {
-                return Some(text[..json_start_byte].chars().count() + relative_idx);
-            }
-        }
-    }
-    let marker = match issue {
-        "final_answer_requires_status_finished"
-        | "final_answer_must_not_start_with_runtime_progress_marker" => "final_answer",
-        "final_answer_required_when_status_finished" | "status_must_be_working_or_finished" => {
-            "status"
-        }
-        issue if issue.starts_with("next_actions") => "next_actions",
-        issue if issue.contains("memmgr") => "memmgr",
-        issue if issue.contains("capmgr") => "capmgr",
-        _ => "",
-    };
-    if marker.is_empty() {
-        return None;
-    }
-    text.find(marker)
-        .map(|byte_idx| text[..byte_idx].chars().count())
-}
-
-fn line_column_to_char_index(text: &str, line: usize, column: usize) -> Option<usize> {
-    if line == 0 {
-        return None;
-    }
-    let mut current_line = 1usize;
-    let mut current_column = 1usize;
-    for (char_idx, ch) in text.chars().enumerate() {
-        if current_line == line && current_column >= column.max(1) {
-            return Some(char_idx);
-        }
-        if ch == '\n' {
-            current_line += 1;
-            current_column = 1;
-        } else {
-            current_column += 1;
-        }
-    }
-    Some(text.chars().count())
-}
-
-fn char_window_around_focus(text: &str, focus: usize, context_chars: usize) -> String {
-    let char_count = text.chars().count();
-    let start = focus.saturating_sub(context_chars);
-    let end = focus.saturating_add(context_chars).min(char_count);
-    let window: String = text.chars().skip(start).take(end - start).collect();
-    format!(
-        "[FOCUSED previous response: chars {}..{} of {} chars; focus char {}]\n{}",
-        start, end, char_count, focus, window
-    )
-}
-
-/// Strip markdown code fences (```json ... ``` or ``` ... ```) from model output.
-fn strip_markdown_code_fences(input: &str) -> Option<&str> {
-    let trimmed = input.trim();
-    let rest = trimmed.strip_prefix("```")?;
-    let after_tag = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("");
-    let body = after_tag.strip_suffix("```").map(str::trim)?;
-    if body.is_empty() {
-        None
-    } else {
-        Some(body)
-    }
-}
-
-fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::Error> {
-    let trimmed = content.trim();
-    if let Ok(value) = serde_json::from_str(trimmed) {
-        return Ok(value);
-    }
-    if let Some(repaired) = repair_known_string_field_quotes(trimmed) {
-        if let Ok(value) = serde_json::from_str(&repaired) {
-            return Ok(value);
-        }
-    }
-    // Strip markdown code fences and retry
-    if let Some(stripped) = strip_markdown_code_fences(trimmed) {
-        if let Ok(value) = serde_json::from_str(stripped) {
-            return Ok(value);
-        }
-        if let Some(repaired) = repair_known_string_field_quotes(stripped) {
-            if let Ok(value) = serde_json::from_str(&repaired) {
-                return Ok(value);
-            }
-        }
-    }
-    let mut last_ok = None;
-    for (idx, ch) in trimmed.char_indices() {
-        if ch != '{' {
-            continue;
-        }
-        let candidate = &trimmed[idx..];
-        if let Ok(value) = serde_json::from_str(candidate) {
-            if is_likely_response_envelope(&value) {
-                last_ok = Some(value);
-            }
-        }
-        if let Some(repaired) = repair_known_string_field_quotes(candidate) {
-            if let Ok(value) = serde_json::from_str(&repaired) {
-                if is_likely_response_envelope(&value) {
-                    last_ok = Some(value);
-                }
-            }
-        }
-        if let Some(object_text) = extract_balanced_json_object(candidate) {
-            if let Ok(value) = serde_json::from_str(&object_text) {
-                if is_likely_response_envelope(&value) {
-                    last_ok = Some(value);
-                }
-            }
-            if let Some(repaired) = repair_known_string_field_quotes(&object_text) {
-                if let Ok(value) = serde_json::from_str(&repaired) {
-                    if is_likely_response_envelope(&value) {
-                        last_ok = Some(value);
-                    }
-                }
-            }
-        }
-    }
-    if let Some(value) = last_ok {
-        Ok(value)
-    } else {
-        serde_json::from_str(trimmed)
-    }
-}
-
-fn is_likely_response_envelope(value: &Value) -> bool {
-    value.as_object().is_some_and(|object| {
-        object.contains_key("report_job_progress")
-            || object.contains_key("next_actions")
-            || object.contains_key("final_answer")
-            || object.contains_key("status")
-            || object.contains_key("thought")
-    })
-}
-
-fn extract_balanced_json_object(input: &str) -> Option<String> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (idx, ch) in input.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth = depth.saturating_add(1),
-            '}' => {
-                if depth == 0 {
-                    return None;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    return Some(input[..idx + ch.len_utf8()].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn repair_known_string_field_quotes(input: &str) -> Option<String> {
-    let mut output = input.to_string();
-    let mut changed = false;
-    for key in [
-        "report_job_progress",
-        "thought",
-        "intent",
-        "query",
-        "content",
-        "command",
-        "sql",
-    ] {
-        let (next, key_changed) = repair_unescaped_quotes_for_key(&output, key);
-        output = next;
-        changed |= key_changed;
-    }
-    changed.then_some(output)
-}
-
-fn repair_unescaped_quotes_for_key(input: &str, key: &str) -> (String, bool) {
-    let marker = format!("\"{key}\"");
-    let bytes = input.as_bytes();
-    let mut output = String::with_capacity(input.len());
-    let mut pos = 0;
-    let mut changed = false;
-    while let Some(rel) = input[pos..].find(&marker) {
-        let marker_start = pos + rel;
-        output.push_str(&input[pos..marker_start]);
-        output.push_str(&marker);
-        let mut cursor = marker_start + marker.len();
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            output.push(bytes[cursor] as char);
-            cursor += 1;
-        }
-        if cursor >= bytes.len() || bytes[cursor] != b':' {
-            pos = cursor;
-            continue;
-        }
-        output.push(':');
-        cursor += 1;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            output.push(bytes[cursor] as char);
-            cursor += 1;
-        }
-        if cursor >= bytes.len() || bytes[cursor] != b'"' {
-            pos = cursor;
-            continue;
-        }
-        output.push('"');
-        cursor += 1;
-        let value_start = cursor;
-        let mut segment = String::new();
-        let mut ended = false;
-        while cursor < input.len() {
-            let Some(ch) = input[cursor..].chars().next() else {
-                break;
-            };
-            let ch_len = ch.len_utf8();
-            if ch == '\\' {
-                segment.push(ch);
-                cursor += ch_len;
-                if cursor < input.len() {
-                    if let Some(next_ch) = input[cursor..].chars().next() {
-                        segment.push(next_ch);
-                        cursor += next_ch.len_utf8();
-                    }
-                }
-                continue;
-            }
-            if ch == '"' {
-                let next = next_non_ws_char(input, cursor + ch_len);
-                if matches!(next, Some(',') | Some('}') | Some(']') | None) {
-                    output.push_str(&segment);
-                    output.push('"');
-                    cursor += ch_len;
-                    ended = true;
-                    break;
-                }
-                output.push_str(&segment);
-                output.push('\\');
-                output.push('"');
-                segment.clear();
-                cursor += ch_len;
-                changed = true;
-                continue;
-            }
-            segment.push(ch);
-            cursor += ch_len;
-        }
-        if !ended {
-            output.push_str(&input[value_start..cursor]);
-        }
-        pos = cursor;
-    }
-    output.push_str(&input[pos..]);
-    (output, changed)
-}
-
-fn next_non_ws_char(input: &str, mut pos: usize) -> Option<char> {
-    while pos < input.len() {
-        let ch = input[pos..].chars().next()?;
-        if !ch.is_whitespace() {
-            return Some(ch);
-        }
-        pos += ch.len_utf8();
-    }
-    None
 }
 
 fn search_terms(query: &str) -> Vec<String> {
@@ -3657,199 +3077,22 @@ fn memory_missing_expected_version_result(
     )
 }
 
-fn json_i64(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_u64().and_then(|raw| i64::try_from(raw).ok()))
-}
-
-fn json_u64(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_i64().and_then(|raw| u64::try_from(raw).ok()))
-        .or_else(|| value.as_str().and_then(|raw| raw.trim().parse().ok()))
-}
-
-fn json_string_array(items: &[Value]) -> Vec<String> {
-    items
-        .iter()
-        .filter_map(|value| {
-            value
-                .as_str()
-                .map(ToString::to_string)
-                .or_else(|| value.as_i64().map(|raw| raw.to_string()))
-                .or_else(|| value.as_u64().map(|raw| raw.to_string()))
-        })
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .collect()
-}
-
-fn json_string_list(value: &Value) -> Vec<String> {
-    if let Some(items) = value.as_array() {
-        return json_string_array(items);
-    }
-    value
-        .as_str()
-        .map(|text| {
-            text.split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(|item| item.trim_matches(['"', '\'']).to_string())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn json_sql_param_to_string(value: &Value) -> Option<String> {
-    if let Some(text) = value.as_str() {
-        return Some(text.to_string());
-    }
-    if let Some(num) = value.as_i64() {
-        return Some(num.to_string());
-    }
-    if let Some(num) = value.as_u64() {
-        return Some(num.to_string());
-    }
-    if let Some(num) = value.as_f64() {
-        return Some(num.to_string());
-    }
-    value.as_bool().map(|flag| flag.to_string())
-}
-
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
-fn execute_guarded_bash(
-    command: &str,
-    background: bool,
-    timeout_ms: u64,
-    approval_mode: BashApprovalMode,
-    intent: &str,
-    shell_jobs: &FileShellJobStore,
-) -> ActionExecution {
-    let command_to_run = command.trim();
-    if command_to_run.is_empty() {
-        return ActionExecution::Completed(
-            "Action result: run_bash\nerror: command_required".to_string(),
-        );
+fn annotate_action_result_with_intent(result: String, intent: &str) -> String {
+    let intent = intent.trim();
+    if intent.is_empty() || result.lines().any(|line| line.starts_with("intent: ")) {
+        return result;
     }
-    if let Err(reason) = shell_exec::validate_bash_request(command_to_run) {
-        return ActionExecution::Completed(format!(
-            "Action result: run_bash\ncommand: {}\nerror: {}",
-            command_to_run, reason
-        ));
-    }
-    if approval_mode == BashApprovalMode::Ask {
-        return ActionExecution::NeedsApproval(PendingApproval {
-            request: ApprovalRequest {
-                approval_id: format!("approval_{}", now_ms()),
-                action: "run_bash".to_string(),
-                command: command_to_run.to_string(),
-                reason: "run_bash_requires_user_approval".to_string(),
-                risk: "local_shell_command".to_string(),
-                intent: intent.to_string(),
-            },
-            command: command_to_run.to_string(),
-            background,
-            timeout_ms,
-            intent: intent.to_string(),
-        });
-    }
-    if background {
-        return ActionExecution::Completed(shell_jobs.spawn(command_to_run));
-    }
-    ActionExecution::Completed(shell_exec::execute_one_bash(command_to_run, timeout_ms))
-}
-
-fn execute_approved_bash(
-    command: &str,
-    background: bool,
-    timeout_ms: u64,
-    request: &ApprovalRequest,
-    shell_jobs: &FileShellJobStore,
-) -> String {
-    let mut result = if background {
-        shell_jobs.spawn(command.trim())
+    if let Some((head, tail)) = result.split_once('\n') {
+        format!("{head}\nintent: {intent}\n{tail}")
     } else {
-        shell_exec::execute_one_bash(command.trim(), timeout_ms)
-    };
-    result.push_str(&format!(
-        "\napproval_id: {}\napproval_status: approved_by_user",
-        request.approval_id
-    ));
-    result
-}
-
-fn format_finished_final_command_result(command: &str, bash_result: &str) -> String {
-    let verdict = if bash_result_status(bash_result) == Some(0) {
-        "PASS"
-    } else {
-        "FAIL"
-    };
-    format!(
-        "Final run_bash command:\ncommand: {}\ncontrolled_bash_result:\n{}\nverdict: {}",
-        command, bash_result, verdict
-    )
-}
-
-fn empty_as_missing(value: &str) -> &str {
-    if value.trim().is_empty() {
-        "(missing)"
-    } else {
-        value.trim()
+        format!("{result}\nintent: {intent}")
     }
 }
 
-fn natural_tool_input_message(issue: &str) -> String {
-    let field = issue
-        .rsplit('.')
-        .next()
-        .unwrap_or(issue)
-        .split(':')
-        .next()
-        .unwrap_or(issue);
-    match field {
-        "type_required" => "Missing `type`. Choose which memory surface to use, such as durable, raw_chat, scratch, or context.".to_string(),
-        "op_required" => "Missing `op`. Choose an operation for the selected type, such as query, write, read, delete, sql, or shrink.".to_string(),
-        "query_required" => "Missing `query`. Provide the search text for this query operation.".to_string(),
-        "content_required" => "Missing `content`. Provide the text that should be written or updated.".to_string(),
-        "id_required" => "Missing `id`. Provide the id returned by a previous query/read/write result.".to_string(),
-        "id_or_query_required" => "Missing target. Provide either `id` or `query` so the runtime knows what to delete.".to_string(),
-        "operation_required" => "Missing `operation`/`op`. Provide the memory update operation.".to_string(),
-        "kind_required" | "type_required_when_op=write" => "Missing scratch `kind`. Use notes for a written checkpoint, or context_offload to store existing prompt delta/slice content.".to_string(),
-        "label_required" => "Missing `label`. Provide a short retrieval label for this scratch record.".to_string(),
-        "prompt_refs_required" => "Missing prompt references. For context_offload, provide at least one `delta_ids` or `slice_ids` value.".to_string(),
-        "ids_required" => "Missing context ids. Provide `delta_ids` or `slice_ids` to shrink/offload dynamic prompt context.".to_string(),
-        "sql_required" => "Missing `sql`. Provide a read-only SQL query for the selected memory surface.".to_string(),
-        other if other.starts_with("params_count_mismatch") || issue.contains("params_count_mismatch") => {
-            format!("SQL placeholder count does not match `params`. {issue}")
-        }
-        other if other.starts_with("unsupported_memmgr_type_or_op") || issue.contains("unsupported_memmgr_type_or_op") => {
-            format!("Unsupported memory type/op combination. Use a supported memmgr type and operation. Detail: {issue}")
-        }
-        other if other.starts_with("kind_unsupported") || issue.contains("kind_unsupported") => {
-            format!("Unsupported scratch kind. Use notes or context_offload. Detail: {issue}")
-        }
-        _ => format!("Invalid tool input. Detail: {issue}"),
-    }
-}
-
-fn finished_final_command_passed(result_body: &str) -> bool {
-    result_body
-        .lines()
-        .any(|line| line.trim() == "verdict: PASS")
-}
-
-fn bash_result_status(result: &str) -> Option<i32> {
-    result.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("status: ")
-            .and_then(|raw| raw.trim().parse().ok())
-    })
-}
-
-fn compact_text(text: &str, max_chars: usize) -> String {
+pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {
         out = out.chars().take(max_chars).collect::<String>();
@@ -3858,7 +3101,7 @@ fn compact_text(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn scratch_label_for_display(record: &ScratchNoteRecord) -> String {
+pub(crate) fn scratch_label_for_display(record: &ScratchNoteRecord) -> String {
     if record.label.trim().is_empty() {
         "(unlabeled)".to_string()
     } else {
@@ -3866,42 +3109,44 @@ fn scratch_label_for_display(record: &ScratchNoteRecord) -> String {
     }
 }
 
-fn format_scratch_write_result(record: &ScratchNoteRecord) -> String {
+pub(crate) fn format_scratch_write_result(record: &ScratchNoteRecord) -> String {
     format!(
-        "Action result: scratch_write\nid: {}\nlabel: {}\ntype: {}\nprompt_delta_ids: {}\nprompt_slice_ids: {}\ncontent_preview: {}",
+        "Action result: memmgr\ntype: scratch\nop: write\nid: {}\nlabel: {}\nscratch_type: {}\nprompt_delta_ids: {}\ncontent_preview: {}",
         record.id,
         scratch_label_for_display(record),
         memmgr::normalize_scratch_kind(&record.scratch_type),
         comma_or_none(&record.prompt_delta_ids),
-        comma_or_none(&record.prompt_slice_ids),
         compact_text(&record.content, 320)
     )
 }
 
-fn format_scratch_read_result(record: &ScratchNoteRecord) -> String {
+pub(crate) fn format_scratch_read_result(record: &ScratchNoteRecord) -> String {
     format!(
-        "Action result: scratch_read\nid: {}\nfound: true\nlabel: {}\ntype: {}\nprompt_delta_ids: {}\nprompt_slice_ids: {}\ncontent:\n{}",
+        "Action result: memmgr\ntype: scratch\nop: read\nid: {}\nfound: true\nlabel: {}\nscratch_type: {}\nprompt_delta_ids: {}\ncontent:\n{}",
         record.id,
         scratch_label_for_display(record),
         memmgr::normalize_scratch_kind(&record.scratch_type),
         comma_or_none(&record.prompt_delta_ids),
-        comma_or_none(&record.prompt_slice_ids),
         record.content
     )
 }
 
+fn prompt_type_role_for_scratch(prompt_type: &str) -> &'static str {
+    match prompt_type {
+        "user_question" | "user_supplement" => "USER",
+        "llm_response" | "llm_free_talk" => "TIMEM_ASSISTANT",
+        "result_of_llm_action" => "ACTIONS",
+        _ => "SYSTEM",
+    }
+}
+
 fn format_prompt_slice_for_scratch(slice: &PromptSlice) -> String {
     format!(
-        "[BEGIN SCRATCH OFFLOAD SLICE {}]\ndelta_id: {}\nslice_id: {}\nslice: {}/{}\nprompt_type: {}\ntime_ms: {}\n{}\n[END SCRATCH OFFLOAD SLICE {}]",
-        slice.slice_id,
+        "[BEGIN SCRATCH OFFLOAD BLOCK]\ndelta_id: {}\ntime_ms: {}\nrole: {}\n{}\n[END SCRATCH OFFLOAD BLOCK]",
         slice.delta_id,
-        slice.slice_id,
-        slice.slice_index,
-        slice.slice_count,
-        slice.prompt_type,
         slice.time_ms,
-        slice.text,
-        slice.slice_id
+        prompt_type_role_for_scratch(&slice.prompt_type),
+        slice.text
     )
 }
 
@@ -4124,9 +3369,11 @@ fn step_to_json(step: CoreStep) -> serde_json::Value {
         CoreStep::Final(turn) => serde_json::json!({
             "ok": true,
             "step": "final",
-            "response_to_user": turn.response_to_user,
+            "final_answer": turn.final_answer,
             "stats": turn.stats,
-            "profile_label": turn.profile_label
+            "profile_label": turn.profile_label,
+            "repair_issue": turn.repair_issue,
+            "stop_summary": turn.stop_summary
         }),
     }
 }

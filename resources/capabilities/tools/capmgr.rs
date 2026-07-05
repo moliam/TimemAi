@@ -1,4 +1,6 @@
 use crate::capability::CapabilityRegistry;
+use crate::response_protocol::ParsedAction;
+use crate::AgentCore;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapmgrActionInput<'a> {
@@ -30,6 +32,17 @@ pub fn execute(registry: &CapabilityRegistry, input: CapmgrActionInput<'_>) -> S
         }
         other => format!("Action result: capmgr\nop: {other}\nerror: unsupported_op"),
     }
+}
+
+pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> String {
+    execute(
+        &core.capabilities,
+        CapmgrActionInput {
+            op: &action.input_lower("op"),
+            kind: &action.input_str("kind"),
+            id: &action.input_str("id"),
+        },
+    )
 }
 
 #[cfg(test)]

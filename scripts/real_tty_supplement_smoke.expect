@@ -1,0 +1,199 @@
+#!/usr/bin/env expect
+#
+# Real PTY smoke for active-turn user supplements. It uses a local fake
+# OpenAI-compatible provider, so it does not need network or a real API key.
+
+set timeout 30
+
+set repo_root [file normalize [file join [file dirname [info script]] ".."]]
+set binary [file join $repo_root "target" "release" "timem-native-rs"]
+set provider_script [file join $repo_root "scripts" "fake_openai_provider.py"]
+set data_dir [file join "/private/tmp" "timem_tty_supplement_smoke_[pid]"]
+set port [expr {21000 + ([pid] % 10000)}]
+
+if {![file executable $binary]} {
+    puts stderr "missing executable: $binary"
+    puts stderr "run: cargo build -p timem_shell --release"
+    exit 1
+}
+
+proc answer_cursor_queries {} {
+    expect {
+        -re "\033\\\[6n" {
+            send "\033\[24;1R"
+            exp_continue
+        }
+        -re "Thought / Action" {
+            return
+        }
+        timeout {
+            error "timeout waiting for thinking panel"
+        }
+        eof {
+            error "unexpected EOF waiting for thinking panel"
+        }
+    }
+}
+
+proc wait_prompt {} {
+    while {1} {
+        expect {
+            -re "\033\\\[6n" {
+                send "\033\[24;1R"
+                exp_continue
+            }
+            -re "❯❯" {
+                return
+            }
+            timeout {
+                error "timeout waiting for Timem prompt"
+            }
+            eof {
+                error "unexpected EOF waiting for Timem prompt"
+            }
+        }
+    }
+}
+
+proc wait_active_turn_cancelled {} {
+    set output ""
+    expect {
+        -re "\033\\\[6n" {
+            append output $expect_out(buffer)
+            send "\033\[24;1R"
+            if {[string first "已取消本轮" $output] >= 0} {
+                return $output
+            }
+            exp_continue
+        }
+        -re "已取消本轮" {
+            append output $expect_out(buffer)
+            return $output
+        }
+        -re "NO_SUPPLEMENT|SUPPLEMENT_OK|模型调用失败" {
+            append output $expect_out(buffer)
+            error "active turn was not cancelled promptly; got model output: $output"
+        }
+        timeout {
+            error "timeout waiting for active turn cancellation"
+        }
+        eof {
+            error "unexpected EOF waiting for active turn cancellation"
+        }
+    }
+}
+
+spawn -noecho python3 $provider_script --port $port --delay 2.5
+set provider_spawn_id $spawn_id
+expect {
+    -re "fake_provider_ready:$port" {}
+    timeout {
+        error "timeout waiting for fake provider"
+    }
+    eof {
+        error "fake provider exited before ready"
+    }
+}
+
+spawn env \
+    TIMEM_API_KEY=dummy \
+    TIMEM_GATEWAY_PROVIDER=local \
+    TIMEM_API_PROTOCOL=openai-compatible \
+    TIMEM_BASE_URL=http://127.0.0.1:$port/v1 \
+    TIMEM_MODEL=fake-supplement-model \
+    TIMEM_DATA_DIR=$data_dir \
+    $binary --space .tty_supplement_smoke
+expect {
+    -re "\033\\\[\\?2004h" {}
+    timeout {
+        error "timeout waiting for bracketed paste mode enable"
+    }
+    eof {
+        error "unexpected EOF waiting for bracketed paste mode enable"
+    }
+}
+wait_prompt
+send "请等待我取消这一轮。\r"
+answer_cursor_queries
+after 300
+send "\003"
+set cancel_started [clock milliseconds]
+set cancel_output [wait_active_turn_cancelled]
+set cancel_elapsed [expr {[clock milliseconds] - $cancel_started}]
+if {$cancel_elapsed > 1500} {
+    error "active turn Ctrl+C cancellation took ${cancel_elapsed}ms, expected <= 1500ms; output=$cancel_output"
+}
+wait_prompt
+send "请等待补充后再回答，最终答案只输出一个标记词。\r"
+answer_cursor_queries
+after 500
+send "补充：最终标记词必须是 SUPPLEMENT_OK。\r"
+expect {
+    -re "\033\\\[6n" {
+        send "\033\[24;1R"
+        exp_continue
+    }
+    -re "思考中\\.\\.\\. x2" {
+        error "thinking transient should not double-count after supplement preempts a stale response"
+    }
+    -re "已收到用户补充指示" {
+        exp_continue
+    }
+    -re "SUPPLEMENT_OK" {
+        expect {
+            -re "\033\\\[6n" {
+                send "\033\[24;1R"
+                exp_continue
+            }
+            -re "⇌2" {}
+            timeout {
+                error "final status should count both model calls, including the stale response preempted by supplement"
+            }
+            eof {
+                error "unexpected EOF waiting for final model-call count"
+            }
+        }
+        wait_prompt
+        send "/prof\r"
+        expect {
+            -re "\033\\\[6n" {
+                send "\033\[24;1R"
+                exp_continue
+            }
+            -re "思考中|模型调用失败" {
+                error "shell command after model answer should not start another model turn"
+            }
+            -re "Token" {}
+            timeout {
+                error "timeout waiting for /prof after model answer"
+            }
+            eof {
+                error "unexpected EOF waiting for /prof after model answer"
+            }
+        }
+        wait_prompt
+        send "/exit\r"
+        expect {
+            -re "\033\\\[6n" {
+                send "\033\[24;1R"
+                exp_continue
+            }
+            eof {}
+            timeout {}
+        }
+        set spawn_id $provider_spawn_id
+        catch {close}
+        catch {wait}
+        puts "real_tty_supplement_smoke: ok"
+        exit 0
+    }
+    -re "NO_SUPPLEMENT" {
+        error "supplement was not applied before stale answer"
+    }
+    timeout {
+        error "timeout waiting for supplement answer"
+    }
+    eof {
+        error "unexpected EOF waiting for supplement answer"
+    }
+}

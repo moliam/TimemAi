@@ -1,4 +1,4 @@
-use serde_json::Value;
+use agent_core::{CoreActionKind, CoreTopicEvent};
 use std::collections::VecDeque;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -17,6 +17,7 @@ pub enum ObservationEvent {
     PersistentChild { text: String, is_last: bool },
     ActiveChild { text: String, is_last: bool },
     Transient(String),
+    EnsureTransient(String),
     FinishTransient(String),
     ClearTransient,
     SettleActive,
@@ -72,7 +73,7 @@ impl ObservationPanel {
     pub fn apply(&mut self, event: ObservationEvent) {
         match event {
             ObservationEvent::Persistent(text) => {
-                let prefix = if text.starts_with("◉ ") {
+                let prefix = if text.starts_with("💡 ") || text.starts_with("⚙️ ") {
                     String::new()
                 } else {
                     OBSERVATION_LINE_PREFIX.to_string()
@@ -95,6 +96,7 @@ impl ObservationPanel {
                 child_prefix(is_last).to_string(),
             ),
             ObservationEvent::Transient(text) => self.increment_transient(text),
+            ObservationEvent::EnsureTransient(text) => self.ensure_transient(text),
             ObservationEvent::FinishTransient(text) => self.decrement_transient(&text),
             ObservationEvent::ClearTransient => self.transients.clear(),
             ObservationEvent::SettleActive => {
@@ -157,6 +159,22 @@ impl ObservationPanel {
             .find(|transient| transient.text == normalized)
         {
             transient.count = transient.count.saturating_add(1);
+            return;
+        }
+        self.transients.push(TransientObservation {
+            text: normalized.to_string(),
+            count: 1,
+        });
+    }
+
+    fn ensure_transient(&mut self, text: String) {
+        let normalized = text.trim();
+        if normalized.is_empty()
+            || self
+                .transients
+                .iter()
+                .any(|transient| transient.text == normalized)
+        {
             return;
         }
         self.transients.push(TransientObservation {
@@ -234,7 +252,10 @@ pub fn render_observation_panel_at_with_elapsed(
     let line_width = content_width.saturating_sub(2);
     let mut render_rows = Vec::new();
     for line in panel.visible_lines() {
-        let text_width = line_width.saturating_sub(display_width(&line.prefix));
+        let marker_extra_width = terminal_marker_extra_width(&line.text);
+        let text_width = line_width
+            .saturating_sub(display_width(&line.prefix))
+            .saturating_sub(marker_extra_width);
         let wrapped =
             wrap_display_width_limited(&line.text, text_width, MAX_WRAPPED_LINES_PER_ITEM);
         for (idx, wrapped) in wrapped.into_iter().enumerate() {
@@ -286,214 +307,120 @@ pub fn observation_panel_width_for_terminal(terminal_width: usize) -> usize {
     }
 }
 
-pub fn observation_events_from_model_response(content: &str) -> Vec<ObservationEvent> {
-    let Some(value) = parse_observation_json_value(content) else {
-        return Vec::new();
-    };
-    let mut events = Vec::new();
-    let should_continue = match value.get("status").and_then(Value::as_str) {
-        Some("working") => true,
-        Some("finished") => false,
-        _ => value
-            .get("continue")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-    };
-    if should_continue {
-        if let Some(progress) = value
-            .get("report_job_progress")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-        {
-            events.push(ObservationEvent::Persistent(format!("◉ {progress}")));
-        }
-    }
-    if let Some(actions) = value.get("next_actions").and_then(Value::as_array) {
-        for action in actions.iter().take(2) {
-            events.extend(observation_events_from_action(action));
-        }
-    }
-    events
-}
-
-pub(crate) fn parse_observation_json_value(content: &str) -> Option<Value> {
-    let trimmed = content.trim();
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        return Some(value);
-    }
-    let mut last_envelope = None;
-    for (idx, ch) in trimmed.char_indices() {
-        if ch != '{' {
-            continue;
-        }
-        let candidate = &trimmed[idx..];
-        if let Some(object_text) = extract_balanced_json_object(candidate) {
-            if let Ok(value) = serde_json::from_str::<Value>(&object_text) {
-                if is_likely_observation_envelope(&value) {
-                    last_envelope = Some(value);
+pub fn observation_events_from_core_topic_events(
+    events: &[CoreTopicEvent],
+) -> Vec<ObservationEvent> {
+    let mut observations = Vec::new();
+    for event in events {
+        if let Some(model_response) = event.as_model_response() {
+            let free_talk = model_response.free_talk.trim();
+            if !free_talk.is_empty() {
+                observations.push(ObservationEvent::Persistent(format!("💡 {free_talk}")));
+            }
+            let progress = model_response.report_job_progress.trim();
+            if !progress.is_empty() {
+                observations.push(ObservationEvent::Persistent(format!("⚙️ {progress}")));
+            }
+            if event.payload.get("global").is_some() {
+                if model_response.global.working_worker_count > 0 {
+                    observations.push(ObservationEvent::EnsureTransient("思考中...".to_string()));
+                } else {
+                    observations.push(ObservationEvent::FinishTransient("思考中...".to_string()));
                 }
-            }
-        }
-    }
-    last_envelope
-}
-
-fn is_likely_observation_envelope(value: &Value) -> bool {
-    value.as_object().is_some_and(|object| {
-        object.contains_key("next_actions")
-            || object.contains_key("report_job_progress")
-            || object.contains_key("thought")
-    })
-}
-
-fn extract_balanced_json_object(input: &str) -> Option<String> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (idx, ch) in input.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
             }
             continue;
         }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth = depth.saturating_add(1),
-            '}' => {
-                if depth == 0 {
-                    return None;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    return Some(input[..idx + ch.len_utf8()].to_string());
-                }
-            }
-            _ => {}
+        if let Some(action) = event.as_action() {
+            let child_style = if action.active {
+                ObservationLineStyle::ActiveBlink
+            } else {
+                ObservationLineStyle::Normal
+            };
+            observations.extend(action_observation_pair(
+                action.intent.as_deref(),
+                child_style,
+                action_detail_for_shell(&action.kind),
+            ));
         }
     }
-    None
+    observations
 }
 
-fn observation_events_from_action(action: &Value) -> Vec<ObservationEvent> {
-    let action_name = action.get("action").and_then(Value::as_str).unwrap_or("");
-    let input = match action.get("args") {
-        Some(Value::Object(_)) => action.get("args").unwrap(),
-        _ => &Value::Null,
+fn action_detail_for_shell(kind: &CoreActionKind) -> String {
+    match kind {
+        CoreActionKind::Bash { command } => format!("Bash: {}", command.trim()),
+        CoreActionKind::ShellJob { job_id } => {
+            format!("后台任务: {}", fallback_unknown(job_id.trim()))
+        }
+        CoreActionKind::Memory { surface, operation } => {
+            memory_action_detail(surface.trim(), operation.trim())
+        }
+        CoreActionKind::Capability { op, kind, id } => {
+            capmgr_action_detail(op.trim(), kind.trim(), id.trim())
+        }
+        CoreActionKind::SelfTool { self_type, op } => {
+            self_tool_action_detail(self_type.trim(), op.trim())
+        }
+        CoreActionKind::ChatHistory { operation } => {
+            memory_action_detail("raw_chat", operation.trim())
+        }
+        CoreActionKind::Other { action } => format!("Action: {action}"),
+    }
+}
+
+fn capmgr_action_detail(op: &str, kind: &str, id: &str) -> String {
+    match (op, kind, id) {
+        ("load", "", _) => "能力: 加载".to_string(),
+        ("load", kind, "") => format!("能力: 加载 {kind}"),
+        ("load", kind, id) => format!("能力: 加载 {kind}/{id}"),
+        ("list", "", _) => "能力: 列出".to_string(),
+        ("list", kind, _) => format!("能力: 列出 {kind}"),
+        ("inspect", kind, id) if !kind.is_empty() && !id.is_empty() => {
+            format!("能力: 查看 {kind}/{id}")
+        }
+        _ => "能力: 管理".to_string(),
+    }
+}
+
+fn self_tool_action_detail(self_type: &str, op: &str) -> String {
+    match (self_type, op) {
+        ("env", "read") => "Timem: 查看环境".to_string(),
+        ("env", "write") => "Timem: 更新环境".to_string(),
+        ("mem_path", "read") => "Timem: 查看记忆路径".to_string(),
+        ("about_me", "read") => "Timem: 查看自身信息".to_string(),
+        _ => "Timem: 自身工具".to_string(),
+    }
+}
+
+fn memory_action_detail(mem_type: &str, op: &str) -> String {
+    let target = match mem_type {
+        "durable" => "长期记忆",
+        "raw_chat" => "聊天记录",
+        "scratch" => "草稿区",
+        "context" => "上下文",
+        _ => "记忆",
     };
-    let intent = action
-        .get("intent")
-        .and_then(Value::as_str)
-        .or_else(|| input.get("intent").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
-    match action_name {
-        "run_bash" => {
-            let Some(command) = input
-                .get("command")
-                .or_else(|| action.get("command"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-            else {
-                return Vec::new();
-            };
-            action_observation_pair(
-                intent,
-                ObservationLineStyle::ActiveBlink,
-                format!("Bash: {command}"),
-            )
-        }
-        "shell_job_status" => action_observation_pair(
-            intent,
-            ObservationLineStyle::ActiveBlink,
-            format!(
-                "后台任务: {}",
-                input
-                    .get("job_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-            ),
-        ),
-        "memmgr" => {
-            let mem_type = input.get("type").and_then(Value::as_str).unwrap_or("");
-            let op = input.get("op").and_then(Value::as_str).unwrap_or("");
-            let default = match (mem_type, op) {
-                ("durable", "query" | "schema" | "sql") => "查询记忆",
-                ("durable", _) => "更新记忆",
-                ("raw_chat", "query" | "sql") => "查询聊天记录",
-                ("raw_chat", "delete") => "删除聊天记录",
-                ("scratch", _) => "处理草稿区",
-                ("context", "shrink") => "整理上下文",
-                _ => "处理记忆",
-            };
-            let detail = memory_action_detail(mem_type, op, default);
-            action_observation_pair(intent, ObservationLineStyle::Normal, detail)
-        }
-        "capmgr" => {
-            let op = input.get("op").and_then(Value::as_str).unwrap_or("");
-            let kind = input.get("kind").and_then(Value::as_str).unwrap_or("");
-            let id = input.get("id").and_then(Value::as_str).unwrap_or("");
-            let detail = match (op, kind, id) {
-                ("load", "", _) => "能力: 加载".to_string(),
-                ("load", kind, "") => format!("能力: 加载 {kind}"),
-                ("load", kind, id) => format!("能力: 加载 {kind}/{id}"),
-                ("list", "", _) => "能力: 列出".to_string(),
-                ("list", kind, _) => format!("能力: 列出 {kind}"),
-                ("inspect", kind, id) if !kind.is_empty() && !id.is_empty() => {
-                    format!("能力: 查看 {kind}/{id}")
-                }
-                _ => "能力: 管理".to_string(),
-            };
-            action_observation_pair(intent, ObservationLineStyle::Normal, detail)
-        }
-        "self_tool" => {
-            let self_type = input.get("type").and_then(Value::as_str).unwrap_or("");
-            let op = input.get("op").and_then(Value::as_str).unwrap_or("");
-            let detail = match (self_type, op) {
-                ("env", "read") => "Timem: 查看环境".to_string(),
-                ("env", "write") => "Timem: 更新环境".to_string(),
-                ("mem_path", "read") => "Timem: 查看记忆路径".to_string(),
-                ("about_me", "read") => "Timem: 查看自身信息".to_string(),
-                _ => "Timem: 自身工具".to_string(),
-            };
-            action_observation_pair(intent, ObservationLineStyle::Normal, detail)
-        }
-        "query_memory" | "memory_query" | "memory_sql_query" | "sql_read" | "memory_schema" => {
-            action_observation_pair(
-                intent,
-                ObservationLineStyle::Normal,
-                "记忆: 查询".to_string(),
-            )
-        }
-        "chat_history_query" => action_observation_pair(
-            intent,
-            ObservationLineStyle::Normal,
-            "聊天记录: 查询".to_string(),
-        ),
-        "memory_write" | "write_memory" | "memory_update" => action_observation_pair(
-            intent,
-            ObservationLineStyle::Normal,
-            "记忆: 更新".to_string(),
-        ),
-        "scratch_write" | "scratch_read" | "scratch_query" | "scratch_delete" => {
-            action_observation_pair(
-                intent,
-                ObservationLineStyle::Normal,
-                "草稿区: 处理".to_string(),
-            )
-        }
-        _ => match intent {
-            Some(text) => vec![ObservationEvent::Persistent(text.to_string())],
-            None => Vec::new(),
+    let action = match op {
+        "query" | "sql" | "schema" | "read" => "查询",
+        "write" | "insert" | "update" | "upsert" => "更新",
+        "delete" => "删除",
+        "shrink" => "压缩",
+        _ => match mem_type {
+            "durable" => "更新",
+            "raw_chat" => "查询",
+            "scratch" => "处理",
+            "context" => "整理",
+            _ => "处理",
         },
+    };
+    format!("{target}: {action}")
+}
+
+fn fallback_unknown(text: &str) -> String {
+    if text.is_empty() {
+        "unknown".to_string()
+    } else {
+        text.to_string()
     }
 }
 
@@ -520,24 +447,6 @@ fn action_observation_pair(
         },
     });
     events
-}
-
-fn memory_action_detail(mem_type: &str, op: &str, fallback: &str) -> String {
-    let target = match mem_type {
-        "durable" => "长期记忆",
-        "raw_chat" => "聊天记录",
-        "scratch" => "草稿区",
-        "context" => "上下文",
-        _ => "记忆",
-    };
-    let action = match op {
-        "query" | "sql" | "schema" | "read" => "查询",
-        "write" | "insert" | "update" | "upsert" => "更新",
-        "delete" => "删除",
-        "shrink" => "压缩",
-        _ => fallback,
-    };
-    format!("{target}: {action}")
 }
 
 fn wrap_display_width(text: &str, width: usize) -> Vec<String> {
@@ -600,15 +509,39 @@ fn fit_with_ellipsis(text: &str, width: usize) -> String {
 
 fn pad_display_width(text: &str, width: usize) -> String {
     let current = display_width(text);
-    if current >= width {
+    if current > width {
+        truncate_display_width(text, width)
+    } else if current == width {
         text.to_string()
     } else {
         format!("{}{}", text, " ".repeat(width - current))
     }
 }
 
+fn truncate_display_width(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > width {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    out
+}
+
 fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(strip_ansi(text).as_str())
+}
+
+fn terminal_marker_extra_width(text: &str) -> usize {
+    if text.starts_with("⚙️ ") || text.starts_with("💡 ") {
+        1
+    } else {
+        0
+    }
 }
 
 fn strip_ansi(text: &str) -> String {
@@ -632,6 +565,86 @@ fn strip_ansi(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::{
+        CoreMemoryActivity, CoreSessionState, CoreTopic, CORE_TOPIC_ACTION,
+        CORE_TOPIC_MODEL_RESPONSE,
+    };
+    use serde_json::json;
+
+    fn action_topic(
+        action: &str,
+        intent: Option<&str>,
+        kind: CoreActionKind,
+        active: bool,
+    ) -> CoreTopicEvent {
+        CoreTopicEvent::new(
+            "session_test",
+            CoreTopic::new(
+                CORE_TOPIC_ACTION,
+                json!({
+                    "name": CORE_TOPIC_ACTION,
+                    "action": action,
+                    "active": active,
+                }),
+            ),
+            CoreSessionState::Running,
+            json!({
+                "intent": intent,
+                "action": action,
+                "input": serde_json::Value::Null,
+                "kind": kind,
+                "active": active,
+                "memory_activity": CoreMemoryActivity::None,
+            }),
+        )
+    }
+
+    fn model_response_topic(free_talk: &str, report_job_progress: &str) -> CoreTopicEvent {
+        CoreTopicEvent::new(
+            "session_test",
+            CoreTopic::new(
+                CORE_TOPIC_MODEL_RESPONSE,
+                json!({
+                    "name": CORE_TOPIC_MODEL_RESPONSE,
+                }),
+            ),
+            CoreSessionState::Running,
+            json!({
+                "status": "working",
+                "free_talk": free_talk,
+                "report_job_progress": report_job_progress,
+                "final_answer": "",
+                "continue_work": true,
+            }),
+        )
+    }
+
+    fn model_response_topic_with_worker_count(
+        free_talk: &str,
+        report_job_progress: &str,
+        working_worker_count: usize,
+    ) -> CoreTopicEvent {
+        CoreTopicEvent::new(
+            "session_test",
+            CoreTopic::new(
+                CORE_TOPIC_MODEL_RESPONSE,
+                json!({
+                    "name": CORE_TOPIC_MODEL_RESPONSE,
+                }),
+            ),
+            CoreSessionState::Running,
+            json!({
+                "status": "working",
+                "free_talk": free_talk,
+                "report_job_progress": report_job_progress,
+                "final_answer": "",
+                "continue_work": true,
+                "global": {
+                    "working_worker_count": working_worker_count,
+                },
+            }),
+        )
+    }
 
     #[test]
     fn panel_renders_heavy_border_and_blinking_transient() {
@@ -729,6 +742,17 @@ mod tests {
     }
 
     #[test]
+    fn ensure_transient_does_not_increment_existing_status() {
+        let mut panel = ObservationPanel::new(8, 48);
+        panel.apply(ObservationEvent::EnsureTransient("思考中...".to_string()));
+        panel.apply(ObservationEvent::EnsureTransient("思考中...".to_string()));
+
+        let rendered = render_observation_panel(&panel);
+        assert_eq!(rendered.matches("思考中...").count(), 1);
+        assert!(!rendered.contains("x2"));
+    }
+
+    #[test]
     fn active_line_can_settle_to_normal() {
         let mut panel = ObservationPanel::new(8, 48);
         panel.apply(ObservationEvent::Active("Bash: pwd".to_string()));
@@ -741,13 +765,21 @@ mod tests {
 
     #[test]
     fn continuing_report_job_progress_renders_progress_marker() {
-        let events = observation_events_from_model_response(
-            r#"{"report_job_progress":"已经完成备份，继续写文件。","next_actions":[{"action":"run_bash","intent":"写入文件","args":{"command":"printf ok"}}]}"#,
-        );
+        let events = observation_events_from_core_topic_events(&[
+            model_response_topic("", "已经完成备份，继续写文件。"),
+            action_topic(
+                "run_bash",
+                Some("写入文件"),
+                CoreActionKind::Bash {
+                    command: "printf ok".to_string(),
+                },
+                true,
+            ),
+        ]);
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("◉ 已经完成备份，继续写文件。".to_string()),
+                ObservationEvent::Persistent("⚙️ 已经完成备份，继续写文件。".to_string()),
                 ObservationEvent::Persistent("写入文件".to_string()),
                 ObservationEvent::ActiveChild {
                     text: "Bash: printf ok".to_string(),
@@ -758,10 +790,78 @@ mod tests {
     }
 
     #[test]
-    fn model_response_maps_run_bash_to_user_facing_bash() {
-        let events = observation_events_from_model_response(
-            r#"{"thought":"不要展示的模型思考","next_actions":[{"action":"run_bash","intent":"统计当前代码量","args":{"command":"rg --files | wc -l"}}]}"#,
+    fn free_talk_topic_renders_lightbulb_marker_before_progress() {
+        let events = observation_events_from_core_topic_events(&[model_response_topic(
+            "先说明一下检查思路。",
+            "正在检查项目状态。",
+        )]);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("💡 先说明一下检查思路。".to_string()),
+                ObservationEvent::Persistent("⚙️ 正在检查项目状态。".to_string()),
+            ]
         );
+    }
+
+    #[test]
+    fn model_response_keeps_thinking_when_global_workers_are_active() {
+        let events =
+            observation_events_from_core_topic_events(&[model_response_topic_with_worker_count(
+                "",
+                "正在继续执行另一个 worker。",
+                2,
+            )]);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("⚙️ 正在继续执行另一个 worker。".to_string()),
+                ObservationEvent::EnsureTransient("思考中...".to_string()),
+            ]
+        );
+
+        let mut panel = ObservationPanel::new(8, 48);
+        panel.apply_all(events);
+        let rendered = render_observation_panel(&panel);
+        assert!(rendered.contains("正在继续执行另一个 worker"));
+        assert!(rendered.contains("思考中..."));
+        assert!(!rendered.contains("x2"));
+    }
+
+    #[test]
+    fn model_response_stops_thinking_when_global_workers_reach_zero() {
+        let events =
+            observation_events_from_core_topic_events(&[model_response_topic_with_worker_count(
+                "",
+                "全部 worker 已结束。",
+                0,
+            )]);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("⚙️ 全部 worker 已结束。".to_string()),
+                ObservationEvent::FinishTransient("思考中...".to_string()),
+            ]
+        );
+
+        let mut panel = ObservationPanel::new(8, 48);
+        panel.apply(ObservationEvent::EnsureTransient("思考中...".to_string()));
+        panel.apply_all(events);
+        let rendered = render_observation_panel(&panel);
+        assert!(rendered.contains("全部 worker 已结束"));
+        assert!(!rendered.contains("思考中..."));
+    }
+
+    #[test]
+    fn model_response_maps_run_bash_to_user_facing_bash() {
+        let events = observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("统计当前代码量"),
+            CoreActionKind::Bash {
+                command: "rg --files | wc -l".to_string(),
+            },
+            true,
+        )]);
         assert_eq!(
             events,
             vec![
@@ -775,26 +875,15 @@ mod tests {
     }
 
     #[test]
-    fn fenced_model_response_still_maps_observation_events() {
-        let events = observation_events_from_model_response(
-            r#"
-```json
-{
-  "thought": {
-    "content": "内部推理，不应该显示",
-    "keep_in_context": false
-  },
-  "next_actions": [
-    {
-      "action": "run_bash",
-      "intent": "整理 v0.5.2 之后的提交",
-      "args":{"command":"git log --oneline v0.5.2..HEAD"}
-    }
-  ]
-}
-```
-"#,
-        );
+    fn core_topic_events_map_action_without_protocol_parsing() {
+        let events = observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("整理 v0.5.2 之后的提交"),
+            CoreActionKind::Bash {
+                command: "git log --oneline v0.5.2..HEAD".to_string(),
+            },
+            true,
+        )]);
         assert_eq!(
             events,
             vec![
@@ -808,31 +897,92 @@ mod tests {
     }
 
     #[test]
-    fn prose_wrapped_model_response_maps_last_valid_envelope() {
-        let events = observation_events_from_model_response(
-            r#"
-先说明一下：{"not":"an envelope"}
-
-```json
-{
-  "report_job_progress": "",
-  "next_actions": [
-    {
-      "action": "query_memory",
-      "intent": "查询测试代号记忆",
-      "args":{"query":"测试代号","limit":5}
-    }
-  ]
-}
-```
-"#,
-        );
+    fn core_topic_events_map_progress_and_action_events() {
+        let events = observation_events_from_core_topic_events(&[
+            model_response_topic("", "正在检查项目状态。"),
+            action_topic(
+                "run_bash",
+                Some("查看当前 git 状态"),
+                CoreActionKind::Bash {
+                    command: "git status --short".to_string(),
+                },
+                true,
+            ),
+        ]);
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("查询测试代号记忆".to_string()),
+                ObservationEvent::Persistent("⚙️ 正在检查项目状态。".to_string()),
+                ObservationEvent::Persistent("查看当前 git 状态".to_string()),
+                ObservationEvent::ActiveChild {
+                    text: "Bash: git status --short".to_string(),
+                    is_last: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn core_topic_events_wire_shape_maps_progress_and_action_events() {
+        let topic_events = [
+            model_response_topic("", "正在检查项目状态。"),
+            action_topic(
+                "run_bash",
+                Some("查看当前 git 状态"),
+                CoreActionKind::Bash {
+                    command: "git status --short".to_string(),
+                },
+                true,
+            ),
+        ];
+        let events = observation_events_from_core_topic_events(&topic_events);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("⚙️ 正在检查项目状态。".to_string()),
+                ObservationEvent::Persistent("查看当前 git 状态".to_string()),
+                ObservationEvent::ActiveChild {
+                    text: "Bash: git status --short".to_string(),
+                    is_last: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn core_topic_events_map_multiple_action_events() {
+        let events = observation_events_from_core_topic_events(&[
+            model_response_topic("", "正在并行检查记忆和本地文件。"),
+            action_topic(
+                "memmgr",
+                Some("查询测试记忆"),
+                CoreActionKind::Memory {
+                    surface: "durable".to_string(),
+                    operation: "query".to_string(),
+                },
+                false,
+            ),
+            action_topic(
+                "run_bash",
+                Some("列出源码文件"),
+                CoreActionKind::Bash {
+                    command: "rg --files -g '*.rs'".to_string(),
+                },
+                true,
+            ),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("⚙️ 正在并行检查记忆和本地文件。".to_string()),
+                ObservationEvent::Persistent("查询测试记忆".to_string()),
                 ObservationEvent::PersistentChild {
-                    text: "记忆: 查询".to_string(),
+                    text: "长期记忆: 查询".to_string(),
+                    is_last: true
+                },
+                ObservationEvent::Persistent("列出源码文件".to_string()),
+                ObservationEvent::ActiveChild {
+                    text: "Bash: rg --files -g '*.rs'".to_string(),
                     is_last: true
                 }
             ]
@@ -841,12 +991,26 @@ mod tests {
 
     #[test]
     fn memmgr_actions_map_to_user_readable_observation_events() {
-        let events = observation_events_from_model_response(
-            r#"{"next_actions":[
-                {"action":"memmgr","intent":"查询测试代号记忆","args":{"type":"durable","op":"query","query":"测试代号"}},
-                {"action":"memmgr","intent":"移除过期上下文","args":{"type":"context","op":"shrink","delta_ids":["pd_1"]}}
-            ]}"#,
-        );
+        let events = observation_events_from_core_topic_events(&[
+            action_topic(
+                "memmgr",
+                Some("查询测试代号记忆"),
+                CoreActionKind::Memory {
+                    surface: "durable".to_string(),
+                    operation: "query".to_string(),
+                },
+                false,
+            ),
+            action_topic(
+                "memmgr",
+                Some("移除过期上下文"),
+                CoreActionKind::Memory {
+                    surface: "context".to_string(),
+                    operation: "shrink".to_string(),
+                },
+                false,
+            ),
+        ]);
         assert_eq!(
             events,
             vec![
@@ -866,11 +1030,16 @@ mod tests {
 
     #[test]
     fn capmgr_action_maps_to_user_readable_observation_events() {
-        let events = observation_events_from_model_response(
-            r#"{"next_actions":[
-                {"action":"capmgr","intent":"加载发布检查能力","args":{"op":"load","kind":"skill","id":"release_quality_gate"}}
-            ]}"#,
-        );
+        let events = observation_events_from_core_topic_events(&[action_topic(
+            "capmgr",
+            Some("加载发布检查能力"),
+            CoreActionKind::Capability {
+                op: "load".to_string(),
+                kind: "skill".to_string(),
+                id: "release_quality_gate".to_string(),
+            },
+            false,
+        )]);
         assert_eq!(
             events,
             vec![
@@ -885,12 +1054,26 @@ mod tests {
 
     #[test]
     fn self_tool_action_maps_to_user_readable_observation_events() {
-        let events = observation_events_from_model_response(
-            r#"{"next_actions":[
-                {"action":"self_tool","intent":"查看 Timem 记忆路径","args":{"type":"mem_path","op":"read"}},
-                {"action":"self_tool","intent":"查看 Timem 软件信息","args":{"type":"about_me","op":"read"}}
-            ]}"#,
-        );
+        let events = observation_events_from_core_topic_events(&[
+            action_topic(
+                "self_tool",
+                Some("查看 Timem 记忆路径"),
+                CoreActionKind::SelfTool {
+                    self_type: "mem_path".to_string(),
+                    op: "read".to_string(),
+                },
+                false,
+            ),
+            action_topic(
+                "self_tool",
+                Some("查看 Timem 软件信息"),
+                CoreActionKind::SelfTool {
+                    self_type: "about_me".to_string(),
+                    op: "read".to_string(),
+                },
+                false,
+            ),
+        ]);
         assert_eq!(
             events,
             vec![
@@ -909,24 +1092,15 @@ mod tests {
     }
 
     #[test]
-    fn model_output_with_json_like_command_keeps_command_intact() {
-        let events = observation_events_from_model_response(
-            r#"
-```json
-{
-  "next_actions": [
-    {
-      "action": "run_bash",
-      "intent": "写入包含 JSON 的示例",
-      "args": {
-        "command": "printf '{\"ok\":true}' > target/example.json"
-      }
-    }
-  ]
-}
-```
-"#,
-        );
+    fn action_topic_with_json_like_command_keeps_command_intact() {
+        let events = observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("写入包含 JSON 的示例"),
+            CoreActionKind::Bash {
+                command: "printf '{\"ok\":true}' > target/example.json".to_string(),
+            },
+            true,
+        )]);
         assert_eq!(
             events,
             vec![
@@ -940,25 +1114,21 @@ mod tests {
     }
 
     #[test]
-    fn model_output_maps_first_two_actions_and_ignores_extra_for_compact_ui() {
-        let events = observation_events_from_model_response(
-            r#"{"next_actions":[
-                {"action":"query_memory","intent":"查测试代号","args":{"query":"测试代号"}},
-                {"action":"run_bash","intent":"看状态","args":{"command":"git status --short"}},
-                {"action":"chat_history_query","intent":"查聊天","args":{"query":"昨天"}}
-            ]}"#,
-        );
+    fn unknown_action_uses_intent_without_exposing_action_name() {
+        let events = observation_events_from_core_topic_events(&[action_topic(
+            "future_tool",
+            Some("执行未来扩展动作"),
+            CoreActionKind::Other {
+                action: "future_tool".to_string(),
+            },
+            false,
+        )]);
         assert_eq!(
             events,
             vec![
-                ObservationEvent::Persistent("查测试代号".to_string()),
+                ObservationEvent::Persistent("执行未来扩展动作".to_string()),
                 ObservationEvent::PersistentChild {
-                    text: "记忆: 查询".to_string(),
-                    is_last: true
-                },
-                ObservationEvent::Persistent("看状态".to_string()),
-                ObservationEvent::ActiveChild {
-                    text: "Bash: git status --short".to_string(),
+                    text: "Action: future_tool".to_string(),
                     is_last: true
                 }
             ]
@@ -966,49 +1136,22 @@ mod tests {
     }
 
     #[test]
-    fn final_only_model_response_creates_no_observation_events() {
-        let events = observation_events_from_model_response(
-            r#"{"thought":"内部思考","report_job_progress":"已经完成","continue":false}"#,
-        );
+    fn empty_core_topic_events_create_no_observation_events() {
+        let events = observation_events_from_core_topic_events(&[]);
         assert!(events.is_empty());
     }
 
     #[test]
-    fn truncated_fenced_model_response_creates_no_observation_events() {
-        let events = observation_events_from_model_response(
-            r#"
-```json
-{"next_actions":[{"action":"run_bash","intent":"坏掉了","args":{"command":"git status"}}
-"#,
-        );
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn unknown_action_uses_intent_without_exposing_action_name() {
-        let events = observation_events_from_model_response(
-            r#"{"next_actions":[{"action":"future_tool","intent":"执行未来扩展动作","args":{}}]}"#,
-        );
-        assert_eq!(
-            events,
-            vec![ObservationEvent::Persistent("执行未来扩展动作".to_string())]
-        );
-    }
-
-    #[test]
-    fn model_thought_is_hidden_from_observation_panel() {
-        let events = observation_events_from_model_response(
-            r#"{"thought":{"content":"内部推理，不给用户看","keep_in_context":true},"report_job_progress":"ok","continue":false}"#,
-        );
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn model_response_does_not_expose_internal_action_name() {
+    fn action_topic_does_not_expose_internal_action_name() {
         let mut panel = ObservationPanel::default();
-        panel.apply_all(observation_events_from_model_response(
-            r#"{"next_actions":[{"action":"run_bash","intent":"统计","args":{"command":"rg --files | wc -l"}}]}"#,
-        ));
+        panel.apply_all(observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("统计"),
+            CoreActionKind::Bash {
+                command: "rg --files | wc -l".to_string(),
+            },
+            true,
+        )]));
         let rendered = render_observation_panel(&panel);
         assert!(rendered.contains("· 统计"));
         assert!(rendered.contains("└─ Bash:"));
@@ -1033,21 +1176,18 @@ mod tests {
 
     #[test]
     fn run_bash_without_intent_shows_plain_label() {
-        let events = observation_events_from_model_response(
-            r#"{"next_actions":[{"action":"run_bash","args":{"command":"ls -la"}}]}"#,
-        );
+        let events = observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            None,
+            CoreActionKind::Bash {
+                command: "ls -la".to_string(),
+            },
+            true,
+        )]);
         assert_eq!(
             events,
             vec![ObservationEvent::Active("Bash: ls -la".to_string())]
         );
-    }
-
-    #[test]
-    fn malformed_model_response_does_not_create_observation_events() {
-        let events = observation_events_from_model_response(
-            r#"{"thought":"partial","next_actions":[{"action":"run_bash""#,
-        );
-        assert!(events.is_empty());
     }
 
     #[test]
@@ -1108,5 +1248,41 @@ mod tests {
             "all panel rows should have the same visible width: {visible_widths:?}\n{rendered}"
         );
         assert!(rendered.contains("\x1b[38;5;255m"));
+    }
+
+    #[test]
+    fn long_progress_and_command_render_as_bounded_aligned_rows() {
+        let mut panel = ObservationPanel::new(20, 80);
+        panel.apply(ObservationEvent::Persistent(format!(
+            "⚙️ {}",
+            "正在处理一个非常长的进度汇报，需要确认观察窗会自动换行但不会把边框撑乱，也不会因为每秒刷新而产生宽度不一致的问题。".repeat(3)
+        )));
+        panel.apply(ObservationEvent::Persistent(
+            "分析当前工作区状态并执行长命令".to_string(),
+        ));
+        panel.apply(ObservationEvent::ActiveChild {
+            text: format!(
+                "Bash: {}",
+                format!(
+                    "{} tail-marker-should-not-render-after-limit",
+                    "echo start; git status --short; git diff --stat; printf '%s' very-long-segment; "
+                        .repeat(12)
+                )
+            ),
+            is_last: true,
+        });
+        panel.apply(ObservationEvent::Transient("思考中...".to_string()));
+
+        let rendered = render_observation_panel_at_with_elapsed(&panel, 1, Some("12:34"));
+        let visible_widths = rendered.lines().map(display_width).collect::<Vec<_>>();
+        assert!(
+            visible_widths.iter().all(|width| *width == 80),
+            "all observation rows should stay aligned: {visible_widths:?}\n{rendered}"
+        );
+        assert!(rendered.contains("⚙️ 正在处理"));
+        assert!(rendered.contains("└─ Bash:"));
+        assert!(rendered.contains('…'));
+        assert!(!rendered.contains("run_bash"));
+        assert!(!rendered.contains("tail-marker-should-not-render-after-limit"));
     }
 }

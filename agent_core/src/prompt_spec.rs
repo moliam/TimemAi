@@ -1,50 +1,18 @@
 use serde_json::Value;
 
-const RESPONSE_V1_SUMMARY: &str = include_str!("../../resources/response_v1_summary.json");
-
-pub fn response_v1_summary_value() -> Value {
-    serde_json::from_str(RESPONSE_V1_SUMMARY)
+pub fn response_v1_summary_value(response_schema_summary: &str) -> Value {
+    serde_json::from_str(response_schema_summary)
         .expect("response_v1 summary resource must be valid JSON")
 }
 
-pub fn enrich_static_prompt_with_response_schema(static_prompt: &str) -> String {
-    let _ = response_v1_summary_value();
+pub fn enrich_static_prompt_with_response_schema(
+    static_prompt: &str,
+    response_schema_summary: &str,
+) -> String {
     if static_prompt.contains("{{RESPONSE_V1_SCHEMA}}") {
-        return static_prompt.replace("{{RESPONSE_V1_SCHEMA}}", RESPONSE_V1_SUMMARY);
+        return static_prompt.replace("{{RESPONSE_V1_SCHEMA}}", response_schema_summary);
     }
-    if let Some(enriched) = replace_json_string_field_with_raw_json(
-        static_prompt,
-        "json_schema_summary",
-        RESPONSE_V1_SUMMARY,
-    ) {
-        return enriched;
-    }
-
-    let Ok(mut value) = serde_json::from_str::<Value>(static_prompt) else {
-        return static_prompt.to_string();
-    };
-    if let Some(response_rule) = value
-        .get_mut("Response_rule")
-        .and_then(Value::as_object_mut)
-    {
-        response_rule.insert(
-            "json_schema_summary".to_string(),
-            response_v1_summary_value(),
-        );
-    }
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| static_prompt.to_string())
-}
-
-pub(crate) fn replace_json_string_field_with_value(
-    source: &str,
-    field: &str,
-    replacement: &Value,
-) -> Option<String> {
-    replace_json_string_field_with_raw_json(
-        source,
-        field,
-        &serde_json::to_string_pretty(replacement).ok()?,
-    )
+    static_prompt.to_string()
 }
 
 pub(crate) fn replace_markdown_placeholder_with_text(
@@ -57,86 +25,17 @@ pub(crate) fn replace_markdown_placeholder_with_text(
         .then(|| source.replace(placeholder, replacement))
 }
 
-pub(crate) fn replace_json_string_field_with_raw_json(
-    source: &str,
-    field: &str,
-    replacement_json: &str,
-) -> Option<String> {
-    serde_json::from_str::<Value>(replacement_json).ok()?;
-    let needle = format!("\"{field}\"");
-    let field_start = source.find(&needle)?;
-    let after_field = field_start + needle.len();
-    let colon_offset = source[after_field..].find(':')?;
-    let colon = after_field + colon_offset;
-    let mut value_start = colon + 1;
-    while let Some(byte) = source.as_bytes().get(value_start) {
-        if !byte.is_ascii_whitespace() {
-            break;
-        }
-        value_start += 1;
-    }
-    if source.as_bytes().get(value_start).copied() != Some(b'"') {
-        return None;
-    }
-
-    let mut value_end = value_start + 1;
-    let mut escaped = false;
-    for (offset, ch) in source[value_end..].char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            value_end += offset + ch.len_utf8();
-            break;
-        }
-    }
-    if source.as_bytes().get(value_end.saturating_sub(1)).copied() != Some(b'"') {
-        return None;
-    }
-
-    let line_start = source[..value_start].rfind('\n').map_or(0, |idx| idx + 1);
-    let base_indent = source[line_start..]
-        .chars()
-        .take_while(|ch| ch.is_ascii_whitespace())
-        .map(char::len_utf8)
-        .sum();
-    let replacement_text = indent_raw_json(replacement_json, base_indent);
-
-    let mut output = String::with_capacity(source.len() + replacement_text.len());
-    output.push_str(&source[..value_start]);
-    output.push_str(&replacement_text);
-    output.push_str(&source[value_end..]);
-    Some(output)
-}
-
-fn indent_raw_json(rendered: &str, base_indent: usize) -> String {
-    let indent = " ".repeat(base_indent);
-    rendered
-        .lines()
-        .enumerate()
-        .map(|(idx, line)| {
-            if idx == 0 {
-                line.to_string()
-            } else {
-                format!("{indent}{line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    const TEST_JSON_RESPONSE_SCHEMA: &str =
+        include_str!("../../resources/protocol/json/response_schema_summary.json");
+    const TEST_MARKDOWN_RESPONSE_SCHEMA: &str =
+        include_str!("../../resources/protocol/markdown/response_schema_summary.md");
 
     #[test]
-    fn response_v1_summary_resource_is_valid() {
-        let summary = response_v1_summary_value();
+    fn json_response_v1_summary_resource_is_valid() {
+        let summary = response_v1_summary_value(TEST_JSON_RESPONSE_SCHEMA);
 
         assert!(summary.get("$id").is_none());
         assert!(summary
@@ -153,12 +52,12 @@ mod tests {
             .is_some());
         assert!(summary
             .get("fields")
-            .and_then(|value| value.get("thought?"))
+            .and_then(|value| value.get("free_talk?"))
             .and_then(|value| value.get("keep_in_context"))
             .is_some());
         assert!(summary
             .get("fields")
-            .and_then(|value| value.get("thought?"))
+            .and_then(|value| value.get("free_talk?"))
             .and_then(|value| value.get("durable"))
             .is_none());
         assert!(summary
@@ -166,6 +65,7 @@ mod tests {
             .and_then(|value| value.get("intent"))
             .is_some());
         let text = serde_json::to_string(&summary).unwrap();
+        assert!(text.contains("context_compact?"));
         for legacy_field in [
             "acceptance_check?",
             "continuation?",
@@ -185,47 +85,32 @@ mod tests {
     }
 
     #[test]
-    fn prompt_spec_injects_response_schema_summary() {
-        let enriched = enrich_static_prompt_with_response_schema(
-            r#"{"Response_rule":{"json_schema_summary":"stale"}}"#,
-        );
-
-        assert!(!enriched.contains("\"$id\""));
-        assert!(enriched.contains("\"fields\""));
-        assert!(enriched.contains("\"status?\""));
-        assert!(enriched.contains("\"report_job_progress?\""));
-        assert!(enriched.contains("\"final_answer?\""));
-        assert!(enriched.find("\"status?\"").unwrap() < enriched.find("\"thought?\"").unwrap());
-        assert!(!enriched.contains("stale"));
-    }
-
-    #[test]
-    fn prompt_spec_injects_response_schema_summary_into_plain_placeholder() {
+    fn prompt_spec_injects_markdown_response_summary_into_plain_placeholder() {
         let enriched = enrich_static_prompt_with_response_schema(
             "## Response Protocol\n{{RESPONSE_V1_SCHEMA}}",
+            TEST_MARKDOWN_RESPONSE_SCHEMA,
         );
 
-        assert!(!enriched.contains("\"$id\""));
-        assert!(enriched.contains("\"status?\""));
-        assert!(enriched.contains("\"report_job_progress?\""));
-        assert!(enriched.contains("\"final_answer?\""));
+        assert!(enriched.contains("Markdown response sections."));
+        assert!(enriched.contains("The top-level response is Markdown, not JSON."));
+        assert!(enriched.contains("`## Status`"));
+        assert!(enriched.contains("`## Progress`"));
+        assert!(enriched.contains("`## Final_Answer`"));
+        assert!(enriched.contains("`## Free_talk`"));
+        assert!(enriched.contains("`## Intermediate_Actions`"));
+        assert!(enriched.contains("`## Context Compact`"));
+        assert!(enriched.contains("inside `## Intermediate_Actions` use JSON objects."));
         assert!(!enriched.contains("{{RESPONSE_V1_SCHEMA}}"));
-        assert!(!enriched.contains("```json\n{\n  \"fields\""));
-        assert!(!enriched.contains("```text\n{\n  \"fields\""));
+        assert!(!enriched.contains("\"sections\""));
+        assert!(!enriched.contains("\"fields\""));
     }
 
     #[test]
-    fn string_field_replacement_preserves_surrounding_order() {
-        let source = "{\n  \"first\": \"a\",\n  \"target\": \"replace me\",\n  \"last\": \"z\"\n}";
-        let replaced = replace_json_string_field_with_value(
-            source,
-            "target",
-            &serde_json::json!({"nested": true}),
-        )
-        .expect("field should be replaced");
+    fn prompt_spec_does_not_magic_rewrite_legacy_json_prompt_fields() {
+        let legacy = r#"{"Response_rule":{"json_schema_summary":"stale"}}"#;
+        let enriched =
+            enrich_static_prompt_with_response_schema(legacy, TEST_MARKDOWN_RESPONSE_SCHEMA);
 
-        assert!(replaced.find("\"first\"").unwrap() < replaced.find("\"target\"").unwrap());
-        assert!(replaced.find("\"target\"").unwrap() < replaced.find("\"last\"").unwrap());
-        assert!(replaced.contains("\"nested\": true"));
+        assert_eq!(enriched, legacy);
     }
 }

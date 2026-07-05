@@ -2,22 +2,21 @@ kind: tool
 id: run_bash
 binding_type: builtin
 binding_name: run_bash
+requires_host: local_command_execution
 summary: Run local shell commands.
 prompt_synopsis: |
   run_bash command=<shell_command> [timeout_ms=<n>] [background=true|mode=background]
 description: |
-  `run_bash` provides you the capability to run a shell command on the local machine and collect the output of the command. This capability is very powerful, such as running bin, reading/editing file, almost everything. Supports foreground and background execution. With status=finished and final_answer, the response may include one final run_bash command; that command's exit code decides whether final_answer is shown.
+  `run_bash` runs a shell command on the local machine and collects bounded
+  evidence from the command result. It supports foreground and background
+  execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
+  Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner.
 prompt_input: |
   Use command for the shell command. Optional: timeout_ms, background=true or
-  mode=background. If status=finished and final_answer includes one final
-  run_bash command, keep it foreground-only and use the command exit code as the
-  final completion check.
+  mode=background.
 prompt_result: |
   Foreground returns status and bounded output. Background returns job_id; use
   shell_job_status with that job_id and your chosen timeout_ms to wait/check.
-  With status=finished and final_answer, the final command exit code determines
-  whether to really finish or continue. If the command exits nonzero, runtime
-  ignores final_answer and returns the command output for continued work.
 input_schema: |
   {
     "type": "object",

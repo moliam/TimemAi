@@ -98,16 +98,19 @@ def extract_prompt(body: Any) -> tuple[str, str] | None:
 
 def prompt_segment_starts(text: str) -> list[int]:
     starts: list[int] = []
-    if text.startswith("[BEGIN SEGMENT "):
+    if text.startswith("[BEGIN DELTA]") or text.startswith("[BEGIN SEGMENT "):
         starts.append(0)
-    offset = 0
-    marker = "\n[BEGIN SEGMENT "
-    while True:
-        idx = text.find(marker, offset)
-        if idx < 0:
-            break
-        starts.append(idx + 1)
-        offset = idx + 2
+    for marker in ("\n[BEGIN DELTA]", "\n[BEGIN SEGMENT "):
+        offset = 0
+        while True:
+            idx = text.find(marker, offset)
+            if idx < 0:
+                break
+            start = idx + 1
+            if start not in starts:
+                starts.append(start)
+            offset = idx + 2
+    starts.sort()
     return starts
 
 
@@ -117,6 +120,21 @@ def segment_field(segment: str, name: str) -> str | None:
         if line.startswith(prefix):
             value = line[len(prefix) :].strip()
             return value or None
+    return None
+
+
+def segment_prompt_type(segment: str) -> str | None:
+    explicit = segment_field(segment, "prompt_type")
+    if explicit:
+        return explicit
+    if "\n## TIMEM_ASSISTANT\n" in segment or segment.startswith("## TIMEM_ASSISTANT\n"):
+        return "llm_response"
+    if "\n## USER\n" in segment or segment.startswith("## USER\n"):
+        return "user_question"
+    if "\n## ACTIONS\n" in segment or segment.startswith("## ACTIONS\n"):
+        return "result_of_llm_action"
+    if "\n## SYSTEM\n" in segment or segment.startswith("## SYSTEM\n"):
+        return "system"
     return None
 
 
@@ -138,7 +156,7 @@ def split_segments(dynamic_prompt: str) -> list[dict[str, str | None]]:
             {
                 "text": text,
                 "delta_id": segment_field(text, "delta_id"),
-                "prompt_type": segment_field(text, "prompt_type"),
+                "prompt_type": segment_prompt_type(text),
             }
         )
     return segments
@@ -309,7 +327,7 @@ def simulate(
         if not prompt:
             continue
         static_prompt, dynamic_prompt = prompt
-        if "[BEGIN SEGMENT " not in dynamic_prompt:
+        if "[BEGIN DELTA]" not in dynamic_prompt and "[BEGIN SEGMENT " not in dynamic_prompt:
             continue
 
         if strategy == "static":

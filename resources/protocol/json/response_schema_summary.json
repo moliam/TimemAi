@@ -1,0 +1,19 @@
+{
+  "fields": {
+    "status?": "string; optional; working/finished. Default is working. Use finished only when the current user request is complete and no more runtime interaction is needed for that request; this does not close the Timem session. Do not use working only to keep the chat session open. If the user says not to end the session/conversation, still use finished when the current request is complete. Then final_answer is shown as the closing user response for the request.",
+    "report_job_progress?": "string; progress report for multi-round tasks so the user can see current status.",
+    "final_answer?": "string; final user-facing answer for the current task. If you include final_answer, also include status:\"finished\".",
+    "next_actions?": "array<object>; required when status is working. Refer to Tools And Skills for available actions. Do not include next_actions when status is finished.",
+    "context_compact?": "object or array<object>; optional. Use to replace old dynamic prompt context with a concise summary. Each object requires summary and delta_ids. Runtime hides those dynamic prompt deltas and appends summary as a new dynamic prompt delta. Do not put the compact summary into a memmgr type=context action. If compact completes the current user request, use status:\"finished\" with final_answer.",
+    "free_talk?": {
+      "content": "string; optional. You can use it for casual reasoning, current plan, or context that should remain visible to you in later prompt context. Runtime keeps it in future context.",
+      "keep_in_context": "boolean; optional. Kept for JSON object form. Runtime keeps non-empty free_talk in future context."
+    }
+  },
+  "action_object_spec": {
+    "scope": "Only for each object inside next_actions. Never use this action/intent/args shape for final answers.",
+    "action": "string; required. Tool name exactly as listed in the Available tool capabilities catalog. Do not invent names.",
+    "intent": "string; required. Concise user-visible reason for the action.",
+    "args": "object; required. Put every tool parameter as a JSON field inside args, for example {\"type\":\"durable\",\"op\":\"query\",\"query\":\"<search text>\",\"limit\":5}. Refer to tool's manifest for details."
+  }
+}

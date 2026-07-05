@@ -3,23 +3,16 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::prompt_spec::{
-    replace_json_string_field_with_value, replace_markdown_placeholder_with_text,
-};
+use crate::prompt_spec::replace_markdown_placeholder_with_text;
 
 const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
 const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
 const SHELL_JOB_STATUS_MANIFEST: &str =
     include_str!("../../resources/capabilities/tools/shell_job_status.yaml");
+const TOOL_JOB_STATUS_MANIFEST: &str =
+    include_str!("../../resources/capabilities/tools/tool_job_status.yaml");
 const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
-const BUILTIN_BINDINGS: &[&str] = &[
-    "memmgr",
-    "capmgr",
-    "run_bash",
-    "shell_job_status",
-    "self_tool",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityBinding {
@@ -42,6 +35,7 @@ pub struct CapabilityInputSchema {
     pub required: Vec<String>,
     pub required_any: Vec<Vec<String>>,
     pub required_when: Vec<CapabilityRequiredWhen>,
+    pub required_any_when: Vec<CapabilityRequiredWhen>,
     pub enum_fields: BTreeMap<String, Vec<String>>,
     pub properties: BTreeMap<String, Value>,
 }
@@ -65,6 +59,7 @@ pub struct ToolManifest {
     pub kind: String,
     pub id: String,
     pub binding: CapabilityBinding,
+    pub requires_host: Option<String>,
     pub summary: String,
     pub prompt: CapabilityPrompt,
     pub input_schema: CapabilityInputSchema,
@@ -87,6 +82,61 @@ pub struct SkillManifest {
 pub struct CapabilityRegistry {
     tools: BTreeMap<String, ToolManifest>,
     skills: BTreeMap<String, SkillManifest>,
+    host_profile: CapabilityHostProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityHostProfile {
+    pub local_command_execution: bool,
+}
+
+impl CapabilityHostProfile {
+    pub fn detect() -> Self {
+        Self {
+            local_command_execution: local_command_execution_available(),
+        }
+    }
+
+    pub fn with_local_command_execution() -> Self {
+        Self {
+            local_command_execution: true,
+        }
+    }
+
+    pub fn without_local_command_execution() -> Self {
+        Self {
+            local_command_execution: false,
+        }
+    }
+
+    fn supports(self, requirement: Option<&str>) -> bool {
+        match requirement.map(str::trim).filter(|value| !value.is_empty()) {
+            None => true,
+            Some("local_command_execution") => self.local_command_execution,
+            Some(_) => false,
+        }
+    }
+
+    fn supports_tool(self, manifest: &ToolManifest) -> bool {
+        if !self.supports(manifest.requires_host.as_deref()) {
+            return false;
+        }
+        if manifest.binding.binding_type == "command" {
+            return self.local_command_execution;
+        }
+        true
+    }
+}
+
+fn local_command_execution_available() -> bool {
+    #[cfg(unix)]
+    {
+        Path::new("/bin/sh").is_file()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 impl CapabilityRegistry {
@@ -94,10 +144,25 @@ impl CapabilityRegistry {
         tool_manifests: &[&str],
         skill_manifests: &[(&str, &str)],
     ) -> Result<Self, String> {
+        Self::from_manifests_for_host(
+            tool_manifests,
+            skill_manifests,
+            CapabilityHostProfile::detect(),
+        )
+    }
+
+    pub fn from_manifests_for_host(
+        tool_manifests: &[&str],
+        skill_manifests: &[(&str, &str)],
+        profile: CapabilityHostProfile,
+    ) -> Result<Self, String> {
         let mut tools = BTreeMap::new();
         for raw in tool_manifests {
             let manifest = parse_tool_manifest(raw)?;
             validate_manifest(&manifest)?;
+            if !profile.supports_tool(&manifest) {
+                continue;
+            }
             if tools.insert(manifest.id.clone(), manifest).is_some() {
                 return Err("duplicate_tool_manifest_id".to_string());
             }
@@ -110,25 +175,42 @@ impl CapabilityRegistry {
                 return Err("duplicate_skill_manifest_id".to_string());
             }
         }
-        Ok(Self { tools, skills })
+        Ok(Self {
+            tools,
+            skills,
+            host_profile: profile,
+        })
     }
 
     pub fn builtin() -> Self {
-        Self::from_manifests(
+        Self::builtin_for_host(CapabilityHostProfile::detect())
+    }
+
+    pub fn builtin_for_host(profile: CapabilityHostProfile) -> Self {
+        Self::from_manifests_for_host(
             &[
                 MEMMGR_MANIFEST,
                 CAPMGR_MANIFEST,
                 RUN_BASH_MANIFEST,
                 SHELL_JOB_STATUS_MANIFEST,
+                TOOL_JOB_STATUS_MANIFEST,
                 SELF_TOOL_MANIFEST,
             ],
             &[],
+            profile,
         )
         .expect("builtin capability manifests must be valid")
     }
 
     pub fn builtin_with_overlay_dir(dir: impl AsRef<Path>) -> Result<Self, String> {
-        let mut registry = Self::builtin();
+        Self::builtin_with_overlay_dir_for_host(dir, CapabilityHostProfile::detect())
+    }
+
+    pub fn builtin_with_overlay_dir_for_host(
+        dir: impl AsRef<Path>,
+        profile: CapabilityHostProfile,
+    ) -> Result<Self, String> {
+        let mut registry = Self::builtin_for_host(profile);
         registry.load_overlay_dir(dir.as_ref())?;
         Ok(registry)
     }
@@ -146,6 +228,9 @@ impl CapabilityRegistry {
             let mut manifest = parse_tool_manifest(&raw)
                 .map_err(|err| format!("parse_tool_manifest_failed:{}:{err}", path.display()))?;
             validate_overlay_manifest(&mut manifest, dir)?;
+            if !self.host_profile.supports_tool(&manifest) {
+                continue;
+            }
             self.tools.insert(manifest.id.clone(), manifest);
         }
         for skill_dir in sorted_dirs(&dir.join("skills"))? {
@@ -182,6 +267,14 @@ impl CapabilityRegistry {
 
     pub fn contains_tool(&self, action: &str) -> bool {
         self.tools.contains_key(action)
+    }
+
+    pub fn tool_count(&self) -> usize {
+        self.tools.len()
+    }
+
+    pub fn skill_count(&self) -> usize {
+        self.skills.len()
     }
 
     pub fn binding_name(&self, action: &str) -> Option<&str> {
@@ -226,6 +319,18 @@ impl CapabilityRegistry {
                 if is_missing_input_value(input.get(key)) {
                     return Err(required_when_error(key, rule, input));
                 }
+            }
+        }
+        for rule in &manifest.input_schema.required_any_when {
+            if !required_when_matches(rule, input) {
+                continue;
+            }
+            if rule
+                .required
+                .iter()
+                .all(|key| is_missing_input_value(input.get(key)))
+            {
+                return Err(required_any_when_error(rule, input));
             }
         }
         for (key, allowed_values) in &manifest.input_schema.enum_fields {
@@ -408,6 +513,19 @@ impl CapabilityRegistry {
                     ),
                 );
             }
+            if !manifest.input_schema.required_any_when.is_empty() {
+                item.insert(
+                    "required_any_when".to_string(),
+                    Value::Array(
+                        manifest
+                            .input_schema
+                            .required_any_when
+                            .iter()
+                            .map(required_when_value)
+                            .collect(),
+                    ),
+                );
+            }
             item.insert("example".to_string(), manifest.example.clone());
             catalog.insert(id.clone(), Value::Object(item));
         }
@@ -442,31 +560,7 @@ impl CapabilityRegistry {
             }
         }
 
-        if let Some(with_catalog) = replace_json_string_field_with_value(
-            static_prompt,
-            "tool_catalog",
-            &self.tool_catalog_value(),
-        ) {
-            if let Some(with_skills) = replace_json_string_field_with_value(
-                &with_catalog,
-                "skill_headers",
-                &self.skill_headers_value(),
-            ) {
-                return with_skills;
-            }
-        }
-
-        let Ok(mut value) = serde_json::from_str::<Value>(static_prompt) else {
-            return static_prompt.to_string();
-        };
-        if let Some(tool_capability) = value
-            .get_mut("Tool_capability")
-            .and_then(Value::as_object_mut)
-        {
-            tool_capability.insert("tool_catalog".to_string(), self.tool_catalog_value());
-            tool_capability.insert("skill_headers".to_string(), self.skill_headers_value());
-        }
-        serde_json::to_string_pretty(&value).unwrap_or_else(|_| static_prompt.to_string())
+        static_prompt.to_string()
     }
 }
 
@@ -522,16 +616,23 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest) -> String {
             .join("; ");
         lines.push(format!("- Conditional: {rules}"));
     }
+    if !manifest.input_schema.required_any_when.is_empty() {
+        let rules = manifest
+            .input_schema
+            .required_any_when
+            .iter()
+            .map(required_any_when_markdown)
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("- Conditional one of: {rules}"));
+    }
     lines.push(String::new());
     lines.push("**Result**".to_string());
     lines.push(one_line(&manifest.prompt.result));
     lines.push(
-        "If args do not match this tool's manifest IDL, runtime asks you to repair the response before executing the tool."
+        "If args do not match this tool spec, runtime asks you to repair the response before executing the tool."
             .to_string(),
     );
-    lines.push(String::new());
-    lines.push("**Example action**".to_string());
-    lines.push(serde_json::to_string_pretty(&manifest.example).unwrap_or_default());
     lines.join("\n")
 }
 
@@ -654,6 +755,7 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let mut required = Vec::<String>::new();
     let mut required_any = Vec::<Vec<String>>::new();
     let mut required_when = Vec::<CapabilityRequiredWhen>::new();
+    let mut required_any_when = Vec::<CapabilityRequiredWhen>::new();
     let mut enum_fields = BTreeMap::<String, Vec<String>>::new();
     let mut prompt_description = String::new();
     let mut prompt_synopsis = String::new();
@@ -714,6 +816,10 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
         }
         if line == "required_when:" {
             section = Some("required_when");
+            continue;
+        }
+        if line == "required_any_when:" {
+            section = Some("required_any_when");
             continue;
         }
         if line == "enum_fields:" {
@@ -800,16 +906,18 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
                 }
                 required_any.push(group);
             }
-            Some("required_when") if line.starts_with("  ") => {
+            Some("required_when") | Some("required_any_when") if line.starts_with("  ") => {
                 let trimmed = line.trim();
                 let Some((condition, fields)) = trimmed.split_once(':') else {
                     return Err(format!(
-                        "required_when_must_use_condition_colon_fields:{trimmed}"
+                        "{}_must_use_condition_colon_fields:{trimmed}",
+                        section.unwrap_or("required_when")
                     ));
                 };
                 let Some((field, values)) = condition.split_once('=') else {
                     return Err(format!(
-                        "required_when_condition_must_use_equals:{condition}"
+                        "{}_condition_must_use_equals:{condition}",
+                        section.unwrap_or("required_when")
                     ));
                 };
                 let values = values
@@ -825,14 +933,22 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
                     .map(str::to_string)
                     .collect::<Vec<_>>();
                 if field.trim().is_empty() || values.is_empty() || required.is_empty() {
-                    return Err(format!("required_when_invalid:{trimmed}"));
+                    return Err(format!(
+                        "{}_invalid:{trimmed}",
+                        section.unwrap_or("required_when")
+                    ));
                 }
-                required_when.push(CapabilityRequiredWhen {
+                let rule = CapabilityRequiredWhen {
                     field: field.trim().to_string(),
                     values,
                     required,
                     conditions: BTreeMap::new(),
-                });
+                };
+                if section == Some("required_any_when") {
+                    required_any_when.push(rule);
+                } else {
+                    required_when.push(rule);
+                }
             }
             Some("enum_fields") if line.starts_with("  ") => {
                 let trimmed = line.trim();
@@ -872,6 +988,7 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             required,
             required_any,
             required_when,
+            required_any_when,
             enum_fields,
             properties: input_properties,
         }
@@ -906,6 +1023,7 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             name: required_top(&top, "binding_name")?,
             command_path: None,
         },
+        requires_host: optional_top(&top, "requires_host"),
         summary: required_top(&top, "summary")?,
         prompt: CapabilityPrompt {
             description: prompt_description,
@@ -942,12 +1060,18 @@ fn parse_input_schema_json(tool_id: &str, raw: &str) -> Result<CapabilityInputSc
         parse_string_array_groups_field(object.get("x-required-any"), tool_id, "x-required-any")?;
     let required_when =
         parse_required_when_field(object.get("x-required-when"), tool_id, "x-required-when")?;
+    let required_any_when = parse_required_when_field(
+        object.get("x-required-any-when"),
+        tool_id,
+        "x-required-any-when",
+    )?;
     let enum_fields = enum_fields_from_properties(&properties);
     Ok(CapabilityInputSchema {
         schema_type,
         required,
         required_any,
         required_when,
+        required_any_when,
         enum_fields,
         properties,
     })
@@ -1201,6 +1325,37 @@ fn required_when_error(key: &str, rule: &CapabilityRequiredWhen, input: &Value) 
     format!("input.{key}_required_when_{}={value}", rule.field)
 }
 
+fn required_any_when_error(rule: &CapabilityRequiredWhen, input: &Value) -> String {
+    let fields = rule.required.join("|");
+    if !rule.conditions.is_empty() {
+        let condition = rule
+            .conditions
+            .iter()
+            .map(|(field, values)| {
+                let value = input
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| values.first().map(String::as_str).unwrap_or(""));
+                format!("{field}={value}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        return format!("input.any_required_when_{fields}_when_{condition}");
+    }
+    let value = input
+        .get(&rule.field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| rule.values.first().map(String::as_str).unwrap_or(""));
+    format!(
+        "input.any_required_when_{fields}_when_{}={value}",
+        rule.field
+    )
+}
+
 fn parse_skill_manifest(raw: &str, body: &str) -> Result<SkillManifest, String> {
     let mut top = BTreeMap::<String, String>::new();
     let mut when_to_use = String::new();
@@ -1252,6 +1407,12 @@ fn required_top(top: &BTreeMap<String, String>, key: &str) -> Result<String, Str
         .ok_or_else(|| format!("{key}_required"))
 }
 
+fn optional_top(top: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    top.get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn json_object(items: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
     let mut object = Map::new();
     for (key, value) in items {
@@ -1299,6 +1460,21 @@ fn required_when_markdown(rule: &CapabilityRequiredWhen) -> String {
         format!("{}={}", rule.field, pipe_values(&rule.values))
     };
     format!("({condition}) requires {}", rule.required.join(", "))
+}
+
+fn required_any_when_markdown(rule: &CapabilityRequiredWhen) -> String {
+    let condition = if !rule.conditions.is_empty() {
+        let mut conditions = rule.conditions.iter().collect::<Vec<_>>();
+        conditions.sort_by_key(|(field, _)| condition_field_order(field));
+        conditions
+            .into_iter()
+            .map(|(field, values)| format!("{field}={}", pipe_values(values)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        format!("{}={}", rule.field, pipe_values(&rule.values))
+    };
+    format!("({condition}) requires one of {}", rule.required.join("|"))
 }
 
 fn pipe_values(values: &[String]) -> String {
@@ -1361,6 +1537,18 @@ fn input_schema_value(schema: &CapabilityInputSchema) -> Value {
             ),
         );
     }
+    if !schema.required_any_when.is_empty() {
+        object.insert(
+            "required_any_when".to_string(),
+            Value::Array(
+                schema
+                    .required_any_when
+                    .iter()
+                    .map(required_when_value)
+                    .collect(),
+            ),
+        );
+    }
     Value::Object(object)
 }
 
@@ -1377,9 +1565,10 @@ fn validate_manifest(manifest: &ToolManifest) -> Result<(), String> {
     if manifest.binding.name.trim().is_empty() {
         return Err(format!("{}:binding_name_required", manifest.id));
     }
-    if !BUILTIN_BINDINGS.contains(&manifest.binding.name.as_str()) {
+    if !crate::tool_registry::BUILTIN_TOOL_BINDINGS.contains(&manifest.binding.name.as_str()) {
         return Err(format!("{}:unsupported_builtin_binding", manifest.id));
     }
+    validate_host_requirement(manifest)?;
     if manifest.prompt.description.trim().is_empty() {
         return Err(format!("{}:description_required", manifest.id));
     }
@@ -1417,9 +1606,12 @@ fn validate_overlay_manifest(
     if manifest.binding.name.trim().is_empty() {
         return Err(format!("{}:binding_name_required", manifest.id));
     }
+    validate_host_requirement(manifest)?;
     match manifest.binding.binding_type.as_str() {
         "builtin" => {
-            if !BUILTIN_BINDINGS.contains(&manifest.binding.name.as_str()) {
+            if !crate::tool_registry::BUILTIN_TOOL_BINDINGS
+                .contains(&manifest.binding.name.as_str())
+            {
                 return Err(format!("{}:unsupported_builtin_binding", manifest.id));
             }
         }
@@ -1482,6 +1674,16 @@ fn input_property_declared(properties: &BTreeMap<String, Value>, key: &str) -> b
     properties.contains_key(key) || properties.contains_key(&format!("{key}?"))
 }
 
+fn validate_host_requirement(manifest: &ToolManifest) -> Result<(), String> {
+    match manifest.requires_host.as_deref() {
+        None | Some("local_command_execution") => Ok(()),
+        Some(requirement) => Err(format!(
+            "{}:unsupported_requires_host:{requirement}",
+            manifest.id
+        )),
+    }
+}
+
 fn validate_manifest_rule_fields(manifest: &ToolManifest) -> Result<(), String> {
     for group in &manifest.input_schema.required_any {
         for key in group {
@@ -1514,6 +1716,32 @@ fn validate_manifest_rule_fields(manifest: &ToolManifest) -> Result<(), String> 
             if !input_property_declared(&manifest.input_schema.properties, key) {
                 return Err(format!(
                     "{}:required_when_required_without_property:{key}",
+                    manifest.id
+                ));
+            }
+        }
+    }
+    for rule in &manifest.input_schema.required_any_when {
+        if !rule.field.is_empty()
+            && !input_property_declared(&manifest.input_schema.properties, &rule.field)
+        {
+            return Err(format!(
+                "{}:required_any_when_field_without_property:{}",
+                manifest.id, rule.field
+            ));
+        }
+        for key in rule.conditions.keys() {
+            if !input_property_declared(&manifest.input_schema.properties, key) {
+                return Err(format!(
+                    "{}:required_any_when_condition_without_property:{key}",
+                    manifest.id
+                ));
+            }
+        }
+        for key in &rule.required {
+            if !input_property_declared(&manifest.input_schema.properties, key) {
+                return Err(format!(
+                    "{}:required_any_when_required_without_property:{key}",
                     manifest.id
                 ));
             }
@@ -1628,8 +1856,48 @@ mod tests {
         assert!(registry.contains_tool("capmgr"));
         assert!(registry.contains_tool("run_bash"));
         assert!(registry.contains_tool("shell_job_status"));
+        assert!(registry.contains_tool("tool_job_status"));
         assert!(registry.contains_tool("self_tool"));
         assert!(!registry.contains_tool("query_memory"));
+    }
+
+    #[test]
+    fn host_profile_filters_local_command_capabilities() {
+        let registry = CapabilityRegistry::builtin_for_host(
+            CapabilityHostProfile::without_local_command_execution(),
+        );
+
+        assert!(registry.contains_tool("memmgr"));
+        assert!(registry.contains_tool("capmgr"));
+        assert!(registry.contains_tool("self_tool"));
+        assert!(!registry.contains_tool("run_bash"));
+        assert!(!registry.contains_tool("shell_job_status"));
+        assert!(!registry.contains_tool("tool_job_status"));
+        assert_eq!(registry.binding_name("run_bash"), None);
+        assert!(registry
+            .validate_action_input(
+                "run_bash",
+                &json_object([("command", Value::String("pwd".to_string()))])
+            )
+            .unwrap_err()
+            .contains("unsupported_action:run_bash"));
+
+        let rendered = registry.render_tool_catalog_markdown();
+        assert!(!rendered.contains("#### `run_bash`"));
+        assert!(!rendered.contains("#### `shell_job_status`"));
+        assert!(!rendered.contains("#### `tool_job_status`"));
+    }
+
+    #[test]
+    fn host_profile_can_enable_local_command_capabilities_without_shell_ui() {
+        let registry = CapabilityRegistry::builtin_for_host(
+            CapabilityHostProfile::with_local_command_execution(),
+        );
+
+        assert!(registry.contains_tool("run_bash"));
+        assert!(registry.contains_tool("shell_job_status"));
+        assert!(registry.contains_tool("tool_job_status"));
+        assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
     }
 
     #[test]
@@ -1641,6 +1909,7 @@ mod tests {
         assert!(rendered.contains("#### `capmgr`"));
         assert!(rendered.contains("#### `run_bash`"));
         assert!(rendered.contains("#### `shell_job_status`"));
+        assert!(rendered.contains("#### `tool_job_status`"));
         assert!(rendered.contains("#### `self_tool`"));
         assert!(rendered.contains("**Synopsis**"));
         assert!(rendered.contains("**Options**"));
@@ -1648,18 +1917,19 @@ mod tests {
         assert!(rendered.contains("Use when the user asks about Timem itself"));
         assert!(rendered.contains("Conditional:"));
         assert!(rendered.contains("(type=durable, op=query) requires query"));
+        assert!(rendered.contains("Conditional one of:"));
+        assert!(rendered.contains("(type=context, op=shrink) requires one of delta_ids"));
         assert!(!rendered.contains("when `` is"));
         assert!(rendered.contains("**Result**"));
         assert!(!rendered.contains("```"));
-        assert!(rendered.contains("\"args\": {"));
-        assert!(rendered.contains("\"command\": \"rg --files | wc -l\""));
+        assert!(!rendered.contains("**Example action**"));
         assert!(!rendered.contains("read_back_command"));
         assert!(!rendered.contains("large_readback"));
         assert!(rendered.contains("`background`:"));
         assert!(rendered.contains("Foreground returns status and bounded output"));
-        assert!(rendered.contains("\"op\": \"load\""));
-        assert!(rendered.contains("\"kind\": \"skill\""));
-        assert!(rendered.contains("\"id\": \"xx_skill_id\""));
+        assert!(rendered.contains("`op`:"));
+        assert!(rendered.contains("`kind`:"));
+        assert!(rendered.contains("`id`:"));
         assert!(rendered.contains("`inspect`"));
         assert!(rendered.contains("memory_conflict"));
         assert!(!rendered.contains("\"output\": {"));
@@ -1677,6 +1947,10 @@ mod tests {
         assert_eq!(
             registry.binding_name("shell_job_status"),
             Some("shell_job_status")
+        );
+        assert_eq!(
+            registry.binding_name("tool_job_status"),
+            Some("tool_job_status")
         );
         assert_eq!(registry.binding_name("self_tool"), Some("self_tool"));
         assert_eq!(registry.binding_name("future_tool"), None);
@@ -1733,11 +2007,72 @@ mod tests {
             .is_ok());
         assert!(registry
             .validate_action_input(
+                "memmgr",
+                &json_object([
+                    ("type", Value::String("scratch".to_string())),
+                    ("op", Value::String("write".to_string())),
+                    ("kind", Value::String("context_offload".to_string())),
+                    ("label", Value::String("large context".to_string())),
+                ])
+            )
+            .unwrap_err()
+            .contains("input.any_required_when_delta_ids_when_kind=context_offload,type=scratch"));
+        assert!(registry
+            .validate_action_input(
+                "memmgr",
+                &json_object([
+                    ("type", Value::String("scratch".to_string())),
+                    ("op", Value::String("write".to_string())),
+                    ("kind", Value::String("context_offload".to_string())),
+                    ("label", Value::String("large context".to_string())),
+                    (
+                        "delta_ids",
+                        Value::Array(vec![Value::String("pd_1".to_string())])
+                    ),
+                ])
+            )
+            .is_ok());
+        assert!(registry
+            .validate_action_input(
+                "memmgr",
+                &json_object([
+                    ("type", Value::String("context".to_string())),
+                    ("op", Value::String("shrink".to_string())),
+                ])
+            )
+            .unwrap_err()
+            .contains("input.any_required_when_delta_ids_when_op=shrink,type=context"));
+        assert!(registry
+            .validate_action_input(
                 "shell_job_status",
                 &json_object([("job_id", Value::String("job_1".to_string()))])
             )
+            .is_ok());
+        assert!(registry
+            .validate_action_input(
+                "tool_job_status",
+                &json_object([("job_id", Value::String("tool_job_1".to_string()))])
+            )
+            .is_ok());
+        assert!(registry
+            .validate_action_input(
+                "shell_job_status",
+                &json_object([
+                    ("job_id", Value::String("job_1".to_string())),
+                    ("op", Value::String("cancel".to_string())),
+                ])
+            )
+            .is_ok());
+        assert!(registry
+            .validate_action_input(
+                "tool_job_status",
+                &json_object([
+                    ("job_id", Value::String("tool_job_1".to_string())),
+                    ("op", Value::String("pause".to_string())),
+                ])
+            )
             .unwrap_err()
-            .contains("input.timeout_ms_required"));
+            .contains("input.op_unsupported:pause"));
         assert!(registry
             .validate_action_input("run_bash", &json_object([]))
             .unwrap_err()
@@ -1846,10 +2181,18 @@ mod tests {
             .and_then(Value::as_object)
             .expect("capmgr catalog entry");
 
-        assert!(capmgr
-            .get("input")
-            .and_then(Value::as_str)
-            .is_some_and(|text| text.contains("op=list") && text.contains("op=load")));
+        let op_enum = capmgr
+            .get("input_schema")
+            .and_then(Value::as_object)
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("op"))
+            .and_then(Value::as_object)
+            .and_then(|op| op.get("enum"))
+            .and_then(Value::as_array)
+            .expect("capmgr op enum");
+        assert!(op_enum.contains(&Value::String("list".to_string())));
+        assert!(op_enum.contains(&Value::String("load".to_string())));
         assert!(capmgr
             .get("required_when")
             .and_then(Value::as_array)
@@ -1895,7 +2238,7 @@ mod tests {
     }
 
     #[test]
-    fn run_bash_idl_uses_command_for_finished_final_command_without_expect_fields() {
+    fn run_bash_idl_uses_command_without_removed_expect_fields() {
         let registry = CapabilityRegistry::builtin();
         let catalog = registry.tool_catalog_value();
         let run_bash = catalog
@@ -1925,7 +2268,6 @@ mod tests {
 
         let prompt = registry.render_tool_catalog_markdown();
         assert!(prompt.contains("run_bash command=<shell_command>"));
-        assert!(prompt.contains("With status=finished"));
         assert!(!prompt.contains("`expect`:"));
         assert!(!prompt.contains("expect_timeout_ms"));
     }
@@ -1953,9 +2295,8 @@ mod tests {
         assert!(loaded_tool.contains("run_bash command=<shell_command>"));
         assert!(!loaded_tool.contains("read_back_command"));
         assert!(!loaded_tool.contains("large_readback"));
-        assert!(loaded_tool.contains("With status=finished"));
         assert!(!loaded_tool.contains("expect_timeout_ms"));
-        assert!(loaded_tool.contains("rg --files | wc -l"));
+        assert!(!loaded_tool.contains("**Example action**"));
     }
 
     #[test]
@@ -2024,6 +2365,77 @@ when_to_use: |
         assert!(registry
             .render_skill_headers_markdown()
             .contains("Runtime-loaded log review checklist"));
+    }
+
+    #[test]
+    fn no_local_command_profile_filters_overlay_command_tools() {
+        let dir = temp_capability_dir("no_local_command_overlay");
+        let tools_dir = dir.join("tools");
+        fs::create_dir_all(&tools_dir).unwrap();
+        fs::write(
+            tools_dir.join("local_echo.yaml"),
+            r#"kind: tool
+id: local_echo
+binding_type: command
+binding_name: echo.sh
+summary: Echo through a local command.
+description: |
+  Uses a host command process.
+input_properties:
+  text: string
+required:
+  - text
+example_json: |
+  {
+    "action": "local_echo",
+    "intent": "Echo a short string.",
+    "args": {
+      "text": "hello"
+    }
+  }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            tools_dir.join("local_echo_builtin.yaml"),
+            r#"kind: tool
+id: local_echo_builtin
+binding_type: builtin
+binding_name: run_bash
+requires_host: local_command_execution
+summary: Echo through the built-in local command executor.
+description: |
+  Uses the built-in local command executor through an overlay alias.
+input_properties:
+  command: string
+required:
+  - command
+example_json: |
+  {
+    "action": "local_echo_builtin",
+    "intent": "Echo a short string.",
+    "args": {
+      "command": "printf hello"
+    }
+  }
+"#,
+        )
+        .unwrap();
+        fs::write(dir.join("echo.sh"), "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").unwrap();
+
+        let registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+            &dir,
+            CapabilityHostProfile::without_local_command_execution(),
+        )
+        .unwrap();
+
+        assert!(!registry.contains_tool("local_echo"));
+        assert!(!registry.contains_tool("local_echo_builtin"));
+        assert!(!registry.contains_tool("run_bash"));
+        assert!(!registry.contains_tool("shell_job_status"));
+        assert!(!registry
+            .render_tool_catalog_markdown()
+            .contains("local_echo"));
     }
 
     #[test]

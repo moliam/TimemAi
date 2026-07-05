@@ -92,6 +92,12 @@ proc assert_contains {scenario output needle} {
     }
 }
 
+proc assert_not_contains {scenario output needle} {
+    if {[string first $needle $output] >= 0} {
+        error "$scenario expected output not to contain: $needle"
+    }
+}
+
 proc wait_for_text {scenario needle timeout_message eof_message} {
     set output ""
     expect {
@@ -195,6 +201,58 @@ proc run_prof_smoke {} {
         }
     }
     wait_prompt
+    exit_timem
+}
+
+proc run_help_smoke {} {
+    spawn_timem
+    send "/help\r"
+    set output [wait_for_text \
+        "/help shell command" \
+        "Runtime system" \
+        "timeout waiting for /help output" \
+        "unexpected EOF waiting for /help output"]
+    assert_contains "/help shell command" $output "Interactive commands"
+    assert_contains "/help shell command" $output "Interactive keys"
+    assert_contains "/help shell command" $output "Runtime system"
+    assert_contains "/help shell command" $output "/prof"
+    assert_contains "/help shell command" $output "/workspace"
+    assert_contains "/help shell command" $output "/exit"
+    assert_not_contains "/help shell command" $output "Usage:"
+    assert_not_contains "/help shell command" $output "--space"
+    assert_not_contains "/help shell command" $output "TIMEM_API_KEY"
+    assert_not_contains "/help shell command" $output "env_template"
+    assert_no_model_call "/help shell command" $output
+    wait_prompt
+    exit_timem
+}
+
+proc run_continuous_help_then_prof_smoke {} {
+    spawn_timem
+
+    send "/help\r"
+    set help_output [wait_for_text \
+        "continuous /help then /prof" \
+        "Runtime system" \
+        "timeout waiting for /help output in continuous flow" \
+        "unexpected EOF waiting for /help output in continuous flow"]
+    assert_contains "continuous /help then /prof" $help_output "Interactive commands"
+    assert_not_contains "continuous /help then /prof" $help_output "Usage:"
+    assert_not_contains "continuous /help then /prof" $help_output "--space"
+    assert_no_model_call "continuous /help then /prof help phase" $help_output
+    wait_prompt
+
+    send "/prof\r"
+    set prof_output [wait_for_text \
+        "continuous /help then /prof" \
+        "Token" \
+        "timeout waiting for /prof output after /help" \
+        "unexpected EOF waiting for /prof output after /help"]
+    assert_contains "continuous /help then /prof" $prof_output "Timem runtime profiling"
+    assert_contains "continuous /help then /prof" $prof_output "Token"
+    assert_no_model_call "continuous /help then /prof prof phase" $prof_output
+    wait_prompt
+
     exit_timem
 }
 
@@ -661,6 +719,8 @@ proc run_workspace_add_cancel_smoke {} {
     exit_timem
 }
 
+run_help_smoke
+run_continuous_help_then_prof_smoke
 run_prof_smoke
 run_multiline_paste_cancel_smoke
 run_edited_paste_recovery_ctrl_c_smoke

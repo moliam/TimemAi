@@ -27,7 +27,9 @@ search_fixed() {
 required_patterns=(
   "session_turn_forced_shrink_runs_to_final_without_repeated_shrink"
   "session_turn_truncated_output_expands_limit_and_retries_same_turn"
+  "session_turn_truncated_output_stop_sets_structured_stop_reason"
   "session_turn_round_limit_continue_recharges_and_finishes_same_task"
+  "session_turn_round_limit_stop_sets_structured_stop_reason"
   "session_turn_bash_approval_executes_action_then_finishes_with_audit"
   "session_turn_scratch_context_offload_records_id_and_continues"
   "session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering"
@@ -47,8 +49,17 @@ required_patterns=(
   "run_config_value_cancel_smoke"
   "run_config_provider_switch_smoke"
   "run_workspace_add_cancel_smoke"
+  "real_tty_supplement_smoke"
   "raw_multiline_paste_requires_confirmation_before_model_submit"
   "queued_paste_fallback_handles_crlf_boundary_without_extra_blank_line"
+  "config_report_is_ui_neutral_and_groups_effective_values"
+  "config_menu_report_is_ui_neutral_command_data"
+  "workspace_menu_report_is_ui_neutral_command_data"
+  "runtime_status_snapshot_groups_retry_state_for_host_rendering"
+  "runtime_status_snapshot_keeps_memory_activity_structured_for_host_rendering"
+  "turn_ui_decision_requests_are_structured_and_ui_neutral"
+  "stale_context_decision_request_is_structured_and_ui_neutral"
+  "config_apply_report_is_ui_neutral_command_data"
 )
 
 for pattern in "${required_patterns[@]}"; do
@@ -62,6 +73,7 @@ ci_required=(
   "cargo test --workspace"
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
+  "scripts/real_tty_supplement_smoke.expect"
   "scripts/sensitive_scan.sh --current"
   "scripts/update_static_prompt_snapshot.sh --check"
 )
@@ -69,6 +81,62 @@ ci_required=(
 for pattern in "${ci_required[@]}"; do
   if ! search_fixed "$pattern" scripts/ci.sh; then
     echo "missing required CI gate: $pattern" >&2
+    exit 1
+  fi
+done
+
+shell_lib_forbidden_wrappers=(
+  "pub fn audit_path("
+  "pub fn action_audit_path("
+  "pub fn memory_path("
+  "pub fn data_root("
+  "pub fn workspace_config_path("
+  "pub fn load_workspace_dirs("
+  "pub fn save_workspace_dirs("
+  "pub fn supporting_context("
+)
+
+for pattern in "${shell_lib_forbidden_wrappers[@]}"; do
+  if search_fixed "$pattern" timem_shell/src/lib.rs; then
+    echo "timem_shell must not re-expose core runtime layout/context wrapper: $pattern" >&2
+    exit 1
+  fi
+done
+
+shell_lib_forbidden_core_internals=(
+  "prepare_provider_request"
+  "prepare_provider_http_request"
+  "provider_http_error_message"
+  "prompt_cache_plan_audit"
+  "plan_prompt_cache"
+  "plan_incremental_cache"
+  "prompt_parts_from_rendered_prompt"
+  "split_old_and_new_delta"
+  "split_prompt"
+  "stable_text_fingerprint"
+  "CacheControl"
+  "PromptBlock"
+  "StructuredOutputHint"
+)
+
+for pattern in "${shell_lib_forbidden_core_internals[@]}"; do
+  if search_fixed "$pattern" timem_shell/src/lib.rs; then
+    echo "timem_shell must not re-export provider/cache core internals: $pattern" >&2
+    exit 1
+  fi
+done
+
+shell_src_forbidden_execution=(
+  'Command::new("curl")'
+  'Command::new("/bin/sh")'
+  "call_model_with_cancel"
+  "run_command_with_cancel"
+  "execute_one_bash"
+)
+
+for pattern in "${shell_src_forbidden_execution[@]}"; do
+  if search_fixed "$pattern" timem_shell/src; then
+    echo "timem_shell must not implement provider/tool execution: $pattern" >&2
     exit 1
   fi
 done
@@ -86,7 +154,7 @@ done
 
 legacy_action_input_hits="$(
   rg -n 'next_actions.*"input"[[:space:]]*:' \
-    agent_core/tests timem_shell/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs \
+    agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs \
     | rg -v 'allow_legacy_input_negative_test' || true
 )"
 if [ -n "$legacy_action_input_hits" ]; then
@@ -100,10 +168,10 @@ if ! search_fixed "allow_legacy_input_negative_test" agent_core/tests/core_tests
 fi
 string_args_hits="$(
   rg -n '"args"[[:space:]]*:[[:space:]]*"' \
-    agent_core/tests timem_shell/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
+    agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
     | rg -v 'allow_string_args_negative_test' \
-    | rg -v 'response_v1_summary.json' \
-    | rg -v 'docs/static-prompt-expanded.md' \
+    | rg -v 'response_schema_summary.json' \
+    | rg -v 'resources/protocol/.*/expanded.md' \
     || true
 )"
 if [ -n "$string_args_hits" ]; then
@@ -181,7 +249,7 @@ for pattern in "${test_strategy_required[@]}"; do
   fi
 done
 
-for id in $(seq 1 27); do
+for id in $(seq 1 28); do
   feature_id="$(printf 'F%02d' "$id")"
   if ! search_fixed "| $feature_id |" "$feature_doc"; then
     echo "missing required feature row: $feature_id" >&2
@@ -206,30 +274,44 @@ for pattern in "${changelog_required[@]}"; do
   fi
 done
 
-static_prompt_snapshot="docs/static-prompt-expanded.md"
-if [ ! -f "$static_prompt_snapshot" ]; then
-  echo "missing expanded static prompt snapshot: $static_prompt_snapshot" >&2
-  exit 1
-fi
+static_prompt_snapshots=(
+  "resources/protocol/markdown/expanded.md"
+  "resources/protocol/json/expanded.md"
+)
 
-static_prompt_snapshot_required=(
-  "Expanded Static Prompt Snapshot"
-  "read-only audit snapshot"
-  "not read by Timem at runtime"
-  "[BEGIN SEGMENT 0: prompt_0]"
+static_prompt_snapshot_common_required=(
+  "[BEGIN SYSTEM PROMPT]"
   "#### \`run_bash\`"
   "#### \`memmgr\`"
   "**Usage**"
   "**Result**"
   '"args": {'
   '"command": "'
-  '"fields"'
-  '"status?"'
 )
 
-for pattern in "${static_prompt_snapshot_required[@]}"; do
-  if ! search_fixed "$pattern" "$static_prompt_snapshot"; then
-    echo "missing required static prompt snapshot item: $pattern" >&2
+static_prompt_snapshot_markdown_required=(
+  "Markdown response sections."
+  "The top-level response is Markdown, not JSON."
+  "\`## Status\`"
+  "\`## Intermediate_Actions\`"
+)
+
+for static_prompt_snapshot in "${static_prompt_snapshots[@]}"; do
+  if [ ! -f "$static_prompt_snapshot" ]; then
+    echo "missing expanded static prompt snapshot: $static_prompt_snapshot" >&2
+    exit 1
+  fi
+  for pattern in "${static_prompt_snapshot_common_required[@]}"; do
+    if ! search_fixed "$pattern" "$static_prompt_snapshot"; then
+      echo "missing required static prompt snapshot item in $static_prompt_snapshot: $pattern" >&2
+      exit 1
+    fi
+  done
+done
+
+for pattern in "${static_prompt_snapshot_markdown_required[@]}"; do
+  if ! search_fixed "$pattern" "resources/protocol/markdown/expanded.md"; then
+    echo "missing required markdown static prompt snapshot item: $pattern" >&2
     exit 1
   fi
 done
@@ -251,11 +333,13 @@ static_prompt_snapshot_forbidden=(
   '"$id"'
 )
 
-for pattern in "${static_prompt_snapshot_forbidden[@]}"; do
-  if search_fixed "$pattern" "$static_prompt_snapshot"; then
-    echo "forbidden verbose schema dump in static prompt snapshot: $pattern" >&2
-    exit 1
-  fi
+for static_prompt_snapshot in "${static_prompt_snapshots[@]}"; do
+  for pattern in "${static_prompt_snapshot_forbidden[@]}"; do
+    if search_fixed "$pattern" "$static_prompt_snapshot"; then
+      echo "forbidden verbose schema dump in $static_prompt_snapshot: $pattern" >&2
+      exit 1
+    fi
+  done
 done
 
 workflow=".github/workflows/ci.yml"

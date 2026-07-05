@@ -4,11 +4,12 @@ binding_type: builtin
 binding_name: capmgr
 summary: Manage capability tools and skills.
 description: |
-  Capability manager. Use op=list to inspect available capability headers.
-  Use op=load when a specific skill body or tool detail is needed.
+  Capability manager. Do not list capabilities for ordinary user tasks. Use
+  op=list only when the user asks about available capabilities, or when you need
+  to discover optional skills/tool details not already visible in the catalog.
+  Use op=load when a specific listed skill body or tool detail is needed.
 prompt_input: |
-  Requires op. Use op=list for headers. For op=load or op=inspect, also provide
-  kind=tool|skill and id.
+  Requires op. For op=load or op=inspect, also provide kind=tool|skill and id.
 prompt_result: |
   `list` returns available capability headers. `load` returns a skill body or tool
   detail when you need more than the static catalog.

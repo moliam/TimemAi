@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 echo "== shell scripts syntax =="
 bash -n install.sh uninstall.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/ci.sh
+python3 -m py_compile scripts/fake_openai_provider.py
 
 echo "== install script logic =="
 scripts/install_logic_test.sh
@@ -37,6 +38,8 @@ cargo build -p timem_shell --release
 echo "== real TTY smoke =="
 if command -v expect >/dev/null 2>&1; then
   scripts/real_tty_smoke.expect
+  scripts/real_tty_supplement_smoke.expect
+  scripts/real_tty_stress.expect
 else
   echo "error: expect is required for real TTY smoke" >&2
   exit 1
