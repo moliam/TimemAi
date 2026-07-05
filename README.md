@@ -24,10 +24,12 @@ agent directly from a terminal without building the iOS app.
 
 ## Layout
 
-- `agent_core/`: protocol loop, memory/search tools, guarded local actions.
-- `timem_shell/`: terminal UI, input editor, provider HTTP adapters, audit log,
-  CLI.
-- `resources/static_v1.md`: Markdown static prompt used by the shell runtime.
+- `agent_core/`: protocol loop, provider wire-format adapters, memory/search
+  tools, guarded local actions.
+- `timem_shell/`: terminal UI, input editor, provider HTTP transport, audit
+  log, CLI.
+- `resources/`: system prompt, response protocol prompt suites, and capability
+  manifests used by the runtime.
 - `docs/architecture.md`: module boundaries, turn lifecycle, runtime contracts.
 - `docs/feature-test-management.md`: feature ownership and test coverage ledger.
 - `.github/workflows/ci.yml`: GitHub Actions workflow for push / pull request
@@ -150,6 +152,7 @@ Common examples:
 export TIMEM_GATEWAY_PROVIDER=aliyun
 export TIMEM_API_KEY=...
 export TIMEM_API_PROTOCOL=openai-compatible
+export TIMEM_RESPONSE_PROTOCOL=markdown
 export TIMEM_MAX_LLM_INPUT=100K
 export TIMEM_MAX_LLM_OUTPUT=10K
 ```
@@ -169,7 +172,7 @@ export TIMEM_API_PROTOCOL=anthropic
 ```
 
 `TIMEM_GATEWAY_PROVIDER` chooses the traffic platform and default URL.
-`TIMEM_API_PROTOCOL` chooses the request/response format. Supported values:
+`TIMEM_API_PROTOCOL` chooses the provider HTTP wire format. Supported values:
 
 - `openai-compatible`
 - `openai-responses`
@@ -184,6 +187,14 @@ If `TIMEM_API_PROTOCOL` is omitted, `TIMEM_GATEWAY_PROVIDER=openai` uses
 OpenAI Responses, `TIMEM_GATEWAY_PROVIDER=anthropic` uses Anthropic protocol,
 and other providers use OpenAI-compatible chat completions. For a custom
 gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
+
+`TIMEM_RESPONSE_PROTOCOL` chooses how the model must format its response for
+the local runtime parser. Supported values are `markdown` and `json`; the
+default is `markdown`.
+
+`TIMEM_WORK_INSTRUCTIONS` controls whether Timem loads `AGENTS.md` and
+`CLAUDE.md` from the current working directory into agent context. Supported
+values are `silent` (default, auto-load and notify), `ask`, and `off`.
 
 `TIMEM_MAX_LLM_INPUT` defaults to `100K`; `TIMEM_MAX_LLM_OUTPUT` defaults to
 `10K`. When observed provider input tokens plus the new prompt delta estimate
@@ -319,6 +330,11 @@ timeout.
 cancels the current line, inside menus it cancels the current selection, and
 while Timem is thinking it cancels the current turn. Use `Ctrl+D` or `/exit` to
 leave the shell intentionally.
+
+While Timem is thinking, you can also type an extra instruction and press Enter.
+That line is added to the current turn as a `user_supplement` prompt slice, so
+the next model round sees it as the newest user correction/instruction instead
+of waiting for a new chat turn.
 
 ## Install Details
 

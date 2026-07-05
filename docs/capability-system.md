@@ -21,18 +21,18 @@ runtime must have a matching executor binding.
 Current first-step implementation:
 
 ```text
-builtin resources/capabilities/tools/*.yaml
+builtin resources/capabilities/tools/{tool}.yaml + {tool}.rs
 optional TIMEM_CAPABILITIES_DIR overlay
         ↓ load at runtime
 CapabilityRegistry
         ↓ render
-Tool_capability.tool_catalog in prompt_0
+{{TOOL_CATALOG}} / {{SKILL_HEADERS}} in the Markdown static prompt
         ↓ generic parse
 parse model next_actions action/intent/args
         ↓ resolve binding
 ExecutorTarget
         ↓ dispatch
-builtin executor implementation
+paired builtin tool callback or overlay command
 ```
 
 The manifest is the human-maintained source for:
@@ -45,8 +45,28 @@ The manifest is the human-maintained source for:
 - required input fields derived from the input IDL for registry/contract tests
 - any-of required groups from the `x-required-any` IDL extension
 - conditional required fields from the `x-required-when` IDL extension
+- conditional any-of required groups from the `x-required-any-when` IDL
+  extension
 - enum field constraints derived from property `enum` values
 - examples
+
+Foreground/background execution is part of the capability interface:
+
+- Built-in tools can own specialized lifecycle semantics when needed. `run_bash`
+  keeps a dedicated path because it includes approval policy and local shell
+  safety checks.
+- Command-bound registered tools run in the foreground by default. If their
+  YAML declares `background` or `mode=background` in `input_schema`, core may
+  start the command as a background `tool_job`, persist its status under the
+  runtime memory directory, and return a `job_id`.
+- Background command-bound tools are checked or cancelled through
+  `tool_job_status`; background `run_bash` jobs use `shell_job_status` for the
+  same status/cancel lifecycle. The shell UI does not manage those jobs. Core
+  owns job ids, output/status files, process termination, polling, bounded
+  readback, and action evidence.
+- A model cannot opt a registered command tool into background execution unless
+  that field is declared in the tool manifest. Manifest validation rejects the
+  undeclared field before execution.
 
 The Rust executor still owns side-effect behavior, storage access, permissions,
 and complex cross-field validation. The top-level parser must not know concrete
@@ -65,14 +85,18 @@ The IDL is intentionally data, not Rust code: the same `input_schema` and
 `capmgr op=load kind=tool`. The static prompt receives a shorter Markdown
 capability guide derived from the manifests, not a full schema dump.
 
-Complex built-in protocol rules and small built-in executors should live near
-their capability family, not in the top-level turn loop. For example,
-`agent_core::memmgr` owns `memmgr` operation validation and scratch-kind
-normalization while `AgentCore` still owns the storage side effects during the
-migration; `agent_core::capmgr` owns capability-manager operation dispatch over
-the registry; `agent_core::shell_exec` owns Bash request validation, foreground
-execution, background job persistence, and shell job polling while `AgentCore`
-keeps user approval and turn-loop routing.
+Built-in tools live as capability packages under
+`resources/capabilities/tools/`. Each package has a `{tool}.yaml` manifest and,
+for compiled built-ins, a paired `{tool}.rs` callback implementation. The YAML
+defines the action id, model-facing manual, executor binding, and manifest-level
+input validation. The Rust callback owns concrete argument extraction,
+execution, evidence shaping, and tool-specific runtime safety checks. The
+`resources/capabilities/tools/registry.rs` file is the compiled builtin
+callback registry. The top-level `AgentCore` turn loop should only resolve the
+action through the manifest registry, call the builtin callback registry by
+binding name, and handle shared audit/approval plumbing. It should not duplicate
+concrete tool option parsing such as `command`, `query`, `expected_version`, or
+`delta_ids`.
 
 Executor binding resolution is centralized in `agent_core::executor`:
 

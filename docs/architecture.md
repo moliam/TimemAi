@@ -1,8 +1,9 @@
-# Timem Shell Architecture
+# Timem Architecture
 
-Timem Shell is a standalone Rust terminal agent. It contains the reusable agent
-state machine plus a local terminal runner, provider adapters, local memory, and
-bounded shell tools.
+Timem Shell is the terminal host for the reusable Timem Rust agent core. The
+terminal host owns CLI/input/rendering. `agent_core` owns the reusable runtime,
+provider transport, memory, model protocol parsing, capability execution, and
+structured core/UI topic protocol.
 
 ## Goals
 
@@ -19,15 +20,17 @@ bounded shell tools.
 flowchart LR
     User["User terminal"] --> Shell["timem_shell\nterminal UI + CLI"]
     Browser["Future local web UI"] -.-> Web["web adapter\nplanned"]
-    Shell --> Runtime["session_runtime\nUI-neutral turn runner"]
-    Web -.-> Runtime
-    Runtime --> Provider["Provider adapter\nOpenAI-compatible / Anthropic"]
+    Shell --> Core["agent_core\nruntime + topic protocol"]
+    Web -.-> Core
+    Core --> Runtime["agent_core::session_runtime\nUI-neutral turn runner"]
+    Runtime --> Provider["agent_core::provider_transport\nprovider I/O"]
+    Provider --> Wire["agent_core::provider\nwire-format adapter"]
     Provider --> LLM["LLM provider"]
-    Runtime --> Core["agent_core\nagent state machine"]
     Core --> Guard["MemGuard\nper data root + space"]
-    Runtime --> Guard
     Guard --> Store["Local data\nmemory + chat history + audit"]
-    Core --> Bash["run_bash\nbounded local shell"]
+    Core --> Caps["Capability registry\nYAML IDL + tool callbacks"]
+    Caps --> Tools["resources/capabilities/tools\n{tool}.yaml + {tool}.rs"]
+    Core --> Exec["Tool execution\nbuiltin + command-bound jobs"]
     Guard --> Audit["audit/api_audit.json\naudit/action_audit.json"]
 ```
 
@@ -35,15 +38,78 @@ flowchart LR
 
 `agent_core` owns the agent loop and is platform independent.
 
+- Provides reusable capability functions and state-machine functions. Host
+  adapters call core functions instead of reimplementing agent behavior.
+- Exposes state/progress through structured topic events and structured return
+  values. Hosts receive `CoreTopicEvent` batches via core dispatch methods, then
+  render the resulting data in their own UI style.
+- Defines host-independent turn adapter helpers such as user-supplement
+  normalization. A terminal, Web, or native host may collect input differently,
+  but empty/whitespace supplement filtering before adding `user_supplement`
+  slices is a core boundary rule.
+- Returns structured output, not terminal strings. A shell, Web UI, or iOS app
+  may render the same core data as ANSI text, HTML, native views, logs, or
+  accessibility-friendly UI.
+- Represents non-normal turn endings with structured `TurnStopReason` values
+  such as cancellation, provider/model error, output-limit stop, or round-limit
+  stop. Hosts may still show the fallback text, but should not infer state by
+  parsing localized user-facing strings.
 - Builds append-only prompt segments.
-- Parses and repairs model response envelopes.
+- Parses and repairs model response envelopes through
+  `agent_core::response_protocol`. The parser modules are runtime code, not
+  model-facing prompt resources.
 - Loads capability manifests and renders the model-facing tool catalog from the
   same JSON Schema style IDL used to validate canonical tool actions.
-- Renders `prompt_0` and dynamic prompt delta/slice segments through
+- Renders `prompt_0` and dynamic prompt delta blocks through
   `agent_core::prompt_render`, so prompt generation is a module boundary rather
   than ad hoc string assembly in the turn loop.
-- Executes structured actions: memory reads/writes, chat-history reads,
-  read-only SQL, and bounded `run_bash`.
+- Owns provider transport in `agent_core::provider_transport`, including model
+  HTTP execution, cancellation polling, request/response audit append, and
+  provider response handoff.
+- Owns provider wire-format construction and response parsing in
+  `agent_core::provider`: OpenAI-compatible chat completions, OpenAI Responses,
+  Anthropic messages, structured-output hints, endpoint joining, usage parsing,
+  truncation detection, provider HTTP error normalization/redaction, provider
+  default protocol/base URL/model rules, provider cache-control block
+  translation, and provider request/response audit event data.
+- Owns provider-agnostic prompt cache planning in `agent_core::prompt_cache`.
+  The algorithm splits rendered prompt into static prompt and dynamic
+  delta blocks, marks stable cache boundaries, and returns shell/UI-neutral
+  data structures for host adapters to translate into provider requests.
+- Owns UI-neutral profiling state in `agent_core::profiler`: per-model token
+  totals, cache hit/create counters, model wait/local work timing, and storage
+  size snapshots. It exposes raw `RuntimeProfileReport` data as the
+  shell-independent `/prof` data shape; host adapters decide how to format
+  counts, durations, percentages, units, and layout.
+- Owns UI-neutral runtime configuration report data in
+  `agent_core::config_report`, including effective provider/model/runtime/data
+  rows and default/default-overridden semantic flags. Host adapters render this as a
+  terminal startup banner, settings screen, or web panel.
+- Owns UI-neutral token/status summary and view-model data in
+  `agent_core::status_summary`: meaningful latest usage detection, total/latest
+  token breakdowns, context percentage, progress-bar fill counts, model rounds,
+  and repair counts. Host adapters choose symbols, compact number formatting,
+  and layout.
+- Owns the UI-neutral runtime status snapshot shape in
+  `agent_core::status_view`, including structured retry status. Hosts may render
+  retry countdowns, details, colors, or notifications differently, but should
+  not store retry state as scattered UI strings.
+- Normalizes model progress/actions into UI-neutral topic events after model
+  response parsing: job progress, user-visible intent, activity state, memory
+  read/write activity, and structured `CoreActionKind` values such as Bash,
+  memory, capability, or self-tool activity. Core may include raw action/input
+  as evidence, but hosts should render from the structured kind instead of
+  parsing protocol-specific action JSON. Host adapters render these topic events
+  as terminal panels, native app status, web events, or other UI-specific forms.
+- Owns API audit document append/migration mechanics and UI-neutral runtime
+  event builders in `agent_core::audit`. Host adapters choose audit file paths
+  and decide when to append events.
+- Executes structured actions through the capability registry. Built-in tool
+  packages live under `resources/capabilities/tools/{tool}.yaml` plus a paired
+  `{tool}.rs` callback; overlay command tools are loaded from the capability
+  directory. The shell UI may provide user decisions such as approval, but
+  command execution, registered tool job lifecycle, evidence shaping, and tool
+  audit are core responsibilities.
 - Routes memory-space file access through `MemGuard` so multiple CLI processes
   using the same data root and space do not corrupt or lose writes.
 - Tracks per-turn stats: model calls, token usage, memory reads/writes, tool
@@ -52,13 +118,19 @@ flowchart LR
 
 ### `timem_shell/`
 
-`timem_shell` owns the terminal runtime.
+`timem_shell` owns the terminal host and UI.
 
 - Reads CLI flags and environment config.
+- Parses terminal-only user commands and maps shared commands to core functions
+  where appropriate.
 - Renders the shell banner, Reedline-backed input prompt, observation panel,
   final answer, profiling output, and status line.
-- Sends HTTP requests to providers.
-- Writes local API/action audit logs with secret redaction.
+- May provide shell-only commands for terminal user experience, such as
+  `/config`, `/prof`, input recovery, or other TTY conveniences. These commands
+  stay outside the model-visible capability surface when they do not require
+  agent reasoning, memory actions, or tool protocol cooperation.
+- Chooses local API/action audit paths and records host turn events through
+  core-owned audit document writers and redaction helpers.
 - Loads shell history and runtime data from the selected data root.
 
 Key shell-side modules:
@@ -66,28 +138,64 @@ Key shell-side modules:
 - `main.rs`: CLI, interactive loop, Reedline input adapter, config menu, paste
   placeholder recovery, cancellation handling, startup banner rendering, and
   the CLI implementation of the turn UI callbacks.
-- `session_runtime.rs`: UI-neutral turn runner. It drives `AgentCore`, provider
-  calls, audit writes, profiler updates, cancellation checks, approval
-  decisions, round-limit decisions, and output-token expansion decisions through
-  a small `TurnUi` trait. CLI is one adapter; future Web UI should implement
-  the same callbacks instead of copying the agent loop.
-- `protocol_adapter.rs`: provider-specific request/response packing.
-- `prompt_cache.rs`: provider cache-control planning over the static prompt
-  plus the recent dynamic tail slices. It avoids marking one ever-growing
-  old-deltas block because that block changes every round and defeats provider
-  prefix reuse.
-- `structured_output.rs`: protocol-specific structured-output options.
 - `observation.rs`: modular Thought / Action observation events and rendering.
-  It hides model-private `thought`, renders user-facing intent as top-level
-  `·` rows, and renders concrete Bash/memory/context activity as wrapped child
+  It consumes `CoreTopicEvent` values instead of parsing model responses in the
+  shell production path, renders user-facing intent as top-level `·` rows, and
+  renders `CoreActionKind` values as concrete Bash/memory/context activity child
   rows using `├─`/`└─` prefixes.
-- `profiler.rs`: `/prof` token, latency, and storage reporting.
+- thinking status hints use `agent_core::topic_event_status_hint`; shell only
+  maps the returned memory activity to a terminal marker.
+- `profiler.rs`: shell rendering for `/prof` from `RuntimeProfileReport`;
+  profiling state, report data generation, and storage collection live in
+  `agent_core::profiler`.
+- startup/config rendering uses `RuntimeConfigReport` from
+  `agent_core::config_report`; shell owns keyboard menus and table drawing.
 
-### `resources/static_v1.md`
+Host-specific commands are acceptable when they are purely presentation or
+adapter ergonomics. If a feature must be visible to the model, callable by the
+model, shared by iOS/Web/CLI, or reflected in prompt/capability contracts, it
+belongs in `agent_core` or `resources` instead of being implemented as a
+shell-only shortcut.
 
-This is the static prompt contract visible to the model. It describes the
-response envelope, tool catalog, memory layers, and safety rules. It should stay
-stable because providers can cache it.
+In short:
+
+```text
+agent_core:
+  - reusable fn() capability/state APIs
+  - CoreTopicEvent-style structured topic protocol
+  - structured outputs and structured decisions
+  - model protocol parsing, provider request preparation, memory/tools
+
+UI host:
+  - render(structured_output)
+  - parse UI gestures/commands and call core fn()
+  - implement UI-only functions such as shell-only slash commands
+  - own terminal/web/native layout, strings, colors, key handling, and host IPC
+  - do not implement provider/model transport or model-requested tool execution
+```
+
+Do not over-centralize UI concerns into core. Core should expose data, abstract
+process state, reusable operations, and structured topic events. Each host
+keeps freedom to present that data differently and to implement host-only
+ergonomics when they do not become shared model-visible capability.
+
+### `resources/`
+
+`resources/` owns model-facing prompt materials and capability manifests.
+`agent_core/src` owns runtime structures, executable response parsers, provider
+wire-format adapters, and executors. It should not contain system prompt text or
+protocol prompt prose.
+
+- `resources/system_prompt/system_prompt.md`: Markdown static prompt shell.
+  It is the stable model-visible outer contract and contains placeholders for
+  protocol and capability injection.
+- `resources/protocol/markdown/`: default model response protocol prompt
+  injection, schema summary, and expanded prompt snapshot.
+- `resources/protocol/json/`: JSON response protocol prompt injection, schema
+  summary, and expanded prompt snapshot.
+- `resources/capabilities/tools/*.yaml`: tool capability manifests. The same
+  manifest data renders the model-facing tool catalog and validates parsed
+  action arguments before execution.
 
 The literal `{{TOOL_CATALOG}}` placeholder in this file is not the long-term
 source of truth. At runtime, `agent_core` replaces it with a catalog generated from built-in
@@ -95,38 +203,87 @@ source of truth. At runtime, `agent_core` replaces it with a catalog generated f
 `TIMEM_CAPABILITIES_DIR` overlay. See
 [`docs/capability-system.md`](capability-system.md).
 
+## Response Protocol Suites
+
+Timem separates model-facing protocol instructions from runtime parsing:
+
+```text
+resources/protocol/<suite>/
+├─ response_protocol.md          model-facing instructions injected into prompt_0
+├─ response_schema_summary.*     compact schema summary injected by prompt render
+└─ expanded.md                   generated read-only snapshot for review
+
+agent_core/src/response_protocol/
+├─ mod.rs                        protocol-independent ParsedEnvelope/ParsedAction
+├─ markdown_suite.rs             Markdown response parser and repair policy
+└─ json_suite.rs                 JSON response parser and repair policy
+```
+
+The `resources/protocol/<suite>` files are model-facing prompt resources and
+review snapshots. The Rust modules under `agent_core/src/response_protocol/`
+are executable parser suites. They intentionally live in code because they
+define runtime behavior, repair boundaries, and tests; they must stay aligned
+with the resource text and generated expanded snapshots.
+
+The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
+`--response-protocol`. The default is `markdown`; `json` remains available.
+Both suites must produce the same internal `ParsedEnvelope` semantics for the
+same user-visible capability: status/final answer, progress, free_talk retention,
+actions, and `context_compact`.
+
+The prompt must not tell the model that multiple suites exist. It should only
+show the currently selected response protocol. This keeps provider-facing text
+small and avoids making runtime implementation choices part of the user's task.
+
+Markdown protocol recovery is intentionally bounded:
+
+- If the model emits a natural-language preface before a valid Markdown
+  protocol section, the parser may recover from the first recognized protocol
+  heading such as `## Status`, `## Progress`, `## Final_Answer`,
+  `## Intermediate_Actions`, or `## Context Compact`.
+- A standalone fenced `action` block is treated as working protocol output.
+- Ordinary Markdown headings such as `## Notes` are not protocol. They remain a
+  plain final answer unless they contain JSON/action-looking syntax that should
+  trigger repair.
+- Malformed action blocks are never downgraded to a final answer. They produce
+  a protocol repair slice so the model can correct the response.
+
+JSON protocol recovery is similarly bounded around explicit JSON-looking
+content. It may strip fences or extract a balanced JSON object, but it must not
+guess actions from ordinary prose.
+
+When changing one suite, add or update parity tests so `json` and `markdown`
+continue to map equivalent protocol content to equivalent `ParsedEnvelope`
+values. Parser tolerance can differ at the syntax edge, but executable
+capability semantics must not.
+
 ## Turn Lifecycle
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant UI as UI adapter
-    participant R as session_runtime
-    participant C as agent_core
-    participant P as Provider
+    participant C as agent_core/session_runtime
+    participant P as agent_core provider
     participant T as Local tools/data
 
     U->>UI: type a message
-    UI->>R: run_session_turn(input, config, callbacks)
-    R->>C: begin_turn(user_input, context)
-    C-->>R: prompt with static prefix + dynamic deltas
-    R->>UI: on_model_request(round)
-    R->>P: provider request
-    P-->>R: model response
-    R->>UI: on_model_response(round, usage, content)
-    R->>C: apply_model_response(response)
+    UI->>C: run_session_turn(TurnInput, config, TurnUi)
+    C->>C: begin_turn(user_input, context)
+    C-->>UI: topic events / on_model_request(round)
+    C->>P: provider request
+    P-->>C: model response
+    C-->>UI: on_model_response(round, usage, content)
+    C->>C: apply_model_response(response)
     alt response asks for actions
         C->>T: execute structured action
         T-->>C: bounded result
-        C-->>R: next prompt
-        R->>P: next provider request
+        C->>P: next provider request
     else approval or round decision is needed
-        R->>UI: pause_for_user_decision()
-        UI-->>R: approval / continue / expand output
-        R->>UI: resume_after_user_decision()
+        C-->>UI: request topic
+        UI-->>C: TopicReply approval / continue / expand output
     else response is final
-        C-->>R: final answer + stats
-        R-->>UI: TurnOutcome
+        C-->>UI: TurnOutcome
         UI-->>U: render answer and status
     end
 ```
@@ -136,13 +293,21 @@ one response envelope. If it emits malformed JSON or an invalid action shape,
 the core sends one protocol repair request. If the repaired response is still
 invalid, raw model text is blocked from the user and a safe fallback is shown.
 
-The UI adapter must not own the agent loop. Its responsibilities are limited to:
+The UI adapter must not own the agent loop, provider transport, or tool
+execution. Its responsibilities are limited to:
 
 - Present turn progress events such as model request/response and observations.
 - Provide user decisions for approvals, round-limit continuation, stale context,
   and output-token expansion when the UI is interactive.
 - Provide cancellation state.
 - Render `TurnOutcome`.
+
+The boundary is intentionally structural, not visual. `agent_core` should expose
+semantic data, events, and operations; it should not decide terminal colors,
+line wrapping, prompt widgets, web animations, iOS layouts, or other
+presentation details. Each host UI may render the same structured core output in
+its own way and may add host-only commands or interactions that improve that
+environment, as long as they do not fork or reimplement the core agent loop.
 
 Non-interactive callers should use `NoopTurnUi`, whose defaults deny approvals,
 do not continue round limits, do not request output expansion, and do not
@@ -154,10 +319,11 @@ require terminal state.
 dependencies such as Reedline, Crossterm, ANSI rendering, prompt menus, or
 terminal input handling. Host integrations should treat it as a state machine:
 
-- call `begin_turn` with user input and host-provided supporting context
-- send `NeedModel.prompt` to the host's provider adapter
-- call `apply_model_response` with the provider response
-- handle `NeedsUserApproval`, `RoundLimitReached`, and `Final` through the host UI
+- call `run_session_turn` or lower-level core functions with user input and
+  host-provided supporting context
+- render topic events and structured outcomes
+- reply to core-originated request topics
+- signal cancellation and supply optional user supplements
 
 The terminal app is one host adapter. iOS should be another host adapter, not a
 fork of the agent loop. The iOS path should reuse `agent_core` through the
@@ -165,16 +331,100 @@ existing JSON-in/JSON-out C ABI or a thin generated binding, then implement only
 iOS-specific pieces outside the core:
 
 - native UI rendering and input
-- provider networking or a bridge to a trusted local/cloud provider service
 - user approval prompts
 - local shell bridge selection and transport
 - platform-specific audit and data-directory wiring
 
-`timem_shell::session_runtime` is intentionally UI-neutral but still lives in
-the shell crate because it depends on shell-side provider config, audit, and
-profiling. A future shared host-runtime crate may extract that layer if iOS and
-Web need the same provider orchestration. Until then, do not move terminal UI
-or provider HTTP details into `agent_core`.
+Host adapter request/outcome/UI callback traits live in `agent_core::host`.
+Those traits are semantic contracts, not a terminal UI framework: a shell,
+iOS, or Web host can implement the same callbacks and render the structured
+events in its own style. User decision callbacks also use structured request
+types, such as `RoundLimitDecisionRequest`, `OutputExpansionRequest`, and
+`StaleContextDecisionRequest`, so the core owns the operation semantics while
+each host owns labels, keyboard/mouse interaction, and visual presentation.
+Conceptually, core-originated host communication is topic-based. Non-blocking
+progress notifications and blocking user-decision requests are both
+`CoreTopicEvent` values. A blocking request topic declares `expects_reply=true`
+and carries a waiting session state; the host replies with `TopicReply`, then
+core validates `session_id`, `topic_name`, and `request_id` before resuming the
+suspended session or applying the safe default. The Rust `TurnUi` callbacks are
+the local in-process adapter for that topic protocol, not a separate semantic
+channel.
+Naming follows direction: host-to-core function arguments are `*Input`, while
+core-to-host/UI decisions are `*Request`. For example, `TurnInput` is supplied
+by the host when it starts a turn; `HostDecisionRequest` and its variants are
+created by core when the host must decide something.
+
+`agent_core::session_runtime` is the UI-neutral turn runner. It drives
+`AgentCore`, provider calls, profiler updates, cancellation checks, approval
+decisions, round-limit decisions, and output-token expansion decisions through
+the structured `TurnUi`/topic boundary. Provider wire-format logic,
+prompt-to-request preparation, cache-plan audit metadata, provider default
+protocol/base URL/model rules, and provider HTTP transport belong in
+`agent_core::provider` and `agent_core::provider_transport`. Profiling state and
+raw report data belong in `agent_core::profiler`; provider/system retry policy
+belongs in `agent_core::retry_policy`; provider configuration source resolution
+belongs in `agent_core::provider_config`; runtime option/env precedence rules
+for core-owned settings belong in `agent_core::config_edit`. Terminal UI,
+reading the host process environment, credential file loading policy,
+retry-delay rendering, profile/report formatting, compact number/unit
+formatting, and audit path selection remain outside `agent_core`.
+
+Host identity is explicit turn input. The shell passes
+`runtime=timem_native_shell` and `run_bash_target=user_local_machine` through
+`TurnInput`; an iOS or Web host can pass its own values. The turn runner must
+not hard-code shell identity into model context.
+
+Threading is a host/runtime deployment choice, not a separate agent semantic.
+The synchronous `run_session_turn` API remains the simplest path for a single
+active CLI session. For concurrent sessions, use one `AgentCore` per logical
+session/context, normally through `agent_core::session_worker::CoreSessionWorker`.
+That worker owns the session's `AgentCore`, provider config, profiler, cancel
+flag, supplement queue, request-reply channel, and event channel on a dedicated
+thread. It emits the same `CoreTopicEvent` values and `TurnOutcome` structures
+as the synchronous path. Hosts should not share one mutable `AgentCore` across
+multiple sessions or recreate a terminal-specific model/action loop.
+
+A session worker has a stable identity and a workspace description. Identity is
+core/UI protocol data, not a shell label: `session_id`, display name, ordinal,
+and optional parent session id. If no display name is supplied, workers use
+`[Ai1]`, `[Ai2]`, ... by ordinal. A parent agent or host may create a worker
+with a more specific name, and the name can later be changed through the worker
+handle; the update is emitted as a lifecycle topic. Workspace data describes
+where the worker is operating: current directory when known, data directory,
+audit file, runtime name, bash target, sanitized environment snapshot, and
+workspace reference directories. The actual prompt context remains owned by
+`AgentCore`; lifecycle topics expose only a `CoreDynamicContextSummary`
+containing visible delta count, visible slice count, and estimated tokens.
+
+Session worker shutdown is a lifecycle boundary, not just another queued
+command. Once shutdown is requested, the worker cancels the active turn, rejects
+new turn/rename requests, skips queued work that has not started, emits
+`WorkerStopped`, and joins the worker thread when the `CoreSessionWorker` owner
+is shut down or dropped. This keeps a closed UI/session from leaving stale
+worker turns running in the background.
+
+Core initialization is also a topic. `core.lifecycle` with
+`event=initialized` tells the host that a session core is ready and exposes
+structured facts such as version, profile, response protocol, context limit,
+round budget, capability counts, optional worker identity, optional workspace
+metadata, and optional dynamic-context summary. A shell may render this as a
+startup status line; a web UI may render it as a session state event.
+
+Stopped-turn outcomes are returned as `TurnStopSummary`/`TurnStopDetail`
+structure. The terminal host renders those structures into Chinese shell text;
+other hosts should render the same fields in their own UI instead of depending
+on shell copy. Serialized stop reasons use stable `snake_case` values, and
+serialized stop details include a `kind` field so Swift/Web/other hosts do not
+need to understand Rust enum names.
+
+Slash commands are host-specific wrappers around core capabilities. For
+example, `/prof`, `/config`, and `/workspace` are shell commands, but their
+data surfaces are core reports such as `RuntimeProfileReport`,
+`RuntimeConfigMenuReport`, `RuntimeConfigApplyReport`, and
+`WorkspaceMenuReport`. The shell may choose terminal labels, descriptions,
+colors, compact formatting, and keyboard flows, but it should not invent
+cross-host command result state.
 
 ## Memory Space Guard
 
@@ -250,50 +500,53 @@ Session-local state stays outside shared memory ownership:
 ## Prompt Concepts
 
 Timem Shell treats prompt construction as a small event log. The model never
-receives hidden runtime state; it receives dynamic prompt deltas rendered into a
-sequence of prompt slices.
+receives hidden runtime state; it receives dynamic prompt deltas rendered as
+role blocks.
 
-### Prompt Slice
+### Prompt Delta
 
-A prompt slice is one rendered segment in the model-visible prompt. It is a
-rendering unit:
+A prompt delta is a runtime-created logical increment. It is the full prompt
+growth between model request N and model request N+1. The model-visible prompt
+keeps `delta_id` as the stable maintenance handle:
 
 ```text
-[BEGIN SEGMENT 3: prompt_delta]
+[BEGIN DELTA]
 delta_id: pd_1782200000000_2
-slice_id: ps_1782200000000_2_s001
-slice: 1/2
-prompt_type: result_of_llm_action
+time: 1782200000000
+
+## USER
+new user input or mid-turn supplement
+
+## TIMEM_ASSISTANT
+free_talk or final_answer already recorded for continuity
+
+## ACTIONS
+You initiated actions. The results are:
+
 Action result: run_bash
 ...
-time: 1782200000000
-[END SEGMENT 3: prompt_delta]
+
+## SYSTEM
+runtime notes such as response repair, compaction result, or work instructions
+
+[END DELTA]
 ```
 
-There are two broad rendered slice classes:
+There are two broad model-visible prompt classes:
 
 - `prompt_0`: the static prefix. It is global, stable, and cache-friendly.
-- `prompt_delta`: rendered slices produced from dynamic prompt deltas.
+- dynamic deltas: append-only role blocks with `delta_id`.
 
 The segment number is an ordering aid. It is not a database id and should not be
 used for product logic.
 
-`delta_id` identifies the logical prompt delta. `slice_id` identifies a specific
-rendered slice inside that delta. `slice_id` is intentionally regex-friendly:
+Runtime shrink review and context maintenance should use `delta_id`:
 
-```text
-^slice_id: ps_[0-9]+_[0-9]+_s[0-9]{3}$
-```
-
-Runtime shrink review and future shrink actions should use these ids:
-
-- Use `delta_id` when a whole logical delta is stale.
-- Use `slice_id` when only one rendered slice of a large delta is stale.
 - Durable context scoring has been rolled back from the model-visible protocol.
   Runtime must not require `durable_ctx_score`, must not repair solely because
   scoring is absent, and must not render scoring fields into prompt deltas.
-  Shrink decisions should rely on explicit `delta_id` / `slice_id`, task
-  relevance, age, and observed context size.
+  Shrink decisions should rely on explicit `delta_id`, task relevance, age, and
+  observed context size.
 - Runtime injects long-context maintenance only when observed provider input
   tokens plus the new prompt delta estimate reaches 90% of
   `TIMEM_MAX_LLM_INPUT`. The default context window is `100K`; new prompt delta
@@ -303,53 +556,26 @@ Runtime shrink review and future shrink actions should use these ids:
   compact before continuing: summarize useful dynamic prompt deltas to about
   10%-20% of their current token footprint, discard stale details, put important
   but lengthy state into scratch memory, and then use `memmgr type=context
-  op=shrink` on covered `delta_id` / `slice_id` ranges.
-
-### Prompt Delta
-
-A prompt delta is a runtime-created logical increment. It is the full prompt
-growth between model request N and model request N+1. One prompt delta can
-contain multiple prompt slices, and those slices share one `delta_id`.
-
-Examples of prompt slices inside a logical prompt delta:
-
-- `user_question`: the user's new message plus small runtime context such as
-  provider/model, local time, and remaining rounds.
-- `result_of_llm_action`: the bounded result of a structured action requested by
-  the model.
-- `llm_response`: a final assistant answer already shown to the user.
-- `llm_thought`: an optional private planning note emitted by the model's
-  `thought` field. It is kept for continuity but never rendered to the user.
-- `response_repair`: a low-retention repair slice created after an invalid
-  model response. It includes the previous raw model response, the protocol
-  issue, and the repair instruction so the next model call can fix the concrete
-  mistake. Shrink should discard these slices before task evidence once the
-  repair round has passed.
-
-For example, one model response may add both an `llm_thought` slice and an
-`llm_response` slice. They are one prompt delta with two rendered slices, not
-two prompt deltas.
+  op=shrink` on covered `delta_id` ranges.
 
 Prompt deltas are append-only in normal operation. Later provider requests
-render the same static prefix plus all retained delta-derived slices, so the
+render the same static prefix plus all retained dynamic deltas, so the
 model can see what it asked the runtime to do and what the runtime returned.
 
 The relationship is:
 
 ```text
 logical prompt stream
-├── prompt_0                    static rendered slice
-└── prompt_delta                dynamic logical increment
-    ├── prompt_delta slice      rendered slice 1, e.g. llm_thought
-    └── prompt_delta slice      rendered slice 2, e.g. llm_response
+├── prompt_0                    static prefix
+└── prompt_delta                dynamic logical increment rendered as role blocks
 ```
 
-### Why Slices Exist
+### Why Delta Blocks Exist
 
-Slices make the rendered boundary explicit:
+Delta blocks make the rendered boundary explicit:
 
 - The model can audit evidence because action results are visible in rendered
-  slices derived from prompt deltas.
+  `## ACTIONS` blocks.
 - The runtime can keep provider cache behavior stable by isolating `prompt_0`.
 - Debug logs can identify which event introduced a piece of context.
 - Protocol repair can be represented as another runtime delta instead of a
@@ -360,17 +586,17 @@ Slices make the rendered boundary explicit:
 Prompt rendering uses explicit segments:
 
 ```text
-[BEGIN SEGMENT 0: prompt_0]
+[BEGIN SYSTEM PROMPT]
 static prompt
-[END SEGMENT 0: prompt_0]
+[END SYSTEM PROMPT]
 
-[BEGIN SEGMENT 1: prompt_delta]
+[BEGIN DELTA]
 delta_id: pd_1782200000000_1
-slice_id: ps_1782200000000_1_s001
-slice: 1/1
-prompt_type: user_question
+time: 1782200000000
+
+## USER
 ...
-[END SEGMENT 1: prompt_delta]
+[END DELTA]
 ```
 
 Important invariants:
@@ -378,16 +604,15 @@ Important invariants:
 - `prompt_0` is static global guidance only. It must not contain user input,
   runtime time, session context, API keys, or provider-specific secrets.
 - Dynamic context belongs in logical prompt deltas that render as
-  `prompt_delta` segments.
-- Every rendered `prompt_delta` segment has `delta_id`, `slice_id`, and
-  `slice: i/N` so runtime shrink review can refer to exact logical deltas or
-  individual rendered slices.
-- Valid dynamic prompt types are `user_question`, `result_of_llm_action`,
-  `llm_response`, and `llm_thought`.
+  `[BEGIN DELTA]` blocks.
+- Every rendered dynamic delta has `delta_id` so runtime shrink review can refer
+  to exact logical deltas.
+- Valid model-visible role blocks are `## USER`, `## TIMEM_ASSISTANT`, `## ACTIONS`, and
+  `## SYSTEM`.
 - The static prefix is sent through provider system-role/system-field support
   when available. Dynamic deltas go in the user message.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
-  the static system block and to the latest three dynamic prompt slices. The
+  the static system block and to the latest three dynamic prompt deltas. The
   newest prompt delta can be marked cacheable because provider prefix-cache
   lookup can look backward from the newest breakpoint to prior cached prefixes
   in append-only conversations. This keeps provider cache boundaries near the
@@ -400,9 +625,10 @@ Important invariants:
 
 ### KVC Cache Planning
 
-`prompt_cache.rs` owns provider cache-control planning. The planning input is
-the fully rendered prompt; provider adapters only translate the resulting
-`PromptBlock` list into each wire protocol.
+`agent_core::prompt_cache` owns cache-control planning. The planning input is
+the fully rendered prompt, and the output is a UI-neutral list of prompt blocks
+with cache hints. Host adapters may audit or display this plan, while
+`agent_core::provider` translates the prompt blocks into each wire protocol.
 
 Algorithm:
 
@@ -454,13 +680,21 @@ Limitations:
 - Production status lines and `/prof` must keep cache hits and cache creation
   separate: hits are reuse, creation writes the next cache boundary.
 
-## Action Protocol
+## Response Protocol And Action Execution
 
-The model does not call Rust functions directly. It sends a response envelope.
-The envelope contains an optional `status`, optional `report_job_progress`,
-optional `next_actions`, and optional `final_answer`.
+The model does not call Rust functions directly. It sends one response in the
+currently selected response protocol. `TIMEM_RESPONSE_PROTOCOL` selects the
+model response protocol (`markdown` by default, `json` optional). This is
+separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
+
+Each response parses into the same runtime envelope: optional `status`, optional
+`report_job_progress`, optional `next_actions`, optional `context_compact`, and
+optional `final_answer`.
 `report_job_progress` is progress text for the Thought/Action panel while
-the job is working. Missing `status` defaults to `working`. `status:"finished"`
+the job is working. It is emitted to the host/UI as a job-progress notification
+and is not replayed into later prompt deltas; replay context keeps action
+intent, command/input, action results, runtime notes, compact summaries, and
+final answers. Missing `status` defaults to `working`. `status:"finished"`
 means the current task is complete: after that envelope, runtime ends the
 current model/action interaction and shows `final_answer` as the closing
 user-visible answer. `final_answer` and `status:"finished"` must appear
@@ -482,17 +716,20 @@ stateDiagram-v2
 
 ### Response Envelope
 
-The model-facing schema summary is injected from
-[`resources/response_v1_summary.json`](../resources/response_v1_summary.json)
-when the prompt is rendered. Keep protocol examples in this section short; the
-runtime-owned schema summary is the source for the full field list shown to the
-model.
+Each protocol directory owns its model-facing schema summary and examples:
 
-The top-level JSON object has this shape:
+- [`resources/protocol/markdown/response_protocol.md`](../resources/protocol/markdown/response_protocol.md)
+- [`resources/protocol/json/response_protocol.md`](../resources/protocol/json/response_protocol.md)
+
+Keep protocol examples short; the runtime parser and capability registry are
+the authoritative executable boundary.
+
+In the JSON protocol, the envelope has this shape. In the Markdown protocol,
+the same fields are represented as sections.
 
 ```json
 {
-  "thought": "optional private planning note",
+  "free_talk": "optional context-visible free talk or plan",
   "report_job_progress": "Checking the project files.",
   "next_actions": [
     {
@@ -507,26 +744,49 @@ The top-level JSON object has this shape:
 }
 ```
 
-With omitted `status` or `status:"working"`, `next_actions` is required and
+With omitted `status` or `status:"working"`, `next_actions` or
+`context_compact` is required and
 `report_job_progress` is shown in the Thought/Action panel with a runtime
 progress marker. With `status:"finished"`, `final_answer` is required and is
 shown as the closing answer before runtime stops this task's action/model
 loop; `final_answer` without `status:"finished"` is also rejected for repair.
-The final command check exception allows
-`status:"finished" + next_actions` only for one final `run_bash` command.
-That action uses the same `command` field as normal shell execution, but it
-must not use background execution or other evidence-gathering work. The command exit code decides whether `final_answer` is shown: exit 0
-shows the answer, while nonzero/timeout returns the command result to the model
-and ignores the premature answer. If the model still needs evidence, it must
-stay `working`, run actions, and answer after the action result is visible. If
-a model mistakenly sends `status:"finished"` plus evidence-gathering actions,
-runtime downgrades that response to `working`, discards the premature
-`final_answer`, executes the actions, and adds a runtime note telling the next
-model round to answer only from the action results. Every action needs a
-top-level `intent`; the shell
+`status:"finished"` must not include `next_actions`; if the model still needs
+evidence, it must stay `working`, run actions, and answer after the action
+result is visible. Every action needs a top-level `intent`; the shell
 displays it while the action runs. The parser also tolerates common provider
 drift such as a valid JSON envelope embedded in Markdown text, but it never
 shows raw protocol fragments to the user.
+
+### Context Compact
+
+`context_compact` is a response-protocol field, not a tool action. It lets the
+model replace older dynamic prompt refs with a concise summary in the same
+model response:
+
+```json
+{
+  "report_job_progress": "Compacting stale context before continuing.",
+  "context_compact": {
+    "delta_ids": ["pd_100_1", "pd_100_2"],
+    "summary": "Earlier work identified the retry redraw issue. Preserve the fix direction and test requirements."
+  },
+  "next_actions": [
+    {
+      "action": "run_bash",
+      "intent": "Inspect the retry renderer.",
+      "args": {
+        "command": "rg -n 'retry_notice|render_thinking' timem_shell/src",
+        "timeout_ms": 5000
+      }
+    }
+  ]
+}
+```
+
+Runtime validates `delta_ids` against currently visible dynamic prompt refs. If
+all refs exist, it hides those dynamic refs and appends the summary as a new
+`context_compact` dynamic delta. If any ref is missing, runtime returns a
+repairable action result and does not silently discard context.
 
 ### Action Object
 
@@ -557,23 +817,29 @@ Fields:
   against the manifest registry; concrete option meaning and validation
   belong to the manifest-backed executor for that tool.
 
+The selected response protocol controls the outer envelope syntax only. Action
+arguments stay JSON objects across protocols: Markdown responses still put each
+action's parameters under `args` as JSON, and JSON responses use the same
+`args` object. This keeps capability manifests, executor validation, and
+cross-host tooling independent from the model-facing response style.
+
 The runtime does not execute hidden compatibility aliases. Unknown action names
 produce a protocol repair slice instead of being bridged to an old tool.
 
 ### Action Result Slice
 
-After an action runs, `agent_core` appends a `result_of_llm_action` slice into
-the current runtime increment's prompt delta. The rendered slice or slices from
-that delta are the only evidence the model may claim it has seen.
+After an action runs, `agent_core` appends the action result into the current
+runtime increment's prompt delta. The rendered `## ACTIONS` block from that
+delta is the only evidence the model may claim it has seen.
 
 Example:
 
 ```text
-[BEGIN SEGMENT 5: prompt_delta]
+[BEGIN DELTA]
 delta_id: pd_1782200001000_4
-slice_id: ps_1782200001000_4_s001
-slice: 1/1
-prompt_type: result_of_llm_action
+time: 1782200001000
+
+## ACTIONS
 Action result: memmgr
 type: raw_chat
 op: sql
@@ -582,7 +848,7 @@ rows:
   role: user
   content: ...
 time: 1782200001000
-[END SEGMENT 5: prompt_delta]
+[END DELTA]
 ```
 
 The model then receives another prompt containing this result and decides
@@ -593,16 +859,17 @@ whether to answer or ask for another action.
 Provider output is untrusted. The runtime validates:
 
 - The response is a JSON object or contains an extractable JSON envelope.
-- `report_job_progress`, `continue`, and `acceptance_check` follow the contract.
+- `status`, `report_job_progress`, `final_answer`, and `context_compact` follow
+  the active response protocol contract.
 - `next_actions` is an array when present.
-- Every action has `action`, `intent`, and valid `input`.
+- Every action has `action`, `intent`, and valid `args`.
 - SQL and bash actions pass their own safety checks.
 
-If validation fails, the runtime appends one repair slice in the current runtime
-increment:
+If validation fails, the runtime appends one `## SYSTEM` repair block in the
+current dynamic delta:
 
 ```text
-prompt_type: result_of_llm_action
+## SYSTEM
 Protocol repair request
 issue: next_actions[0].intent_required
 Return exactly one valid JSON object with report_job_progress.
@@ -620,7 +887,7 @@ flowchart TB
     Memmgr --> Chat["raw_chat query/sql/delete\nUI-visible chat records"]
     Memmgr --> Memory["durable query/schema/sql/write/delete\nlong-lived facts"]
     Memmgr --> Scratch["scratch query/write/read/delete\ntyped notes and context offload"]
-    Memmgr --> Shrink["context shrink\nremove delta/slice context"]
+    Memmgr --> Shrink["context shrink\nremove delta context"]
     Core --> SelfTool["self_tool\nTimem runtime self-info"]
     Core --> Bash["run_bash\nlocal command"]
 ```
@@ -685,13 +952,16 @@ Only `SELECT`, `WITH ... SELECT`, and `PRAGMA table_info(...)` for those tables
 are allowed. Write statements, DDL, SQLite metadata tables, and mismatched SQL
 placeholders are rejected before execution.
 
-### Local Shell Action
+### Local Command Action
 
-`run_bash` is for shell sessions only. It lets the model inspect or modify the
-local working area when the user asks for local work and memory/chat tools are
-not enough.
+`run_bash` is available only when the active host profile exposes local command
+execution. This is independent of UI type: a terminal host, server host, or
+desktop app may enable it, while a mobile app or sandboxed host may run with a
+no-bash capability profile. It lets the model inspect or modify the local
+working area when the user asks for local work and memory/chat tools are not
+enough.
 
-Current shell approval is configured at startup:
+Current local-command approval is configured at startup:
 
 - `TIMEM_BASH_APPROVAL=ask`: ask before running bash actions.
 - `TIMEM_BASH_APPROVAL=approve`: run bash actions directly.
@@ -717,8 +987,7 @@ slices:
   "args": {
     "type": "context",
     "op": "shrink",
-    "delta_ids": ["pd_1782200000000_2"],
-    "slice_ids": ["ps_1782200001000_4_s001"]
+    "delta_ids": ["pd_1782200000000_2"]
   }
 }
 ```
@@ -726,20 +995,19 @@ slices:
 Rules:
 
 - `delta_ids` removes whole logical prompt deltas.
-- `slice_ids` hides exact rendered slices inside a delta.
 - `prompt_0` is never removable.
-- Hidden slices are not rendered in later prompts and are not returned by
-  prompt-delta fallback search.
+- Hidden deltas are not rendered in later prompts and are not returned by
+  prompt fallback search.
 
 Forced compaction uses the same response envelope and action protocol; it does
 not introduce a separate `compressed_delta` schema. The model decides what
 should be offloaded and supplies ids; runtime owns validation and copies actual
-prompt delta/slice content into scratch. A typical forced shrink response first
+prompt delta content into scratch. A typical forced shrink response first
 asks runtime to offload covered prompt context, then shrinks those dynamic ids:
 
 ```json
 {
-  "thought": "Compact dynamic context before continuing.",
+  "free_talk": "Compact dynamic context before continuing.",
   "status": "working",
   "report_job_progress": "Preparing to compact dynamic context.",
   "next_actions": [
@@ -763,11 +1031,7 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
         "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
       }
     }
-  ],
-  "acceptance_check": {
-    "is_satisfied": false,
-    "missing_info": ["shrink action results"]
-  }
+  ]
 }
 ```
 
@@ -775,7 +1039,7 @@ Scratch write has two modes under `memmgr type=scratch op=write`:
 
 - `kind=notes`: model provides `label` and `content`; runtime stores the note and
   returns `id`, `label`, `type`, and a short preview.
-- `kind=context_offload`: model provides `label` and `delta_ids`/`slice_ids`;
+- `kind=context_offload`: model provides `label` and `delta_ids`;
   runtime verifies the ids are visible dynamic prompt context, rejects `prompt_0`,
   copies the real content into scratch, and returns only index metadata plus a
   preview. The model later uses `memmgr type=scratch op=read` with the returned
@@ -811,7 +1075,9 @@ custom    -> set TIMEM_API_PROTOCOL and TIMEM_BASE_URL explicitly
 ```
 
 `TIMEM_BASE_URL` can override the provider default. API keys are read from
-environment/config and are redacted from audit logs.
+environment/config and are redacted from audit logs. The CLI adapter may choose
+a default local key-file path, but key-file parsing and conversion into provider
+configuration are core provider-config responsibilities.
 
 ## Runtime Data
 
@@ -828,10 +1094,11 @@ data/<space>/shell_history.txt
 Use `TIMEM_DATA_DIR=/path/to/data` for a fixed data root.
 
 The API audit file is a JSON document with a `version` field and an `events`
-array. It records provider requests/responses and final turn summaries. The
-action audit file is also JSON and groups model-requested actions by user turn
-and model interaction. These are debugging artifacts, not user-facing
-transcripts. Secrets are redacted.
+array. `agent_core::audit` owns the guarded append path and legacy JSONL
+migration for this document. Host adapters decide the file path and which
+provider/turn events to append. The action audit file is also JSON and groups
+model-requested actions by user turn and model interaction. These are debugging
+artifacts, not user-facing transcripts. Secrets are redacted.
 
 ## Runtime Boundary
 

@@ -6,6 +6,42 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+### Added
+
+- Added unified `core.model.response` topic events carrying model status,
+  free talk, progress, final-answer metadata, and global working-worker count
+  for shell/native/web host rendering.
+- Added session-worker runtime state that atomically tracks active worker turns
+  across concurrent workers and publishes the count in model-response topics.
+- Added runtime `/config` control for `TIMEM_WORK_INSTRUCTIONS` so
+  AGENTS/CLAUDE loading can be switched between `silent`, `ask`, and `off`.
+- Added audit sidecar JSONL rollover for large API audit files to avoid
+  rewriting large JSON audit documents on every event.
+- Added streaming JSONL entry counting for `/prof` storage metrics so large
+  memory/scratch files are not loaded fully into memory.
+
+### Changed
+
+- The Thought / Action panel now renders model `free_talk` and progress from a
+  single model-response topic before action rows, keeping UI updates coherent.
+- Direct shell turns now mark `working_worker_count` as `1` while work
+  continues and `0` when the current turn is finished, matching the multi-worker
+  topic semantics.
+- Startup notices are grouped into a startup status block, and runtime command
+  help is routed through `/help`.
+
+### Fixed
+
+- Malformed model responses that require protocol repair no longer publish a
+  model-response topic from the invalid response before the repair round.
+- Model responses with more than two actions now publish observation metadata
+  for every action the core will execute, so the UI does not hide later actions.
+- Repeated `思考中...` updates now use idempotent transient rendering and do not
+  show duplicate `x2` status for a single active turn.
+- Startup config tables now keep long env keys such as
+  `TIMEM_WORK_INSTRUCTIONS` on one row instead of splitting a trailing
+  character into a separate line.
+
 ## [0.8.1] - 2026-07-03
 
 ### Added
@@ -15,7 +51,7 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Fixed
 
-- Replaced private fixture data (`李默`) with synthetic test name in core tests to pass `test_contract_check`.
+- Replaced private fixture data with synthetic test names in core tests to pass `test_contract_check`.
 - Applied `cargo fmt` to resolve formatting diffs in CI.
 
 ## [0.8.0] - 2026-07-03
