@@ -1240,6 +1240,240 @@ fn canonical_tools_accept_json_object_args() {
 }
 
 #[test]
+fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
+    let root = tmp_dir("builtin_tools_e2e");
+    let memory_dir = root.join("memory");
+    fs::create_dir_all(&memory_dir).unwrap();
+    write_audit_doc(
+        &root.join("audit").join("api_audit.json"),
+        vec![
+            json!({"type":"turn_start","session":"shell_e2e","turn_id":"turn_1781760000000","user_input":"测试聊天记录 BUILTIN-RAW-42"}),
+            json!({"type":"turn_final","session":"shell_e2e","turn_id":"turn_1781760000000","assistant_output":"已记录 BUILTIN-RAW-42。"}),
+        ],
+    );
+    let loop_marker = root.join("loop-marker");
+    fs::write(&loop_marker, "ready").unwrap();
+
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("覆盖 builtin tool 参数端到端", None);
+
+    let first_response = json!({
+        "status": "working",
+        "progress": "端到端执行 builtin tool 参数。",
+        "working_still_action": [
+            {
+                "order": "sequential",
+                "intent": "覆盖记忆管理参数。",
+                "actions": [
+                    {
+                        "action": "memmgr",
+                        "intent": "写入 durable 事实。",
+                        "args": {
+                            "type": "durable",
+                            "op": "upsert",
+                            "id": "builtin_fact",
+                            "content": "builtin e2e fact value"
+                        }
+                    },
+                    {
+                        "action": "memmgr",
+                        "intent": "查询 durable 事实。",
+                        "args": {
+                            "type": "durable",
+                            "op": "query",
+                            "query": "builtin e2e",
+                            "limit": 5
+                        }
+                    },
+                    {
+                        "action": "memmgr",
+                        "intent": "用 SQL 参数查询 durable 事实。",
+                        "args": {
+                            "type": "durable",
+                            "op": "sql",
+                            "sql": "SELECT id, content FROM memories WHERE id = ?",
+                            "params": ["builtin_fact"],
+                            "limit": 5
+                        }
+                    },
+                    {
+                        "action": "memmgr",
+                        "intent": "查询 raw chat 记录。",
+                        "args": {
+                            "type": "raw_chat",
+                            "op": "query",
+                            "query": "BUILTIN-RAW-42",
+                            "limit": 5
+                        }
+                    },
+                    {
+                        "action": "memmgr",
+                        "intent": "写入 scratch note。",
+                        "args": {
+                            "type": "scratch",
+                            "op": "write",
+                            "kind": "notes",
+                            "label": "builtin e2e note",
+                            "content": "scratch e2e content"
+                        }
+                    }
+                ]
+            },
+            {
+                "order": "sequential",
+                "intent": "覆盖 capability/self/bash 参数。",
+                "actions": [
+                    {
+                        "action": "capmgr",
+                        "intent": "列出 builtin tools。",
+                        "args": {
+                            "op": "list",
+                            "kind": "tool"
+                        }
+                    },
+                    {
+                        "action": "capmgr",
+                        "intent": "加载 run_bash 说明。",
+                        "args": {
+                            "op": "load",
+                            "kind": "tool",
+                            "id": "run_bash"
+                        }
+                    },
+                    {
+                        "action": "self_tool",
+                        "intent": "设置非敏感环境变量。",
+                        "args": {
+                            "type": "env",
+                            "op": "write",
+                            "key": "TIMEM_BUILTIN_E2E",
+                            "value": "enabled"
+                        }
+                    },
+                    {
+                        "action": "self_tool",
+                        "intent": "读取非敏感环境变量。",
+                        "args": {
+                            "type": "env",
+                            "op": "read",
+                            "key": "TIMEM_BUILTIN_E2E"
+                        }
+                    },
+                    {
+                        "action": "self_tool",
+                        "intent": "读取路径。",
+                        "args": {
+                            "type": "mem_path",
+                            "op": "read"
+                        }
+                    },
+                    {
+                        "action": "self_tool",
+                        "intent": "读取自身信息。",
+                        "args": {
+                            "type": "about_me",
+                            "op": "read"
+                        }
+                    },
+                    {
+                        "action": "run_bash",
+                        "intent": "执行普通命令。",
+                        "args": {
+                            "cmd": "printf builtin-normal",
+                            "timeout_ms": 5000
+                        }
+                    },
+                    {
+                        "action": "run_bash",
+                        "intent": "执行轮询命令。",
+                        "args": {
+                            "loop_cmd": format!("test -f {}", loop_marker.display()),
+                            "interval_ms": 10,
+                            "loop_timeout_ms": 500,
+                            "once_timeout_ms": 200
+                        }
+                    },
+                    {
+                        "action": "run_bash",
+                        "intent": "启动后台命令。",
+                        "args": {
+                            "cmd": "sleep 0.1; printf builtin-bg",
+                            "background": true
+                        }
+                    }
+                ]
+            }
+        ]
+    });
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: first_response.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected action results, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("type: durable"));
+    assert!(prompt.contains("op: insert"));
+    assert!(prompt.contains("stored: builtin e2e fact value"));
+    assert!(prompt.contains("builtin e2e fact value"));
+    assert!(prompt.contains("type: raw_chat"));
+    assert!(prompt.contains("BUILTIN-RAW-42"));
+    assert!(prompt.contains("label: builtin e2e note"));
+    assert!(prompt.contains("Action result: capmgr"));
+    assert!(prompt.contains("op: list"));
+    assert!(prompt.contains("id=run_bash"));
+    assert!(prompt.contains("op: load"));
+    assert!(prompt.contains("#### `run_bash`"));
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("key: TIMEM_BUILTIN_E2E"));
+    assert!(prompt.contains("value: enabled"));
+    assert!(prompt.contains("type: mem_path"));
+    assert!(prompt.contains("TimemAi"));
+    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("builtin-normal"));
+    assert!(prompt.contains("Polling state: finished"));
+    assert!(prompt.contains("background command has started"));
+
+    let job_id = action_result_field(&prompt, "Job id for shell_job_status");
+    assert!(job_id.starts_with("job_"));
+    std::thread::sleep(std::time::Duration::from_millis(250));
+
+    let second_response = json!({
+        "status": "working",
+        "progress": "检查后台命令。",
+        "working_still_action": {
+            "action": "shell_job_status",
+            "intent": "等待后台命令完成。",
+            "args": {
+                "op": "status",
+                "job_id": job_id,
+                "timeout_ms": 1000
+            }
+        }
+    });
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: second_response.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected shell_job_status result, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: shell_job_status"));
+    assert!(prompt.contains("State: finished"));
+    assert!(prompt.contains("Exit code: 0"));
+    assert!(prompt.contains("builtin-bg"));
+}
+
+#[test]
 fn action_input_field_is_rejected_instead_of_compatibly_executed() {
     let mut core = core_with_builtin_capabilities("old_input_rejected");
     let _ = core.begin_turn("查一下记忆", None);
