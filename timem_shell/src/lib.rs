@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod final_answer_renderer;
 mod observation;
 mod profiler;
 
@@ -43,6 +44,9 @@ pub use agent_core::{
     DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
 };
 pub use agent_core::{cancelled_turn_result, run_session_turn};
+pub use final_answer_renderer::{
+    render_final_answer_markdown, FinalAnswerRenderer, TermimadFinalAnswerRenderer,
+};
 pub use observation::{
     observation_events_from_core_topic_events, observation_panel_width_for_terminal,
     render_observation_panel, render_observation_panel_at,
@@ -250,6 +254,7 @@ pub fn render_final_response_at(
     );
     let status_line = dim_line(&status);
     let body = render_terminal_markdown(text);
+    let body = body.trim_end_matches('\n');
     format!("{}\n{body}\n{status_line}\n\n", timem_prefix(time_label))
 }
 
@@ -295,25 +300,7 @@ pub fn render_turn_stop_summary(stop: &TurnStopSummary) -> String {
 }
 
 pub fn render_terminal_markdown(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    let mut bold = false;
-    while let Some(idx) = rest.find("**") {
-        out.push_str(&rest[..idx]);
-        if bold {
-            out.push_str(ANSI_RESET);
-            bold = false;
-        } else {
-            out.push_str(ANSI_BOLD);
-            bold = true;
-        }
-        rest = &rest[idx + 2..];
-    }
-    out.push_str(rest);
-    if bold {
-        out.push_str(ANSI_RESET);
-    }
-    out
+    render_final_answer_markdown(text)
 }
 
 pub fn token_status(stats: &UsageStats) -> String {
@@ -1600,6 +1587,41 @@ mod tests {
         );
         assert!(rendered.contains(&format!("{ANSI_BOLD}系统{ANSI_RESET}：macOS")));
         assert!(!rendered.contains("**系统**"));
+    }
+
+    #[test]
+    fn final_response_renders_common_markdown_shapes() {
+        let rendered = render_final_response_at(
+            "# 结论\n> 关键观察\n\n运行 `cargo test`：\n```text\nok 12 passed\n```",
+            &UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                ..UsageStats::zero()
+            },
+            None,
+            "custom",
+            "qwen-plus",
+            1,
+            100_000,
+            "17:20:00",
+        );
+
+        assert!(rendered.contains("结论"));
+        assert!(rendered.contains("关键观察"));
+        assert!(rendered.contains("cargo test"));
+        assert!(rendered.contains("ok 12 passed"));
+        assert!(!rendered.contains("# 结论"));
+        assert!(!rendered.contains("```text"));
+        assert!(!rendered.contains("`cargo test`"));
+    }
+
+    #[test]
+    fn final_response_markdown_renderer_resets_unclosed_inline_styles() {
+        let rendered = render_terminal_markdown("先 `code\n再 **bold");
+        assert!(rendered.contains("code"));
+        assert!(rendered.contains("bold"));
+        assert!(!rendered.contains("**bold"));
     }
 
     #[test]

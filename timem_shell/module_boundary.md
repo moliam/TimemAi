@@ -10,6 +10,8 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 ## Belongs here
 
 - Terminal UI rendering, ANSI styling, prompt lines, status panels, and menus.
+- Final-answer Markdown rendering behind `final_answer_renderer`, with a
+  replaceable renderer interface and a community renderer backend by default.
 - Reedline/input handling, paste recovery, Ctrl+C/Esc behavior, and TTY quirks.
 - CLI flags, process env collection, shell history, and startup banner display.
 - Collecting CLI/env config values, then passing the effective runtime config to
