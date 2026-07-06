@@ -179,6 +179,33 @@ fn prompt_is_append_only_and_segmented() {
 }
 
 #[test]
+fn assistant_prompt_heading_uses_current_worker_speaker_name() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("assistant_heading"),
+    );
+    core.set_assistant_speaker_name("[Ai2]\nignored");
+    assert_eq!(core.assistant_speaker_name(), "[Ai2] ignored");
+
+    let _ = core.begin_turn("你好", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"finished","final_answer":"你好"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("## [Ai2] ignored"));
+    assert!(!prompt.contains("## TIMEM_ASSISTANT\n\nAll previous"));
+}
+
+#[test]
 fn default_max_rounds_is_fifty() {
     let mut core = AgentCore::new(
         "STATIC",

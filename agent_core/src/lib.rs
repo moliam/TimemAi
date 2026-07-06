@@ -254,6 +254,25 @@ fn llm_final_answer_slice_text(final_answer: &str) -> String {
     format!("All previous pending open tasks are completed.  Final Answer:\n{final_answer}")
 }
 
+fn normalize_assistant_speaker_name(name: &str) -> String {
+    let clean = name
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '\n' | '\r' => ' ',
+            _ => ch,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if clean.is_empty() {
+        "TIMEM_ASSISTANT".to_string()
+    } else {
+        clean
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApprovalRequest {
     pub approval_id: String,
@@ -739,6 +758,7 @@ pub struct AgentCore {
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
     pending_next_turn_slices: Vec<(String, String)>,
+    assistant_speaker_name: String,
 }
 impl AgentCore {
     pub fn new(
@@ -791,7 +811,16 @@ impl AgentCore {
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
             pending_next_turn_slices: Vec::new(),
+            assistant_speaker_name: "TIMEM_ASSISTANT".to_string(),
         }
+    }
+
+    pub fn set_assistant_speaker_name(&mut self, name: impl AsRef<str>) {
+        self.assistant_speaker_name = normalize_assistant_speaker_name(name.as_ref());
+    }
+
+    pub fn assistant_speaker_name(&self) -> &str {
+        &self.assistant_speaker_name
     }
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
         self.bash_approval_mode = mode;
@@ -1724,6 +1753,7 @@ impl AgentCore {
         prompt_render::render_prompt_with_rendered_static(
             &self.rendered_static_prompt,
             &self.deltas,
+            &self.assistant_speaker_name,
         )
     }
     fn render_prompt_slices(&self) -> Vec<PromptSlice> {
@@ -3552,7 +3582,7 @@ pub(crate) fn format_scratch_read_result(record: &ScratchNoteRecord) -> String {
 fn prompt_type_role_for_scratch(prompt_type: &str) -> &'static str {
     match prompt_type {
         "user_question" | "user_supplement" => "USER",
-        "llm_response" | "llm_free_talk" => "TIMEM_ASSISTANT",
+        "llm_response" | "llm_free_talk" => "ASSISTANT",
         "result_of_llm_action" => "SYSTEM",
         _ => "SYSTEM",
     }

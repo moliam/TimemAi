@@ -65,8 +65,9 @@ Use `delta_id` when you need to
 compact or offload old dynamic context.
 
 Prompt delta example:
-Prompt deltas use only `## USER`, `## TIMEM_ASSISTANT`, and `## SYSTEM` as
-visible speakers, in chronological order.
+Prompt deltas use only `## USER`, the current assistant/session-worker heading
+(for example `## TIMEM_ASSISTANT` or `## [Ai1]`), and `## SYSTEM` as visible
+speakers, in chronological order.
 
 [BEGIN DELTA]
 delta_id: xxx

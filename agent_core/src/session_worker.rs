@@ -291,6 +291,7 @@ impl CoreSessionWorker {
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();
             let workspace = worker_config.workspace.clone();
+            core.set_assistant_speaker_name(&identity.display_name);
             let init_event = core_initialized_topic_event_with_worker(
                 &identity.session_id,
                 core.profile(),
@@ -353,6 +354,7 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::Rename { display_name } => {
                         identity.rename(display_name);
+                        core.set_assistant_speaker_name(&identity.display_name);
                         let event = core_initialized_topic_event_with_worker(
                             &identity.session_id,
                             core.profile(),
@@ -822,6 +824,86 @@ mod tests {
                 truncated: false,
             })
         }
+    }
+
+    struct AssistantHeadingModel {
+        expected_heading: String,
+        calls: u32,
+    }
+
+    impl ModelClient for AssistantHeadingModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.calls += 1;
+            if self.calls == 1 {
+                assert!(!prompt.contains(&self.expected_heading));
+            } else {
+                assert!(
+                    prompt.contains(&self.expected_heading),
+                    "prompt should contain assistant heading {}:\n{}",
+                    self.expected_heading,
+                    prompt
+                );
+            }
+            Ok(LlmResponse {
+                content: "## Status\nfinished\n\n## Final_Answer\nok".to_string(),
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    total_tokens: 12,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            })
+        }
+    }
+
+    #[test]
+    fn session_worker_identity_sets_prompt_assistant_heading() {
+        let dir = tmp_dir("worker_assistant_heading");
+        let core = AgentCore::new(
+            "STATIC",
+            CoreProfile {
+                name: "test".to_string(),
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+            },
+            &dir,
+        );
+        let worker = CoreSessionWorker::spawn_with_model_client(
+            core,
+            test_config(),
+            test_worker_config(&dir, "session_worker_heading", 4),
+            AssistantHeadingModel {
+                expected_heading: "## [Ai4]".to_string(),
+                calls: 0,
+            },
+        );
+
+        worker
+            .handle()
+            .run_turn("hello", None)
+            .expect("worker should accept run_turn");
+        let first = wait_for_turn_finished(worker.events(), "heading first", false);
+        assert_eq!(first.text, "ok");
+        worker
+            .handle()
+            .run_turn("continue", None)
+            .expect("worker should accept second run_turn");
+        let second = wait_for_turn_finished(worker.events(), "heading second", false);
+        assert_eq!(second.text, "ok");
+        worker
+            .handle()
+            .request_shutdown()
+            .expect("worker should accept shutdown");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

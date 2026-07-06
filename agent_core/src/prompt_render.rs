@@ -11,11 +11,11 @@ enum VisiblePromptRole {
 }
 
 impl VisiblePromptRole {
-    fn heading(self) -> &'static str {
+    fn heading(self, assistant_heading: &str) -> String {
         match self {
-            VisiblePromptRole::User => "USER",
-            VisiblePromptRole::You => "TIMEM_ASSISTANT",
-            VisiblePromptRole::System => "SYSTEM",
+            VisiblePromptRole::User => "USER".to_string(),
+            VisiblePromptRole::You => assistant_heading.to_string(),
+            VisiblePromptRole::System => "SYSTEM".to_string(),
         }
     }
 }
@@ -60,6 +60,7 @@ pub(crate) fn render_static_prompt(
 pub(crate) fn render_prompt_with_rendered_static(
     rendered_static_prompt: &str,
     deltas: &[PromptDelta],
+    assistant_heading: &str,
 ) -> String {
     let mut out = format!("{}", rendered_static_prompt);
 
@@ -79,7 +80,7 @@ pub(crate) fn render_prompt_with_rendered_static(
             let role = visible_role(&slice.prompt_type);
             if last_role != Some(role) {
                 out.push('\n');
-                out.push_str(&format!("## {}\n", role.heading()));
+                out.push_str(&format!("## {}\n", role.heading(assistant_heading)));
                 last_role = Some(role);
             }
             out.push('\n');
@@ -158,7 +159,8 @@ mod tests {
             &CapabilityRegistry::builtin(),
             &MarkdownSuiteV1,
         );
-        let rendered = render_prompt_with_rendered_static(&rendered_static, &[delta]);
+        let rendered =
+            render_prompt_with_rendered_static(&rendered_static, &[delta], "TIMEM_ASSISTANT");
         assert!(rendered.contains("Response Protocol"));
         assert!(rendered.contains("memmgr"));
         assert!(rendered.contains("hello"));
