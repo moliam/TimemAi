@@ -1,39 +1,8 @@
 ## Response Protocol
 
 Your response must be organized as XML with the pre-defined tags below.
-
-The top-level response is XML, not JSON or Markdown. Only the individual action
-payloads inside `<action_json>` use JSON objects.
-
-Required tag rules:
-
-- Always use exactly one `<response>...</response>` root element.
-- If work is still in progress, omit `<status>` or write
-  `<status>working</status>`, provide `<progress>` when useful, and include
-  concrete actions when runtime work is needed. Do not write `<final_answer>`
-  while still working; use `<progress>` for user-visible ongoing reports.
-- If the task is complete, write `<status>ALL_FINISHED</status>` and provide
-  `<final_answer>`. `ALL_FINISHED` means all pending user tasks are completed.
-- Any response containing `<final_answer>` must also contain
-  `<status>ALL_FINISHED</status>`, including responses that also contain
-  `<context_compact>`.
-- Final answers are not actions.
-- `<free_talk>` is optional. Use it for casual reasoning, next plans, or context
-  that should remain visible to you in later prompt context. Runtime keeps it
-  for you in future context.
-- `<working_still_action>` contains one or more `<action_json>` blocks. Each
-  `<action_json>` block contains JSON for a single action object, an array of
-  action objects, or an array of action groups. Wrap JSON in CDATA when it
-  contains quotes, angle brackets, shell punctuation, or multi-line content.
-  DO NOT include `<working_still_action>` when `<status>` is `ALL_FINISHED`.
-- `<context_compact>` lets you replace old dynamic context with a concise
-  summary. Provide `<delta_ids>` plus `<summary>`. Runtime will hide the
-  referenced dynamic prompt deltas and append your summary as a new dynamic
-  prompt delta. A good compact summary keeps the active task description,
-  working environment facts, current progress, todo/next steps, and only the few
-  high-level work principles that still guide the task. Do not put the compact
-  summary into a `memmgr type=context` action. If compact completes the current
-  user request, use `<status>ALL_FINISHED</status>` with `<final_answer>`.
+Always use exactly one `<response>...</response>` root element.
+The top-level response is XML. Only the individual action payloads inside `<action_json>` use JSON objects.
 
 The response protocol summary is:
 

@@ -2,8 +2,8 @@ XML response tags. The top-level response is XML. Tool actions are JSON objects
 inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
 
 - `<response>`: required root element.
-- `<status>`: optional. Use `ALL_FINISHED` only when the current user request is
-  complete and no more runtime interaction is needed for that request. Omit it
+- `<status>`: optional. Use `ALL_FINISHED` only when all user's open and pending requests are
+  complete, no more action needed, and a final summary/answer is ready. Omit it
   or use `working` while work continues.
 - `<progress>`: optional progress report for multi-round tasks.
 - `<final_answer>`: summary/answer of all pending tasks. Use only together with

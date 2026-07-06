@@ -3805,8 +3805,8 @@ fn run_bash_allows_readonly_count_command() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("status: 0"));
-    assert!(prompt.contains("output:"));
+    assert!(prompt.contains("Exit code: 0"));
+    assert!(prompt.contains("Output:"));
 }
 
 #[test]
@@ -3902,8 +3902,8 @@ fn run_bash_can_start_and_poll_background_job() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("status: background_started"));
-    let job_id = action_result_field(&prompt, "job_id");
+    assert!(prompt.contains("background command has started"));
+    let job_id = action_result_field(&prompt, "Job id for shell_job_status");
     assert!(job_id.starts_with("job_"));
 
     std::thread::sleep(std::time::Duration::from_millis(250));
@@ -3921,8 +3921,8 @@ fn run_bash_can_start_and_poll_background_job() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: shell_job_status"));
-    assert!(prompt.contains("state: finished"));
-    assert!(prompt.contains("exit_code: 0"));
+    assert!(prompt.contains("State: finished"));
+    assert!(prompt.contains("Exit code: 0"));
     assert!(prompt.contains("background-ok"));
 }
 
@@ -3969,7 +3969,7 @@ fn shell_job_status_missing_timeout_uses_immediate_check() {
     };
     assert!(!prompt.contains("Protocol repair request"));
     assert!(prompt.contains("Action result: shell_job_status"));
-    assert!(prompt.contains("error: job_not_found"));
+    assert!(prompt.contains("No background job with this id was found"));
 }
 
 #[test]
@@ -3991,7 +3991,7 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let job_id = action_result_field(&prompt, "job_id");
+    let job_id = action_result_field(&prompt, "Job id for shell_job_status");
     assert!(job_id.starts_with("job_"));
 
     let step = core.apply_model_response(LlmResponse {
@@ -4008,9 +4008,9 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: shell_job_status"));
-    assert!(prompt.contains("state: finished"));
+    assert!(prompt.contains("State: finished"));
     assert!(prompt.contains("waited-ok"));
-    assert!(prompt.contains("waited_ms:"));
+    assert!(prompt.contains("Waited:"));
 }
 
 #[test]
@@ -4137,7 +4137,7 @@ fn run_bash_allows_compound_local_write_commands() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("status: 0"));
+    assert!(prompt.contains("Exit code: 0"));
     assert!(prompt.contains("ok"));
     let _ = fs::remove_dir_all("target/timem_test");
     let _ = fs::remove_dir("target");
@@ -4190,7 +4190,7 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("status: 0"));
+    assert!(prompt.contains("Exit code: 0"));
     assert!(prompt.contains("Ok"));
     assert!(prompt.contains("approval_status: approved_by_user"));
     assert!(!prompt.contains("shell_expansion_not_allowed"));
@@ -4263,8 +4263,8 @@ fn run_bash_allows_low_risk_system_identity_commands() {
     };
     assert!(prompt.contains("Action result: run_bash"));
     assert!(prompt.contains("intent: Read system identity."));
-    assert!(prompt.contains("command: uname -s"));
-    assert!(prompt.contains("status: 0"));
+    assert!(prompt.contains("Command: uname -s"));
+    assert!(prompt.contains("Exit code: 0"));
     assert!(!prompt.contains("approval_status: approved_by_user"));
 }
 
@@ -4391,7 +4391,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(shell_prompt.contains("Action result: run_bash"));
-    assert!(shell_prompt.contains("status: 0"));
+    assert!(shell_prompt.contains("Exit code: 0"));
 
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("把 /etc/passwd 读出来", None);
@@ -4459,7 +4459,7 @@ fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
     assert!(prompt.contains("Action result: run_bash"));
     assert!(prompt.contains("target/timem_scenario_files.txt"));
     assert!(prompt.contains("target/timem_scenario_tests.rs"));
-    assert!(prompt.contains("status: 0"));
+    assert!(prompt.contains("Exit code: 0"));
 
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
@@ -4599,7 +4599,7 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
     assert!(prompt.contains("Release_Check"));
     assert!(prompt.contains("CI_passed"));
     assert!(prompt.contains("Sensitive_scan_passed"));
-    assert!(prompt.contains("status: 0"));
+    assert!(prompt.contains("Exit code: 0"));
     assert!(
         fs::read_to_string("target/timem_scenario_output/release_check.md")
             .unwrap()
@@ -4863,7 +4863,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(default_prompt.contains("The top-level response is XML, not JSON or Markdown."));
+    assert!(default_prompt.contains("The top-level response is XML."));
     assert!(default_prompt.contains("protocol-compliant response in XML format"));
     assert!(!default_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
@@ -4907,7 +4907,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(xml_prompt.contains("The top-level response is XML, not JSON or Markdown."));
+    assert!(xml_prompt.contains("The top-level response is XML."));
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
     assert!(xml_prompt.contains("<working_still_action>"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
@@ -4955,7 +4955,7 @@ fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
     };
     assert!(repair_prompt.contains("Protocol repair request"));
     assert!(repair_prompt.contains("unsupported_action:run_bash"));
-    assert!(!repair_prompt.contains("status: 0"));
+    assert!(!repair_prompt.contains("Exit code: 0"));
     assert!(!repair_prompt.contains("output:\n"));
 }
 

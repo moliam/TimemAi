@@ -55,7 +55,10 @@ impl FileShellJobStore {
     pub fn spawn(&self, command: &str, session_id: &str, turn_id: &str) -> String {
         let clean = command.trim();
         if clean.is_empty() {
-            return "Action result: run_bash\nerror: command_required".to_string();
+            return bash_action_not_executed(
+                None,
+                "The background command was not started because no shell command was provided.",
+            );
         }
         let _ = fs::create_dir_all(&self.dir);
         let id = unique_shell_id("job");
@@ -82,9 +85,9 @@ impl FileShellJobStore {
         let child = match spawn {
             Ok(child) => child,
             Err(_) => {
-                return format!(
-                    "Action result: run_bash\ncommand: {}\nerror: background_spawn_failed",
-                    clean
+                return bash_action_not_executed(
+                    Some(clean),
+                    "The background command could not be started by the local shell.",
                 )
             }
         };
@@ -100,7 +103,7 @@ impl FileShellJobStore {
         };
         let _ = self.append(&record);
         format!(
-            "Action result: run_bash\ncommand: {}\nstatus: background_started\njob_id: {}\npid: {}\noutput_file: {}\nstatus_file: {}\nnext_action: shell_job_status",
+            "Action result: run_bash\nThe background command has started.\nCommand: {}\nJob id for shell_job_status: {}\nProcess id: {}\nOutput file: {}\nStatus file: {}",
             clean, record.id, record.pid, record.output_file, record.status_file
         )
     }
@@ -129,11 +132,11 @@ impl FileShellJobStore {
     pub fn status(&self, job_id: &str, wait_ms: u64) -> String {
         let clean_id = job_id.trim();
         if clean_id.is_empty() {
-            return "Action result: shell_job_status\nerror: job_id_required".to_string();
+            return "Action result: shell_job_status\nThe job status was not checked because no job_id was provided. Use the job id returned when the background command was started.".to_string();
         }
         let Some(record) = self.find(clean_id) else {
             return format!(
-                "Action result: shell_job_status\njob_id: {}\nerror: job_not_found",
+                "Action result: shell_job_status\nJob id: {}\nNo background job with this id was found in the current shell job store.",
                 clean_id
             );
         };
@@ -148,7 +151,7 @@ impl FileShellJobStore {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
                 if code == "cancelled" {
                     return format!(
-                        "Action result: shell_job_status\njob_id: {}\nstate: cancelled\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
+                        "Action result: shell_job_status\nThe background job was cancelled.\nJob id: {}\nState: cancelled\nWaited: {} ms\nOutput file: {}\nPartial output:\n{}",
                         record.id,
                         started.elapsed().as_millis(),
                         record.output_file,
@@ -156,7 +159,7 @@ impl FileShellJobStore {
                     );
                 }
                 return format!(
-                    "Action result: shell_job_status\njob_id: {}\nstate: finished\nexit_code: {}\nwaited_ms: {}\noutput_file: {}\noutput:\n{}",
+                    "Action result: shell_job_status\nThe background job has finished.\nJob id: {}\nState: finished\nExit code: {}\nWaited: {} ms\nOutput file: {}\nOutput:\n{}",
                     record.id,
                     code,
                     started.elapsed().as_millis(),
@@ -167,7 +170,7 @@ impl FileShellJobStore {
             if started.elapsed() >= wait {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
                 return format!(
-                    "Action result: shell_job_status\njob_id: {}\nstate: running\npid: {}\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
+                    "Action result: shell_job_status\nThe background job is still running.\nJob id: {}\nState: running\nProcess id: {}\nWaited: {} ms\nOutput file: {}\nPartial output:\n{}",
                     record.id,
                     record.pid,
                     started.elapsed().as_millis(),
@@ -182,11 +185,11 @@ impl FileShellJobStore {
     pub fn cancel(&self, job_id: &str) -> String {
         let clean_id = job_id.trim();
         if clean_id.is_empty() {
-            return "Action result: shell_job_status\nerror: job_id_required".to_string();
+            return "Action result: shell_job_status\nThe background job was not cancelled because no job_id was provided.".to_string();
         }
         let Some(record) = self.find(clean_id) else {
             return format!(
-                "Action result: shell_job_status\njob_id: {}\nerror: job_not_found",
+                "Action result: shell_job_status\nJob id: {}\nNo background job with this id was found, so there was nothing to cancel.",
                 clean_id
             );
         };
@@ -201,7 +204,7 @@ impl FileShellJobStore {
                 "finished"
             };
             return format!(
-                "Action result: shell_job_status\njob_id: {}\nstate: {}\nstatus: already_completed",
+                "Action result: shell_job_status\nThe background job was already completed.\nJob id: {}\nState: {}",
                 record.id, state
             );
         }
@@ -210,7 +213,7 @@ impl FileShellJobStore {
         let _ = fs::write(&record.status_file, "cancelled");
         let output = fs::read_to_string(&record.output_file).unwrap_or_default();
         format!(
-            "Action result: shell_job_status\njob_id: {}\nstate: cancelled\npid: {}\noutput_file: {}\npartial_output:\n{}",
+            "Action result: shell_job_status\nThe background job has been cancelled.\nJob id: {}\nState: cancelled\nProcess id: {}\nOutput file: {}\nPartial output:\n{}",
             record.id,
             record.pid,
             record.output_file,
@@ -287,9 +290,10 @@ pub(crate) fn execute_run_bash_action(
 ) -> ActionExecution {
     let loop_command = action.input_str("loop_cmd");
     if !loop_command.is_empty() && !action.input_str("cmd").is_empty() {
-        return ActionExecution::Completed(
-            "Action result: run_bash\nerror: cmd_and_loop_cmd_conflict".to_string(),
-        );
+        return ActionExecution::Completed(bash_action_not_executed(
+            None,
+            "The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
+        ));
     }
     let is_regular_command = loop_command.is_empty();
     let command_to_run = if is_regular_command {
@@ -337,14 +341,15 @@ pub(crate) fn execute_run_bash(
 ) -> ActionExecution {
     let command_to_run = command.trim();
     if command_to_run.is_empty() {
-        return ActionExecution::Completed(
-            "Action result: run_bash\nerror: command_required".to_string(),
-        );
+        return ActionExecution::Completed(bash_action_not_executed(
+            None,
+            "The command was not executed because no shell command was provided.",
+        ));
     }
     if let Err(reason) = validate_bash_request(command_to_run) {
-        return ActionExecution::Completed(format!(
-            "Action result: run_bash\ncommand: {}\nerror: {}",
-            command_to_run, reason
+        return ActionExecution::Completed(bash_action_not_executed(
+            Some(command_to_run),
+            bash_validation_message(&reason),
         ));
     }
     if !background
@@ -352,27 +357,27 @@ pub(crate) fn execute_run_bash(
         && is_regular_command
         && contains_long_normal_sleep(command_to_run)
     {
-        return ActionExecution::Completed(format!(
-            "Action result: run_bash\ncommand: {}\nerror: long_sleep_in_normal_command\nmessage: Use run_bash with interval_ms for waiting on external status, or background=true for long local work.",
-            command_to_run
+        return ActionExecution::Completed(bash_action_not_executed(
+            Some(command_to_run),
+            "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.",
         ));
     }
     if background && interval_ms.is_some() {
-        return ActionExecution::Completed(format!(
-            "Action result: run_bash\ncommand: {}\nerror: poll_mode_cannot_be_background",
-            command_to_run
+        return ActionExecution::Completed(bash_action_not_executed(
+            Some(command_to_run),
+            "Polling mode and background mode cannot be combined. Use loop_cmd with interval_ms for polling, or background=true for a persistent background command.",
         ));
     }
     if interval_ms.is_some() && is_regular_command {
-        return ActionExecution::Completed(format!(
-            "Action result: run_bash\ncommand: {}\nerror: loop_cmd_required_for_polling",
-            command_to_run
+        return ActionExecution::Completed(bash_action_not_executed(
+            Some(command_to_run),
+            "interval_ms is only valid with loop_cmd. Move the check command to loop_cmd, or remove interval_ms for a normal command.",
         ));
     }
     if interval_ms.is_none() && !is_regular_command {
-        return ActionExecution::Completed(format!(
-            "Action result: run_bash\ncommand: {}\nerror: interval_ms_required_for_loop_cmd",
-            command_to_run
+        return ActionExecution::Completed(bash_action_not_executed(
+            Some(command_to_run),
+            "loop_cmd needs interval_ms so the runtime knows how often to check the condition.",
         ));
     }
     if approval_mode == BashApprovalMode::Ask {
@@ -527,21 +532,27 @@ fn polling_result(
     output: &str,
     error: Option<&str>,
 ) -> String {
+    let state_sentence = match state {
+        "finished" => "The polling command finished because the check command exited with code 0.",
+        "timeout" => "The polling command stopped because the total wait budget was reached before the check command exited with code 0.",
+        "cancelled" => "The polling command was cancelled before the check command exited with code 0.",
+        _ => "The polling command stopped.",
+    };
     let mut out = format!(
-        "Action result: run_bash\nmode: poll\ncommand: {}\nstate: {}\nsuccess_exit_code: 0\nattempts: {}\nelapsed_ms: {}",
+        "Action result: run_bash\n{state_sentence}\nCommand: {}\nPolling state: {}\nAttempts: {}\nElapsed: {} ms\nSuccess condition: exit code 0",
         command,
         state,
         attempts,
         elapsed.as_millis()
     );
     if let Some(status) = last_status {
-        out.push_str(&format!("\nlast_status: {status}"));
+        out.push_str(&format!("\nLast observed exit code: {status}"));
     }
     if let Some(error) = error {
-        out.push_str(&format!("\nlast_error: {error}"));
+        out.push_str(&format!("\nLast execution problem: {error}"));
     }
     if !output.trim().is_empty() {
-        out.push_str("\noutput:\n");
+        out.push_str("\nLast output:\n");
         out.push_str(&compact_text(output, 4000));
     }
     out
@@ -618,12 +629,14 @@ impl BashCommandOutput {
     pub fn to_action_result(&self, action_name: &str) -> String {
         if let Some(error) = &self.error {
             return format!(
-                "Action result: {}\ncommand: {}\nerror: {}",
-                action_name, self.command, error
+                "Action result: {}\nCommand: {}\n{}",
+                action_name,
+                self.command,
+                bash_runtime_error_message(error)
             );
         }
         format!(
-            "Action result: {}\ncommand: {}\nstatus: {}\noutput:\n{}",
+            "Action result: {}\nThe command finished.\nCommand: {}\nExit code: {}\nOutput:\n{}",
             action_name,
             self.command,
             self.status.unwrap_or(-1),
@@ -771,6 +784,43 @@ fn bash_error(command: &str, error: &str) -> BashCommandOutput {
     }
 }
 
+fn bash_action_not_executed(command: Option<&str>, reason: &str) -> String {
+    let mut out = String::from("Action result: run_bash\nThe command was not executed.\n");
+    if let Some(command) = command.map(str::trim).filter(|command| !command.is_empty()) {
+        out.push_str("Command: ");
+        out.push_str(command);
+        out.push('\n');
+    }
+    out.push_str("Reason: ");
+    out.push_str(reason);
+    out
+}
+
+fn bash_validation_message(reason: &str) -> &'static str {
+    match reason {
+        "command_required" => "No shell command was provided.",
+        "command_too_long" => {
+            "The shell command is too long for a single run_bash action. Split the work into smaller commands or write a short script file first."
+        }
+        _ => "The shell command request did not pass runtime validation.",
+    }
+}
+
+fn bash_runtime_error_message(error: &str) -> &'static str {
+    match error {
+        "timeout" => {
+            "The command was stopped because it exceeded the configured timeout. For long local work, use background=true; for waiting on external state, use loop_cmd with interval_ms."
+        }
+        "cancelled" | "cancelled_by_user" => {
+            "The command was cancelled before it completed."
+        }
+        "command_failed" => {
+            "The local shell could not start or wait for the command successfully."
+        }
+        _ => "The command did not complete successfully.",
+    }
+}
+
 fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
@@ -870,7 +920,7 @@ mod tests {
         let mut runtime = NeverCancelRuntime;
         let result = execute_one_bash("printf shell_ok", 1000, &mut runtime);
         assert!(result.contains("Action result: run_bash"));
-        assert!(result.contains("status: 0"));
+        assert!(result.contains("Exit code: 0"));
         assert!(result.contains("shell_ok"));
     }
 
@@ -878,14 +928,17 @@ mod tests {
     fn normal_bash_timeout_is_bounded() {
         let mut runtime = NeverCancelRuntime;
         let result = execute_one_bash("sleep 2", 1000, &mut runtime);
-        assert!(result.contains("error: timeout"));
+        assert!(
+            result.contains("exceeded the configured timeout"),
+            "{result}"
+        );
     }
 
     #[test]
     fn normal_bash_timeout_minus_one_waits_without_runtime_timeout() {
         let mut runtime = NeverCancelRuntime;
         let result = execute_one_bash("sleep 1; printf no_timeout_ok", -1, &mut runtime);
-        assert!(result.contains("status: 0"), "{result}");
+        assert!(result.contains("Exit code: 0"), "{result}");
         assert!(result.contains("no_timeout_ok"), "{result}");
     }
 
@@ -895,7 +948,7 @@ mod tests {
         let mut runtime = CancelAfterLongRunningPromptRuntime::default();
         let result = execute_one_bash("sleep 2; printf should_not_finish", -1, &mut runtime);
 
-        assert!(result.contains("error: cancelled_by_user"), "{result}");
+        assert!(result.contains("cancelled before it completed"), "{result}");
         assert_eq!(runtime.prompts.len(), 1);
         assert_eq!(runtime.prompts[0].action, "run_bash");
         assert_eq!(
@@ -925,7 +978,7 @@ mod tests {
         );
         match result {
             ActionExecution::Completed(text) => {
-                assert!(text.contains("long_sleep_in_normal_command"));
+                assert!(text.contains("long sleep in normal mode"), "{text}");
                 assert!(text.contains("interval_ms"));
             }
             ActionExecution::NeedsApproval(_) => {
@@ -953,7 +1006,7 @@ mod tests {
         );
         match result {
             ActionExecution::Completed(text) => {
-                assert!(text.contains("status: 0"));
+                assert!(text.contains("Exit code: 0"));
                 assert!(text.contains("done"));
             }
             ActionExecution::NeedsApproval(_) => panic!("approve mode should not request approval"),
@@ -972,9 +1025,8 @@ mod tests {
         let mut runtime = NeverCancelRuntime;
         let result = execute_polling_bash(&command, 1000, 5000, 1000, &mut runtime);
         assert!(result.contains("Action result: run_bash"), "{result}");
-        assert!(result.contains("mode: poll"), "{result}");
-        assert!(result.contains("state: finished"), "{result}");
-        assert!(result.contains("attempts: 2"), "{result}");
+        assert!(result.contains("Polling state: finished"), "{result}");
+        assert!(result.contains("Attempts: 2"), "{result}");
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -982,9 +1034,8 @@ mod tests {
     fn run_bash_poll_mode_times_out_when_command_stays_nonzero() {
         let mut runtime = NeverCancelRuntime;
         let result = execute_polling_bash("printf waiting; exit 7", 1000, 1100, 1000, &mut runtime);
-        assert!(result.contains("mode: poll"), "{result}");
-        assert!(result.contains("state: timeout"), "{result}");
-        assert!(result.contains("last_status: 7"), "{result}");
+        assert!(result.contains("Polling state: timeout"), "{result}");
+        assert!(result.contains("Last observed exit code: 7"), "{result}");
         assert!(result.contains("waiting"), "{result}");
     }
 
@@ -995,7 +1046,7 @@ mod tests {
             cancelled: &cancelled,
         };
         let result = execute_polling_bash("exit 1", 1000, 10_000, 1000, &mut runtime);
-        assert!(result.contains("state: cancelled"), "{result}");
+        assert!(result.contains("Polling state: cancelled"), "{result}");
     }
 
     #[test]
@@ -1044,7 +1095,10 @@ mod tests {
         );
         match cmd_with_interval {
             ActionExecution::Completed(text) => {
-                assert!(text.contains("loop_cmd_required_for_polling"), "{text}");
+                assert!(
+                    text.contains("interval_ms is only valid with loop_cmd"),
+                    "{text}"
+                );
             }
             other => panic!("expected pairing error, got {other:?}"),
         }
@@ -1065,7 +1119,7 @@ mod tests {
         );
         match loop_without_interval {
             ActionExecution::Completed(text) => {
-                assert!(text.contains("interval_ms_required_for_loop_cmd"), "{text}");
+                assert!(text.contains("loop_cmd needs interval_ms"), "{text}");
             }
             other => panic!("expected pairing error, got {other:?}"),
         }
@@ -1076,14 +1130,14 @@ mod tests {
         let dir = tmp_memory_dir("background_job");
         let store = FileShellJobStore::new(&dir);
         let started = store.spawn("printf background_ok", "session_a", "turn_a");
-        assert!(started.contains("status: background_started"));
+        assert!(started.contains("background command has started"));
         let job_id = started
             .lines()
-            .find_map(|line| line.strip_prefix("job_id: "))
+            .find_map(|line| line.strip_prefix("Job id for shell_job_status: "))
             .unwrap()
             .to_string();
         let status = store.status(&job_id, 1000);
-        assert!(status.contains("state: finished"), "{status}");
+        assert!(status.contains("State: finished"), "{status}");
         assert!(status.contains("background_ok"), "{status}");
         let _ = fs::remove_dir_all(dir);
     }
@@ -1093,9 +1147,9 @@ mod tests {
         let dir = tmp_memory_dir("missing_job");
         let store = FileShellJobStore::new(&dir);
         let missing = store.status("missing", 0);
-        assert!(missing.contains("error: job_not_found"));
+        assert!(missing.contains("No background job with this id was found"));
         let empty = store.status("", 0);
-        assert!(empty.contains("error: job_id_required"));
+        assert!(empty.contains("no job_id was provided"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1111,7 +1165,7 @@ mod tests {
         );
         let job_id = started
             .lines()
-            .find_map(|line| line.strip_prefix("job_id: "))
+            .find_map(|line| line.strip_prefix("Job id for shell_job_status: "))
             .expect("job id");
         let cancelled = store.cancel(job_id);
 
@@ -1119,9 +1173,9 @@ mod tests {
             cancelled.contains("Action result: shell_job_status"),
             "{cancelled}"
         );
-        assert!(cancelled.contains("state: cancelled"), "{cancelled}");
+        assert!(cancelled.contains("State: cancelled"), "{cancelled}");
         let status = store.status(job_id, 0);
-        assert!(status.contains("state: cancelled"), "{status}");
+        assert!(status.contains("State: cancelled"), "{status}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1134,17 +1188,17 @@ mod tests {
         let other = store.spawn("sleep 10", "session_other", "turn_a");
         let owned_job = owned
             .lines()
-            .find_map(|line| line.strip_prefix("job_id: "))
+            .find_map(|line| line.strip_prefix("Job id for shell_job_status: "))
             .expect("owned job");
         let other_job = other
             .lines()
-            .find_map(|line| line.strip_prefix("job_id: "))
+            .find_map(|line| line.strip_prefix("Job id for shell_job_status: "))
             .expect("other job");
 
         let cancelled = store.cancel_unfinished_for_session("session_owned");
         assert_eq!(cancelled, vec![owned_job.to_string()]);
-        assert!(store.status(owned_job, 0).contains("state: cancelled"));
-        assert!(store.status(other_job, 0).contains("state: running"));
+        assert!(store.status(owned_job, 0).contains("State: cancelled"));
+        assert!(store.status(other_job, 0).contains("State: running"));
         let _ = store.cancel(other_job);
         let _ = fs::remove_dir_all(&dir);
     }

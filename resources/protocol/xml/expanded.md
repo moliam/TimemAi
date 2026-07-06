@@ -213,7 +213,7 @@ Use cmd for a shell command. Optional: timeout_ms, background=true or mode=backg
 - Required one of: `cmd`, `loop_cmd`
 
 **Result**
-Normal returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check. Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts, elapsed_ms, last_status, and bounded last output. If a normal command with timeout_ms=-1 runs for a long time, the host may ask the user whether to keep waiting. If the user stops waiting, the action returns cancelled_by_user and the runtime adds the user's cancellation as supplementary context for your next response.
+Normal returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check. Polling mode returns a natural-language result with polling state, attempts, elapsed time, last observed exit code, and bounded last output. If a normal command with timeout_ms=-1 runs for a long time, the host may ask the user whether to keep waiting. If the user stops waiting, the action result says the command was cancelled before completion and the runtime adds the user's cancellation as supplementary context for your next response.
 If args do not match this tool spec, runtime asks you to repair the response before executing the tool.
 
 #### `self_tool`
@@ -276,39 +276,8 @@ skills are loaded, do not call `capmgr` for a skill.
 ## Response Protocol
 
 Your response must be organized as XML with the pre-defined tags below.
-
-The top-level response is XML, not JSON or Markdown. Only the individual action
-payloads inside `<action_json>` use JSON objects.
-
-Required tag rules:
-
-- Always use exactly one `<response>...</response>` root element.
-- If work is still in progress, omit `<status>` or write
-  `<status>working</status>`, provide `<progress>` when useful, and include
-  concrete actions when runtime work is needed. Do not write `<final_answer>`
-  while still working; use `<progress>` for user-visible ongoing reports.
-- If the task is complete, write `<status>ALL_FINISHED</status>` and provide
-  `<final_answer>`. `ALL_FINISHED` means all pending user tasks are completed.
-- Any response containing `<final_answer>` must also contain
-  `<status>ALL_FINISHED</status>`, including responses that also contain
-  `<context_compact>`.
-- Final answers are not actions.
-- `<free_talk>` is optional. Use it for casual reasoning, next plans, or context
-  that should remain visible to you in later prompt context. Runtime keeps it
-  for you in future context.
-- `<working_still_action>` contains one or more `<action_json>` blocks. Each
-  `<action_json>` block contains JSON for a single action object, an array of
-  action objects, or an array of action groups. Wrap JSON in CDATA when it
-  contains quotes, angle brackets, shell punctuation, or multi-line content.
-  DO NOT include `<working_still_action>` when `<status>` is `ALL_FINISHED`.
-- `<context_compact>` lets you replace old dynamic context with a concise
-  summary. Provide `<delta_ids>` plus `<summary>`. Runtime will hide the
-  referenced dynamic prompt deltas and append your summary as a new dynamic
-  prompt delta. A good compact summary keeps the active task description,
-  working environment facts, current progress, todo/next steps, and only the few
-  high-level work principles that still guide the task. Do not put the compact
-  summary into a `memmgr type=context` action. If compact completes the current
-  user request, use `<status>ALL_FINISHED</status>` with `<final_answer>`.
+Always use exactly one `<response>...</response>` root element.
+The top-level response is XML. Only the individual action payloads inside `<action_json>` use JSON objects.
 
 The response protocol summary is:
 
@@ -316,8 +285,8 @@ XML response tags. The top-level response is XML. Tool actions are JSON objects
 inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
 
 - `<response>`: required root element.
-- `<status>`: optional. Use `ALL_FINISHED` only when the current user request is
-  complete and no more runtime interaction is needed for that request. Omit it
+- `<status>`: optional. Use `ALL_FINISHED` only when all user's open and pending requests are
+  complete, no more action needed, and a final summary/answer is ready. Omit it
   or use `working` while work continues.
 - `<progress>`: optional progress report for multi-round tasks.
 - `<final_answer>`: summary/answer of all pending tasks. Use only together with

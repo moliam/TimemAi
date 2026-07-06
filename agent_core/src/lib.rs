@@ -2024,7 +2024,7 @@ impl AgentCore {
                 };
                 let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
                     ActionExecution::Completed(
-                        "Action result: run_bash\nerror: cmd_and_loop_cmd_conflict".to_string(),
+                        "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.".to_string(),
                     )
                 } else {
                     let mut should_cancel = || false;

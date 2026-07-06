@@ -899,9 +899,8 @@ mod tests {
         assert_eq!(outcome.text, "CI 已完成。");
         assert_eq!(model.prompts.len(), 2);
         assert!(model.prompts[1].contains("Action result: run_bash"));
-        assert!(model.prompts[1].contains("mode: poll"));
-        assert!(model.prompts[1].contains("state: finished"));
-        assert!(model.prompts[1].contains("attempts: 2"));
+        assert!(model.prompts[1].contains("Polling state: finished"));
+        assert!(model.prompts[1].contains("Attempts: 2"));
     }
 
     #[test]
@@ -953,7 +952,7 @@ mod tests {
             model.prompts[1].contains("You can initiate action to check current working status")
         );
         let prompt = core.render_prompt();
-        assert!(prompt.contains("error: cancelled_by_user"));
+        assert!(prompt.contains("The command was cancelled before it completed"));
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "user_supplement"), 1);
     }
@@ -1021,7 +1020,9 @@ finished
         assert_eq!(ui.requests[0].command, "sleep 2; printf late");
         assert!(model.prompts[1].contains("quick"));
         assert!(model.prompts[1].contains("user cancels the command"));
-        assert!(core.render_prompt().contains("error: cancelled_by_user"));
+        assert!(core
+            .render_prompt()
+            .contains("The command was cancelled before it completed"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1476,13 +1477,13 @@ finished
 
         assert_eq!(outcome.text, "没有找到相关 scratch。");
         assert_eq!(model.prompts.len(), 2);
-        assert!(model.prompts[0].contains("The top-level response is XML, not JSON or Markdown."));
-        assert!(model.prompts[1].contains("The top-level response is XML, not JSON or Markdown."));
+        assert!(model.prompts[0].contains("The top-level response is XML."));
+        assert!(model.prompts[1].contains("The top-level response is XML."));
 
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
         assert!(second_parts
             .static_prompt
-            .contains("The top-level response is XML, not JSON or Markdown."));
+            .contains("The top-level response is XML."));
         assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
         assert!(second_parts.new_delta.contains("Action result: memmgr"));
         let second_blocks = crate::plan_incremental_cache(second_parts);
@@ -2382,7 +2383,7 @@ finished
         assert_eq!(std::fs::read_to_string(&output_file).unwrap(), "approved");
         assert_eq!(model.prompts.len(), 2);
         assert!(model.prompts[1].contains("Action result: run_bash"));
-        assert!(model.prompts[1].contains("status: 0"));
+        assert!(model.prompts[1].contains("Exit code: 0"));
         let events = read_audit_events(&audit);
         let approval = audit_event(&events, "user_approval").unwrap();
         assert_eq!(approval["approved"], true);
