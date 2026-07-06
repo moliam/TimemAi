@@ -1,6 +1,9 @@
 use serde_json::Value;
 
-use super::{ParsedAction, ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite};
+use super::{
+    ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
+    ResponseProtocolSuite,
+};
 use crate::capability::CapabilityRegistry;
 
 pub struct MarkdownSuiteV1;
@@ -214,6 +217,55 @@ fn parse_single_action(
     })
 }
 
+fn parse_action_groups_value(
+    value: &Value,
+    capabilities: &CapabilityRegistry,
+) -> Result<Vec<ParsedActionGroup>, String> {
+    if value.is_object() && value.get("action").is_some() {
+        return Ok(vec![ParsedActionGroup {
+            order: ActionGroupOrder::Sequential,
+            actions: vec![parse_single_action(value, 0, capabilities)?],
+        }]);
+    }
+    let Some(items) = value.as_array() else {
+        return Err("actions_section_must_be_action_or_array".to_string());
+    };
+    if items
+        .iter()
+        .all(|item| item.get("actions").is_some() || item.get("order").is_some())
+    {
+        let mut groups = Vec::new();
+        for (group_idx, group) in items.iter().enumerate() {
+            let order = group
+                .get("order")
+                .and_then(Value::as_str)
+                .map(ActionGroupOrder::from_name)
+                .unwrap_or(ActionGroupOrder::Sequential);
+            let Some(actions) = group.get("actions").and_then(Value::as_array) else {
+                return Err(format!("action_groups[{group_idx}].actions_required"));
+            };
+            let mut parsed_actions = Vec::new();
+            for (action_idx, action) in actions.iter().enumerate() {
+                parsed_actions.push(parse_single_action(action, action_idx, capabilities)?);
+            }
+            groups.push(ParsedActionGroup {
+                order,
+                actions: parsed_actions,
+            });
+        }
+        return Ok(groups);
+    }
+
+    let mut actions = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        actions.push(parse_single_action(item, idx, capabilities)?);
+    }
+    Ok(vec![ParsedActionGroup {
+        order: ActionGroupOrder::Sequential,
+        actions,
+    }])
+}
+
 fn extract_fenced_json(text: &str) -> Option<String> {
     let start_marker = "```json";
     let start = text.find(start_marker)?;
@@ -285,6 +337,7 @@ fn malformed_markdown_response(issue: &str) -> ParsedEnvelope {
         thought: String::new(),
         thought_keep_in_context: false,
         next_actions: vec![],
+        action_groups: vec![],
         context_compacts: vec![],
         memory_candidates: vec![],
         runtime_note: None,
@@ -336,6 +389,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
                 thought: String::new(),
                 thought_keep_in_context: false,
                 next_actions: vec![],
+                action_groups: vec![],
                 context_compacts: vec![],
                 memory_candidates: vec![],
                 runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
@@ -352,6 +406,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             thought: String::new(),
             thought_keep_in_context: false,
             next_actions: vec![],
+            action_groups: vec![],
             context_compacts: vec![],
             memory_candidates: vec![],
             runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
@@ -372,6 +427,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             thought: String::new(),
             thought_keep_in_context: false,
             next_actions: vec![],
+            action_groups: vec![],
             context_compacts: vec![],
             memory_candidates: vec![],
             runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
@@ -442,6 +498,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     };
 
     let mut next_actions = Vec::new();
+    let mut action_groups = Vec::new();
     let context_compacts = parse_context_compact_section(&context_compact_body, &mut repair_issue);
     if !actions_body.is_empty() {
         let blocks = extract_action_blocks(&actions_body);
@@ -451,23 +508,12 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             && (trimmed_actions_body.starts_with('{') || trimmed_actions_body.starts_with('['))
         {
             if let Ok(value) = serde_json::from_str::<Value>(trimmed_actions_body) {
-                if value.is_object() && value.get("action").is_some() {
-                    match parse_single_action(&value, 0, capabilities) {
-                        Ok(action) => next_actions.push(action),
-                        Err(issue) => repair_issue = Some(issue),
+                match parse_action_groups_value(&value, capabilities) {
+                    Ok(groups) => {
+                        next_actions.extend(groups.iter().flat_map(|group| group.actions.clone()));
+                        action_groups.extend(groups);
                     }
-                } else if value.is_array() {
-                    if let Some(arr) = value.as_array() {
-                        for (idx, item) in arr.iter().enumerate() {
-                            match parse_single_action(item, idx, capabilities) {
-                                Ok(action) => next_actions.push(action),
-                                Err(issue) => {
-                                    repair_issue = Some(issue);
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    Err(issue) => repair_issue = Some(issue),
                 }
             } else {
                 repair_issue = Some("actions_section_invalid_json".to_string());
@@ -475,8 +521,12 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         } else {
             for (idx, block) in blocks.iter().enumerate() {
                 match serde_json::from_str::<Value>(block) {
-                    Ok(value) => match parse_single_action(&value, idx, capabilities) {
-                        Ok(action) => next_actions.push(action),
+                    Ok(value) => match parse_action_groups_value(&value, capabilities) {
+                        Ok(groups) => {
+                            next_actions
+                                .extend(groups.iter().flat_map(|group| group.actions.clone()));
+                            action_groups.extend(groups);
+                        }
                         Err(issue) => {
                             repair_issue = Some(issue);
                             break;
@@ -519,6 +569,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         thought,
         thought_keep_in_context,
         next_actions,
+        action_groups,
         context_compacts,
         memory_candidates: vec![],
         runtime_note,
@@ -791,6 +842,39 @@ finished
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].action, "run_bash");
         assert_eq!(env.next_actions[0].input_str("command"), "pwd");
+    }
+
+    #[test]
+    fn actions_section_accepts_group_array() {
+        let input = r#"## Progress
+checking
+
+## Intermediate_Actions
+```action
+[
+  {
+    "order": "parallel",
+    "actions": [
+      {"action":"run_bash","intent":"Check A.","args":{"command":"printf a"}},
+      {"action":"run_bash","intent":"Check B.","args":{"command":"printf b"}}
+    ]
+  },
+  {
+    "order": "sequential",
+    "actions": [
+      {"action":"memmgr","intent":"Query durable memory.","args":{"type":"durable","op":"query","query":"project","limit":5}}
+    ]
+  }
+]
+```"#;
+        let env = parse_markdown_envelope(input, &caps());
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 2);
+        assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
+        assert_eq!(env.action_groups[0].actions.len(), 2);
+        assert_eq!(env.action_groups[1].order, ActionGroupOrder::Sequential);
+        assert_eq!(env.next_actions.len(), 3);
     }
 
     #[test]

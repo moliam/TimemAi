@@ -148,11 +148,12 @@ pub fn run_session_turn_with_model_client(
                             &response.response.usage,
                             &response.response.content,
                         );
-                        step = core.apply_model_response_with_repair_audit(
+                        step = core.apply_model_response_with_repair_audit_and_cancel(
                             response.response,
                             request.audit_file,
                             request.session,
                             &turn_id,
+                            &mut || ui.is_cancel_requested(),
                         );
                         let mut sink = TurnUiTopicEventSink { ui };
                         core.notify_last_topic_events(request.session, &mut sink);
@@ -183,22 +184,24 @@ pub fn run_session_turn_with_model_client(
                     .as_bool();
                 user_wait_this_turn = user_wait_this_turn.saturating_add(user_wait_start.elapsed());
                 if ui.take_cancel_request() {
-                    step = core.resolve_user_approval_with_audit(
+                    step = core.resolve_user_approval_with_audit_and_cancel(
                         &approval,
                         false,
                         request.audit_file,
                         request.session,
                         &turn_id,
+                        &mut || ui.is_cancel_requested(),
                     );
                     ui.resume_after_user_decision();
                     continue;
                 }
-                step = core.resolve_user_approval_with_audit(
+                step = core.resolve_user_approval_with_audit_and_cancel(
                     &approval,
                     approved,
                     request.audit_file,
                     request.session,
                     &turn_id,
+                    &mut || ui.is_cancel_requested(),
                 );
                 ui.resume_after_user_decision();
             }
@@ -491,6 +494,11 @@ mod tests {
         doc["events"].as_array().unwrap().clone()
     }
 
+    fn shell_quote(path: &Path) -> String {
+        let raw = path.to_string_lossy();
+        format!("'{}'", raw.replace('\'', "'\\''"))
+    }
+
     fn audit_event_count(events: &[Value], event_type: &str) -> usize {
         events
             .iter()
@@ -729,6 +737,133 @@ mod tests {
         );
         assert_eq!(model.prompts.len(), 1);
         assert!(ui.retries.is_empty());
+    }
+
+    #[test]
+    fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
+        let dir = tmp_dir("run_bash_poll_session");
+        let audit = dir.join("audit.json");
+        let flag = dir.join("ci_done.flag");
+        let check_command = format!(
+            "test -f {} || (touch {}; exit 1)",
+            shell_quote(&flag),
+            shell_quote(&flag)
+        );
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                format!(
+                    r#"{{"status":"working","report_job_progress":"等待 CI 完成。","next_actions":[{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"command":{},"interval_ms":1000,"timeout_ms":5000,"check_timeout_ms":1000}}}}]}}"#,
+                    serde_json::to_string(&check_command).unwrap()
+                ),
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"{"status":"finished","final_answer":"CI 已完成。"}"#,
+                1_200,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "等 CI",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "CI 已完成。");
+        assert_eq!(model.prompts.len(), 2);
+        assert!(model.prompts[1].contains("Action result: run_bash"));
+        assert!(model.prompts[1].contains("mode: poll"));
+        assert!(model.prompts[1].contains("state: finished"));
+        assert!(model.prompts[1].contains("attempts: 2"));
+    }
+
+    #[test]
+    fn session_turn_executes_parallel_action_group_before_next_group() {
+        let dir = tmp_dir("parallel_action_groups_session");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"## Progress
+正在并行检查两个本地状态。
+
+## Intermediate_Actions
+```action
+[
+  {
+    "order": "parallel",
+    "actions": [
+      {"action":"run_bash","intent":"并行检查 A","args":{"command":"sleep 1; printf group_a","timeout_ms":3000}},
+      {"action":"run_bash","intent":"并行检查 B","args":{"command":"sleep 1; printf group_b","timeout_ms":3000}}
+    ]
+  },
+  {
+    "order": "sequential",
+    "actions": [
+      {"action":"run_bash","intent":"前一组完成后再执行 C","args":{"command":"printf group_c","timeout_ms":3000}}
+    ]
+  }
+]
+```"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"## Status
+finished
+
+## Final_Answer
+分组动作完成。"#,
+                1_200,
+                false,
+            )),
+        ]);
+
+        let started = std::time::Instant::now();
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "执行分组动作",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome.text, "分组动作完成。");
+        assert!(
+            elapsed < std::time::Duration::from_millis(1800),
+            "parallel group should not run two one-second commands serially; elapsed={elapsed:?}"
+        );
+        assert!(model.prompts[1].contains("group_a"));
+        assert!(model.prompts[1].contains("group_b"));
+        assert!(model.prompts[1].contains("group_c"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2294,6 +2429,8 @@ Markdown 协议动作已执行。"#,
                     && topic.kind
                         == CoreActionKind::Bash {
                             command: "printf markdown-ok".to_string(),
+                            mode: "foreground".to_string(),
+                            interval_ms: None,
                         }
             })
         }));

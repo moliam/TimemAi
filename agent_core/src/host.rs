@@ -1193,9 +1193,15 @@ pub fn topic_event_status_hint(events: &[CoreTopicEvent]) -> Option<CoreTopicSta
 
 fn action_kind_topic_payload(kind: &CoreActionKind) -> Value {
     match kind {
-        CoreActionKind::Bash { command } => json!({
+        CoreActionKind::Bash {
+            command,
+            mode,
+            interval_ms,
+        } => json!({
             "kind": "bash",
             "command": command,
+            "mode": mode,
+            "interval_ms": interval_ms,
         }),
         CoreActionKind::ShellJob { job_id } => json!({
             "kind": "shell_job",
@@ -1232,6 +1238,8 @@ fn action_kind_from_topic_payload(value: &Value, fallback_action: &str) -> CoreA
     match value["kind"].as_str().unwrap_or_default() {
         "bash" => CoreActionKind::Bash {
             command: value["command"].as_str().unwrap_or_default().to_string(),
+            mode: value["mode"].as_str().unwrap_or("foreground").to_string(),
+            interval_ms: value["interval_ms"].as_u64(),
         },
         "shell_job" => CoreActionKind::ShellJob {
             job_id: value["job_id"].as_str().unwrap_or_default().to_string(),
@@ -1997,6 +2005,8 @@ mod tests {
                 input: serde_json::json!({"command": "pwd"}),
                 kind: crate::CoreActionKind::Bash {
                     command: "pwd".to_string(),
+                    mode: "foreground".to_string(),
+                    interval_ms: None,
                 },
                 active: true,
                 memory_activity: crate::CoreMemoryActivity::None,
@@ -2076,6 +2086,8 @@ mod tests {
                     "kind": {
                         "kind": "bash",
                         "command": "pwd",
+                        "mode": "foreground",
+                        "interval_ms": null,
                     },
                     "active": true,
                     "memory_activity": "none",
@@ -2089,7 +2101,9 @@ mod tests {
                 action: "run_bash".to_string(),
                 input: serde_json::json!({"command": "pwd"}),
                 kind: CoreActionKind::Bash {
-                    command: "pwd".to_string()
+                    command: "pwd".to_string(),
+                    mode: "foreground".to_string(),
+                    interval_ms: None,
                 },
                 active: true,
                 memory_activity: CoreMemoryActivity::None,
@@ -2268,6 +2282,8 @@ mod tests {
             input: serde_json::json!({"command": "pwd"}),
             kind: CoreActionKind::Bash {
                 command: "pwd".to_string(),
+                mode: "foreground".to_string(),
+                interval_ms: None,
             },
             active: true,
             memory_activity: CoreMemoryActivity::None,
@@ -2294,8 +2310,18 @@ mod tests {
             (
                 CoreActionKind::Bash {
                     command: "pwd".to_string(),
+                    mode: "foreground".to_string(),
+                    interval_ms: None,
                 },
-                json!({"kind": "bash", "command": "pwd"}),
+                json!({"kind": "bash", "command": "pwd", "mode": "foreground", "interval_ms": null}),
+            ),
+            (
+                CoreActionKind::Bash {
+                    command: "gh run list".to_string(),
+                    mode: "poll".to_string(),
+                    interval_ms: Some(5000),
+                },
+                json!({"kind": "bash", "command": "gh run list", "mode": "poll", "interval_ms": 5000}),
             ),
             (
                 CoreActionKind::ShellJob {

@@ -6,33 +6,49 @@ requires_host: local_command_execution
 summary: Run local shell commands.
 prompt_synopsis: |
   run_bash command=<shell_command> [timeout_ms=<n>] [background=true|mode=background]
+  run_bash command=<check_command> interval_ms=<n> [timeout_ms=<total_wait_ms>] [check_timeout_ms=<n>]
 description: |
   `run_bash` runs a shell command on the local machine and collects bounded
-  evidence from the command result. It supports foreground and background
-  execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
+  evidence from the command result. It supports foreground, background, and
+  polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
   Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner.
+  Do not put long sleeps in foreground commands. For waiting on external state,
+  use interval_ms. For long local work, use
+  background=true and shell_job_status.
 prompt_input: |
   Use command for the shell command. Optional: timeout_ms, background=true or
-  mode=background.
+  mode=background. If interval_ms is present, run_bash enters polling mode:
+  command is run repeatedly until it exits with code 0 or timeout_ms total wait
+  budget is reached. check_timeout_ms is the per-check command timeout.
 prompt_result: |
   Foreground returns status and bounded output. Background returns job_id; use
   shell_job_status with that job_id and your chosen timeout_ms to wait/check.
+  Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts,
+  elapsed_ms, last_status, and bounded last output.
 input_schema: |
   {
     "type": "object",
     "properties": {
       "command": {"type": "string", "description": "Shell command to execute."},
-      "timeout_ms": {"type": "integer", "description": "Foreground wait budget in milliseconds."},
+      "cmd": {"type": "string", "description": "Alias for command."},
+      "timeout_ms": {"type": "integer", "description": "Foreground wait budget, or total polling wait budget when interval_ms is present."},
+      "check_timeout_ms": {"type": "integer", "description": "Per-check timeout in polling mode."},
+      "interval_ms": {"type": "integer", "description": "Polling interval. When present, command is re-run until it exits with code 0."},
       "background": {"type": "boolean", "description": "When true, return a job_id instead of blocking."},
       "mode": {"type": "string", "enum": ["foreground", "background"], "description": "Execution mode alias."}
     },
-    "required": ["command"]
+    "x-required-any": [["command", "cmd"]]
   }
 output_schema: |
   {
     "type": "object",
     "properties": {
       "command": {"type": "string", "description": "Command actually executed."},
+      "mode": {"type": "string", "description": "poll when interval_ms was used."},
+      "state": {"type": "string", "description": "Polling state: finished|timeout|cancelled."},
+      "attempts": {"type": "integer", "description": "Polling attempts."},
+      "elapsed_ms": {"type": "integer", "description": "Polling elapsed time."},
+      "last_status": {"type": "integer", "description": "Last observed polling exit code."},
       "status": {"type": "integer", "description": "Process exit code for foreground success."},
       "output": {"type": "string", "description": "Bounded stdout/stderr text for foreground execution."},
       "job_id": {"type": "string", "description": "Background job id when background=true."},
@@ -40,7 +56,7 @@ output_schema: |
       "output_file": {"type": "string", "description": "Path where background output is stored."},
       "status_file": {"type": "string", "description": "Path where background exit status is stored."},
       "approval_status": {"type": "string", "enum": ["approved_by_user", "denied_by_user"], "description": "Approval result."},
-      "error": {"type": "string", "description": "command_required|command_too_long|timeout|command_failed|background_spawn_failed"}
+      "error": {"type": "string", "description": "command_required|command_too_long|long_sleep_in_foreground_command|poll_mode_cannot_be_background|timeout|command_failed|background_spawn_failed"}
     }
   }
 example_json: |

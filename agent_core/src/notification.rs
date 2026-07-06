@@ -15,6 +15,8 @@ pub enum CoreMemoryActivity {
 pub enum CoreActionKind {
     Bash {
         command: String,
+        mode: String,
+        interval_ms: Option<u64>,
     },
     ShellJob {
         job_id: String,
@@ -116,9 +118,28 @@ pub fn notification_from_action(action: &ParsedAction) -> CoreNotification {
 
 fn action_kind(action: &ParsedAction) -> CoreActionKind {
     match action.action.as_str() {
-        "run_bash" => CoreActionKind::Bash {
-            command: action.input_str("command"),
-        },
+        "run_bash" => {
+            let interval_ms = action.input_u64("interval_ms");
+            let command = {
+                let command = action.input_str("command");
+                if command.is_empty() {
+                    action.input_str("cmd")
+                } else {
+                    command
+                }
+            };
+            CoreActionKind::Bash {
+                command,
+                mode: if interval_ms.is_some() {
+                    "poll".to_string()
+                } else if action.background() {
+                    "background".to_string()
+                } else {
+                    "foreground".to_string()
+                },
+                interval_ms,
+            }
+        }
         "shell_job_status" => CoreActionKind::ShellJob {
             job_id: action.input_str("job_id"),
         },
@@ -190,6 +211,8 @@ mod tests {
                     }),
                     kind: CoreActionKind::Bash {
                         command: "pwd".to_string(),
+                        mode: "foreground".to_string(),
+                        interval_ms: None,
                     },
                     active: true,
                     memory_activity: CoreMemoryActivity::None,

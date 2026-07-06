@@ -128,8 +128,8 @@ pub use provider_config::{
 };
 pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
 pub use redaction::{redact_value, REDACTED};
-use response_protocol::ParsedAction;
 pub use response_protocol::ResponseProtocolKind;
+use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup};
 pub use retry_policy::{
     is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
     ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
@@ -339,10 +339,48 @@ pub struct ChatHistoryRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingApproval {
     request: ApprovalRequest,
-    command: String,
-    background: bool,
-    timeout_ms: u64,
+    approved_action: PendingApprovedAction,
     intent: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingApprovedAction {
+    RunBash {
+        command: String,
+        background: bool,
+        timeout_ms: u64,
+        interval_ms: Option<u64>,
+        check_timeout_ms: u64,
+    },
+}
+
+impl PendingApprovedAction {
+    fn command(&self) -> &str {
+        match self {
+            PendingApprovedAction::RunBash { command, .. } => command,
+        }
+    }
+
+    fn audit_input(&self, approval_id: &str, risk: &str, reason: &str) -> Value {
+        match self {
+            PendingApprovedAction::RunBash {
+                command,
+                background,
+                timeout_ms,
+                interval_ms,
+                check_timeout_ms,
+            } => json!({
+                "command": command,
+                "background": background,
+                "timeout_ms": timeout_ms,
+                "interval_ms": interval_ms,
+                "check_timeout_ms": check_timeout_ms,
+                "approval_id": approval_id,
+                "risk": risk,
+                "reason": reason,
+            }),
+        }
+    }
 }
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
@@ -1005,6 +1043,14 @@ impl AgentCore {
     }
 
     pub fn apply_model_response(&mut self, response: LlmResponse) -> CoreStep {
+        self.apply_model_response_with_cancel(response, &mut || false)
+    }
+
+    pub fn apply_model_response_with_cancel(
+        &mut self,
+        response: LlmResponse,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> CoreStep {
         self.last_notifications.clear();
         self.current_round += 1;
         self.current_stats.add(&response.usage);
@@ -1145,25 +1191,23 @@ impl AgentCore {
             slices.push(("runtime_note".to_string(), note.to_string()));
         }
 
-        if !parsed.next_actions.is_empty() {
-            let mut result_lines = Vec::new();
-            for action in parsed.next_actions {
-                match self.execute_action(action) {
-                    ActionExecution::Completed(result) => result_lines.push(result),
-                    ActionExecution::NeedsApproval(pending) => {
-                        if !result_lines.is_empty() {
-                            slices.push((
-                                "result_of_llm_action".to_string(),
-                                result_lines.join("\n\n"),
-                            ));
-                        }
-                        self.append_delta(slices);
-                        let request = pending.request.clone();
-                        self.pending_approval = Some(pending);
-                        return CoreStep::NeedsUserApproval { request };
+        if !parsed.action_groups.is_empty() {
+            let result_lines = match self.execute_action_groups(parsed.action_groups, should_cancel)
+            {
+                Ok(result_lines) => result_lines,
+                Err((result_lines, pending)) => {
+                    if !result_lines.is_empty() {
+                        slices.push((
+                            "result_of_llm_action".to_string(),
+                            result_lines.join("\n\n"),
+                        ));
                     }
+                    self.append_delta(slices);
+                    let request = pending.request.clone();
+                    self.pending_approval = Some(pending);
+                    return CoreStep::NeedsUserApproval { request };
                 }
-            }
+            };
             if !result_lines.is_empty() {
                 slices.push((
                     "result_of_llm_action".to_string(),
@@ -1235,11 +1279,28 @@ impl AgentCore {
         session: &str,
         turn_id: &str,
     ) -> CoreStep {
+        self.apply_model_response_with_repair_audit_and_cancel(
+            response,
+            audit_file,
+            session,
+            turn_id,
+            &mut || false,
+        )
+    }
+
+    pub fn apply_model_response_with_repair_audit_and_cancel(
+        &mut self,
+        response: LlmResponse,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> CoreStep {
         let repair_calls_before = self.current_stats().repair_calls;
         let response_model = response.model_name.clone();
         let response_usage = response.usage.clone();
         let response_truncated = response.truncated;
-        let step = self.apply_model_response(response);
+        let step = self.apply_model_response_with_cancel(response, should_cancel);
         let repair_calls_after = self.current_stats().repair_calls;
         if repair_calls_after > repair_calls_before {
             let _ = append_audit_event(
@@ -1305,6 +1366,15 @@ impl AgentCore {
     }
 
     pub fn resolve_user_approval(&mut self, approval_id: &str, approved: bool) -> CoreStep {
+        self.resolve_user_approval_with_cancel(approval_id, approved, &mut || false)
+    }
+
+    pub fn resolve_user_approval_with_cancel(
+        &mut self,
+        approval_id: &str,
+        approved: bool,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> CoreStep {
         let Some(pending) = self.pending_approval.take() else {
             self.append_delta(vec![(
                 "result_of_llm_action".to_string(),
@@ -1324,17 +1394,31 @@ impl AgentCore {
             return CoreStep::NeedsUserApproval { request };
         }
         let result = if approved {
-            shell_exec::execute_approved_bash(
-                &pending.command,
-                pending.background,
-                pending.timeout_ms,
-                &pending.request,
-                &self.shell_jobs,
-            )
+            match &pending.approved_action {
+                PendingApprovedAction::RunBash {
+                    command,
+                    background,
+                    timeout_ms,
+                    interval_ms,
+                    check_timeout_ms,
+                } => shell_exec::execute_approved_bash(
+                    command,
+                    *background,
+                    *timeout_ms,
+                    *interval_ms,
+                    *check_timeout_ms,
+                    &pending.request,
+                    &self.shell_jobs,
+                    should_cancel,
+                ),
+            }
         } else {
             format!(
-                "Action result: run_bash\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
-                pending.command, pending.request.approval_id, pending.request.reason
+                "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
+                pending.request.action,
+                pending.approved_action.command(),
+                pending.request.approval_id,
+                pending.request.reason
             )
         };
         let result = annotate_action_result_with_intent(result, &pending.intent);
@@ -1360,11 +1444,30 @@ impl AgentCore {
         session: &str,
         turn_id: &str,
     ) -> CoreStep {
+        self.resolve_user_approval_with_audit_and_cancel(
+            approval,
+            approved,
+            audit_file,
+            session,
+            turn_id,
+            &mut || false,
+        )
+    }
+
+    pub fn resolve_user_approval_with_audit_and_cancel(
+        &mut self,
+        approval: &ApprovalRequest,
+        approved: bool,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> CoreStep {
         let _ = append_audit_event(
             audit_file,
             &user_approval_audit_event(session, turn_id, approval, approved),
         );
-        self.resolve_user_approval(&approval.approval_id, approved)
+        self.resolve_user_approval_with_cancel(&approval.approval_id, approved, should_cancel)
     }
 
     pub fn continue_after_round_limit(&mut self) -> CoreStep {
@@ -1692,7 +1795,95 @@ impl AgentCore {
         rows
     }
 
-    fn execute_action(&mut self, action: ParsedAction) -> ActionExecution {
+    fn execute_action_groups(
+        &mut self,
+        groups: Vec<ParsedActionGroup>,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
+        let mut result_lines = Vec::new();
+        for group in groups {
+            if group.order == ActionGroupOrder::Parallel
+                && group.actions.len() > 1
+                && self.can_execute_parallel_bash_group(&group.actions)
+            {
+                result_lines.extend(self.execute_parallel_bash_group(group.actions));
+                continue;
+            }
+            for action in group.actions {
+                match self.execute_action(action, should_cancel) {
+                    ActionExecution::Completed(result) => result_lines.push(result),
+                    ActionExecution::NeedsApproval(pending) => {
+                        return Err((result_lines, pending));
+                    }
+                }
+            }
+        }
+        Ok(result_lines)
+    }
+
+    fn can_execute_parallel_bash_group(&self, actions: &[ParsedAction]) -> bool {
+        self.bash_approval_mode == BashApprovalMode::Approve
+            && actions
+                .iter()
+                .all(|action| action.action == "run_bash" && !action.background())
+    }
+
+    fn execute_parallel_bash_group(&mut self, actions: Vec<ParsedAction>) -> Vec<String> {
+        let mut handles = Vec::new();
+        for action in actions {
+            let action_for_audit = action.clone();
+            let shell_jobs = self.shell_jobs.clone();
+            self.current_stats.tool_calls += 1;
+            handles.push(thread::spawn(move || {
+                let command = {
+                    let command = action.input_str("command");
+                    if command.is_empty() {
+                        action.input_str("cmd")
+                    } else {
+                        command
+                    }
+                };
+                let result = shell_exec::execute_run_bash(
+                    &command,
+                    action.background(),
+                    action.timeout_ms(5000),
+                    action.input_u64("interval_ms"),
+                    action.input_u64("check_timeout_ms").unwrap_or(5000),
+                    BashApprovalMode::Approve,
+                    &action.intent,
+                    &shell_jobs,
+                    &mut || false,
+                );
+                let result = match result {
+                    ActionExecution::Completed(result) => result,
+                    ActionExecution::NeedsApproval(_) => format!(
+                        "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
+                        &command,
+                    ),
+                };
+                (action_for_audit, result)
+            }));
+        }
+        let mut result_lines = Vec::new();
+        for handle in handles {
+            match handle.join() {
+                Ok((action, result)) => {
+                    let result = annotate_action_result_with_intent(result, &action.intent);
+                    self.record_action_audit(&action, "completed", Some(&result));
+                    result_lines.push(result);
+                }
+                Err(_) => result_lines
+                    .push("Action result: run_bash\nerror: parallel_action_panicked".to_string()),
+            }
+        }
+        result_lines
+    }
+
+    fn execute_action(
+        &mut self,
+        action: ParsedAction,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> ActionExecution {
         let action_for_audit = action.clone();
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
@@ -1734,7 +1925,12 @@ impl AgentCore {
             }
         };
         self.current_stats.tool_calls += 1;
-        let execution = match tool_registry::execute_builtin_tool(self, dispatch_name, &action) {
+        let execution = match tool_registry::execute_builtin_tool(
+            self,
+            dispatch_name,
+            &action,
+            should_cancel,
+        ) {
             Some(execution) => execution,
             None => ActionExecution::Completed(format!(
                 "Action result: {}\nunsupported native action",
@@ -1751,7 +1947,7 @@ impl AgentCore {
                 let result = annotate_action_result_with_intent(format!(
                     "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
                     action_for_audit.action,
-                    pending.command,
+                    pending.approved_action.command(),
                     pending.request.approval_id,
                     pending.request.risk,
                     pending.request.reason
@@ -1816,14 +2012,11 @@ impl AgentCore {
                 } else {
                     "denied_by_user".to_string()
                 },
-                input: json!({
-                    "command": pending.command,
-                    "background": pending.background,
-                    "timeout_ms": pending.timeout_ms,
-                    "approval_id": pending.request.approval_id,
-                    "risk": pending.request.risk,
-                    "reason": pending.request.reason,
-                }),
+                input: pending.approved_action.audit_input(
+                    &pending.request.approval_id,
+                    &pending.request.risk,
+                    &pending.request.reason,
+                ),
                 result_summary: Some(compact_text(result, 2_000)),
             },
             turn_id,

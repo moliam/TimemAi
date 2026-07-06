@@ -11,14 +11,16 @@ pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "self_tool",
 ];
 
-type BuiltinToolCallback = fn(&mut AgentCore, &ParsedAction) -> ActionExecution;
+type BuiltinToolCallback =
+    fn(&mut AgentCore, &ParsedAction, &mut dyn FnMut() -> bool) -> ActionExecution;
 
 pub(crate) fn execute_builtin_tool(
     core: &mut AgentCore,
     binding_name: &str,
     action: &ParsedAction,
+    should_cancel: &mut dyn FnMut() -> bool,
 ) -> Option<ActionExecution> {
-    builtin_tool_callback(binding_name).map(|callback| callback(core, action))
+    builtin_tool_callback(binding_name).map(|callback| callback(core, action, should_cancel))
 }
 
 fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
@@ -33,27 +35,51 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
     }
 }
 
-fn execute_capmgr(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_capmgr(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _should_cancel: &mut dyn FnMut() -> bool,
+) -> ActionExecution {
     ActionExecution::Completed(capmgr::execute_action(core, action))
 }
 
-fn execute_memmgr(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_memmgr(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _should_cancel: &mut dyn FnMut() -> bool,
+) -> ActionExecution {
     ActionExecution::Completed(memmgr::execute(core, action))
 }
 
-fn execute_self_tool(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_self_tool(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _should_cancel: &mut dyn FnMut() -> bool,
+) -> ActionExecution {
     ActionExecution::Completed(self_tool::execute_action(core, action))
 }
 
-fn execute_shell_job_status(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_shell_job_status(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _should_cancel: &mut dyn FnMut() -> bool,
+) -> ActionExecution {
     ActionExecution::Completed(shell_job_status::execute_action(core, action))
 }
 
-fn execute_tool_job_status(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_tool_job_status(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _should_cancel: &mut dyn FnMut() -> bool,
+) -> ActionExecution {
     ActionExecution::Completed(tool_job_status::execute_action(core, action))
 }
 
-fn execute_run_bash(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_run_bash(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _should_cancel: &mut dyn FnMut() -> bool,
+) -> ActionExecution {
     shell_exec::execute_run_bash_action(core, action)
 }
 

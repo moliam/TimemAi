@@ -1,6 +1,9 @@
 use crate::response_protocol::ParsedAction;
 use crate::MemGuard;
-use crate::{ActionExecution, AgentCore, ApprovalRequest, BashApprovalMode, PendingApproval};
+use crate::{
+    ActionExecution, AgentCore, ApprovalRequest, BashApprovalMode, PendingApproval,
+    PendingApprovedAction,
+};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -238,14 +241,17 @@ pub(crate) fn execute_run_bash_action(
     core: &mut AgentCore,
     action: &ParsedAction,
 ) -> ActionExecution {
-    let command_to_run = action.input_str("command");
+    let command_to_run = command_from_action(action);
     execute_run_bash(
         &command_to_run,
         action.background(),
-        action.shell_timeout_ms(),
+        action.timeout_ms(5000),
+        action.input_u64("interval_ms"),
+        action.input_u64("check_timeout_ms").unwrap_or(5000),
         core.bash_approval_mode,
         &action.intent,
         &core.shell_jobs,
+        &mut || false,
     )
 }
 
@@ -253,9 +259,12 @@ pub(crate) fn execute_run_bash(
     command: &str,
     background: bool,
     timeout_ms: u64,
+    interval_ms: Option<u64>,
+    check_timeout_ms: u64,
     approval_mode: BashApprovalMode,
     intent: &str,
     shell_jobs: &FileShellJobStore,
+    should_cancel: &mut dyn FnMut() -> bool,
 ) -> ActionExecution {
     let command_to_run = command.trim();
     if command_to_run.is_empty() {
@@ -269,6 +278,18 @@ pub(crate) fn execute_run_bash(
             command_to_run, reason
         ));
     }
+    if !background && contains_long_foreground_sleep(command_to_run) {
+        return ActionExecution::Completed(format!(
+            "Action result: run_bash\ncommand: {}\nerror: long_sleep_in_foreground_command\nmessage: Use run_bash with interval_ms for waiting on external status, or background=true for long local work.",
+            command_to_run
+        ));
+    }
+    if background && interval_ms.is_some() {
+        return ActionExecution::Completed(format!(
+            "Action result: run_bash\ncommand: {}\nerror: poll_mode_cannot_be_background",
+            command_to_run
+        ));
+    }
     if approval_mode == BashApprovalMode::Ask {
         return ActionExecution::NeedsApproval(PendingApproval {
             request: ApprovalRequest {
@@ -279,29 +300,56 @@ pub(crate) fn execute_run_bash(
                 risk: "local_command_execution".to_string(),
                 intent: intent.to_string(),
             },
-            command: command_to_run.to_string(),
-            background,
-            timeout_ms,
+            approved_action: PendingApprovedAction::RunBash {
+                command: command_to_run.to_string(),
+                background,
+                timeout_ms,
+                interval_ms,
+                check_timeout_ms,
+            },
             intent: intent.to_string(),
         });
     }
     if background {
         return ActionExecution::Completed(shell_jobs.spawn(command_to_run));
     }
-    ActionExecution::Completed(execute_one_bash(command_to_run, timeout_ms))
+    if let Some(interval_ms) = interval_ms {
+        return ActionExecution::Completed(execute_polling_bash(
+            command_to_run,
+            interval_ms,
+            timeout_ms,
+            check_timeout_ms,
+            should_cancel,
+        ));
+    }
+    ActionExecution::Completed(execute_one_bash(
+        command_to_run,
+        timeout_ms.clamp(1000, 15000),
+    ))
 }
 
 pub(crate) fn execute_approved_bash(
     command: &str,
     background: bool,
     timeout_ms: u64,
+    interval_ms: Option<u64>,
+    check_timeout_ms: u64,
     request: &ApprovalRequest,
     shell_jobs: &FileShellJobStore,
+    should_cancel: &mut dyn FnMut() -> bool,
 ) -> String {
     let mut result = if background {
         shell_jobs.spawn(command.trim())
+    } else if let Some(interval_ms) = interval_ms {
+        execute_polling_bash(
+            command.trim(),
+            interval_ms,
+            timeout_ms,
+            check_timeout_ms,
+            should_cancel,
+        )
     } else {
-        execute_one_bash(command.trim(), timeout_ms)
+        execute_one_bash(command.trim(), timeout_ms.clamp(1000, 15000))
     };
     result.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
@@ -311,6 +359,196 @@ pub(crate) fn execute_approved_bash(
 }
 
 pub fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
+    execute_one_bash_structured(command, timeout_ms).to_action_result("run_bash")
+}
+
+pub(crate) fn execute_polling_bash(
+    command: &str,
+    interval_ms: u64,
+    timeout_ms: u64,
+    check_timeout_ms: u64,
+    mut cancelled: impl FnMut() -> bool,
+) -> String {
+    let interval = Duration::from_millis(interval_ms.clamp(1000, 60_000));
+    let max_wait = Duration::from_millis(timeout_ms.clamp(1000, 900_000));
+    let check_timeout_ms = check_timeout_ms.clamp(1000, 15_000);
+    let started = Instant::now();
+    let mut attempts = 0_u64;
+    let mut last_status = None;
+    let mut last_output = String::new();
+    let mut last_error = None;
+
+    loop {
+        if cancelled() {
+            return polling_result(
+                command,
+                "cancelled",
+                attempts,
+                started.elapsed(),
+                last_status,
+                &last_output,
+                last_error.as_deref(),
+            );
+        }
+
+        attempts = attempts.saturating_add(1);
+        let result = execute_one_bash_structured(command, check_timeout_ms);
+        last_status = result.status;
+        last_output = result.output;
+        last_error = result.error;
+
+        if let Some(status) = last_status {
+            if status == 0 {
+                return polling_result(
+                    command,
+                    "finished",
+                    attempts,
+                    started.elapsed(),
+                    last_status,
+                    &last_output,
+                    None,
+                );
+            }
+        }
+
+        if started.elapsed() >= max_wait {
+            return polling_result(
+                command,
+                "timeout",
+                attempts,
+                started.elapsed(),
+                last_status,
+                &last_output,
+                last_error.as_deref(),
+            );
+        }
+
+        let remaining = max_wait.saturating_sub(started.elapsed());
+        let wait = interval.min(remaining);
+        sleep_cancelable(wait, &mut cancelled);
+    }
+}
+
+fn polling_result(
+    command: &str,
+    state: &str,
+    attempts: u64,
+    elapsed: Duration,
+    last_status: Option<i32>,
+    output: &str,
+    error: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "Action result: run_bash\nmode: poll\ncommand: {}\nstate: {}\nsuccess_exit_code: 0\nattempts: {}\nelapsed_ms: {}",
+        command,
+        state,
+        attempts,
+        elapsed.as_millis()
+    );
+    if let Some(status) = last_status {
+        out.push_str(&format!("\nlast_status: {status}"));
+    }
+    if let Some(error) = error {
+        out.push_str(&format!("\nlast_error: {error}"));
+    }
+    if !output.trim().is_empty() {
+        out.push_str("\noutput:\n");
+        out.push_str(&compact_text(output, 4000));
+    }
+    out
+}
+
+fn sleep_cancelable(duration: Duration, cancelled: &mut impl FnMut() -> bool) {
+    let started = Instant::now();
+    while started.elapsed() < duration {
+        if cancelled() {
+            return;
+        }
+        let remaining = duration.saturating_sub(started.elapsed());
+        thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+}
+
+fn command_from_action(action: &ParsedAction) -> String {
+    let command = action.input_str("command");
+    if command.is_empty() {
+        action.input_str("cmd")
+    } else {
+        command
+    }
+}
+
+fn contains_long_foreground_sleep(command: &str) -> bool {
+    let tokens = shell_words_for_sleep_scan(command);
+    tokens.windows(2).any(|pair| {
+        pair[0] == "sleep" && sleep_arg_seconds(&pair[1]).is_some_and(|seconds| seconds >= 30.0)
+    })
+}
+
+fn shell_words_for_sleep_scan(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in command.chars() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' if !in_single && !in_double => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn sleep_arg_seconds(arg: &str) -> Option<f64> {
+    let clean = arg.trim();
+    let (number, multiplier) = if let Some(number) = clean.strip_suffix('s') {
+        (number, 1.0)
+    } else if let Some(number) = clean.strip_suffix('m') {
+        (number, 60.0)
+    } else if let Some(number) = clean.strip_suffix('h') {
+        (number, 3600.0)
+    } else {
+        (clean, 1.0)
+    };
+    number.parse::<f64>().ok().map(|value| value * multiplier)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashCommandOutput {
+    pub command: String,
+    pub status: Option<i32>,
+    pub output: String,
+    pub error: Option<String>,
+}
+
+impl BashCommandOutput {
+    pub fn to_action_result(&self, action_name: &str) -> String {
+        if let Some(error) = &self.error {
+            return format!(
+                "Action result: {}\ncommand: {}\nerror: {}",
+                action_name, self.command, error
+            );
+        }
+        format!(
+            "Action result: {}\ncommand: {}\nstatus: {}\noutput:\n{}",
+            action_name,
+            self.command,
+            self.status.unwrap_or(-1),
+            compact_text(&self.output, 4000)
+        )
+    }
+}
+
+pub fn execute_one_bash_structured(command: &str, timeout_ms: u64) -> BashCommandOutput {
     let spawn = Command::new("/bin/sh")
         .arg("-lc")
         .arg(command)
@@ -319,12 +557,7 @@ pub fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
         .spawn();
     let mut child = match spawn {
         Ok(child) => child,
-        Err(_) => {
-            return format!(
-                "Action result: run_bash\ncommand: {}\nerror: command_failed",
-                command
-            )
-        }
+        Err(_) => return bash_error(command, "command_failed"),
     };
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms.clamp(1000, 15000));
@@ -334,18 +567,10 @@ pub fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
             Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return format!(
-                    "Action result: run_bash\ncommand: {}\nerror: timeout",
-                    command
-                );
+                return bash_error(command, "timeout");
             }
             Ok(None) => thread::sleep(Duration::from_millis(50)),
-            Err(_) => {
-                return format!(
-                    "Action result: run_bash\ncommand: {}\nerror: command_failed",
-                    command
-                )
-            }
+            Err(_) => return bash_error(command, "command_failed"),
         }
     }
     match child.wait_with_output() {
@@ -366,17 +591,23 @@ pub fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
             if combined.is_empty() {
                 combined = "<no output>".to_string();
             }
-            format!(
-                "Action result: run_bash\ncommand: {}\nstatus: {}\noutput:\n{}",
-                command,
-                output.status.code().unwrap_or(-1),
-                compact_text(&combined, 4000)
-            )
+            BashCommandOutput {
+                command: command.to_string(),
+                status: Some(output.status.code().unwrap_or(-1)),
+                output: combined,
+                error: None,
+            }
         }
-        Err(_) => format!(
-            "Action result: run_bash\ncommand: {}\nerror: command_failed",
-            command
-        ),
+        Err(_) => bash_error(command, "command_failed"),
+    }
+}
+
+fn bash_error(command: &str, error: &str) -> BashCommandOutput {
+    BashCommandOutput {
+        command: command.to_string(),
+        status: None,
+        output: String::new(),
+        error: Some(error.to_string()),
     }
 }
 
@@ -400,7 +631,7 @@ fn terminate_process(pid: u32) {
         .status();
 }
 
-fn compact_text(text: &str, max_chars: usize) -> String {
+pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {
         out = out.chars().take(max_chars).collect::<String>();
@@ -424,6 +655,7 @@ fn unique_shell_id(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn tmp_memory_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -447,6 +679,114 @@ mod tests {
     fn foreground_bash_timeout_is_bounded() {
         let result = execute_one_bash("sleep 2", 1000);
         assert!(result.contains("error: timeout"));
+    }
+
+    #[test]
+    fn foreground_run_bash_rejects_long_sleep_commands() {
+        let store = FileShellJobStore::new(&tmp_memory_dir("long_sleep_guard"));
+        let result = execute_run_bash(
+            "sleep 90 && printf done",
+            false,
+            5000,
+            None,
+            5000,
+            BashApprovalMode::Approve,
+            "Wait then check.",
+            &store,
+            &mut || false,
+        );
+        match result {
+            ActionExecution::Completed(text) => {
+                assert!(text.contains("long_sleep_in_foreground_command"));
+                assert!(text.contains("interval_ms"));
+            }
+            ActionExecution::NeedsApproval(_) => {
+                panic!("long sleep should be rejected before approval")
+            }
+        }
+    }
+
+    #[test]
+    fn foreground_run_bash_allows_short_sleep_commands() {
+        let store = FileShellJobStore::new(&tmp_memory_dir("short_sleep_guard"));
+        let result = execute_run_bash(
+            "sleep 1; printf done",
+            false,
+            3000,
+            None,
+            5000,
+            BashApprovalMode::Approve,
+            "Short wait.",
+            &store,
+            &mut || false,
+        );
+        match result {
+            ActionExecution::Completed(text) => {
+                assert!(text.contains("status: 0"));
+                assert!(text.contains("done"));
+            }
+            ActionExecution::NeedsApproval(_) => panic!("approve mode should not request approval"),
+        }
+    }
+
+    #[test]
+    fn run_bash_poll_mode_finishes_when_command_exits_zero() {
+        let dir = tmp_memory_dir("poll_success");
+        let marker = dir.join("ready.flag");
+        let command = format!(
+            "test -f {} || (touch {}; exit 1)",
+            shell_quote_path(&marker),
+            shell_quote_path(&marker)
+        );
+        let result = execute_polling_bash(&command, 1000, 5000, 1000, || false);
+        assert!(result.contains("Action result: run_bash"), "{result}");
+        assert!(result.contains("mode: poll"), "{result}");
+        assert!(result.contains("state: finished"), "{result}");
+        assert!(result.contains("attempts: 2"), "{result}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn run_bash_poll_mode_times_out_when_command_stays_nonzero() {
+        let result = execute_polling_bash("printf waiting; exit 7", 1000, 1100, 1000, || false);
+        assert!(result.contains("mode: poll"), "{result}");
+        assert!(result.contains("state: timeout"), "{result}");
+        assert!(result.contains("last_status: 7"), "{result}");
+        assert!(result.contains("waiting"), "{result}");
+    }
+
+    #[test]
+    fn run_bash_poll_mode_can_be_cancelled_during_wait() {
+        let cancelled = AtomicBool::new(false);
+        let result = execute_polling_bash("exit 1", 1000, 10_000, 1000, || {
+            let previous = cancelled.swap(true, Ordering::Relaxed);
+            previous
+        });
+        assert!(result.contains("state: cancelled"), "{result}");
+    }
+
+    #[test]
+    fn run_bash_poll_mode_requests_user_approval_in_ask_mode() {
+        let store = FileShellJobStore::new(&tmp_memory_dir("poll_approval"));
+        let result = execute_run_bash(
+            "test -f /tmp/timem_poll_marker",
+            false,
+            5000,
+            Some(1000),
+            1000,
+            BashApprovalMode::Ask,
+            "等待外部状态完成",
+            &store,
+            &mut || false,
+        );
+        match result {
+            ActionExecution::NeedsApproval(pending) => {
+                assert_eq!(pending.request.action, "run_bash");
+                assert_eq!(pending.request.risk, "local_command_execution");
+                assert_eq!(pending.request.intent, "等待外部状态完成");
+            }
+            other => panic!("expected run_bash approval request, got {other:?}"),
+        }
     }
 
     #[test]

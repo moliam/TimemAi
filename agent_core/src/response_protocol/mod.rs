@@ -140,6 +140,35 @@ impl ParsedAction {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedActionGroup {
+    pub order: ActionGroupOrder,
+    pub actions: Vec<ParsedAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionGroupOrder {
+    Sequential,
+    Parallel,
+}
+
+impl ActionGroupOrder {
+    pub fn from_name(name: &str) -> Self {
+        if name.trim().eq_ignore_ascii_case("parallel") {
+            Self::Parallel
+        } else {
+            Self::Sequential
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sequential => "sequential",
+            Self::Parallel => "parallel",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 
 pub struct ParsedEnvelope {
     pub report_job_progress: String,
@@ -148,6 +177,7 @@ pub struct ParsedEnvelope {
     pub thought: String,
     pub thought_keep_in_context: bool,
     pub next_actions: Vec<ParsedAction>,
+    pub action_groups: Vec<ParsedActionGroup>,
     pub context_compacts: Vec<ParsedContextCompact>,
     pub memory_candidates: Vec<String>,
     pub runtime_note: Option<String>,

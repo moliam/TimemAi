@@ -64,6 +64,13 @@ Foreground/background execution is part of the capability interface:
   same status/cancel lifecycle. The shell UI does not manage those jobs. Core
   owns job ids, output/status files, process termination, polling, bounded
   readback, and action evidence.
+- External or remote status waiting should use `run_bash` polling mode, not a
+  foreground `sleep && check` command. When `interval_ms` is present,
+  `run_bash` repeatedly runs the command until it exits with code 0, the total
+  `timeout_ms` expires, or the active turn is cancelled. The model owns the
+  check command; core owns the fixed success condition, interval/timeout bounds,
+  cancellation checks, bounded output, approval, audit, and the structured
+  action result.
 - A model cannot opt a registered command tool into background execution unless
   that field is declared in the tool manifest. Manifest validation rejects the
   undeclared field before execution.

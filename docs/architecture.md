@@ -974,6 +974,15 @@ Short commands run in the foreground. Long-running commands should use
 `job_id`, output file, and status file; the model then uses `shell_job_status`
 to poll the job instead of repeating the long command.
 
+Waiting on external state is a structured `run_bash` mode, not a separate tool.
+When `interval_ms` is present, core repeatedly runs the command until its exit
+code is 0, the total `timeout_ms` expires, or the active turn is cancelled. This
+keeps `sleep 90 && check` out of foreground Bash,
+lets the UI render a Poll action through the existing `core.action` topic, and
+preserves the model/runtime boundary: the model defines the command, while core
+owns the fixed success condition, approval, wait bounds, audit, bounded output,
+and cancellation.
+
 ### Context Shrink Action
 
 `memmgr` with `type=context, op=shrink` is the structured action that actually

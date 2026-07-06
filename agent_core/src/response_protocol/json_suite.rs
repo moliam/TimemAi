@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
-use super::{ParsedAction, ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite};
+use super::{
+    ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
+    ResponseProtocolSuite,
+};
 use crate::capability::CapabilityRegistry;
 
 /// JSON envelope v1 response protocol.
@@ -86,6 +89,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                     thought: String::new(),
                     thought_keep_in_context: false,
                     next_actions: vec![],
+                    action_groups: vec![],
                     context_compacts: vec![],
                     memory_candidates: vec![],
                     runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
@@ -99,6 +103,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                 thought: String::new(),
                 thought_keep_in_context: false,
                 next_actions: vec![],
+                action_groups: vec![],
                 context_compacts: vec![],
                 memory_candidates: vec![],
                 runtime_note: None,
@@ -136,6 +141,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
             thought: String::new(),
             thought_keep_in_context: false,
             next_actions: vec![],
+            action_groups: vec![],
             context_compacts: vec![],
             memory_candidates: vec![],
             runtime_note: None,
@@ -199,72 +205,86 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     let context_compacts = parse_context_compacts(&value, &mut repair_issue);
 
     let mut next_actions = Vec::new();
+    let mut action_groups = Vec::new();
     let bare_action = value.get("action").and_then(Value::as_str).is_some();
-    let action_values = if let Some(next_actions_value) = value.get("next_actions") {
-        if let Some(actions) = next_actions_value.as_array() {
-            Some(actions.iter().collect::<Vec<_>>())
-        } else if !next_actions_value.is_null() {
-            repair_issue = Some("next_actions_must_be_array".to_string());
-            None
+    if let Some(groups_value) = value.get("action_groups") {
+        if let Some(groups) = groups_value.as_array() {
+            for (group_idx, group) in groups.iter().enumerate() {
+                let Some(group_object) = group.as_object() else {
+                    repair_issue = Some(format!("action_groups[{group_idx}]_must_be_object"));
+                    break;
+                };
+                let order = group_object
+                    .get("order")
+                    .and_then(Value::as_str)
+                    .map(ActionGroupOrder::from_name)
+                    .unwrap_or(ActionGroupOrder::Sequential);
+                let Some(actions) = group_object.get("actions").and_then(Value::as_array) else {
+                    repair_issue = Some(format!("action_groups[{group_idx}].actions_required"));
+                    break;
+                };
+                let mut parsed_group_actions = Vec::new();
+                for (action_idx, action) in actions.iter().enumerate() {
+                    let label = format!("action_groups[{group_idx}].actions[{action_idx}]");
+                    match parse_action_value(action, &label, capabilities) {
+                        Ok(action) => {
+                            next_actions.push(action.clone());
+                            parsed_group_actions.push(action);
+                        }
+                        Err(issue) => {
+                            repair_issue = Some(issue);
+                            break;
+                        }
+                    }
+                }
+                if repair_issue.is_some() {
+                    break;
+                }
+                action_groups.push(ParsedActionGroup {
+                    order,
+                    actions: parsed_group_actions,
+                });
+            }
+        } else if !groups_value.is_null() {
+            repair_issue = Some("action_groups_must_be_array".to_string());
+        }
+    }
+    let action_values = if action_groups.is_empty() {
+        if let Some(next_actions_value) = value.get("next_actions") {
+            if let Some(actions) = next_actions_value.as_array() {
+                Some(actions.iter().collect::<Vec<_>>())
+            } else if !next_actions_value.is_null() {
+                repair_issue = Some("next_actions_must_be_array".to_string());
+                None
+            } else {
+                None
+            }
+        } else if bare_action {
+            Some(vec![&value])
         } else {
             None
         }
-    } else if bare_action {
-        Some(vec![&value])
     } else {
         None
     };
     if let Some(actions) = action_values {
+        let mut group_actions = Vec::new();
         for (idx, action) in actions.iter().enumerate() {
-            let name = action
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if name.is_empty() {
-                repair_issue = Some(format!("next_actions[{idx}].action_missing"));
-                break;
-            }
-            let parsed_input_holder;
-            let action_args = action.get("args");
-            let input = match action_args {
-                Some(Value::Object(_)) => {
-                    parsed_input_holder = action_args.cloned().unwrap_or(Value::Null);
-                    &parsed_input_holder
+            match parse_action_value(action, &format!("next_actions[{idx}]"), capabilities) {
+                Ok(action) => {
+                    next_actions.push(action.clone());
+                    group_actions.push(action);
                 }
-                Some(_) => {
-                    repair_issue = Some(format!("next_actions[{idx}].args_must_be_object"));
+                Err(issue) => {
+                    repair_issue = Some(issue);
                     break;
                 }
-                None => {
-                    repair_issue = Some(format!("next_actions[{idx}].args_required"));
-                    break;
-                }
-            };
-            let intent = action
-                .get("intent")
-                .or_else(|| input.get("intent"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if intent.is_empty() {
-                repair_issue = Some(format!("next_actions[{idx}].intent_required"));
-                break;
             }
-            let normalized_name = name.as_str();
-            if !capabilities.contains_tool(normalized_name) {
-                repair_issue = Some(format!("unsupported_action:{normalized_name}"));
-                break;
-            }
-            if let Err(issue) = capabilities.validate_action_input(normalized_name, input) {
-                repair_issue = Some(format!("next_actions[{idx}].{issue}"));
-                break;
-            }
-            next_actions.push(ParsedAction {
-                action: name,
-                intent: intent.to_string(),
-                raw_input: input.clone(),
+        }
+        if repair_issue.is_none() && !group_actions.is_empty() {
+            action_groups.push(ParsedActionGroup {
+                order: ActionGroupOrder::Sequential,
+                actions: group_actions,
             });
         }
     }
@@ -326,6 +346,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         thought,
         thought_keep_in_context,
         next_actions,
+        action_groups,
         context_compacts,
         memory_candidates,
         runtime_note,
@@ -343,6 +364,48 @@ fn unwrap_fields_envelope(value: Value) -> Value {
         }
     }
     value
+}
+
+fn parse_action_value(
+    action: &Value,
+    label: &str,
+    capabilities: &CapabilityRegistry,
+) -> Result<ParsedAction, String> {
+    let name = action
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err(format!("{label}.action_missing"));
+    }
+    let input = match action.get("args") {
+        Some(Value::Object(_)) => action.get("args").cloned().unwrap_or(Value::Null),
+        Some(_) => return Err(format!("{label}.args_must_be_object")),
+        None => return Err(format!("{label}.args_required")),
+    };
+    let intent = action
+        .get("intent")
+        .or_else(|| input.get("intent"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if intent.is_empty() {
+        return Err(format!("{label}.intent_required"));
+    }
+    let normalized_name = name.as_str();
+    if !capabilities.contains_tool(normalized_name) {
+        return Err(format!("unsupported_action:{normalized_name}"));
+    }
+    if let Err(issue) = capabilities.validate_action_input(normalized_name, &input) {
+        return Err(format!("{label}.{issue}"));
+    }
+    Ok(ParsedAction {
+        action: name,
+        intent: intent.to_string(),
+        raw_input: input,
+    })
 }
 
 fn parse_context_compacts(
@@ -436,6 +499,21 @@ mod tests {
         assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a"]);
         assert!(env.context_compacts[0].slice_ids.is_empty());
         assert_eq!(env.context_compacts[0].summary, "keep important state");
+    }
+
+    #[test]
+    fn parses_action_groups_and_flattens_actions_for_notifications() {
+        let env = parse_envelope(
+            r#"{"report_job_progress":"checking","action_groups":[{"order":"parallel","actions":[{"action":"run_bash","intent":"Check A.","args":{"command":"printf a"}},{"action":"run_bash","intent":"Check B.","args":{"command":"printf b"}}]},{"order":"sequential","actions":[{"action":"run_bash","intent":"Check C.","args":{"command":"printf c"}}]}]}"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 2);
+        assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
+        assert_eq!(env.action_groups[0].actions.len(), 2);
+        assert_eq!(env.action_groups[1].order, ActionGroupOrder::Sequential);
+        assert_eq!(env.next_actions.len(), 3);
     }
 
     #[test]
@@ -538,6 +616,7 @@ fn is_allowed_response_top_level_key(key: &str) -> bool {
             | "report_job_progress"
             | "final_answer"
             | "next_actions"
+            | "action_groups"
             | "free_talk"
             | "memory_candidates"
             | "context_compact"

@@ -191,22 +191,26 @@ If args do not match this tool spec, runtime asks you to repair the response bef
 
 **Synopsis**
 `run_bash command=<shell_command> [timeout_ms=<n>] [background=true|mode=background]`
+`run_bash command=<check_command> interval_ms=<n> [timeout_ms=<total_wait_ms>] [check_timeout_ms=<n>]`
 
 **Description**
-`run_bash` runs a shell command on the local machine and collects bounded evidence from the command result. It supports foreground and background execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment. Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner.
+`run_bash` runs a shell command on the local machine and collects bounded evidence from the command result. It supports foreground, background, and polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment. Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner. Do not put long sleeps in foreground commands. For waiting on external state, use interval_ms. For long local work, use background=true and shell_job_status.
 
 **Usage**
-Use command for the shell command. Optional: timeout_ms, background=true or mode=background.
+Use command for the shell command. Optional: timeout_ms, background=true or mode=background. If interval_ms is present, run_bash enters polling mode: command is run repeatedly until it exits with code 0 or timeout_ms total wait budget is reached. check_timeout_ms is the per-check command timeout.
 
 **Options**
 - `background`: When true, return a job_id instead of blocking.
+- `check_timeout_ms`: Per-check timeout in polling mode.
+- `cmd`: Alias for command.
 - `command`: Shell command to execute.
+- `interval_ms`: Polling interval. When present, command is re-run until it exits with code 0.
 - `mode`: Execution mode alias. Allowed: `foreground`, `background`.
-- `timeout_ms`: Foreground wait budget in milliseconds.
-- Required: `command`
+- `timeout_ms`: Foreground wait budget, or total polling wait budget when interval_ms is present.
+- Required one of: `command`, `cmd`
 
 **Result**
-Foreground returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check.
+Foreground returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check. Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts, elapsed_ms, last_status, and bounded last output.
 If args do not match this tool spec, runtime asks you to repair the response before executing the tool.
 
 #### `self_tool`
@@ -302,7 +306,8 @@ Schema:
     "status?": "string; optional; working/finished. Default is working. Use finished only when the current user request is complete and no more runtime interaction is needed for that request; this does not close the Timem session. Do not use working only to keep the chat session open. If the user says not to end the session/conversation, still use finished when the current request is complete. Then final_answer is shown as the closing user response for the request.",
     "report_job_progress?": "string; progress report for multi-round tasks so the user can see current status.",
     "final_answer?": "string; final user-facing answer for the current task. If you include final_answer, also include status:\"finished\".",
-    "next_actions?": "array<object>; required when status is working. Refer to Tools And Skills for available actions. Do not include next_actions when status is finished.",
+    "next_actions?": "array<object>; required when status is working unless action_groups is present. Refer to Tools And Skills for available actions. Do not include next_actions when status is finished.",
+    "action_groups?": "array<object>; optional alternative to next_actions. Each group has order:\"sequential\"|\"parallel\" and actions:[action objects]. Groups execute one after another. Actions inside a sequential group run in order; actions inside a parallel group may run concurrently when safe. Do not include action_groups when status is finished.",
     "context_compact?": "object or array<object>; optional. Use to replace old dynamic prompt context with a concise summary. Each object requires summary and delta_ids. Runtime hides those dynamic prompt deltas and appends summary as a new dynamic prompt delta. Do not put the compact summary into a memmgr type=context action. If compact completes the current user request, use status:\"finished\" with final_answer.",
     "free_talk?": {
       "content": "string; optional. You can use it for casual reasoning, current plan, or context that should remain visible to you in later prompt context. Runtime keeps it in future context.",
@@ -314,6 +319,10 @@ Schema:
     "action": "string; required. Tool name exactly as listed in the Available tool capabilities catalog. Do not invent names.",
     "intent": "string; required. Concise user-visible reason for the action.",
     "args": "object; required. Put every tool parameter as a JSON field inside args, for example {\"type\":\"durable\",\"op\":\"query\",\"query\":\"<search text>\",\"limit\":5}. Refer to tool's manifest for details."
+  },
+  "action_group_spec": {
+    "order": "string; required. sequential or parallel.",
+    "actions": "array<object>; required. Each item follows action_object_spec."
   }
 }
 
@@ -324,7 +333,10 @@ example `{"status":"finished","final_answer":"OK"}`. Do not include
 `next_actions`.
 
 You may issue multiple `next_actions` in one response to save interaction
-rounds.
+rounds. For larger work, you may use `action_groups` instead. Each group has
+`order` (`sequential` or `parallel`) and `actions`. Groups execute one after
+another; actions inside a sequential group run in order, and actions inside a
+parallel group may run concurrently when safe.
 
 You may include `context_compact` to compact old dynamic prompt context without
 using a tool action. Provide `summary` and `delta_ids`. Runtime hides those
@@ -387,6 +399,50 @@ unless the current user task actually requires the same action.
     "summary": "Earlier work identified the UI rendering issue as repeated redraw of long network retry messages. Keep the fix direction: compact retry notice, show a countdown line and a separate detail line, and avoid redrawing new Timem headers on every tick. Current todo: patch the renderer, add regression tests, and rerun the shell UI test set. Work principle: keep core data structured and let the shell decide terminal layout."
   },
   "final_answer": "上下文已压缩，当前请求已完成。Timem session 仍保持开启，可继续接收后续输入。"
+}
+
+### Example: grouped actions
+
+{
+  "report_job_progress": "正在并行检查本地状态，然后等待 CI 完成。",
+  "action_groups": [
+    {
+      "order": "parallel",
+      "actions": [
+        {
+          "action": "run_bash",
+          "intent": "检查当前分支",
+          "args": {
+            "command": "git branch --show-current",
+            "timeout_ms": 3000
+          }
+        },
+        {
+          "action": "run_bash",
+          "intent": "检查工作区状态",
+          "args": {
+            "command": "git status --short",
+            "timeout_ms": 3000
+          }
+        }
+      ]
+    },
+    {
+      "order": "sequential",
+      "actions": [
+        {
+          "action": "run_bash",
+          "intent": "等待 CI 完成",
+          "args": {
+            "command": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
+            "interval_ms": 10000,
+            "timeout_ms": 600000,
+            "check_timeout_ms": 5000
+          }
+        }
+      ]
+    }
+  ]
 }
 
 

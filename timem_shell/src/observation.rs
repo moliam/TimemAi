@@ -353,7 +353,13 @@ pub fn observation_events_from_core_topic_events(
 
 fn action_detail_for_shell(kind: &CoreActionKind) -> String {
     match kind {
-        CoreActionKind::Bash { command } => format!("Bash: {}", command.trim()),
+        CoreActionKind::Bash { command, mode, .. } => {
+            if mode == "poll" {
+                format!("Poll: {}", command.trim())
+            } else {
+                format!("Bash: {}", command.trim())
+            }
+        }
         CoreActionKind::ShellJob { job_id } => {
             format!("后台任务: {}", fallback_unknown(job_id.trim()))
         }
@@ -619,6 +625,22 @@ mod tests {
         )
     }
 
+    fn bash_kind(command: &str) -> CoreActionKind {
+        CoreActionKind::Bash {
+            command: command.to_string(),
+            mode: "foreground".to_string(),
+            interval_ms: None,
+        }
+    }
+
+    fn polling_bash_kind(command: &str) -> CoreActionKind {
+        CoreActionKind::Bash {
+            command: command.to_string(),
+            mode: "poll".to_string(),
+            interval_ms: Some(5000),
+        }
+    }
+
     fn model_response_topic(free_talk: &str, report_job_progress: &str) -> CoreTopicEvent {
         CoreTopicEvent::new(
             "session_test",
@@ -806,14 +828,7 @@ mod tests {
     fn continuing_report_job_progress_renders_progress_marker() {
         let events = observation_events_from_core_topic_events(&[
             model_response_topic("", "已经完成备份，继续写文件。"),
-            action_topic(
-                "run_bash",
-                Some("写入文件"),
-                CoreActionKind::Bash {
-                    command: "printf ok".to_string(),
-                },
-                true,
-            ),
+            action_topic("run_bash", Some("写入文件"), bash_kind("printf ok"), true),
         ]);
         assert_eq!(
             events,
@@ -905,9 +920,7 @@ mod tests {
         let events = observation_events_from_core_topic_events(&[action_topic(
             "run_bash",
             Some("统计当前代码量"),
-            CoreActionKind::Bash {
-                command: "rg --files | wc -l".to_string(),
-            },
+            bash_kind("rg --files | wc -l"),
             true,
         )]);
         assert_eq!(
@@ -923,13 +936,31 @@ mod tests {
     }
 
     #[test]
+    fn model_response_maps_polling_run_bash_to_user_facing_poll() {
+        let events = observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("等待 CI 完成"),
+            polling_bash_kind("gh run list --branch main"),
+            true,
+        )]);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("等待 CI 完成".to_string()),
+                ObservationEvent::ActiveChild {
+                    text: "Poll: gh run list --branch main".to_string(),
+                    is_last: true
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn core_topic_events_map_action_without_protocol_parsing() {
         let events = observation_events_from_core_topic_events(&[action_topic(
             "run_bash",
             Some("整理 v0.5.2 之后的提交"),
-            CoreActionKind::Bash {
-                command: "git log --oneline v0.5.2..HEAD".to_string(),
-            },
+            bash_kind("git log --oneline v0.5.2..HEAD"),
             true,
         )]);
         assert_eq!(
@@ -951,9 +982,7 @@ mod tests {
             action_topic(
                 "run_bash",
                 Some("查看当前 git 状态"),
-                CoreActionKind::Bash {
-                    command: "git status --short".to_string(),
-                },
+                bash_kind("git status --short"),
                 true,
             ),
         ]);
@@ -977,9 +1006,7 @@ mod tests {
             action_topic(
                 "run_bash",
                 Some("查看当前 git 状态"),
-                CoreActionKind::Bash {
-                    command: "git status --short".to_string(),
-                },
+                bash_kind("git status --short"),
                 true,
             ),
         ];
@@ -1013,9 +1040,7 @@ mod tests {
             action_topic(
                 "run_bash",
                 Some("列出源码文件"),
-                CoreActionKind::Bash {
-                    command: "rg --files -g '*.rs'".to_string(),
-                },
+                bash_kind("rg --files -g '*.rs'"),
                 true,
             ),
         ]);
@@ -1144,9 +1169,7 @@ mod tests {
         let events = observation_events_from_core_topic_events(&[action_topic(
             "run_bash",
             Some("写入包含 JSON 的示例"),
-            CoreActionKind::Bash {
-                command: "printf '{\"ok\":true}' > target/example.json".to_string(),
-            },
+            bash_kind("printf '{\"ok\":true}' > target/example.json"),
             true,
         )]);
         assert_eq!(
@@ -1195,9 +1218,7 @@ mod tests {
         panel.apply_all(observation_events_from_core_topic_events(&[action_topic(
             "run_bash",
             Some("统计"),
-            CoreActionKind::Bash {
-                command: "rg --files | wc -l".to_string(),
-            },
+            bash_kind("rg --files | wc -l"),
             true,
         )]));
         let rendered = render_observation_panel(&panel);
@@ -1227,9 +1248,7 @@ mod tests {
         let events = observation_events_from_core_topic_events(&[action_topic(
             "run_bash",
             None,
-            CoreActionKind::Bash {
-                command: "ls -la".to_string(),
-            },
+            bash_kind("ls -la"),
             true,
         )]);
         assert_eq!(
@@ -1346,9 +1365,7 @@ mod tests {
             events.push(action_topic(
                 "run_bash",
                 Some(&format!("执行第 {idx} 个本地检查")),
-                CoreActionKind::Bash {
-                    command: format!("printf '{long_text}'"),
-                },
+                bash_kind(&format!("printf '{long_text}'")),
                 true,
             ));
         }

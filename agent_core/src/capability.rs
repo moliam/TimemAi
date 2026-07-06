@@ -1911,6 +1911,8 @@ mod tests {
         assert!(rendered.contains("#### `shell_job_status`"));
         assert!(rendered.contains("#### `tool_job_status`"));
         assert!(rendered.contains("#### `self_tool`"));
+        assert!(rendered.contains("interval_ms"));
+        assert!(rendered.contains("exits with code 0"));
         assert!(rendered.contains("**Synopsis**"));
         assert!(rendered.contains("**Options**"));
         assert!(rendered.contains("Unified local memory manager"));
@@ -1927,6 +1929,7 @@ mod tests {
         assert!(!rendered.contains("large_readback"));
         assert!(rendered.contains("`background`:"));
         assert!(rendered.contains("Foreground returns status and bounded output"));
+        assert!(rendered.contains("use interval_ms"));
         assert!(rendered.contains("`op`:"));
         assert!(rendered.contains("`kind`:"));
         assert!(rendered.contains("`id`:"));
@@ -2076,7 +2079,7 @@ mod tests {
         assert!(registry
             .validate_action_input("run_bash", &json_object([]))
             .unwrap_err()
-            .contains("input.command_required"));
+            .contains("input.any_required:command|cmd"));
         assert!(registry
             .validate_action_input("self_tool", &json_object([]))
             .unwrap_err()
@@ -2260,11 +2263,16 @@ mod tests {
         assert!(!input_properties.contains_key("expect"));
         assert!(!input_properties.contains_key("expect_timeout_ms"));
 
-        let required = input_schema
-            .get("required")
+        let required_any = input_schema
+            .get("required_any")
             .and_then(Value::as_array)
-            .expect("run_bash required");
-        assert!(required.iter().any(|field| field == "command"));
+            .expect("run_bash required_any");
+        assert!(required_any.iter().any(|group| {
+            group
+                .as_array()
+                .map(|fields| fields.iter().any(|field| field == "command"))
+                .unwrap_or(false)
+        }));
 
         let prompt = registry.render_tool_catalog_markdown();
         assert!(prompt.contains("run_bash command=<shell_command>"));

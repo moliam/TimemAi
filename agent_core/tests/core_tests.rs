@@ -4209,7 +4209,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.command_required"));
+    assert!(prompt.contains("issue: next_actions[0].input.any_required:command|cmd"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -5062,6 +5062,8 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
         action.kind,
         agent_core::CoreActionKind::Bash {
             command: "rg --files -g '*.rs'".to_string(),
+            mode: "foreground".to_string(),
+            interval_ms: None,
         }
     );
     assert!(action.active);
