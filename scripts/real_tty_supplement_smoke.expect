@@ -176,6 +176,7 @@ expect {
     -re "action_audit: \[^\r\n\]*" {
         append prof_output $expect_out(buffer)
         set prof_complete 1
+        exp_continue
     }
     -re "❯❯" {
         if {!$prof_seen} {
