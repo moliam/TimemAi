@@ -1,6 +1,6 @@
 use crate::response_protocol::ParsedAction;
 use crate::{capmgr, memmgr, self_tool, shell_exec, shell_job_status, tool_job_status};
-use crate::{ActionExecution, AgentCore};
+use crate::{ActionExecution, ActionRuntime, AgentCore};
 
 pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "memmgr",
@@ -12,15 +12,15 @@ pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
 ];
 
 type BuiltinToolCallback =
-    fn(&mut AgentCore, &ParsedAction, &mut dyn FnMut() -> bool) -> ActionExecution;
+    fn(&mut AgentCore, &ParsedAction, &mut dyn ActionRuntime) -> ActionExecution;
 
 pub(crate) fn execute_builtin_tool(
     core: &mut AgentCore,
     binding_name: &str,
     action: &ParsedAction,
-    should_cancel: &mut dyn FnMut() -> bool,
+    runtime: &mut dyn ActionRuntime,
 ) -> Option<ActionExecution> {
-    builtin_tool_callback(binding_name).map(|callback| callback(core, action, should_cancel))
+    builtin_tool_callback(binding_name).map(|callback| callback(core, action, runtime))
 }
 
 fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
@@ -38,7 +38,7 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
 fn execute_capmgr(
     core: &mut AgentCore,
     action: &ParsedAction,
-    _should_cancel: &mut dyn FnMut() -> bool,
+    _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(capmgr::execute_action(core, action))
 }
@@ -46,7 +46,7 @@ fn execute_capmgr(
 fn execute_memmgr(
     core: &mut AgentCore,
     action: &ParsedAction,
-    _should_cancel: &mut dyn FnMut() -> bool,
+    _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(memmgr::execute(core, action))
 }
@@ -54,7 +54,7 @@ fn execute_memmgr(
 fn execute_self_tool(
     core: &mut AgentCore,
     action: &ParsedAction,
-    _should_cancel: &mut dyn FnMut() -> bool,
+    _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(self_tool::execute_action(core, action))
 }
@@ -62,7 +62,7 @@ fn execute_self_tool(
 fn execute_shell_job_status(
     core: &mut AgentCore,
     action: &ParsedAction,
-    _should_cancel: &mut dyn FnMut() -> bool,
+    _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(shell_job_status::execute_action(core, action))
 }
@@ -70,7 +70,7 @@ fn execute_shell_job_status(
 fn execute_tool_job_status(
     core: &mut AgentCore,
     action: &ParsedAction,
-    _should_cancel: &mut dyn FnMut() -> bool,
+    _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(tool_job_status::execute_action(core, action))
 }
@@ -78,9 +78,9 @@ fn execute_tool_job_status(
 fn execute_run_bash(
     core: &mut AgentCore,
     action: &ParsedAction,
-    _should_cancel: &mut dyn FnMut() -> bool,
+    runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    shell_exec::execute_run_bash_action(core, action)
+    shell_exec::execute_run_bash_action(core, action, runtime)
 }
 
 #[cfg(test)]

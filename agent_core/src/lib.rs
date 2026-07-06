@@ -92,10 +92,11 @@ pub use host::{
     CoreLifecycleEvent, CoreLifecycleTopic, CoreModelResponseTopic, CoreSessionState,
     CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic, CoreTopicEvent,
     CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic, HostDecision,
-    HostDecisionDefault, HostDecisionRequest, NoopTurnUi, OutputExpansionRequest,
-    OutputExpansionResolution, RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn,
-    TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
-    TurnStopSummary, TurnUi, CORE_TOPIC_ACTION, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_MODEL_RESPONSE,
+    HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest, NoopTurnUi,
+    OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
+    RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
+    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, CORE_TOPIC_ACTION,
+    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_RESPONSE,
     CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
     CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_USER_APPROVAL_REQUEST,
     CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
@@ -503,6 +504,47 @@ impl Drop for MemGuardLock {
 pub(crate) enum ActionExecution {
     Completed(String),
     NeedsApproval(PendingApproval),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongRunningCommandDecision {
+    Continue,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongRunningCommandStatus {
+    pub action: String,
+    pub command: String,
+    pub elapsed: Duration,
+    pub timeout_ms: Option<i64>,
+}
+
+pub trait ActionRuntime {
+    fn should_cancel(&mut self) -> bool;
+
+    fn on_long_running_command(
+        &mut self,
+        _status: &LongRunningCommandStatus,
+    ) -> LongRunningCommandDecision {
+        LongRunningCommandDecision::Continue
+    }
+}
+
+pub(crate) struct CancelOnlyActionRuntime<'a> {
+    should_cancel: &'a mut dyn FnMut() -> bool,
+}
+
+impl<'a> CancelOnlyActionRuntime<'a> {
+    pub(crate) fn new(should_cancel: &'a mut dyn FnMut() -> bool) -> Self {
+        Self { should_cancel }
+    }
+}
+
+impl ActionRuntime for CancelOnlyActionRuntime<'_> {
+    fn should_cancel(&mut self) -> bool {
+        (self.should_cancel)()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1093,6 +1135,15 @@ impl AgentCore {
         response: LlmResponse,
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> CoreStep {
+        let mut runtime = CancelOnlyActionRuntime::new(should_cancel);
+        self.apply_model_response_with_action_runtime(response, &mut runtime)
+    }
+
+    pub fn apply_model_response_with_action_runtime(
+        &mut self,
+        response: LlmResponse,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
         self.last_notifications.clear();
         self.current_round += 1;
         self.current_stats.add(&response.usage);
@@ -1237,8 +1288,7 @@ impl AgentCore {
         }
 
         if !parsed.action_groups.is_empty() {
-            let result_lines = match self.execute_action_groups(parsed.action_groups, should_cancel)
-            {
+            let result_lines = match self.execute_action_groups(parsed.action_groups, runtime) {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
                     if !result_lines.is_empty() {
@@ -1347,7 +1397,55 @@ impl AgentCore {
         let response_model = response.model_name.clone();
         let response_usage = response.usage.clone();
         let response_truncated = response.truncated;
-        let step = self.apply_model_response_with_cancel(response, should_cancel);
+        let mut runtime = CancelOnlyActionRuntime::new(should_cancel);
+        let step = self.apply_model_response_with_action_runtime(response, &mut runtime);
+        self.record_model_repair_audit_if_needed(
+            audit_file,
+            session,
+            turn_id,
+            repair_calls_before,
+            &response_model,
+            &response_usage,
+            response_truncated,
+        );
+        step
+    }
+
+    pub fn apply_model_response_with_repair_audit_and_runtime(
+        &mut self,
+        response: LlmResponse,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
+        let repair_calls_before = self.current_stats().repair_calls;
+        let response_model = response.model_name.clone();
+        let response_usage = response.usage.clone();
+        let response_truncated = response.truncated;
+        let step = self.apply_model_response_with_action_runtime(response, runtime);
+        self.record_model_repair_audit_if_needed(
+            audit_file,
+            session,
+            turn_id,
+            repair_calls_before,
+            &response_model,
+            &response_usage,
+            response_truncated,
+        );
+        step
+    }
+
+    fn record_model_repair_audit_if_needed(
+        &self,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        repair_calls_before: u32,
+        response_model: &str,
+        response_usage: &UsageStats,
+        response_truncated: bool,
+    ) {
         let repair_calls_after = self.current_stats().repair_calls;
         if repair_calls_after > repair_calls_before {
             let _ = append_audit_event(
@@ -1356,15 +1454,14 @@ impl AgentCore {
                     session,
                     turn_id,
                     self.last_repair_issue(),
-                    &response_model,
-                    &response_usage,
+                    response_model,
+                    response_usage,
                     response_truncated,
                     repair_calls_after,
                     repair_calls_after.saturating_sub(repair_calls_before),
                 ),
             );
         }
-        step
     }
 
     pub fn record_turn_start_audit(
@@ -1423,6 +1520,16 @@ impl AgentCore {
         approved: bool,
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> CoreStep {
+        let mut runtime = CancelOnlyActionRuntime::new(should_cancel);
+        self.resolve_user_approval_with_runtime(approval_id, approved, &mut runtime)
+    }
+
+    pub fn resolve_user_approval_with_runtime(
+        &mut self,
+        approval_id: &str,
+        approved: bool,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
         let Some(pending) = self.pending_approval.take() else {
             self.append_delta(vec![(
                 "result_of_llm_action".to_string(),
@@ -1462,7 +1569,7 @@ impl AgentCore {
                     interval_ms.is_none(),
                     &pending.request,
                     &self.shell_jobs,
-                    should_cancel,
+                    runtime,
                 ),
             }
         } else {
@@ -1521,6 +1628,22 @@ impl AgentCore {
             &user_approval_audit_event(session, turn_id, approval, approved),
         );
         self.resolve_user_approval_with_cancel(&approval.approval_id, approved, should_cancel)
+    }
+
+    pub fn resolve_user_approval_with_audit_and_runtime(
+        &mut self,
+        approval: &ApprovalRequest,
+        approved: bool,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
+        let _ = append_audit_event(
+            audit_file,
+            &user_approval_audit_event(session, turn_id, approval, approved),
+        );
+        self.resolve_user_approval_with_runtime(&approval.approval_id, approved, runtime)
     }
 
     pub fn continue_after_round_limit(&mut self) -> CoreStep {
@@ -1851,7 +1974,7 @@ impl AgentCore {
     fn execute_action_groups(
         &mut self,
         groups: Vec<ParsedActionGroup>,
-        should_cancel: &mut dyn FnMut() -> bool,
+        runtime: &mut dyn ActionRuntime,
     ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
         let mut result_lines = Vec::new();
         for group in groups {
@@ -1863,7 +1986,7 @@ impl AgentCore {
                 continue;
             }
             for action in group.actions {
-                match self.execute_action(action, should_cancel) {
+                match self.execute_action(action, runtime) {
                     ActionExecution::Completed(result) => result_lines.push(result),
                     ActionExecution::NeedsApproval(pending) => {
                         return Err((result_lines, pending));
@@ -1876,9 +1999,11 @@ impl AgentCore {
 
     fn can_execute_parallel_bash_group(&self, actions: &[ParsedAction]) -> bool {
         self.bash_approval_mode == BashApprovalMode::Approve
-            && actions
-                .iter()
-                .all(|action| action.action == "run_bash" && !action.background())
+            && actions.iter().all(|action| {
+                action.action == "run_bash"
+                    && !action.background()
+                    && action.timeout_ms_i64(5000) >= 0
+            })
     }
 
     fn execute_parallel_bash_group(&mut self, actions: Vec<ParsedAction>) -> Vec<String> {
@@ -1903,6 +2028,8 @@ impl AgentCore {
                         "Action result: run_bash\nerror: cmd_and_loop_cmd_conflict".to_string(),
                     )
                 } else {
+                    let mut should_cancel = || false;
+                    let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                     shell_exec::execute_run_bash(
                         &command,
                         action.background(),
@@ -1915,7 +2042,7 @@ impl AgentCore {
                         &session_id,
                         &turn_id,
                         is_regular_command,
-                        &mut || false,
+                        &mut runtime,
                     )
                 };
                 let result = match result {
@@ -1946,7 +2073,7 @@ impl AgentCore {
     fn execute_action(
         &mut self,
         action: ParsedAction,
-        should_cancel: &mut dyn FnMut() -> bool,
+        runtime: &mut dyn ActionRuntime,
     ) -> ActionExecution {
         let action_for_audit = action.clone();
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
@@ -1989,18 +2116,14 @@ impl AgentCore {
             }
         };
         self.current_stats.tool_calls += 1;
-        let execution = match tool_registry::execute_builtin_tool(
-            self,
-            dispatch_name,
-            &action,
-            should_cancel,
-        ) {
-            Some(execution) => execution,
-            None => ActionExecution::Completed(format!(
-                "Action result: {}\nunsupported native action",
-                dispatch_name
-            )),
-        };
+        let execution =
+            match tool_registry::execute_builtin_tool(self, dispatch_name, &action, runtime) {
+                Some(execution) => execution,
+                None => ActionExecution::Completed(format!(
+                    "Action result: {}\nunsupported native action",
+                    dispatch_name
+                )),
+            };
         match execution {
             ActionExecution::Completed(result) => {
                 let result = annotate_action_result_with_intent(result, &action.intent);

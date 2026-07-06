@@ -246,6 +246,30 @@ pub enum OutputExpansionResolution {
     Stop(TurnStopSummary),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongRunningCommandContinueRequest {
+    pub action: String,
+    pub command: String,
+    pub elapsed: Duration,
+    pub timeout_ms: Option<i64>,
+}
+
+impl LongRunningCommandContinueRequest {
+    pub fn new(
+        action: impl Into<String>,
+        command: impl Into<String>,
+        elapsed: Duration,
+        timeout_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            action: action.into(),
+            command: command.into(),
+            elapsed,
+            timeout_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreSessionState {
     Running,
@@ -317,6 +341,7 @@ pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request"
 pub const CORE_TOPIC_OUTPUT_EXPAND_REQUEST: &str = "core.user.output_expand.request";
 pub const CORE_TOPIC_STALE_CONTEXT_REQUEST: &str = "core.user.stale_context.request";
 pub const CORE_TOPIC_WORK_INSTRUCTION_LOAD: &str = "core.work_instruction_load";
+pub const CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST: &str = "core.user.long_running_command.request";
 static TOPIC_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1008,6 +1033,7 @@ pub enum HostDecisionRequest {
     OutputExpansion(OutputExpansionRequest),
     StaleContextContinue(StaleContextDecisionRequest),
     WorkInstructionLoad(WorkInstructionLoadRequest),
+    LongRunningCommandContinue(LongRunningCommandContinueRequest),
 }
 
 impl HostDecisionRequest {
@@ -1018,14 +1044,16 @@ impl HostDecisionRequest {
             Self::OutputExpansion(_) => "output_expansion",
             Self::StaleContextContinue(_) => "stale_context_continue",
             Self::WorkInstructionLoad(_) => "work_instruction_load",
+            Self::LongRunningCommandContinue(_) => "long_running_command_continue",
         }
     }
 
     pub fn safe_default(&self) -> HostDecisionDefault {
         match self {
-            Self::UserApproval(_) | Self::RoundLimitContinue(_) | Self::OutputExpansion(_) => {
-                HostDecisionDefault::Accept
-            }
+            Self::UserApproval(_)
+            | Self::RoundLimitContinue(_)
+            | Self::OutputExpansion(_)
+            | Self::LongRunningCommandContinue(_) => HostDecisionDefault::Accept,
             Self::StaleContextContinue(_) | Self::WorkInstructionLoad(_) => {
                 HostDecisionDefault::Decline
             }
@@ -1038,7 +1066,8 @@ impl HostDecisionRequest {
             Self::UserApproval(_)
             | Self::RoundLimitContinue(_)
             | Self::OutputExpansion(_)
-            | Self::StaleContextContinue(_) => None,
+            | Self::StaleContextContinue(_)
+            | Self::LongRunningCommandContinue(_) => None,
         }
     }
 
@@ -1049,6 +1078,7 @@ impl HostDecisionRequest {
             Self::OutputExpansion(_) => CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
             Self::StaleContextContinue(_) => CORE_TOPIC_STALE_CONTEXT_REQUEST,
             Self::WorkInstructionLoad(_) => CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+            Self::LongRunningCommandContinue(_) => CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
         }
     }
 
@@ -1330,6 +1360,12 @@ fn decision_request_payload(request: &HostDecisionRequest) -> Value {
             "directory": work.directory.display().to_string(),
             "file_names": work.file_names,
         }),
+        HostDecisionRequest::LongRunningCommandContinue(command) => json!({
+            "action": command.action,
+            "command": command.command,
+            "elapsed_ms": command.elapsed.as_millis(),
+            "timeout_ms": command.timeout_ms,
+        }),
     }
 }
 
@@ -1383,6 +1419,14 @@ fn host_decision_request_from_payload(kind: &str, payload: &Value) -> Option<Hos
                     .iter()
                     .map(|item| item.as_str().map(str::to_string))
                     .collect::<Option<Vec<_>>>()?,
+            },
+        )),
+        "long_running_command_continue" => Some(HostDecisionRequest::LongRunningCommandContinue(
+            LongRunningCommandContinueRequest {
+                action: payload["action"].as_str()?.to_string(),
+                command: payload["command"].as_str()?.to_string(),
+                elapsed: Duration::from_millis(payload["elapsed_ms"].as_u64()?),
+                timeout_ms: payload.get("timeout_ms").and_then(Value::as_i64),
             },
         )),
         _ => None,
@@ -1874,6 +1918,14 @@ mod tests {
                 directory: "/tmp/project".into(),
                 file_names: vec!["AGENTS.md".to_string(), "CLAUDE.md".to_string()],
             }),
+            HostDecisionRequest::LongRunningCommandContinue(
+                LongRunningCommandContinueRequest::new(
+                    "run_bash",
+                    "sleep 120",
+                    Duration::from_secs(65),
+                    None,
+                ),
+            ),
         ];
 
         for request in requests {

@@ -1,8 +1,8 @@
 use crate::response_protocol::ParsedAction;
 use crate::MemGuard;
 use crate::{
-    ActionExecution, AgentCore, ApprovalRequest, BashApprovalMode, PendingApproval,
-    PendingApprovedAction,
+    ActionExecution, ActionRuntime, AgentCore, ApprovalRequest, BashApprovalMode,
+    LongRunningCommandDecision, LongRunningCommandStatus, PendingApproval, PendingApprovedAction,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -17,6 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::os::unix::process::CommandExt;
 
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static LONG_RUNNING_COMMAND_PROMPT_AFTER_MS: AtomicU64 = AtomicU64::new(60_000);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellJobRecord {
@@ -281,6 +283,7 @@ pub fn validate_bash_request(command: &str) -> Result<(), String> {
 pub(crate) fn execute_run_bash_action(
     core: &mut AgentCore,
     action: &ParsedAction,
+    runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     let loop_command = action.input_str("loop_cmd");
     if !loop_command.is_empty() && !action.input_str("cmd").is_empty() {
@@ -309,7 +312,7 @@ pub(crate) fn execute_run_bash_action(
         &session_id,
         &turn_id,
         action.input_str("loop_cmd").is_empty(),
-        &mut || false,
+        runtime,
     )
 }
 
@@ -325,7 +328,7 @@ pub(crate) fn execute_run_bash(
     session_id: &str,
     turn_id: &str,
     is_regular_command: bool,
-    should_cancel: &mut dyn FnMut() -> bool,
+    runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     let command_to_run = command.trim();
     if command_to_run.is_empty() {
@@ -398,10 +401,10 @@ pub(crate) fn execute_run_bash(
             interval_ms,
             timeout_ms,
             check_timeout_ms,
-            should_cancel,
+            runtime,
         ));
     }
-    ActionExecution::Completed(execute_one_bash(command_to_run, timeout_ms, should_cancel))
+    ActionExecution::Completed(execute_one_bash(command_to_run, timeout_ms, runtime))
 }
 
 pub(crate) fn execute_approved_bash(
@@ -415,7 +418,7 @@ pub(crate) fn execute_approved_bash(
     _is_regular_command: bool,
     request: &ApprovalRequest,
     shell_jobs: &FileShellJobStore,
-    should_cancel: &mut dyn FnMut() -> bool,
+    runtime: &mut dyn ActionRuntime,
 ) -> String {
     let mut result = if background {
         shell_jobs.spawn(command.trim(), session_id, turn_id)
@@ -425,10 +428,10 @@ pub(crate) fn execute_approved_bash(
             interval_ms,
             timeout_ms,
             check_timeout_ms,
-            should_cancel,
+            runtime,
         )
     } else {
-        execute_one_bash(command.trim(), timeout_ms, should_cancel)
+        execute_one_bash(command.trim(), timeout_ms, runtime)
     };
     result.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
@@ -437,12 +440,8 @@ pub(crate) fn execute_approved_bash(
     result
 }
 
-pub fn execute_one_bash(
-    command: &str,
-    timeout_ms: i64,
-    should_cancel: &mut dyn FnMut() -> bool,
-) -> String {
-    execute_one_bash_structured(command, timeout_ms, should_cancel).to_action_result("run_bash")
+pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn ActionRuntime) -> String {
+    execute_one_bash_structured(command, timeout_ms, runtime).to_action_result("run_bash")
 }
 
 pub(crate) fn execute_polling_bash(
@@ -450,7 +449,7 @@ pub(crate) fn execute_polling_bash(
     interval_ms: u64,
     timeout_ms: i64,
     check_timeout_ms: u64,
-    mut cancelled: impl FnMut() -> bool,
+    runtime: &mut dyn ActionRuntime,
 ) -> String {
     let interval = Duration::from_millis(interval_ms.clamp(1000, 60_000));
     let max_wait =
@@ -463,7 +462,7 @@ pub(crate) fn execute_polling_bash(
     let mut last_error = None;
 
     loop {
-        if cancelled() {
+        if runtime.should_cancel() {
             return polling_result(
                 command,
                 "cancelled",
@@ -476,7 +475,7 @@ pub(crate) fn execute_polling_bash(
         }
 
         attempts = attempts.saturating_add(1);
-        let result = execute_one_bash_structured(command, check_timeout_ms as i64, &mut cancelled);
+        let result = execute_one_bash_structured(command, check_timeout_ms as i64, runtime);
         last_status = result.status;
         last_output = result.output;
         last_error = result.error;
@@ -510,7 +509,7 @@ pub(crate) fn execute_polling_bash(
         let wait = max_wait
             .map(|max_wait| interval.min(max_wait.saturating_sub(started.elapsed())))
             .unwrap_or(interval);
-        sleep_cancelable(wait, &mut cancelled);
+        sleep_cancelable(wait, &mut || runtime.should_cancel());
     }
 }
 
@@ -631,7 +630,21 @@ impl BashCommandOutput {
 pub fn execute_one_bash_structured(
     command: &str,
     timeout_ms: i64,
-    should_cancel: &mut dyn FnMut() -> bool,
+    runtime: &mut dyn ActionRuntime,
+) -> BashCommandOutput {
+    execute_one_bash_structured_with_prompt_after(
+        command,
+        timeout_ms,
+        runtime,
+        long_running_command_prompt_after(),
+    )
+}
+
+fn execute_one_bash_structured_with_prompt_after(
+    command: &str,
+    timeout_ms: i64,
+    runtime: &mut dyn ActionRuntime,
+    long_running_prompt_after: Duration,
 ) -> BashCommandOutput {
     let spawn = Command::new("/bin/sh")
         .arg("-lc")
@@ -646,11 +659,27 @@ pub fn execute_one_bash_structured(
     let started = Instant::now();
     let timeout =
         (timeout_ms >= 0).then(|| Duration::from_millis((timeout_ms as u64).clamp(1000, 15000)));
+    let mut next_long_running_check = long_running_prompt_after;
     loop {
-        if should_cancel() {
+        if runtime.should_cancel() {
             let _ = child.kill();
             let _ = child.wait();
             return bash_error(command, "cancelled");
+        }
+        if timeout.is_none() && started.elapsed() >= next_long_running_check {
+            let status = LongRunningCommandStatus {
+                action: "run_bash".to_string(),
+                command: command.to_string(),
+                elapsed: started.elapsed(),
+                timeout_ms: None,
+            };
+            if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
+                let _ = child.kill();
+                let _ = child.wait();
+                return bash_error(command, "cancelled_by_user");
+            }
+            next_long_running_check =
+                next_long_running_check.saturating_add(long_running_prompt_after);
         }
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -690,6 +719,42 @@ pub fn execute_one_bash_structured(
         }
         Err(_) => bash_error(command, "command_failed"),
     }
+}
+
+fn long_running_command_prompt_after() -> Duration {
+    #[cfg(test)]
+    {
+        return Duration::from_millis(
+            LONG_RUNNING_COMMAND_PROMPT_AFTER_MS
+                .load(Ordering::Relaxed)
+                .max(1),
+        );
+    }
+    #[cfg(not(test))]
+    {
+        Duration::from_secs(60)
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct LongRunningPromptAfterGuard {
+    previous_ms: u64,
+}
+
+#[cfg(test)]
+impl Drop for LongRunningPromptAfterGuard {
+    fn drop(&mut self) {
+        LONG_RUNNING_COMMAND_PROMPT_AFTER_MS.store(self.previous_ms, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_long_running_command_prompt_after_for_tests(
+    duration: Duration,
+) -> LongRunningPromptAfterGuard {
+    let previous_ms = LONG_RUNNING_COMMAND_PROMPT_AFTER_MS
+        .swap(duration.as_millis().max(1) as u64, Ordering::Relaxed);
+    LongRunningPromptAfterGuard { previous_ms }
 }
 
 fn bash_error(command: &str, error: &str) -> BashCommandOutput {
@@ -747,6 +812,44 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    struct NeverCancelRuntime;
+
+    impl ActionRuntime for NeverCancelRuntime {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+    }
+
+    struct ToggleCancelRuntime<'a> {
+        cancelled: &'a AtomicBool,
+    }
+
+    impl ActionRuntime for ToggleCancelRuntime<'_> {
+        fn should_cancel(&mut self) -> bool {
+            let previous = self.cancelled.swap(true, Ordering::Relaxed);
+            previous
+        }
+    }
+
+    #[derive(Default)]
+    struct CancelAfterLongRunningPromptRuntime {
+        prompts: Vec<LongRunningCommandStatus>,
+    }
+
+    impl ActionRuntime for CancelAfterLongRunningPromptRuntime {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+
+        fn on_long_running_command(
+            &mut self,
+            status: &LongRunningCommandStatus,
+        ) -> LongRunningCommandDecision {
+            self.prompts.push(status.clone());
+            LongRunningCommandDecision::Cancel
+        }
+    }
+
     fn tmp_memory_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "timem_shell_exec_test_{}_{}",
@@ -759,7 +862,8 @@ mod tests {
 
     #[test]
     fn foreground_bash_reports_status_and_output() {
-        let result = execute_one_bash("printf shell_ok", 1000, &mut || false);
+        let mut runtime = NeverCancelRuntime;
+        let result = execute_one_bash("printf shell_ok", 1000, &mut runtime);
         assert!(result.contains("Action result: run_bash"));
         assert!(result.contains("status: 0"));
         assert!(result.contains("shell_ok"));
@@ -767,15 +871,34 @@ mod tests {
 
     #[test]
     fn foreground_bash_timeout_is_bounded() {
-        let result = execute_one_bash("sleep 2", 1000, &mut || false);
+        let mut runtime = NeverCancelRuntime;
+        let result = execute_one_bash("sleep 2", 1000, &mut runtime);
         assert!(result.contains("error: timeout"));
     }
 
     #[test]
     fn foreground_bash_timeout_minus_one_waits_without_runtime_timeout() {
-        let result = execute_one_bash("sleep 1; printf no_timeout_ok", -1, &mut || false);
+        let mut runtime = NeverCancelRuntime;
+        let result = execute_one_bash("sleep 1; printf no_timeout_ok", -1, &mut runtime);
         assert!(result.contains("status: 0"), "{result}");
         assert!(result.contains("no_timeout_ok"), "{result}");
+    }
+
+    #[test]
+    fn foreground_bash_timeout_minus_one_reports_long_running_status_to_runtime() {
+        let _guard = set_long_running_command_prompt_after_for_tests(Duration::from_millis(50));
+        let mut runtime = CancelAfterLongRunningPromptRuntime::default();
+        let result = execute_one_bash("sleep 2; printf should_not_finish", -1, &mut runtime);
+
+        assert!(result.contains("error: cancelled_by_user"), "{result}");
+        assert_eq!(runtime.prompts.len(), 1);
+        assert_eq!(runtime.prompts[0].action, "run_bash");
+        assert_eq!(
+            runtime.prompts[0].command,
+            "sleep 2; printf should_not_finish"
+        );
+        assert_eq!(runtime.prompts[0].timeout_ms, None);
+        assert!(runtime.prompts[0].elapsed >= Duration::from_millis(50));
     }
 
     #[test]
@@ -793,7 +916,7 @@ mod tests {
             "session_a",
             "turn_a",
             true,
-            &mut || false,
+            &mut NeverCancelRuntime,
         );
         match result {
             ActionExecution::Completed(text) => {
@@ -821,7 +944,7 @@ mod tests {
             "session_a",
             "turn_a",
             true,
-            &mut || false,
+            &mut NeverCancelRuntime,
         );
         match result {
             ActionExecution::Completed(text) => {
@@ -841,7 +964,8 @@ mod tests {
             shell_quote_path(&marker),
             shell_quote_path(&marker)
         );
-        let result = execute_polling_bash(&command, 1000, 5000, 1000, || false);
+        let mut runtime = NeverCancelRuntime;
+        let result = execute_polling_bash(&command, 1000, 5000, 1000, &mut runtime);
         assert!(result.contains("Action result: run_bash"), "{result}");
         assert!(result.contains("mode: poll"), "{result}");
         assert!(result.contains("state: finished"), "{result}");
@@ -851,7 +975,8 @@ mod tests {
 
     #[test]
     fn run_bash_poll_mode_times_out_when_command_stays_nonzero() {
-        let result = execute_polling_bash("printf waiting; exit 7", 1000, 1100, 1000, || false);
+        let mut runtime = NeverCancelRuntime;
+        let result = execute_polling_bash("printf waiting; exit 7", 1000, 1100, 1000, &mut runtime);
         assert!(result.contains("mode: poll"), "{result}");
         assert!(result.contains("state: timeout"), "{result}");
         assert!(result.contains("last_status: 7"), "{result}");
@@ -861,10 +986,10 @@ mod tests {
     #[test]
     fn run_bash_poll_mode_can_be_cancelled_during_wait() {
         let cancelled = AtomicBool::new(false);
-        let result = execute_polling_bash("exit 1", 1000, 10_000, 1000, || {
-            let previous = cancelled.swap(true, Ordering::Relaxed);
-            previous
-        });
+        let mut runtime = ToggleCancelRuntime {
+            cancelled: &cancelled,
+        };
+        let result = execute_polling_bash("exit 1", 1000, 10_000, 1000, &mut runtime);
         assert!(result.contains("state: cancelled"), "{result}");
     }
 
@@ -883,7 +1008,7 @@ mod tests {
             "session_a",
             "turn_a",
             false,
-            &mut || false,
+            &mut NeverCancelRuntime,
         );
         match result {
             ActionExecution::NeedsApproval(pending) => {
@@ -910,7 +1035,7 @@ mod tests {
             "session_a",
             "turn_a",
             true,
-            &mut || false,
+            &mut NeverCancelRuntime,
         );
         match cmd_with_interval {
             ActionExecution::Completed(text) => {
@@ -931,7 +1056,7 @@ mod tests {
             "session_a",
             "turn_a",
             false,
-            &mut || false,
+            &mut NeverCancelRuntime,
         );
         match loop_without_interval {
             ActionExecution::Completed(text) => {

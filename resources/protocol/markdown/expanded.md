@@ -210,7 +210,7 @@ Use cmd for a shell command. Optional: timeout_ms, background=true or mode=backg
 - Required one of: `cmd`, `loop_cmd`
 
 **Result**
-Foreground returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check. Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts, elapsed_ms, last_status, and bounded last output.
+Foreground returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check. Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts, elapsed_ms, last_status, and bounded last output. If a foreground command with timeout_ms=-1 runs for a long time, the host may ask the user whether to keep waiting. If the user stops waiting, the action returns cancelled_by_user and the runtime adds the user's cancellation as supplementary context for your next response.
 If args do not match this tool spec, runtime asks you to repair the response before executing the tool.
 
 #### `self_tool`

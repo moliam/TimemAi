@@ -972,10 +972,15 @@ infer the user's semantic goal from the natural-language text.
 Foreground commands use `cmd`. A positive `timeout_ms` is the runtime wait
 budget. `timeout_ms=-1` means the command blocks without a runtime timeout; the
 same execution path remains cancel-aware so host/UI cancellation can stop the
-active command. Long-running work that should survive later prompt deltas should
-use `background=true` or `mode=background`. Runtime returns a `job_id`, output
-file, and status file; the model then uses `shell_job_status` to poll the job
-instead of repeating the long command.
+active command. If such a command is still running after the long-command
+threshold, core emits a structured host decision request asking whether to keep
+waiting. If the host/user stops waiting, core terminates the active process and
+adds a `user_supplement` delta that tells the model the user cancelled the
+command and may request a status check or a new action if still necessary.
+Long-running work that should survive later prompt deltas should use
+`background=true` or `mode=background`. Runtime returns a `job_id`, output file,
+and status file; the model then uses `shell_job_status` to poll the job instead
+of repeating the long command.
 
 Waiting on external state is a structured `run_bash` mode, not a separate tool.
 The model uses `loop_cmd` with `interval_ms`; core repeatedly runs that check

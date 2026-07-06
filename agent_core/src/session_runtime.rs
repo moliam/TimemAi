@@ -1,7 +1,8 @@
 use crate::{
     append_audit_event, model_retry_audit_event, model_retry_decision, normalize_user_supplements,
-    turn_supporting_context, AgentCore, CoreStep, CoreTopicEvent, CoreTopicEventSink,
-    HostDecisionRequest, LlmResponse, ModelCallOutcome, ModelSystemRetryPolicy,
+    turn_supporting_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
+    CoreTopicEventSink, HostDecisionRequest, LlmResponse, LongRunningCommandContinueRequest,
+    LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome, ModelSystemRetryPolicy,
     OutputExpansionRequest, OutputExpansionResolution, ProviderConfig, ProviderModelClient,
     RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn,
     SupportingContextInput, TurnInput, TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi,
@@ -148,15 +149,29 @@ pub fn run_session_turn_with_model_client(
                             &response.response.usage,
                             &response.response.content,
                         );
-                        step = core.apply_model_response_with_repair_audit_and_cancel(
+                        let mut action_runtime = TurnActionRuntime::new(ui, request.session);
+                        step = core.apply_model_response_with_repair_audit_and_runtime(
                             response.response,
                             request.audit_file,
                             request.session,
                             &turn_id,
-                            &mut || ui.is_cancel_requested(),
+                            &mut action_runtime,
                         );
+                        user_wait_this_turn =
+                            user_wait_this_turn.saturating_add(action_runtime.user_wait());
+                        let command_supplements = action_runtime.take_pending_supplements();
                         let mut sink = TurnUiTopicEventSink { ui };
                         core.notify_last_topic_events(request.session, &mut sink);
+                        if !command_supplements.is_empty() {
+                            if let Some(next_step) = core.append_user_supplements_with_audit(
+                                command_supplements,
+                                request.audit_file,
+                                request.session,
+                                &turn_id,
+                            ) {
+                                step = next_step;
+                            }
+                        }
                     }
                     Err(err) => {
                         if ui.take_cancel_request() {
@@ -195,14 +210,28 @@ pub fn run_session_turn_with_model_client(
                     ui.resume_after_user_decision();
                     continue;
                 }
-                step = core.resolve_user_approval_with_audit_and_cancel(
+                let mut action_runtime = TurnActionRuntime::new(ui, request.session);
+                step = core.resolve_user_approval_with_audit_and_runtime(
                     &approval,
                     approved,
                     request.audit_file,
                     request.session,
                     &turn_id,
-                    &mut || ui.is_cancel_requested(),
+                    &mut action_runtime,
                 );
+                user_wait_this_turn =
+                    user_wait_this_turn.saturating_add(action_runtime.user_wait());
+                let command_supplements = action_runtime.take_pending_supplements();
+                if !command_supplements.is_empty() {
+                    if let Some(next_step) = core.append_user_supplements_with_audit(
+                        command_supplements,
+                        request.audit_file,
+                        request.session,
+                        &turn_id,
+                    ) {
+                        step = next_step;
+                    }
+                }
                 ui.resume_after_user_decision();
             }
             CoreStep::RoundLimitReached { max_rounds } => {
@@ -266,6 +295,72 @@ struct TurnUiTopicEventSink<'a> {
 impl CoreTopicEventSink for TurnUiTopicEventSink<'_> {
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         self.ui.on_core_topic_events(events);
+    }
+}
+
+struct TurnActionRuntime<'a> {
+    ui: &'a mut dyn TurnUi,
+    session: &'a str,
+    pending_supplements: Vec<String>,
+    user_wait: Duration,
+}
+
+impl<'a> TurnActionRuntime<'a> {
+    fn new(ui: &'a mut dyn TurnUi, session: &'a str) -> Self {
+        Self {
+            ui,
+            session,
+            pending_supplements: Vec::new(),
+            user_wait: Duration::ZERO,
+        }
+    }
+
+    fn take_pending_supplements(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_supplements)
+    }
+
+    fn user_wait(&self) -> Duration {
+        self.user_wait
+    }
+}
+
+impl ActionRuntime for TurnActionRuntime<'_> {
+    fn should_cancel(&mut self) -> bool {
+        self.ui.is_cancel_requested()
+    }
+
+    fn on_long_running_command(
+        &mut self,
+        status: &LongRunningCommandStatus,
+    ) -> LongRunningCommandDecision {
+        self.ui.pause_for_user_decision();
+        let user_wait_start = Instant::now();
+        let decision = self
+            .ui
+            .request_host_decision_topic(
+                self.session,
+                HostDecisionRequest::LongRunningCommandContinue(
+                    LongRunningCommandContinueRequest::new(
+                        status.action.clone(),
+                        status.command.clone(),
+                        status.elapsed,
+                        status.timeout_ms,
+                    ),
+                ),
+            )
+            .as_bool();
+        self.user_wait = self.user_wait.saturating_add(user_wait_start.elapsed());
+        self.ui.resume_after_user_decision();
+        if decision {
+            LongRunningCommandDecision::Continue
+        } else {
+            self.pending_supplements.push(format!(
+                "user cancels the command: {} (already running {} secs). You can initiate action to check current working status. If you feel it is still necessary, initiate action again with an explanation in free_talk.",
+                status.command,
+                status.elapsed.as_secs()
+            ));
+            LongRunningCommandDecision::Cancel
+        }
     }
 }
 
@@ -657,6 +752,23 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct DeclineLongRunningCommandUi {
+        requests: Vec<LongRunningCommandContinueRequest>,
+    }
+
+    impl TurnUi for DeclineLongRunningCommandUi {
+        fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
+            match request {
+                HostDecisionRequest::LongRunningCommandContinue(request) => {
+                    self.requests.push(request);
+                    HostDecision::Decline
+                }
+                other => other.safe_default().into(),
+            }
+        }
+    }
+
     #[test]
     fn session_turn_retries_transient_provider_errors_and_reports_status() {
         let dir = tmp_dir("retry_transient_provider_error");
@@ -790,6 +902,127 @@ mod tests {
         assert!(model.prompts[1].contains("mode: poll"));
         assert!(model.prompts[1].contains("state: finished"));
         assert!(model.prompts[1].contains("attempts: 2"));
+    }
+
+    #[test]
+    fn session_turn_long_no_timeout_command_decline_becomes_user_supplement() {
+        let _guard = crate::shell_exec::set_long_running_command_prompt_after_for_tests(
+            Duration::from_millis(50),
+        );
+        let dir = tmp_dir("long_command_decline_supplement");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut config = test_config();
+        let mut ui = DeclineLongRunningCommandUi::default();
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"{"status":"working","report_job_progress":"运行一个无 runtime timeout 的长命令。","next_actions":[{"action":"run_bash","intent":"Run a blocking command for user testing.","args":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":-1}}]}"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"{"status":"finished","final_answer":"已按用户停止等待后的补充继续处理。"}"#,
+                1_100,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "run a blocking command",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "已按用户停止等待后的补充继续处理。");
+        assert_eq!(ui.requests.len(), 1);
+        assert_eq!(ui.requests[0].command, "sleep 2; printf should_not_finish");
+        assert_eq!(ui.requests[0].timeout_ms, None);
+        assert!(model.prompts[1].contains("user cancels the command"));
+        assert!(
+            model.prompts[1].contains("You can initiate action to check current working status")
+        );
+        let prompt = core.render_prompt();
+        assert!(prompt.contains("error: cancelled_by_user"));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "user_supplement"), 1);
+    }
+
+    #[test]
+    fn parallel_group_with_no_timeout_command_uses_sequential_decision_path() {
+        let _guard = crate::shell_exec::set_long_running_command_prompt_after_for_tests(
+            Duration::from_millis(50),
+        );
+        let dir = tmp_dir("parallel_no_timeout_decline");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut config = test_config();
+        let mut ui = DeclineLongRunningCommandUi::default();
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"## Progress
+启动并行动作组。
+
+## Intermediate_Actions
+```action
+[
+  {
+    "order": "parallel",
+    "actions": [
+      {"action":"run_bash","intent":"短检查","args":{"cmd":"printf quick","timeout_ms":3000}},
+      {"action":"run_bash","intent":"长阻塞检查","args":{"cmd":"sleep 2; printf late","timeout_ms":-1}}
+    ]
+  }
+]
+```"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"## Status
+finished
+
+## Final_Answer
+已按停止等待后的补充继续。"#,
+                1_200,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "执行含长阻塞的并行动作组",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "已按停止等待后的补充继续。");
+        assert_eq!(ui.requests.len(), 1);
+        assert_eq!(ui.requests[0].command, "sleep 2; printf late");
+        assert!(model.prompts[1].contains("quick"));
+        assert!(model.prompts[1].contains("user cancels the command"));
+        assert!(core.render_prompt().contains("error: cancelled_by_user"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

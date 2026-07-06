@@ -71,6 +71,12 @@ Foreground/background execution is part of the capability interface:
   check command; core owns the fixed success condition, interval/timeout bounds,
   cancellation checks, bounded output, approval, audit, and the structured
   action result.
+- Foreground `run_bash` can use `timeout_ms=-1` when the user explicitly wants a
+  command to block without a runtime timeout. Core still owns the process and
+  emits a structured host decision request after the long-command threshold, so
+  a UI can let the user keep waiting or stop waiting. Stopping waiting becomes a
+  `cancelled_by_user` action result plus a `user_supplement` for the next model
+  response.
 - A model cannot opt a registered command tool into background execution unless
   that field is declared in the tool manifest. Manifest validation rejects the
   undeclared field before execution.

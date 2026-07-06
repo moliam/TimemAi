@@ -109,6 +109,10 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   Shell may render the request and collect the user's choice, but it must not
   execute the command, shape stdout/stderr evidence, decide tool semantics, or
   write tool audit records.
+- Terminal-side decision UI for long foreground `run_bash timeout_ms=-1`
+  commands. Shell renders the keep-waiting/stop-waiting menu and returns the
+  user's decision through the core host-decision channel; core owns the process
+  lifecycle, action result, and any follow-up `user_supplement`.
 - Local host concerns such as where this shell process stores history or audit
   files.
 - Choosing host policy for this terminal process, while using `agent_core`
@@ -135,6 +139,9 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   and timeout policy. Shell may display the resulting core topics or action
   evidence, but must not manage those jobs itself. Final-answer/context-compact
   cleanup is also a core responsibility.
+- Foreground long-command process waiting and cancellation for
+  `timeout_ms=-1`. Shell may prompt the user for a decision but must not kill or
+  track the model-requested process itself.
 - Memory conflict logic, context shrink/compact algorithms, provider cache
   planning, or retry policy.
 - Runtime configuration validation or reusable configuration side effects, such
