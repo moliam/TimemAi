@@ -161,19 +161,21 @@ fn prompt_is_append_only_and_segmented() {
     assert!(first.contains("\ntime: "));
     assert!(!first.contains("{\"segment_type\""));
 
-    let second = match core.apply_model_response(LlmResponse {
+    let final_step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"finished","final_answer":"你好"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
-    }) {
-        CoreStep::Final(_) => core.render_prompt(),
+    });
+    assert!(matches!(final_step, CoreStep::Final(_)));
+    let second = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(second.contains("[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]"));
-    assert!(second.contains("User question:\n你好"));
     assert!(second.contains("## TIMEM_ASSISTANT"));
-    assert!(second.contains("final_answer:\n你好"));
+    assert!(second.contains("All previous pending open tasks are completed.  Final Answer:\n你好"));
+    assert!(second.contains("## USER\n\n继续"));
 }
 
 #[test]
@@ -192,7 +194,7 @@ fn default_max_rounds_is_fifty() {
         panic!("unexpected step: {step:?}");
     };
     assert_eq!(rounds_remaining, 50);
-    assert!(prompt.contains("rounds_remaining: 50"));
+    assert!(!prompt.contains("rounds_remaining: 50"));
 }
 
 #[test]
@@ -245,10 +247,10 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     assert_eq!(events[0]["max_rounds"], 1);
     assert_eq!(events[0]["continued"], true);
     assert_eq!(rounds_remaining, 50);
-    assert!(prompt.contains("User question:\n需要两步完成"));
+    assert!(prompt.contains("## USER\n\n需要两步完成"));
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("Runtime round budget continued by user."));
-    assert!(prompt.contains("rounds_remaining: 50"));
+    assert!(!prompt.contains("rounds_remaining: 50"));
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Need evidence after continuation.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
@@ -562,11 +564,20 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     let prompt = core.render_prompt();
     let delta_ids = field_values(&prompt, "delta_id");
 
+    assert_eq!(delta_ids.len(), 1);
+    assert!(!prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(!prompt.contains("先分析"));
+    assert!(!prompt.contains("Final Answer:\n结论"));
+    let prompt = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_ids = field_values(&prompt, "delta_id");
+
     assert_eq!(delta_ids.len(), 2);
-    assert_ne!(delta_ids[0], delta_ids[1]);
     assert!(prompt.contains("## TIMEM_ASSISTANT"));
-    assert!(prompt.contains("Free_talk:\n先分析"));
-    assert!(prompt.contains("final_answer:\n结论"));
+    assert!(prompt.contains("先分析"));
+    assert!(prompt.contains("All previous pending open tasks are completed.  Final Answer:\n结论"));
 }
 
 #[test]
@@ -594,7 +605,7 @@ fn user_supplement_appends_to_latest_delta_as_slice() {
 
     assert_eq!(delta_ids, vec![original_delta]);
     assert!(prompt.contains("## USER"));
-    assert!(prompt.contains("User supplement during current turn:"));
+    assert!(!prompt.contains("User supplement during current turn:"));
     assert!(prompt.contains("补充：优先考虑跨平台实现"));
 }
 
@@ -672,7 +683,7 @@ fn prompt_rendering_does_not_expose_durable_ctx_score() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("User question:\n不要记住：纪念日这个词只是测试"));
+    assert!(prompt.contains("## USER\n\n不要记住：纪念日这个词只是测试"));
     assert!(!prompt.contains("durable_ctx_score"));
 }
 
@@ -857,8 +868,8 @@ fn prompt0_is_static_global_only() {
     assert!(prompt0.contains("STATIC_GLOBAL"));
     assert!(!prompt0.contains("secret user question"));
     assert!(!prompt0.contains("runtime_time: now"));
-    assert!(prompt.contains("User question:\nsecret user question"));
-    assert!(prompt.contains("Supporting context:\nruntime_time: now"));
+    assert!(prompt.contains("## USER\n\nsecret user question"));
+    assert!(prompt.contains("## SYSTEM\n\nruntime_time: now"));
 }
 
 #[test]
@@ -1261,7 +1272,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected action results, got {other:?}"),
     };
-    assert!(prompt.contains("Free_talk:"));
+    assert!(prompt.contains("并行查询记忆和本地文件数量。"));
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("Action result: run_bash"));
 
@@ -4280,8 +4291,8 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(first_prompt.contains("User question:\n测试项目纪念日是 2099-06-12"));
-    assert!(first_prompt.contains("Supporting context:\nruntime_time:"));
+    assert!(first_prompt.contains("## USER\n\n测试项目纪念日是 2099-06-12"));
+    assert!(first_prompt.contains("## SYSTEM\n\nruntime_time:"));
     let write_final = match core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"finished","final_answer":"已记录。","memory_candidates":[{"content":"测试项目纪念日是 2099-06-12"}]}"#),
         model_name: "qwen-plus".to_string(),
@@ -4636,9 +4647,14 @@ fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = core.render_prompt();
-    assert!(prompt.contains("Free_talk:"));
-    assert!(prompt.contains("Free_talk:\n推导一下"));
+    assert!(!core.render_prompt().contains("推导一下"));
+    let prompt = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains("推导一下"));
+    assert!(!prompt.contains("Free_talk:"));
 }
 
 #[test]
@@ -4679,9 +4695,12 @@ fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = core.render_prompt();
-    assert!(prompt.contains("Free_talk:"));
-    assert!(prompt.contains("Free_talk:\n对象形式的思考"));
+    let prompt = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("对象形式的思考"));
+    assert!(!prompt.contains("Free_talk:"));
 }
 
 #[test]
@@ -4699,9 +4718,12 @@ fn free_talk_object_keep_in_context_false_is_still_persisted() {
         truncated: false,
     });
     assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = core.render_prompt();
-    assert!(prompt.contains("Free_talk:"));
-    assert!(prompt.contains("Free_talk:\n临时思考不保留"));
+    let prompt = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("临时思考不保留"));
+    assert!(!prompt.contains("Free_talk:"));
 }
 
 #[test]

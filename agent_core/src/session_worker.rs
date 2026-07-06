@@ -595,8 +595,7 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
-            let has_supplement = prompt.contains("## USER")
-                && prompt.contains("User supplement during current turn:");
+            let has_supplement = prompt.contains("## USER") && prompt.contains("SUPPLEMENT");
             let content = if has_supplement {
                 "## Status\nfinished\n\n## Final_Answer\nSUPPLEMENT_WORKER_OK"
             } else {
@@ -1018,8 +1017,7 @@ mod tests {
             _audit_file: &std::path::Path,
             should_cancel: &mut dyn FnMut() -> bool,
         ) -> Result<LlmResponse, String> {
-            let has_supplement = prompt.contains("## USER")
-                && prompt.contains("User supplement during current turn:");
+            let has_supplement = prompt.contains("## USER") && prompt.contains("SUPPLEMENT");
             self.calls.lock().unwrap().push(ConcurrentModelCall {
                 worker: self.worker.to_string(),
                 has_supplement,

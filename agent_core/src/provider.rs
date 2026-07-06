@@ -926,7 +926,7 @@ mod tests {
         config.provider = "openai".to_string();
         config.model = "gpt-4o".to_string();
         config.max_llm_output_tokens = 2048;
-        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nUser question:\nhello\n[END DELTA]";
+        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]";
 
         let prepared = prepare_provider_request(&config, prompt);
         let body = prepared.body;
@@ -947,7 +947,7 @@ mod tests {
     fn openai_compatible_request_splits_static_and_dynamic_prompt() {
         let mut config = config(ApiProtocol::OpenAiCompatible);
         config.provider = "aliyun".to_string();
-        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nUser question:\nsecret\n[END DELTA]";
+        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nsecret\n[END DELTA]";
 
         let prepared = prepare_provider_request(&config, prompt);
         let body = prepared.body;

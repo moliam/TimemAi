@@ -251,7 +251,7 @@ pub struct TurnFinal {
 }
 
 fn llm_final_answer_slice_text(final_answer: &str) -> String {
-    format!("final_answer:\n{final_answer}")
+    format!("All previous pending open tasks are completed.  Final Answer:\n{final_answer}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -738,6 +738,7 @@ pub struct AgentCore {
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
+    pending_next_turn_slices: Vec<(String, String)>,
 }
 impl AgentCore {
     pub fn new(
@@ -789,6 +790,7 @@ impl AgentCore {
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
+            pending_next_turn_slices: Vec::new(),
         }
     }
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
@@ -1057,24 +1059,38 @@ impl AgentCore {
             now_ms(),
             &self.current_action_user_question,
         );
+        let mut slices = std::mem::take(&mut self.pending_next_turn_slices);
         let should_memory_precheck = supporting_context
             .map(should_run_memory_precheck)
             .unwrap_or(false);
-        let mut text = format!("User question:\n{}", user_input.trim());
+        let text = user_input.trim().to_string();
         let filtered_supporting_context = supporting_context
             .map(|ctx| self.filter_repeated_work_instructions(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
+        let mut system_texts = Vec::new();
         if let Some(ctx) = filtered_supporting_context.as_deref() {
-            text.push_str("\n\nSupporting context:\n");
-            text.push_str(ctx.trim());
+            system_texts.push(ctx.trim().to_string());
         }
-        let incoming_prompt_tokens = estimate_prompt_tokens(&text);
-        if let Some(shrink_review) = self.consume_shrink_review_if_needed(incoming_prompt_tokens) {
-            text.push_str("\n\nLong-context maintenance:\n");
-            text.push_str(&shrink_review);
+        let mut token_estimate_text = text.clone();
+        for system_text in &system_texts {
+            token_estimate_text.push('\n');
+            token_estimate_text.push_str(system_text);
         }
-        text.push_str(&format!("\nrounds_remaining: {}", self.round_budget));
-        let mut slices = vec![("user_question".to_string(), text)];
+        let incoming_prompt_tokens = estimate_prompt_tokens(&token_estimate_text);
+        let pending_dynamic_tokens = estimate_prompt_tokens(&token_estimate_text)
+            + slices
+                .iter()
+                .map(|(_, text)| estimate_prompt_tokens(text))
+                .sum::<u32>();
+        if let Some(shrink_review) =
+            self.consume_shrink_review_if_needed(incoming_prompt_tokens, pending_dynamic_tokens)
+        {
+            system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
+        }
+        slices.push(("user_question".to_string(), text));
+        for system_text in system_texts {
+            slices.push(("runtime_note".to_string(), system_text));
+        }
         if should_memory_precheck {
             let result = self.runtime_memory_precheck(user_input, 5);
             slices.push(("result_of_llm_action".to_string(), result));
@@ -1090,13 +1106,7 @@ impl AgentCore {
         if text.is_empty() {
             return None;
         }
-        self.append_slice_to_latest_delta(
-            "user_supplement".to_string(),
-            format!(
-                "User supplement during current turn:\n{}\n\nNote: This supplement was entered while the model was already working on the current turn. Treat it as the latest user instruction/correction.",
-                text
-            ),
-        );
+        self.append_slice_to_latest_delta("user_supplement".to_string(), text.to_string());
         Some(CoreStep::NeedModel {
             prompt: self.render_prompt(),
             rounds_remaining: self.remaining_rounds(),
@@ -1160,11 +1170,8 @@ impl AgentCore {
         let protocol_suite = self.response_protocol.suite();
         let parsed = protocol_suite.parse(&response.content, &self.capabilities);
         let mut slices = Vec::new();
-        if !parsed.thought.is_empty() && parsed.thought_keep_in_context {
-            slices.push((
-                "llm_free_talk".to_string(),
-                format!("Free_talk:\n{}", parsed.thought),
-            ));
+        if !parsed.thought.is_empty() {
+            slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
         }
         if let Some(issue) = parsed.repair_issue.clone() {
             if !self.repair_attempted {
@@ -1182,7 +1189,7 @@ impl AgentCore {
                     "llm_response".to_string(),
                     llm_final_answer_slice_text(&final_text),
                 ));
-                self.append_delta(slices);
+                self.defer_next_turn_slices(slices);
                 self.cleanup_background_jobs_for_current_session("final_answer");
                 return CoreStep::Final(TurnFinal {
                     final_answer: final_text,
@@ -1214,7 +1221,7 @@ impl AgentCore {
                 "llm_response".to_string(),
                 llm_final_answer_slice_text(&final_text),
             ));
-            self.append_delta(slices);
+            self.defer_next_turn_slices(slices);
             self.cleanup_background_jobs_for_current_session("protocol_repair_final_answer");
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
@@ -1264,7 +1271,7 @@ impl AgentCore {
                 "llm_response".to_string(),
                 llm_final_answer_slice_text(&final_text),
             ));
-            self.append_delta(slices);
+            self.defer_next_turn_slices(slices);
             self.cleanup_background_jobs_for_current_session("final_answer");
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
@@ -1350,7 +1357,7 @@ impl AgentCore {
             "llm_response".to_string(),
             llm_final_answer_slice_text(&final_text),
         ));
-        self.append_delta(slices);
+        self.defer_next_turn_slices(slices);
         self.cleanup_background_jobs_for_current_session("final_answer");
         CoreStep::Final(TurnFinal {
             final_answer: final_text,
@@ -1650,10 +1657,7 @@ impl AgentCore {
         self.round_budget = DEFAULT_ROUND_BUDGET;
         self.append_delta(vec![(
             "result_of_llm_action".to_string(),
-            format!(
-                "Runtime round budget continued by user.\nrounds_remaining: {}",
-                self.round_budget
-            ),
+            "Runtime round budget continued by user.".to_string(),
         )]);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
@@ -1757,7 +1761,7 @@ impl AgentCore {
     }
 
     fn append_in_turn_shrink_review_if_needed(&mut self) {
-        if let Some(shrink_review) = self.consume_shrink_review_if_needed(0) {
+        if let Some(shrink_review) = self.consume_shrink_review_if_needed(0, 0) {
             self.append_delta(vec![(
                 "result_of_llm_action".to_string(),
                 format!("Long-context maintenance:\n{shrink_review}"),
@@ -1810,6 +1814,14 @@ impl AgentCore {
         });
     }
 
+    fn defer_next_turn_slices(&mut self, slice_texts: Vec<(String, String)>) {
+        self.pending_next_turn_slices.extend(
+            slice_texts
+                .into_iter()
+                .filter(|(_, text)| !text.trim().is_empty()),
+        );
+    }
+
     fn append_slice_to_latest_delta(&mut self, prompt_type: String, text: String) {
         if self.deltas.is_empty() {
             self.append_delta(vec![(prompt_type, text)]);
@@ -1847,7 +1859,11 @@ impl AgentCore {
             );
         }
     }
-    fn consume_shrink_review_if_needed(&mut self, incoming_prompt_tokens: u32) -> Option<String> {
+    fn consume_shrink_review_if_needed(
+        &mut self,
+        incoming_prompt_tokens: u32,
+        pending_dynamic_tokens: u32,
+    ) -> Option<String> {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
         let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
         let slices = self.render_prompt_slices();
@@ -1857,7 +1873,8 @@ impl AgentCore {
         let dynamic_tokens = slices
             .iter()
             .map(|slice| estimate_prompt_tokens(&slice.text))
-            .sum::<u32>();
+            .sum::<u32>()
+            .saturating_add(pending_dynamic_tokens);
         if estimated_prompt_tokens < force_threshold {
             return None;
         }

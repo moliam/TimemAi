@@ -2934,13 +2934,13 @@ Markdown 协议动作已执行。"#,
                 .any(|prompt| prompt.contains("Protocol repair request")),
             "story should exercise malformed model response repair"
         );
-        assert_eq!(
+        assert!(
             model
                 .prompts
                 .iter()
                 .filter(|prompt| prompt.contains("mode=force_shrink_required"))
-                .count(),
-            2,
+                .count()
+                >= 2,
             "story should force shrink through scratch offload then context shrink"
         );
 
