@@ -1760,33 +1760,56 @@ mod tests {
         }
     }
 
-    fn collect_model_response_worker_counts(
+    fn drain_worker_count_event(
         events: &Receiver<CoreSessionWorkerEvent>,
         label: &str,
-    ) -> Vec<usize> {
-        let mut counts = Vec::new();
-        loop {
-            match events
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap_or_else(|_| panic!("{label} timed out waiting for turn finish"))
-            {
-                CoreSessionWorkerEvent::Topics(events) => {
-                    counts.extend(
-                        events
-                            .iter()
-                            .filter_map(CoreTopicEvent::as_model_response)
-                            .map(|topic| topic.global.working_worker_count),
-                    );
-                }
-                CoreSessionWorkerEvent::TurnFinished { outcome } => {
-                    assert_eq!(outcome.text, "WORKER_COUNT_DONE");
-                    return counts;
-                }
-                CoreSessionWorkerEvent::ModelRequest { .. }
-                | CoreSessionWorkerEvent::ModelResponse { .. } => {}
-                other => panic!("{label} unexpected event while collecting counts: {other:?}"),
+        counts: &mut Vec<usize>,
+        finished: &mut bool,
+    ) {
+        if *finished {
+            return;
+        }
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(CoreSessionWorkerEvent::Topics(events)) => {
+                counts.extend(
+                    events
+                        .iter()
+                        .filter_map(CoreTopicEvent::as_model_response)
+                        .map(|topic| topic.global.working_worker_count),
+                );
+            }
+            Ok(CoreSessionWorkerEvent::TurnFinished { outcome }) => {
+                assert_eq!(outcome.text, "WORKER_COUNT_DONE");
+                *finished = true;
+            }
+            Ok(CoreSessionWorkerEvent::ModelRequest { .. })
+            | Ok(CoreSessionWorkerEvent::ModelResponse { .. }) => {}
+            Ok(other) => panic!("{label} unexpected event while collecting counts: {other:?}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{label} event channel disconnected before turn finish")
             }
         }
+    }
+
+    fn collect_two_worker_model_response_counts(
+        events_a: &Receiver<CoreSessionWorkerEvent>,
+        events_b: &Receiver<CoreSessionWorkerEvent>,
+    ) -> Vec<usize> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut counts = Vec::new();
+        let mut finished_a = false;
+        let mut finished_b = false;
+        while !(finished_a && finished_b) {
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for worker count turns; finished_a={finished_a} finished_b={finished_b} counts={counts:?}"
+                );
+            }
+            drain_worker_count_event(events_a, "worker_count_a", &mut counts, &mut finished_a);
+            drain_worker_count_event(events_b, "worker_count_b", &mut counts, &mut finished_b);
+        }
+        counts
     }
 
     #[test]
@@ -1849,10 +1872,8 @@ mod tests {
         handle_a.run_turn("worker count a", None).unwrap();
         handle_b.run_turn("worker count b", None).unwrap();
 
-        let counts_a = collect_model_response_worker_counts(worker_a.events(), "worker_count_a");
-        let counts_b = collect_model_response_worker_counts(worker_b.events(), "worker_count_b");
-        let mut all_counts = counts_a;
-        all_counts.extend(counts_b);
+        let all_counts =
+            collect_two_worker_model_response_counts(worker_a.events(), worker_b.events());
 
         assert!(
             all_counts.contains(&2),
