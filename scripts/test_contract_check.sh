@@ -309,14 +309,14 @@ static_prompt_snapshot_markdown_required=(
   "Markdown response sections."
   "The top-level response is Markdown, not JSON."
   "\`## Status\`"
-  "\`## Intermediate_Actions\`"
+  "\`## Working_Still_Action\`"
 )
 
 static_prompt_snapshot_xml_required=(
   "XML response tags."
   "The top-level response is XML."
   "\`<response>\`"
-  "\`<intermediate_actions>\`"
+  "\`<working_still_action>\`"
 )
 
 for static_prompt_snapshot in "${static_prompt_snapshots[@]}"; do

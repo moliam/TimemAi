@@ -142,9 +142,7 @@ fn is_protocol_heading(heading: &str) -> bool {
             | "free_talk"
             | "free talk"
             | "freetalk"
-            | "intermediate_actions"
-            | "intermediate actions"
-            | "next_actions"
+            | "working_still_action"
             | "context compact"
             | "context_compact"
             | "compact"
@@ -466,7 +464,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
                 thought = section.body.trim().to_string();
                 thought_keep_in_context = !thought.is_empty();
             }
-            "intermediate_actions" | "intermediate actions" | "next_actions" => {
+            "working_still_action" => {
                 actions_body = section.body.clone();
             }
             "context compact" | "context_compact" | "compact" => {
@@ -650,29 +648,29 @@ pub fn md_repair_instruction(issue: &str) -> &'static str {
         issue,
         "unsupported_action:final_answer" | "unsupported_action:final_response"
     ) {
-        return "检查到刚刚的输出格式有点问题：final_answer/final_response 不是工具 action。最终回答请使用 Markdown response protocol：写 `## Status` 为 `finished`，并写 `## Final_Answer`。不要把最终回答放进 `## Intermediate_Actions`。";
+        return "检查到刚刚的输出格式有点问题：final_answer/final_response 不是工具 action。最终回答请使用 Markdown response protocol：写 `## Status` 为 `finished`，并写 `## Final_Answer`。不要把最终回答放进 `## Working_Still_Action`。";
     }
     match issue {
         "truncated_model_output" => {
             "检查到刚刚的输出被 max output token 截断。请继续使用 Markdown response protocol，输出更短的 `## Progress`/`## Final_Answer`，长报告可用 `run_bash` 写入文件后在回答中给出路径。不要切换成顶层 JSON。"
         }
         "final_answer_requires_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你给了最终回答内容，但没有明确完成状态。如果当前用户请求已经完成，请写 `## Status` 为 `finished`，并写 `## Final_Answer`；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要写 `## Final_Answer`，改写 `## Progress` 和 `## Intermediate_Actions`。"
+            "检查到刚刚的输出格式有点问题：你给了最终回答内容，但没有明确完成状态。如果当前用户请求已经完成，请写 `## Status` 为 `finished`，并写 `## Final_Answer`；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要写 `## Final_Answer`，改写 `## Progress` 和 `## Working_Still_Action`。"
         }
         "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你写了 `## Status` 为 `finished`，但缺少 `## Final_Answer`。如果当前用户请求已经完成，请同时提供 `## Status` 和 `## Final_Answer`；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要写 finished，并提供 `## Progress` 和需要的 `## Intermediate_Actions`。"
+            "检查到刚刚的输出格式有点问题：你写了 `## Status` 为 `finished`，但缺少 `## Final_Answer`。如果当前用户请求已经完成，请同时提供 `## Status` 和 `## Final_Answer`；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要写 finished，并提供 `## Progress` 和需要的 `## Working_Still_Action`。"
         }
         "status_finished_must_not_include_next_actions" => {
-            "检查到刚刚的输出格式有点问题：`## Status` finished 表示当前用户请求已完成，因此不能同时包含 `## Intermediate_Actions`。如果还需要 runtime 执行动作，请保持 working，用 `## Progress` 和 `## Intermediate_Actions` 继续；拿到 action result 后再写 finished 和 `## Final_Answer`。"
+            "检查到刚刚的输出格式有点问题：`## Status` finished 表示当前用户请求已完成，因此不能同时包含 `## Working_Still_Action`。如果还需要 runtime 执行动作，请保持 working，用 `## Progress` 和 `## Working_Still_Action` 继续；拿到 action result 后再写 finished 和 `## Final_Answer`。"
         }
         "next_actions_required_when_status_working" => {
-            "检查到刚刚的输出格式有点问题：请继续使用 Markdown response protocol。`## Status` working 表示还需要 runtime 继续执行动作，因此必须提供 `## Progress` 和 `## Intermediate_Actions`。如果当前用户请求已经完成，请改用 `## Status` finished 和 `## Final_Answer`；finished 不会关闭 Timem session。"
+            "检查到刚刚的输出格式有点问题：请继续使用 Markdown response protocol。`## Status` working 表示还需要 runtime 继续执行动作，因此必须提供 `## Progress` 和 `## Working_Still_Action`。如果当前用户请求已经完成，请改用 `## Status` finished 和 `## Final_Answer`；finished 不会关闭 Timem session。"
         }
         "external_tool_call_protocol" => {
-            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 Markdown response protocol：需要动作时写 `## Progress` 和 `## Intermediate_Actions`，动作放在 action JSON block 中；完成时写 `## Status` finished 和 `## Final_Answer`。"
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 Markdown response protocol：需要动作时写 `## Progress` 和 `## Working_Still_Action`，动作放在 action JSON block 中；完成时写 `## Status` finished 和 `## Final_Answer`。"
         }
         _ => {
-            "Use the Markdown response protocol. If work still needs runtime action, write `## Progress` and concrete `## Intermediate_Actions`. If the current user request is complete, write `## Status` with `finished` and provide `## Final_Answer`; this does not close the Timem session. Do not switch to a top-level JSON response."
+            "Use the Markdown response protocol. If work still needs runtime action, write `## Progress` and concrete `## Working_Still_Action`. If the current user request is complete, write `## Status` with `finished` and provide `## Final_Answer`; this does not close the Timem session. Do not switch to a top-level JSON response."
         }
     }
 }
@@ -854,7 +852,7 @@ finished
 
     #[test]
     fn parses_context_compact_section() {
-        let input = "## Progress\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "## Progress\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -867,7 +865,7 @@ finished
 
     #[test]
     fn actions_section_json_fence_still_parses_action() {
-        let input = "## Progress\nchecking\n\n## Intermediate_Actions\n```json\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "## Progress\nchecking\n\n## Working_Still_Action\n```json\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -882,7 +880,7 @@ finished
         let input = r#"## Progress
 checking
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 [
   {
@@ -912,7 +910,7 @@ checking
 
     #[test]
     fn extracts_markdown_protocol_after_preface() {
-        let input = "我先说明一下处理计划。\n\n## Progress\nchecking\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "我先说明一下处理计划。\n\n## Progress\nchecking\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -935,7 +933,7 @@ checking
 
     #[test]
     fn actions_section_accepts_bare_json_array() {
-        let input = "## Progress\nchecking\n\n## Intermediate_Actions\n[{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}},{\"action\":\"memmgr\",\"intent\":\"Query durable memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}]";
+        let input = "## Progress\nchecking\n\n## Working_Still_Action\n[{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}},{\"action\":\"memmgr\",\"intent\":\"Query durable memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}]";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -975,7 +973,7 @@ checking
 
         assert!(instruction.contains("Markdown response protocol"));
         assert!(instruction.contains("## Progress"));
-        assert!(instruction.contains("## Intermediate_Actions"));
+        assert!(instruction.contains("## Working_Still_Action"));
         assert!(instruction.contains("## Status"));
         assert!(!instruction.contains("Return exactly one valid JSON object"));
         assert!(!instruction.contains("Do not use markdown fences"));

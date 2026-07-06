@@ -50,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
             content = (
                 "## Progress\n"
                 + progress
-                + "\n\n## Intermediate_Actions\n```action\n"
+                + "\n\n## Working_Still_Action\n```action\n"
                 + json.dumps(
                     {
                         "action": "run_bash",

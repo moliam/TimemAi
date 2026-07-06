@@ -798,7 +798,7 @@ mod tests {
                 r#"## Progress
 需要用户确认后执行本地命令。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 {
   "action": "run_bash",
@@ -1184,7 +1184,7 @@ mod tests {
             self.call_no += 1;
             let content = if self.call_no == 1 {
                 self.first_call_barrier.wait();
-                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"执行一个短命令。\",\"args\":{\"cmd\":\"printf worker-count-ok\",\"timeout_ms\":5000}}\n```"
+                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"执行一个短命令。\",\"args\":{\"cmd\":\"printf worker-count-ok\",\"timeout_ms\":5000}}\n```"
                     .to_string()
             } else {
                 "## Status\nfinished\n\n## Final_Answer\nWORKER_COUNT_DONE".to_string()
@@ -1531,7 +1531,7 @@ mod tests {
             }
             if completed_actions < target_actions {
                 let content = format!(
-                    "## Progress\n{}\n\n## Intermediate_Actions\n```action\n{}\n```",
+                    "## Progress\n{}\n\n## Working_Still_Action\n```action\n{}\n```",
                     stress_progress(self.worker_idx, turn_idx, completed_actions),
                     stress_action_response(self.worker_idx, turn_idx, completed_actions)
                 );

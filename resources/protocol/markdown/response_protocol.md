@@ -3,7 +3,7 @@
 Your response must be organized as a markdown chaptered with pre-defined names as below.
 
 The top-level response is Markdown, not JSON. Only the individual action blocks
-inside `## Intermediate_Actions` use JSON objects.
+inside `## Working_Still_Action` use JSON objects.
 
 Required section rules:
 
@@ -25,12 +25,12 @@ Required section rules:
   context that should remain visible to you in later prompt context. Runtime
   keeps it for you in future context. User may input many questions in a turn, you can use
   free talk to answer intermediately and keep working.
-- `## Intermediate_Actions` contains a single action object, an array of action
+- `## Working_Still_Action` contains a single action object, an array of action
   objects, or an array of action groups. Each action object must match the tool
   catalog exactly. A group has `order` (`sequential` or `parallel`) and
   `actions`. Groups execute one after another; actions in a sequential group run
   in order, actions in a parallel group may run concurrently when safe.
-  DO NOT include `## Intermediate_Actions` when `## Status` is `finished`.
+  DO NOT include `## Working_Still_Action` when `## Status` is `finished`.
 - `## Context Compact` lets you replace old dynamic context with a concise
   summary. Provide delta_ids plus a summary. Runtime will hide the referenced
   dynamic prompt deltas and append your summary as a new dynamic prompt delta. A
@@ -62,7 +62,7 @@ finished
 ## Progress
 正在执行用户要求的本地检查。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 {
   "action": "run_bash",
@@ -79,7 +79,7 @@ finished
 ## Free_Talk
 这个任务我将会分成 ..... 几个步骤进行，下面先进行..
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 {
   "action": "run_bash",
@@ -113,7 +113,7 @@ This is the summary....
 ## Free_Talk
 我会先并行检查两个本地状态，然后轮询等待外部状态就绪。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 [
   {

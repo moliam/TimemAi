@@ -4758,9 +4758,9 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(prompt.contains("`intent`"));
     assert!(prompt.contains("The top-level response is Markdown, not JSON."));
     assert!(prompt.contains("the individual action blocks"));
-    assert!(prompt.contains("inside `## Intermediate_Actions` use JSON objects."));
+    assert!(prompt.contains("inside `## Working_Still_Action` use JSON objects."));
     assert!(!prompt.contains("`## Thought`"));
-    assert!(prompt.contains("`## Intermediate_Actions`"));
+    assert!(prompt.contains("`## Working_Still_Action`"));
     assert!(!prompt.contains("\"json_schema_summary\": \"stale\""));
 }
 
@@ -4879,7 +4879,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     };
     assert!(markdown_prompt.contains("The top-level response is Markdown, not JSON."));
     assert!(markdown_prompt.contains("protocol-compliant response in Markdown format"));
-    assert!(markdown_prompt.contains("## Intermediate_Actions"));
+    assert!(markdown_prompt.contains("## Working_Still_Action"));
     assert!(!markdown_prompt.contains("All your output things MUST BE enclosed"));
     assert!(!markdown_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
@@ -4909,7 +4909,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     };
     assert!(xml_prompt.contains("The top-level response is XML, not JSON or Markdown."));
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
-    assert!(xml_prompt.contains("<intermediate_actions>"));
+    assert!(xml_prompt.contains("<working_still_action>"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }
 

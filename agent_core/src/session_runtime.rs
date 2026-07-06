@@ -974,7 +974,7 @@ mod tests {
                 r#"## Progress
 启动并行动作组。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 [
   {
@@ -1038,7 +1038,7 @@ finished
                 r#"## Progress
 正在并行检查两个本地状态。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 [
   {
@@ -1352,7 +1352,7 @@ finished
                 r##"## Progress
 查询 scratch 后继续。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 {
   "action": "memmgr",
@@ -1430,7 +1430,7 @@ finished
             Ok(llm(
                 r#"<response>
 <progress>查询 scratch 后继续。</progress>
-<intermediate_actions>
+<working_still_action>
 <action_json><![CDATA[
 {
   "action": "memmgr",
@@ -1443,7 +1443,7 @@ finished
   }
 }
 ]]></action_json>
-</intermediate_actions>
+</working_still_action>
 </response>"#,
                 5_000,
                 false,
@@ -1850,7 +1850,7 @@ finished
         assert!(repair_prompt.contains("Protocol repair request"));
         assert!(repair_prompt.contains("Markdown response protocol"));
         assert!(repair_prompt.contains("## Progress"));
-        assert!(repair_prompt.contains("## Intermediate_Actions"));
+        assert!(repair_prompt.contains("## Working_Still_Action"));
         assert!(!repair_prompt.contains("Return exactly one valid JSON object"));
         assert!(!repair_prompt.contains("Do not use markdown fences"));
         let _ = std::fs::remove_dir_all(dir);
@@ -2687,7 +2687,7 @@ finished
                 r#"## Progress
 正在检查本地 shell。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 {
   "action": "run_bash",

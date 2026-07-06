@@ -97,9 +97,9 @@ mod tests {
         assert!(enriched.contains("`## Progress`"));
         assert!(enriched.contains("`## Final_Answer`"));
         assert!(enriched.contains("`## Free_talk`"));
-        assert!(enriched.contains("`## Intermediate_Actions`"));
+        assert!(enriched.contains("`## Working_Still_Action`"));
         assert!(enriched.contains("`## Context Compact`"));
-        assert!(enriched.contains("inside `## Intermediate_Actions` use JSON objects."));
+        assert!(enriched.contains("inside `## Working_Still_Action` use JSON objects."));
         assert!(!enriched.contains("{{RESPONSE_V1_SCHEMA}}"));
         assert!(!enriched.contains("\"sections\""));
         assert!(!enriched.contains("\"fields\""));

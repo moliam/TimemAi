@@ -234,8 +234,7 @@ fn decode_xml_text(text: &str) -> String {
 }
 
 fn has_actions(response_body: &str) -> bool {
-    !extract_tags(response_body, "intermediate_actions").is_empty()
-        || !extract_tags(response_body, "actions").is_empty()
+    !extract_tags(response_body, "working_still_action").is_empty()
 }
 
 fn parse_actions(
@@ -244,10 +243,7 @@ fn parse_actions(
     repair_issue: &mut Option<String>,
 ) -> (Vec<ParsedAction>, Vec<ParsedActionGroup>) {
     let mut action_blocks = Vec::new();
-    for body in extract_tags(response_body, "intermediate_actions")
-        .into_iter()
-        .chain(extract_tags(response_body, "actions"))
-    {
+    for body in extract_tags(response_body, "working_still_action") {
         let nested = extract_tags(body, "action_json");
         if nested.is_empty() {
             let direct = decode_xml_text(strip_cdata(body).trim());
@@ -267,7 +263,7 @@ fn parse_actions(
         return (Vec::new(), Vec::new());
     }
 
-    let mut markdown = String::from("## Progress\nchecking\n\n## Intermediate_Actions\n");
+    let mut markdown = String::from("## Progress\nchecking\n\n## Working_Still_Action\n");
     for block in action_blocks {
         markdown.push_str("```action\n");
         markdown.push_str(block.trim());
@@ -328,22 +324,22 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <progress> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
         }
         "external_tool_call_protocol" => {
-            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 XML response protocol：需要动作时写 <progress> 和 <intermediate_actions><action_json><![CDATA[{...}]]></action_json></intermediate_actions>；完成时写 <status>finished</status> 和 <final_answer>...</final_answer>。"
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 XML response protocol：需要动作时写 <progress> 和 <working_still_action><action_json><![CDATA[{...}]]></action_json></working_still_action>；完成时写 <status>finished</status> 和 <final_answer>...</final_answer>。"
         }
         "final_answer_requires_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你给了 <final_answer>，但没有明确 <status>finished</status>。如果当前用户请求已经完成，请同时提供 <status>finished</status> 和 <final_answer>；如果仍需 runtime 继续工作，请不要写 <final_answer>，改写 <progress> 和 <intermediate_actions>。"
+            "检查到刚刚的输出格式有点问题：你给了 <final_answer>，但没有明确 <status>finished</status>。如果当前用户请求已经完成，请同时提供 <status>finished</status> 和 <final_answer>；如果仍需 runtime 继续工作，请不要写 <final_answer>，改写 <progress> 和 <working_still_action>。"
         }
         "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你写了 <status>finished</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果仍需 runtime 继续工作，请不要写 finished，并提供 <progress> 和需要的 <intermediate_actions>。"
+            "检查到刚刚的输出格式有点问题：你写了 <status>finished</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果仍需 runtime 继续工作，请不要写 finished，并提供 <progress> 和需要的 <working_still_action>。"
         }
         "status_finished_must_not_include_next_actions" => {
-            "检查到刚刚的输出格式有点问题：<status>finished</status> 表示当前用户请求已完成，因此不能同时包含 <intermediate_actions>。如果还需要 runtime 执行动作，请保持 working，用 <progress> 和 <intermediate_actions> 继续；拿到 action result 后再写 finished 和 <final_answer>。"
+            "检查到刚刚的输出格式有点问题：<status>finished</status> 表示当前用户请求已完成，因此不能同时包含 <working_still_action>。如果还需要 runtime 执行动作，请保持 working，用 <progress> 和 <working_still_action> 继续；拿到 action result 后再写 finished 和 <final_answer>。"
         }
         "next_actions_required_when_status_working" => {
-            "检查到刚刚的输出格式有点问题：working 表示还需要 runtime 继续执行动作，因此必须提供 <progress> 和 <intermediate_actions>。如果当前用户请求已经完成，请改用 <status>finished</status> 和 <final_answer>。"
+            "检查到刚刚的输出格式有点问题：working 表示还需要 runtime 继续执行动作，因此必须提供 <progress> 和 <working_still_action>。如果当前用户请求已经完成，请改用 <status>finished</status> 和 <final_answer>。"
         }
         _ => {
-            "Use the XML response protocol. If work still needs runtime action, write <progress> and concrete <intermediate_actions>. If the current user request is complete, write <status>finished</status> with <final_answer>; this does not close the Timem session."
+            "Use the XML response protocol. If work still needs runtime action, write <progress> and concrete <working_still_action>. If the current user request is complete, write <status>finished</status> with <final_answer>; this does not close the Timem session."
         }
     }
 }
@@ -385,9 +381,9 @@ mod tests {
             r#"<response>
 <progress>checking</progress>
 <free_talk>state</free_talk>
-<intermediate_actions>
+<working_still_action>
 <action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
-</intermediate_actions>
+</working_still_action>
 </response>"#,
             &caps(),
         );
@@ -410,9 +406,9 @@ mod tests {
 <delta_ids>pd_a, pd_b</delta_ids>
 <summary><![CDATA[keep state]]></summary>
 </context_compact>
-<intermediate_actions>
+<working_still_action>
 <action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]]></action_json>
-</intermediate_actions>
+</working_still_action>
 </response>"#,
             &caps(),
         );

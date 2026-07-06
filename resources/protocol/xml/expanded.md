@@ -298,11 +298,11 @@ Required tag rules:
 - `<free_talk>` is optional. Use it for casual reasoning, next plans, or context
   that should remain visible to you in later prompt context. Runtime keeps it
   for you in future context.
-- `<intermediate_actions>` contains one or more `<action_json>` blocks. Each
+- `<working_still_action>` contains one or more `<action_json>` blocks. Each
   `<action_json>` block contains JSON for a single action object, an array of
   action objects, or an array of action groups. Wrap JSON in CDATA when it
   contains quotes, angle brackets, shell punctuation, or multi-line content.
-  DO NOT include `<intermediate_actions>` when `<status>` is `finished`.
+  DO NOT include `<working_still_action>` when `<status>` is `finished`.
 - `<context_compact>` lets you replace old dynamic context with a concise
   summary. Provide `<delta_ids>` plus `<summary>`. Runtime will hide the
   referenced dynamic prompt deltas and append your summary as a new dynamic
@@ -326,7 +326,7 @@ inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
   `<status>finished</status>`.
 - `<free_talk>`: optional casual reasoning, current plan, or context you want
   kept visible to you in later prompt context.
-- `<intermediate_actions>`: intermediate runtime action section. Put one or more
+- `<working_still_action>`: runtime action section for work that still needs tool execution. Put one or more
   `<action_json><![CDATA[{...}]]></action_json>` blocks inside it. The JSON
   content may be a single action object, an array of action objects, or an array
   of action groups.
@@ -363,7 +363,7 @@ Examples below are format examples ONLY:
 <response>
   <free_talk>好的，你关于 yy 的整改要求我收到了，等会我做完 xx 后再进行。</free_talk>
   <progress>正在执行用户要求的本地检查。</progress>
-  <intermediate_actions>
+  <working_still_action>
     <action_json><![CDATA[
 {
   "action": "run_bash",
@@ -374,14 +374,14 @@ Examples below are format examples ONLY:
   }
 }
     ]]></action_json>
-  </intermediate_actions>
+  </working_still_action>
 </response>
 
 ## -------- Example: receive a user task, plan, and start doing --------
 
 <response>
   <free_talk>这个任务我将会分成几个步骤进行，下面先进行目录浏览。</free_talk>
-  <intermediate_actions>
+  <working_still_action>
     <action_json><![CDATA[
 {
   "action": "run_bash",
@@ -392,7 +392,7 @@ Examples below are format examples ONLY:
   }
 }
     ]]></action_json>
-  </intermediate_actions>
+  </working_still_action>
 </response>
 
 ## -------- Example: finish one user's task, compact context --------
@@ -412,7 +412,7 @@ This is the summary....
 
 <response>
   <free_talk>我会先并行检查两个本地状态，然后轮询等待外部状态就绪。</free_talk>
-  <intermediate_actions>
+  <working_still_action>
     <action_json><![CDATA[
 [
   {
@@ -448,7 +448,7 @@ This is the summary....
   }
 ]
     ]]></action_json>
-  </intermediate_actions>
+  </working_still_action>
 </response>
 
 

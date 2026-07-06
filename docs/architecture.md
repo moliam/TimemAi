@@ -243,7 +243,7 @@ Markdown protocol recovery is intentionally bounded:
 - If the model emits a natural-language preface before a valid Markdown
   protocol section, the parser may recover from the first recognized protocol
   heading such as `## Status`, `## Progress`, `## Final_Answer`,
-  `## Intermediate_Actions`, or `## Context Compact`.
+  `## Working_Still_Action`, or `## Context Compact`.
 - A standalone fenced `action` block is treated as working protocol output.
 - Ordinary Markdown headings such as `## Notes` are not protocol. They remain a
   plain final answer unless they contain JSON/action-looking syntax that should

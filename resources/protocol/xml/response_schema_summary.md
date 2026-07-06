@@ -10,7 +10,7 @@ inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
   `<status>finished</status>`.
 - `<free_talk>`: optional casual reasoning, current plan, or context you want
   kept visible to you in later prompt context.
-- `<intermediate_actions>`: intermediate runtime action section. Put one or more
+- `<working_still_action>`: runtime action section for work that still needs tool execution. Put one or more
   `<action_json><![CDATA[{...}]]></action_json>` blocks inside it. The JSON
   content may be a single action object, an array of action objects, or an array
   of action groups.
