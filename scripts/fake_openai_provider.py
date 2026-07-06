@@ -71,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 + "\n```"
             )
-        elif "## USER" in prompt and "User supplement during current turn:" in prompt and "SUPPLEMENT_OK" in prompt:
+        elif "## USER" in prompt and "SUPPLEMENT_OK" in prompt:
             content = "## Status\nfinished\n\n## Final_Answer\nSUPPLEMENT_OK"
         else:
             time.sleep(self.response_delay)

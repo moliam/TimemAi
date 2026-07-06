@@ -23,6 +23,11 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   topic fan-out, and long Thought / Action panel rendering hot paths.
 
 ### Changed
+- Default response protocol changed from JSON to XML.
+- Consolidated core protocol and shell runtime into agent_core.
+- Reorganized capability tools into resources/capabilities/tools/.
+- Renamed working action section to working_still_action.
+- Renamed foreground bash mode to normal mode.
 
 - The Thought / Action panel now renders model `free_talk` and progress from a
   single model-response topic before action rows, keeping UI updates coherent.
@@ -35,6 +40,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   when response protocol or capability registry changes.
 
 ### Fixed
+- Tool job status routed through capmgr.
+- Bash action results naturalized for model readability.
+- Model-visible deltas simplified.
+- Worker name used as assistant heading.
+- Uncached response format trailer appended correctly.
+- CI removed Microsoft apt repos returning 403.
+- CI replaced private fixture data with safe fixtures.
 
 - Malformed model responses that require protocol repair no longer publish a
   model-response topic from the invalid response before the repair round.
@@ -56,6 +68,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Expanded envelope detection and added Markdown fence stripping for model responses.
 
 ### Fixed
+- Tool job status routed through capmgr.
+- Bash action results naturalized for model readability.
+- Model-visible deltas simplified.
+- Worker name used as assistant heading.
+- Uncached response format trailer appended correctly.
+- CI removed Microsoft apt repos returning 403.
+- CI replaced private fixture data with safe fixtures.
 
 - Replaced private fixture data with synthetic test names in core tests to pass `test_contract_check`.
 - Applied `cargo fmt` to resolve formatting diffs in CI.
@@ -71,6 +90,11 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   cache marker generation.
 
 ### Changed
+- Default response protocol changed from JSON to XML.
+- Consolidated core protocol and shell runtime into agent_core.
+- Reorganized capability tools into resources/capabilities/tools/.
+- Renamed working action section to working_still_action.
+- Renamed foreground bash mode to normal mode.
 
 - Refined the model-facing response envelope wording and regenerated the
   expanded static prompt snapshot.
@@ -78,6 +102,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   architecture and optimization notes.
 
 ### Fixed
+- Tool job status routed through capmgr.
+- Bash action results naturalized for model readability.
+- Model-visible deltas simplified.
+- Worker name used as assistant heading.
+- Uncached response format trailer appended correctly.
+- CI removed Microsoft apt repos returning 403.
+- CI replaced private fixture data with safe fixtures.
 
 - Stabilized Thought / Action panel rendering when ANSI color sequences are
   present, preventing visible-width miscalculation during long command/status
@@ -86,6 +117,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 ## [0.7.1] - 2026-07-03
 
 ### Fixed
+- Tool job status routed through capmgr.
+- Bash action results naturalized for model readability.
+- Model-visible deltas simplified.
+- Worker name used as assistant heading.
+- Uncached response format trailer appended correctly.
+- CI removed Microsoft apt repos returning 403.
+- CI replaced private fixture data with safe fixtures.
 
 - Removed Markdown fenced code blocks from the model-facing static prompt,
   response schema summary, and generated tool action examples. This reduces
@@ -96,6 +134,11 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 ## [0.7.0] - 2026-07-03
 
 ### Changed
+- Default response protocol changed from JSON to XML.
+- Consolidated core protocol and shell runtime into agent_core.
+- Reorganized capability tools into resources/capabilities/tools/.
+- Renamed working action section to working_still_action.
+- Renamed foreground bash mode to normal mode.
 
 - Runtime static prompt source now uses `resources/static_v1.md`, a Markdown
   prompt with explicit injection placeholders for response schema, tool catalog,
@@ -133,6 +176,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   and profiler cached-token accounting.
 
 ### Fixed
+- Tool job status routed through capmgr.
+- Bash action results naturalized for model readability.
+- Model-visible deltas simplified.
+- Worker name used as assistant heading.
+- Uncached response format trailer appended correctly.
+- CI removed Microsoft apt repos returning 403.
+- CI replaced private fixture data with safe fixtures.
 
 - Clarified `status:"finished"` protocol semantics in the model prompt and
   schema summary: a finished response closes the current model/action loop, so
@@ -181,6 +231,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   multi-line layout.
 
 ### Fixed
+- Tool job status routed through capmgr.
+- Bash action results naturalized for model readability.
+- Model-visible deltas simplified.
+- Worker name used as assistant heading.
+- Uncached response format trailer appended correctly.
+- CI removed Microsoft apt repos returning 403.
+- CI replaced private fixture data with safe fixtures.
 
 - Observation panel wraps long intent/action lines instead of truncating them.
 - Observation panel renders action details as child rows under the user-facing
@@ -197,6 +254,11 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   mixing current-turn deltas into the completed turn summary.
 
 ### Changed
+- Default response protocol changed from JSON to XML.
+- Consolidated core protocol and shell runtime into agent_core.
+- Reorganized capability tools into resources/capabilities/tools/.
+- Renamed working action section to working_still_action.
+- Renamed foreground bash mode to normal mode.
 
 - Static prompt exposes `memmgr` as the canonical memory/context management
   interface instead of separate memory, chat, scratch, and shrink action names.
@@ -208,12 +270,24 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 ## [0.5.2] - 2026-06-30
 
 ### Changed
+- Default response protocol changed from JSON to XML.
+- Consolidated core protocol and shell runtime into agent_core.
+- Reorganized capability tools into resources/capabilities/tools/.
+- Renamed working action section to working_still_action.
+- Renamed foreground bash mode to normal mode.
 
 - Clarified Ctrl+C and Esc cancellation behavior in shell documentation.
 
 ## [0.5.1] - 2026-06-28
 
 ### Fixed
+- Tool job status routed through capmgr.
+- Bash action results naturalized for model readability.
+- Model-visible deltas simplified.
+- Worker name used as assistant heading.
+- Uncached response format trailer appended correctly.
+- CI removed Microsoft apt repos returning 403.
+- CI replaced private fixture data with safe fixtures.
 
 - Tightened token context status labels and follow-up shell quality fixes after
   v0.5.
@@ -234,6 +308,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Feature/test management documentation with core and UI quality axes.
 
 ### Fixed
+- Tool job status routed through capmgr.
+- Bash action results naturalized for model readability.
+- Model-visible deltas simplified.
+- Worker name used as assistant heading.
+- Uncached response format trailer appended correctly.
+- CI removed Microsoft apt repos returning 403.
+- CI replaced private fixture data with safe fixtures.
 
 - Repeated shell disconnect and timeout handling problems from earlier shell
   bridge iterations.
