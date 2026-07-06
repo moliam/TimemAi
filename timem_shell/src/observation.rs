@@ -21,6 +21,8 @@ pub enum ObservationEvent {
     FinishTransient(String),
     ClearTransient,
     SettleActive,
+    ActiveWithTimer { text: String, timer: ActionTimer },
+    ActiveChildWithTimer { text: String, is_last: bool, timer: ActionTimer },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,12 +30,22 @@ pub enum ObservationLineStyle {
     Normal,
     ActiveBlink,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionTimer {
+    pub started_at_ms: u64,
+    pub timeout_ms: Option<u64>,
+    pub loop_timeout_ms: Option<u64>,
+    pub interval_ms: Option<u64>,
+    pub once_timeout_ms: Option<u64>,
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationLine {
     pub text: String,
     pub style: ObservationLineStyle,
     pub prefix: String,
+    pub timer: Option<ActionTimer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,8 +115,25 @@ impl ObservationPanel {
                 for line in &mut self.lines {
                     if line.style == ObservationLineStyle::ActiveBlink {
                         line.style = ObservationLineStyle::Normal;
+                        line.timer = None;
                     }
                 }
+            }
+            ObservationEvent::ActiveWithTimer { text, timer } => {
+                self.push_line_with_timer(
+                    text,
+                    ObservationLineStyle::ActiveBlink,
+                    OBSERVATION_LINE_PREFIX.to_string(),
+                    Some(timer),
+                );
+            }
+            ObservationEvent::ActiveChildWithTimer { text, is_last, timer } => {
+                self.push_line_with_timer(
+                    text,
+                    ObservationLineStyle::ActiveBlink,
+                    child_prefix(is_last).to_string(),
+                    Some(timer),
+                );
             }
         }
     }
@@ -120,6 +149,16 @@ impl ObservationPanel {
     }
 
     fn push_line(&mut self, text: String, style: ObservationLineStyle, prefix: String) {
+        self.push_line_with_timer(text, style, prefix, None);
+    }
+
+    fn push_line_with_timer(
+        &mut self,
+        text: String,
+        style: ObservationLineStyle,
+        prefix: String,
+        timer: Option<ActionTimer>,
+    ) {
         if text.trim().is_empty() {
             return;
         }
@@ -127,6 +166,7 @@ impl ObservationPanel {
             text,
             style,
             prefix,
+            timer,
         });
         while self.lines.len() > self.max_lines {
             self.lines.pop_front();
@@ -140,6 +180,7 @@ impl ObservationPanel {
                 text: transient_label(transient),
                 style: ObservationLineStyle::ActiveBlink,
                 prefix: OBSERVATION_LINE_PREFIX.to_string(),
+                timer: None,
             });
         }
         if lines.len() > self.max_lines {
@@ -220,6 +261,34 @@ fn transient_label(transient: &TransientObservation) -> String {
     }
 }
 
+
+fn format_countdown(timer: &ActionTimer, now_ms: u64) -> String {
+    let elapsed_ms = now_ms.saturating_sub(timer.started_at_ms);
+    
+    // For polling mode, show loop_timeout countdown
+    if let Some(loop_timeout) = timer.loop_timeout_ms {
+        let remaining = loop_timeout.saturating_sub(elapsed_ms);
+        let secs = remaining / 1000;
+        return format!("⏱ {}s", secs);
+    }
+    
+    // For normal mode, show timeout countdown
+    if let Some(timeout) = timer.timeout_ms {
+        let remaining = timeout.saturating_sub(elapsed_ms);
+        let secs = remaining / 1000;
+        return format!("⏱ {}s", secs);
+    }
+    
+    // For once_timeout in polling, show per-check timeout
+    if let Some(once_timeout) = timer.once_timeout_ms {
+        let remaining = once_timeout.saturating_sub(elapsed_ms % once_timeout);
+        let secs = remaining / 1000;
+        return format!("⏱ {}s", secs);
+    }
+    
+    String::new()
+}
+
 pub fn render_observation_panel(panel: &ObservationPanel) -> String {
     render_observation_panel_at(panel, 0)
 }
@@ -252,11 +321,19 @@ pub fn render_observation_panel_at_with_elapsed(
     out.push('\n');
     let line_width = content_width.saturating_sub(2);
     let mut render_rows = Vec::new();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
     for line in panel.visible_lines() {
+        let countdown = line.timer.as_ref().map(|t| format_countdown(t, now_ms)).unwrap_or_default();
+        let countdown_width = display_width(&countdown);
         let marker_extra_width = terminal_marker_extra_width(&line.text);
         let text_width = line_width
             .saturating_sub(display_width(&line.prefix))
-            .saturating_sub(marker_extra_width);
+            .saturating_sub(marker_extra_width)
+            .saturating_sub(countdown_width);
         let wrapped =
             wrap_display_width_limited(&line.text, text_width, MAX_WRAPPED_LINES_PER_ITEM);
         for (idx, wrapped) in wrapped.into_iter().enumerate() {
@@ -265,7 +342,8 @@ pub fn render_observation_panel_at_with_elapsed(
             } else {
                 " ".repeat(display_width(&line.prefix))
             };
-            render_rows.push((line.style, format!("{prefix}{wrapped}")));
+            let suffix = if idx == 0 && !countdown.is_empty() { format!(" {countdown}") } else { String::new() };
+            render_rows.push((line.style, format!("{prefix}{wrapped}{suffix}")));
         }
     }
     if render_rows.len() > panel.max_lines {
@@ -341,41 +419,56 @@ pub fn observation_events_from_core_topic_events(
             } else {
                 ObservationLineStyle::Normal
             };
+            let (detail_text, timer) = action_detail_for_shell(&action.kind);
             observations.extend(action_observation_pair(
                 action.intent.as_deref(),
                 child_style,
-                action_detail_for_shell(&action.kind),
+                detail_text,
+                timer,
             ));
         }
     }
     observations
 }
 
-fn action_detail_for_shell(kind: &CoreActionKind) -> String {
+fn action_detail_for_shell(kind: &CoreActionKind) -> (String, Option<ActionTimer>) {
     match kind {
-        CoreActionKind::Bash { command, mode, .. } => {
-            if mode == "poll" {
+        CoreActionKind::Bash { command, mode, interval_ms, timeout_ms, loop_timeout_ms, once_timeout_ms } => {
+            let timer = if timeout_ms.is_some() || loop_timeout_ms.is_some() || once_timeout_ms.is_some() {
+                Some(ActionTimer {
+                    started_at_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                    timeout_ms: timeout_ms.map(|t| t as u64),
+                    loop_timeout_ms: loop_timeout_ms.map(|t| t as u64),
+                    interval_ms: *interval_ms,
+                    once_timeout_ms: *once_timeout_ms,
+                })
+            } else { None };
+            let text = if mode == "poll" {
                 format!("Poll: {}", command.trim())
             } else {
                 format!("Bash: {}", command.trim())
-            }
+            };
+            (text, timer)
         }
         CoreActionKind::ShellJob { job_id } => {
-            format!("后台任务: {}", fallback_unknown(job_id.trim()))
+            (format!("后台任务: {}", fallback_unknown(job_id.trim())), None)
         }
         CoreActionKind::Memory { surface, operation } => {
-            memory_action_detail(surface.trim(), operation.trim())
+            (memory_action_detail(surface.trim(), operation.trim()), None)
         }
         CoreActionKind::Capability { op, kind, id } => {
-            capmgr_action_detail(op.trim(), kind.trim(), id.trim())
+            (capmgr_action_detail(op.trim(), kind.trim(), id.trim()), None)
         }
         CoreActionKind::SelfTool { self_type, op } => {
-            self_tool_action_detail(self_type.trim(), op.trim())
+            (self_tool_action_detail(self_type.trim(), op.trim()), None)
         }
         CoreActionKind::ChatHistory { operation } => {
-            memory_action_detail("raw_chat", operation.trim())
+            (memory_action_detail("raw_chat", operation.trim()), None)
         }
-        CoreActionKind::Other { action } => format!("Action: {action}"),
+        CoreActionKind::Other { action } => (format!("Action: {action}"), None),
     }
 }
 
@@ -443,20 +536,27 @@ fn action_observation_pair(
     intent: Option<&str>,
     child_style: ObservationLineStyle,
     child_text: String,
+    timer: Option<ActionTimer>,
 ) -> Vec<ObservationEvent> {
     let Some(intent) = intent else {
-        return match child_style {
-            ObservationLineStyle::Normal => vec![ObservationEvent::Persistent(child_text)],
-            ObservationLineStyle::ActiveBlink => vec![ObservationEvent::Active(child_text)],
+        return match (child_style, timer) {
+            (ObservationLineStyle::Normal, _) => vec![ObservationEvent::Persistent(child_text)],
+            (ObservationLineStyle::ActiveBlink, Some(t)) => vec![ObservationEvent::ActiveWithTimer { text: child_text, timer: t }],
+            (ObservationLineStyle::ActiveBlink, None) => vec![ObservationEvent::Active(child_text)],
         };
     };
     let mut events = vec![ObservationEvent::Persistent(intent.to_string())];
-    events.push(match child_style {
-        ObservationLineStyle::Normal => ObservationEvent::PersistentChild {
+    events.push(match (child_style, timer) {
+        (ObservationLineStyle::Normal, _) => ObservationEvent::PersistentChild {
             text: child_text,
             is_last: true,
         },
-        ObservationLineStyle::ActiveBlink => ObservationEvent::ActiveChild {
+        (ObservationLineStyle::ActiveBlink, Some(t)) => ObservationEvent::ActiveChildWithTimer {
+            text: child_text,
+            is_last: true,
+            timer: t,
+        },
+        (ObservationLineStyle::ActiveBlink, None) => ObservationEvent::ActiveChild {
             text: child_text,
             is_last: true,
         },
@@ -1396,4 +1496,100 @@ mod tests {
             Duration::from_millis(1200),
         );
     }
+
+    #[test]
+    fn action_timer_created_for_bash_with_timeout() {
+        let kind = CoreActionKind::Bash {
+            command: "sleep 10".to_string(),
+            mode: "normal".to_string(),
+            interval_ms: None,
+            timeout_ms: Some(10000),
+            loop_timeout_ms: None,
+            once_timeout_ms: None,
+        };
+        let (text, timer) = action_detail_for_shell(&kind);
+        assert_eq!(text, "Bash: sleep 10");
+        assert!(timer.is_some());
+        let t = timer.unwrap();
+        assert_eq!(t.timeout_ms, Some(10000));
+        assert!(t.started_at_ms > 0);
+    }
+
+    #[test]
+    fn action_timer_created_for_polling_bash() {
+        let kind = CoreActionKind::Bash {
+            command: "check_status".to_string(),
+            mode: "poll".to_string(),
+            interval_ms: Some(5000),
+            timeout_ms: None,
+            loop_timeout_ms: Some(60000),
+            once_timeout_ms: Some(10000),
+        };
+        let (text, timer) = action_detail_for_shell(&kind);
+        assert_eq!(text, "Poll: check_status");
+        assert!(timer.is_some());
+        let t = timer.unwrap();
+        assert_eq!(t.loop_timeout_ms, Some(60000));
+        assert_eq!(t.interval_ms, Some(5000));
+        assert_eq!(t.once_timeout_ms, Some(10000));
+    }
+
+    #[test]
+    fn no_timer_for_bash_without_timeout() {
+        let kind = bash_kind("echo hello");
+        let (text, timer) = action_detail_for_shell(&kind);
+        assert_eq!(text, "Bash: echo hello");
+        assert!(timer.is_none());
+    }
+
+    #[test]
+    fn format_countdown_shows_remaining_seconds() {
+        let now_ms = 1000000u64;
+        let timer = ActionTimer {
+            started_at_ms: now_ms - 3000,
+            timeout_ms: Some(10000),
+            loop_timeout_ms: None,
+            interval_ms: None,
+            once_timeout_ms: None,
+        };
+        let countdown = format_countdown(&timer, now_ms);
+        assert!(countdown.contains("7"), "Expected ~7s remaining, got: {}", countdown);
+    }
+
+    #[test]
+    fn format_countdown_uses_loop_timeout_for_polling() {
+        let now_ms = 1000000u64;
+        let timer = ActionTimer {
+            started_at_ms: now_ms - 5000,
+            timeout_ms: None,
+            loop_timeout_ms: Some(60000),
+            interval_ms: Some(5000),
+            once_timeout_ms: None,
+        };
+        let countdown = format_countdown(&timer, now_ms);
+        assert!(countdown.contains("55"), "Expected ~55s remaining, got: {}", countdown);
+    }
+
+    #[test]
+    fn observation_line_with_timer_renders_countdown() {
+        let mut panel = ObservationPanel::new(10, 80);
+        let timer = ActionTimer {
+            started_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64 - 2000,
+            timeout_ms: Some(10000),
+            loop_timeout_ms: None,
+            interval_ms: None,
+            once_timeout_ms: None,
+        };
+        panel.apply(ObservationEvent::ActiveWithTimer {
+            text: "Bash: sleep 10".to_string(),
+            timer,
+        });
+        let rendered = render_observation_panel_at(&panel, 0);
+        assert!(rendered.contains("\u{23f1}"), "Expected countdown symbol in output");
+        assert!(rendered.contains("Bash: sleep 10"));
+    }
+
 }
