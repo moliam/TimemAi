@@ -754,7 +754,7 @@ impl AgentCore {
         );
         let static_prompt = static_prompt.into();
         let capabilities = CapabilityRegistry::builtin();
-        let response_protocol = ResponseProtocolKind::Markdown;
+        let response_protocol = ResponseProtocolKind::default();
         let rendered_static_prompt = prompt_render::render_static_prompt(
             &static_prompt,
             &capabilities,

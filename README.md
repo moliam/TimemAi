@@ -153,7 +153,7 @@ Common examples:
 export TIMEM_GATEWAY_PROVIDER=aliyun
 export TIMEM_API_KEY=...
 export TIMEM_API_PROTOCOL=openai-compatible
-export TIMEM_RESPONSE_PROTOCOL=markdown
+export TIMEM_RESPONSE_PROTOCOL=xml
 export TIMEM_MAX_LLM_INPUT=100K
 export TIMEM_MAX_LLM_OUTPUT=10K
 ```
@@ -191,7 +191,7 @@ gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 
 `TIMEM_RESPONSE_PROTOCOL` chooses how the model must format its response for
 the local runtime parser. Supported values are `markdown`, `json`, and `xml`;
-the default is `markdown`.
+the default is `xml`.
 
 `TIMEM_WORK_INSTRUCTIONS` controls whether Timem loads `AGENTS.md` and
 `CLAUDE.md` from the current working directory into agent context. Supported

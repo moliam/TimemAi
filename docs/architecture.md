@@ -189,7 +189,7 @@ protocol prompt prose.
 - `resources/system_prompt/system_prompt.md`: Markdown static prompt shell.
   It is the stable model-visible outer contract and contains placeholders for
   protocol and capability injection.
-- `resources/protocol/markdown/`: default model response protocol prompt
+- `resources/protocol/markdown/`: Markdown response protocol prompt
   injection, schema summary, and expanded prompt snapshot.
 - `resources/protocol/json/`: JSON response protocol prompt injection, schema
   summary, and expanded prompt snapshot.
@@ -229,7 +229,7 @@ define runtime behavior, repair boundaries, and tests; they must stay aligned
 with the resource text and generated expanded snapshots.
 
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
-`--response-protocol`. The default is `markdown`; `json` and `xml` remain
+`--response-protocol`. The default is `xml`; `markdown` and `json` remain
 available. All suites must produce the same internal `ParsedEnvelope` semantics
 for the same user-visible capability: status/final answer, progress, free_talk
 retention, actions, and `context_compact`.
@@ -687,7 +687,7 @@ Limitations:
 
 The model does not call Rust functions directly. It sends one response in the
 currently selected response protocol. `TIMEM_RESPONSE_PROTOCOL` selects the
-model response protocol (`markdown` by default; `json` and `xml` optional). This
+model response protocol (`xml` by default; `markdown` and `json` optional). This
 is separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
 
 Each response parses into the same runtime envelope: optional `status`, optional

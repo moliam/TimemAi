@@ -1581,6 +1581,7 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("final_answer_without_status"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"final_answer":"这是最终结论。"}"#),
@@ -1611,6 +1612,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("finished_without_final_answer"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"finished","report_job_progress":"完成了"}"#),
@@ -1638,6 +1640,7 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("repair_focus_previous_response"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("总结", None);
     let raw = format!(
         "BEGIN_SHOULD_NOT_APPEAR{}{{\"report_job_progress\":\"BAD_JSON_FOCUS\nTAIL_NEAR_FOCUS\"}}{}END_SHOULD_NOT_APPEAR",
@@ -1745,6 +1748,7 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("repair_action_like"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("你好", None);
     // Contains braces but invalid JSON -> triggers repair
     let step = core.apply_model_response(LlmResponse {
@@ -1789,6 +1793,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("truncated_repair"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("写一个很长的报告", None);
     let step = core.apply_model_response(LlmResponse {
         content: "{\"report_job_progress\":\"partial".to_string(),
@@ -1965,6 +1970,7 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("prose_then_fenced_json"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("把下载目录视频做 3 倍加速", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -2138,6 +2144,7 @@ fn malformed_complex_protocol_is_blocked_without_raw_leak() {
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("malformed_complex_protocol"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("展示各种奇怪符号", None);
     let step = core.apply_model_response(LlmResponse {
         content: "```json\n{\"report_job_progress\":\"bad dangling \\ path and raw \n newline"
@@ -4729,6 +4736,7 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("response_schema_prompt_injection"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Markdown);
     let prompt = match core.begin_turn("hello", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
@@ -4846,11 +4854,25 @@ fn rendered_static_prompt_preserves_source_rule_order() {
 #[test]
 fn response_protocol_kind_controls_rendered_protocol_section() {
     let template = include_str!("../../resources/system_prompt/system_prompt.md");
+    let mut default_core = AgentCore::new(
+        template,
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("response_protocol_default"),
+    );
+    let default_prompt = match default_core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(default_prompt.contains("The top-level response is XML, not JSON or Markdown."));
+    assert!(default_prompt.contains("protocol-compliant response in XML format"));
+    assert!(!default_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
+
     let mut markdown_core = AgentCore::new(
         template,
         profile("aliyun", "qwen-plus"),
         tmp_dir("response_protocol_markdown"),
     );
+    markdown_core.set_response_protocol(ResponseProtocolKind::Markdown);
     let markdown_prompt = match markdown_core.begin_turn("hello", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
@@ -5191,6 +5213,7 @@ fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("static_prompt_example_heading_levels"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Markdown);
     let prompt = match core.begin_turn("请只回答 ok", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),

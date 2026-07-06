@@ -89,7 +89,7 @@ impl LocalLLMKeyFile {
             max_llm_output_tokens: 512,
             max_llm_input_tokens: 100_000,
             api_protocol: ApiProtocol::OpenAiCompatible,
-            response_protocol: crate::ResponseProtocolKind::Markdown,
+            response_protocol: crate::ResponseProtocolKind::default(),
         }
     }
 }
@@ -169,7 +169,7 @@ pub fn provider_config_from_sources(
         max_llm_output_tokens,
         max_llm_input_tokens,
         api_protocol,
-        response_protocol: crate::ResponseProtocolKind::Markdown,
+        response_protocol: crate::ResponseProtocolKind::default(),
     })
 }
 

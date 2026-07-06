@@ -772,6 +772,10 @@ mod tests {
             "https://dashscope.aliyuncs.com/compatible-mode/v1"
         );
         assert_eq!(config.api_protocol, ApiProtocol::OpenAiCompatible);
+        assert_eq!(
+            config.response_protocol,
+            agent_core::ResponseProtocolKind::Xml
+        );
     }
 
     #[test]
@@ -1680,7 +1684,7 @@ mod tests {
         let event = agent_core::core_initialized_topic_event(
             "session_a",
             &profile,
-            "markdown",
+            "xml",
             100_000,
             50,
             6,
@@ -1692,7 +1696,7 @@ mod tests {
         assert_eq!(message.level, HostStatusLevel::Info);
         assert!(message.text.contains("Timem Core 启动成功"));
         assert!(message.text.contains("aliyun:qwen-plus"));
-        assert!(message.text.contains("response protocol=markdown"));
+        assert!(message.text.contains("response protocol=xml"));
         assert!(message.text.contains("tools=6"));
 
         let rendered = render_shell_status_bar(&message);

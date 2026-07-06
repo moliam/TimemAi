@@ -16,9 +16,11 @@ pub enum ResponseProtocolKind {
 impl ResponseProtocolKind {
     pub fn from_name(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
+            "" => Self::default(),
+            "markdown" | "md" | "markdown_v1" => Self::Markdown,
             "json" | "json_v1" | "response_v1" => Self::Json,
             "xml" | "xml_v1" => Self::Xml,
-            _ => Self::Markdown,
+            _ => Self::default(),
         }
     }
 
@@ -44,6 +46,12 @@ impl ResponseProtocolKind {
             Self::Json => &json_suite::JsonSuiteV1,
             Self::Xml => &xml_suite::XmlSuiteV1,
         }
+    }
+}
+
+impl Default for ResponseProtocolKind {
+    fn default() -> Self {
+        Self::Xml
     }
 }
 

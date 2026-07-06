@@ -1283,6 +1283,7 @@ finished
             test_profile(),
             &dir,
         );
+        core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
         core.set_response_protocol(crate::ResponseProtocolKind::Json);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
@@ -1343,6 +1344,7 @@ finished
             test_profile(),
             &dir,
         );
+        core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
@@ -1496,6 +1498,7 @@ finished
         let dir = tmp_dir("host_runtime_context");
         let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([Ok(llm(
@@ -1738,6 +1741,7 @@ finished
         let dir = tmp_dir("protocol_repair_failure_stop");
         let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
@@ -1807,6 +1811,7 @@ finished
             test_profile(),
             &dir,
         );
+        core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
