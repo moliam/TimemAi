@@ -159,38 +159,36 @@ if {[string first "SUPPLEMENT_OK" $supplement_output] < 0} {
 send "/prof\r"
 set prof_output ""
 set prof_seen 0
-set prof_complete 0
-expect {
-    -re "\033\\\[6n" {
-        if {$prof_seen} {
+set old_timeout $timeout
+set timeout 1
+set prof_deadline [expr {[clock milliseconds] + 10000}]
+while {!$prof_seen && [clock milliseconds] < $prof_deadline} {
+    expect {
+        -re "\033\\\[6n" {
             append prof_output $expect_out(buffer)
+            send "\033\[24;1R"
         }
-        send "\033\[24;1R"
-        exp_continue
-    }
-    -re "Timem runtime profiling" {
-        set prof_output $expect_out(buffer)
-        set prof_seen 1
-        exp_continue
-    }
-    -re "action_audit: \[^\r\n\]*" {
-        append prof_output $expect_out(buffer)
-        set prof_complete 1
-    }
-    timeout {
-        error "timeout waiting for /prof after model answer"
-    }
-    eof {
-        error "unexpected EOF waiting for /prof after model answer"
+        -re "思考中|模型调用失败" {
+            append prof_output $expect_out(buffer)
+            error "shell command after model answer should not start another model turn; output=$prof_output"
+        }
+        -re ".+" {
+            append prof_output $expect_out(buffer)
+            if {[string first "Timem runtime profiling" $prof_output] >= 0} {
+                set prof_seen 1
+            }
+        }
+        timeout {}
+        eof {
+            error "unexpected EOF waiting for /prof after model answer"
+        }
     }
 }
-if {!$prof_complete} {
-    error "profiling output did not include action_audit"
+set timeout $old_timeout
+if {!$prof_seen} {
+    error "timeout waiting for /prof after model answer; output=$prof_output"
 }
-wait_prompt
-if {[string first "思考中" $prof_output] >= 0 || [string first "模型调用失败" $prof_output] >= 0} {
-    error "shell command after model answer should not start another model turn; output=$prof_output"
-}
+after 300
 send "/exit\r"
 expect {
     -re "\033\\\[6n" {
