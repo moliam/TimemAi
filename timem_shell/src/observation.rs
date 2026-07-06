@@ -2001,6 +2001,52 @@ mod tests {
     }
 
     #[test]
+    fn performance_guard_topic_interface_rate_mix_render_bounded() {
+        let long_text = "topic pressure 内容 with ascii 中文 ".repeat(40);
+        let mut topic_events = Vec::new();
+        for idx in 0..20 {
+            topic_events.push(model_response_topic(
+                &format!("计划 {idx}: {long_text}"),
+                &format!("进度 {idx}: {long_text}"),
+            ));
+        }
+        for idx in 0..300 {
+            topic_events.push(action_topic(
+                "run_bash",
+                Some(&format!("执行压力动作 {idx}")),
+                bash_kind(&format!("printf '{}'", idx)),
+                true,
+            ));
+        }
+        let supplement_events = (0..20)
+            .map(|idx| ObservationEvent::Persistent(format!("ⓘ 收到用户补充 {idx}: {long_text}")))
+            .collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let mut panel = ObservationPanel::new(20, 100);
+        for chunk in topic_events.chunks(16) {
+            panel.apply_all(observation_events_from_core_topic_events(chunk));
+            panel.apply(ObservationEvent::SettleActive);
+            let rendered = render_observation_panel_at_with_elapsed(&panel, 1, Some("00:09"));
+            assert!(rendered.len() < 14_000);
+            assert!(!rendered.contains("run_bash"));
+        }
+        panel.apply_all(supplement_events);
+        let rendered = render_observation_panel_at_with_elapsed(&panel, 2, Some("00:10"));
+        assert!(rendered.len() < 14_000);
+        let widths = rendered.lines().map(display_width).collect::<Vec<_>>();
+        assert!(
+            widths.iter().all(|width| *width == 100),
+            "topic pressure render should keep aligned rows: {widths:?}\n{rendered}"
+        );
+        assert_perf_under(
+            "topic interface 20 response 300 action 20 supplement render bounded",
+            started,
+            Duration::from_millis(1200),
+        );
+    }
+
+    #[test]
     fn action_timer_created_for_bash_with_timeout() {
         let kind = CoreActionKind::Bash {
             command: "sleep 10".to_string(),

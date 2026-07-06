@@ -164,7 +164,8 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         }
     }
     let report_job_progress = value
-        .get("report_job_progress")
+        .get("progress")
+        .or_else(|| value.get("report_job_progress"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
@@ -174,12 +175,13 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         .unwrap_or("")
         .to_string();
     let status = value.get("status").and_then(Value::as_str);
-    let continue_work = match status {
+    let status_normalized = status.map(|raw| raw.trim().to_ascii_lowercase());
+    let continue_work = match status_normalized.as_deref() {
         Some("working") => true,
-        Some("finished") => false,
+        Some("all_finished") | Some("finished") => false,
         Some(_) => {
             repair_issue =
-                repair_issue.or_else(|| Some("status_must_be_working_or_finished".to_string()));
+                repair_issue.or_else(|| Some("status_must_be_working_or_all_finished".to_string()));
             true
         }
         None => true,
@@ -213,60 +215,68 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     let mut next_actions = Vec::new();
     let mut action_groups = Vec::new();
     let bare_action = value.get("action").and_then(Value::as_str).is_some();
-    if let Some(groups_value) = value.get("action_groups") {
-        if let Some(groups) = groups_value.as_array() {
-            for (group_idx, group) in groups.iter().enumerate() {
-                let Some(group_object) = group.as_object() else {
-                    repair_issue = Some(format!("action_groups[{group_idx}]_must_be_object"));
-                    break;
-                };
-                let order = group_object
-                    .get("order")
-                    .and_then(Value::as_str)
-                    .map(ActionGroupOrder::from_name)
-                    .unwrap_or(ActionGroupOrder::Sequential);
-                let Some(actions) = group_object.get("actions").and_then(Value::as_array) else {
-                    repair_issue = Some(format!("action_groups[{group_idx}].actions_required"));
-                    break;
-                };
-                let group_intent = group_object.get("intent").and_then(Value::as_str);
-                let mut parsed_group_actions = Vec::new();
-                for (action_idx, action) in actions.iter().enumerate() {
-                    let label = format!("action_groups[{group_idx}].actions[{action_idx}]");
-                    match parse_action_value_with_fallback(
-                        action,
-                        &label,
-                        capabilities,
-                        group_intent,
-                    ) {
-                        Ok(action) => {
-                            next_actions.push(action.clone());
-                            parsed_group_actions.push(action);
-                        }
-                        Err(issue) => {
-                            repair_issue = Some(issue);
-                            break;
+    if value.get("working_still_action").is_none() {
+        if let Some(groups_value) = value.get("action_groups") {
+            if let Some(groups) = groups_value.as_array() {
+                for (group_idx, group) in groups.iter().enumerate() {
+                    let Some(group_object) = group.as_object() else {
+                        repair_issue = Some(format!("action_groups[{group_idx}]_must_be_object"));
+                        break;
+                    };
+                    let order = group_object
+                        .get("order")
+                        .and_then(Value::as_str)
+                        .map(ActionGroupOrder::from_name)
+                        .unwrap_or(ActionGroupOrder::Sequential);
+                    let Some(actions) = group_object.get("actions").and_then(Value::as_array)
+                    else {
+                        repair_issue = Some(format!("action_groups[{group_idx}].actions_required"));
+                        break;
+                    };
+                    let group_intent = group_object.get("intent").and_then(Value::as_str);
+                    let mut parsed_group_actions = Vec::new();
+                    for (action_idx, action) in actions.iter().enumerate() {
+                        let label = format!("action_groups[{group_idx}].actions[{action_idx}]");
+                        match parse_action_value_with_fallback(
+                            action,
+                            &label,
+                            capabilities,
+                            group_intent,
+                        ) {
+                            Ok(action) => {
+                                next_actions.push(action.clone());
+                                parsed_group_actions.push(action);
+                            }
+                            Err(issue) => {
+                                repair_issue = Some(issue);
+                                break;
+                            }
                         }
                     }
+                    if repair_issue.is_some() {
+                        break;
+                    }
+                    action_groups.push(ParsedActionGroup {
+                        order,
+                        actions: parsed_group_actions,
+                    });
                 }
-                if repair_issue.is_some() {
-                    break;
-                }
-                action_groups.push(ParsedActionGroup {
-                    order,
-                    actions: parsed_group_actions,
-                });
+            } else if !groups_value.is_null() {
+                repair_issue = Some("action_groups_must_be_array".to_string());
             }
-        } else if !groups_value.is_null() {
-            repair_issue = Some("action_groups_must_be_array".to_string());
         }
     }
     let action_values = if action_groups.is_empty() {
-        if let Some(next_actions_value) = value.get("next_actions") {
-            if let Some(actions) = next_actions_value.as_array() {
+        if let Some(working_actions_value) = value
+            .get("working_still_action")
+            .or_else(|| value.get("next_actions"))
+        {
+            if let Some(actions) = working_actions_value.as_array() {
                 Some(actions.iter().collect::<Vec<_>>())
-            } else if !next_actions_value.is_null() {
-                repair_issue = Some("next_actions_must_be_array".to_string());
+            } else if working_actions_value.is_object() {
+                Some(vec![working_actions_value])
+            } else if !working_actions_value.is_null() {
+                repair_issue = Some("working_still_action_must_be_object_or_array".to_string());
                 None
             } else {
                 None
@@ -289,12 +299,12 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                     .unwrap_or(ActionGroupOrder::Sequential);
                 let group_intent = action.get("intent").and_then(Value::as_str);
                 let Some(group_actions) = action.get("actions").and_then(Value::as_array) else {
-                    repair_issue = Some(format!("next_actions[{idx}].actions_required"));
+                    repair_issue = Some(format!("actions[{idx}].actions_required"));
                     break;
                 };
                 let mut parsed_group_actions = Vec::new();
                 for (action_idx, action) in group_actions.iter().enumerate() {
-                    let label = format!("next_actions[{idx}].actions[{action_idx}]");
+                    let label = format!("actions[{idx}].actions[{action_idx}]");
                     match parse_action_value_with_fallback(
                         action,
                         &label,
@@ -319,7 +329,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                     actions: parsed_group_actions,
                 });
             } else {
-                match parse_action_value(action, &format!("next_actions[{idx}]"), capabilities) {
+                match parse_action_value(action, &format!("actions[{idx}]"), capabilities) {
                     Ok(action) => {
                         next_actions.push(action.clone());
                         action_groups.push(ParsedActionGroup {
@@ -365,7 +375,10 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     }
     if repair_issue.is_none()
         && continue_work
-        && status != Some("finished")
+        && !matches!(
+            status_normalized.as_deref(),
+            Some("finished") | Some("all_finished")
+        )
         && !final_answer.trim().is_empty()
     {
         repair_issue = Some("final_answer_requires_status_finished".to_string());
@@ -541,7 +554,7 @@ mod tests {
     #[test]
     fn unwraps_common_fields_envelope_without_repair() {
         let env = parse_envelope(
-            r#"{"fields":{"status":"finished","final_answer":"ok"}}"#,
+            r#"{"fields":{"status":"ALL_FINISHED","final_answer":"ok"}}"#,
             &caps(),
         );
 
@@ -553,7 +566,7 @@ mod tests {
     #[test]
     fn parses_context_compact_field() {
         let env = parse_envelope(
-            r#"{"report_job_progress":"整理上下文","context_compact":{"delta_ids":["pd_a"],"summary":"keep important state"},"next_actions":[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]}"#,
+            r#"{"progress":"整理上下文","context_compact":{"delta_ids":["pd_a"],"summary":"keep important state"},"working_still_action":{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}}"#,
             &caps(),
         );
 
@@ -567,7 +580,7 @@ mod tests {
     #[test]
     fn parses_action_groups_and_flattens_actions_for_notifications() {
         let env = parse_envelope(
-            r#"{"report_job_progress":"checking","action_groups":[{"order":"parallel","actions":[{"action":"run_bash","intent":"Check A.","args":{"cmd":"printf a"}},{"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b"}}]},{"order":"sequential","actions":[{"action":"run_bash","intent":"Check C.","args":{"cmd":"printf c"}}]}]}"#,
+            r#"{"progress":"checking","working_still_action":[{"order":"parallel","actions":[{"action":"run_bash","intent":"Check A.","args":{"cmd":"printf a"}},{"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b"}}]},{"order":"sequential","actions":[{"action":"run_bash","intent":"Check C.","args":{"cmd":"printf c"}}]}]}"#,
             &caps(),
         );
 
@@ -584,30 +597,30 @@ mod tests {
         let cases = [
             (
                 r#"{"status":"done","final_answer":"ok"}"#,
-                "status_must_be_working_or_finished",
+                "status_must_be_working_or_all_finished",
             ),
             (
-                r#"{"status":"finished"}"#,
+                r#"{"status":"ALL_FINISHED"}"#,
                 "final_answer_required_when_status_finished",
             ),
             (
-                r#"{"status":"finished","final_answer":"ok","debug":"leak"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"ok","debug":"leak"}"#,
                 "unexpected_top_level_field:debug",
             ),
             (
-                r#"{"status":"working","report_job_progress":"checking","next_actions":{"action":"run_bash","intent":"List.","args":{"cmd":"ls"}}}"#,
-                "next_actions_must_be_array",
+                r#"{"status":"working","progress":"checking","working_still_action":"bad"}"#,
+                "working_still_action_must_be_object_or_array",
             ),
             (
-                r#"{"status":"working","report_job_progress":"checking","next_actions":[{"action":"run_bash","intent":"List."}]}"#,
-                "next_actions[0].args_required",
+                r#"{"status":"working","progress":"checking","working_still_action":[{"action":"run_bash","intent":"List."}]}"#,
+                "actions[0].args_required",
             ),
             (
-                r#"{"status":"working","report_job_progress":"checking","next_actions":[{"action":"fetch_web_page","intent":"Fetch.","args":{"url":"https://example.test"}}]}"#,
+                r#"{"status":"working","progress":"checking","working_still_action":[{"action":"fetch_web_page","intent":"Fetch.","args":{"url":"https://example.test"}}]}"#,
                 "unsupported_action:fetch_web_page",
             ),
             (
-                r#"{"continue":false,"report_job_progress":"done"}"#,
+                r#"{"continue":false,"progress":"done"}"#,
                 "unexpected_top_level_field:continue",
             ),
             (
@@ -615,15 +628,15 @@ mod tests {
                 "unexpected_top_level_field:response_to_user",
             ),
             (
-                r#"{"status":"working","report_job_progress":"checking","next_actions":[],"acceptance_check":{"is_satisfied":false}}"#,
+                r#"{"status":"working","progress":"checking","working_still_action":[],"acceptance_check":{"is_satisfied":false}}"#,
                 "unexpected_top_level_field:acceptance_check",
             ),
             (
-                r#"{"status":"finished","final_answer":"◉ 准备汇报结果..."}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"◉ 准备汇报结果..."}"#,
                 "final_answer_must_not_start_with_runtime_progress_marker",
             ),
             (
-                r#"{"status":"working","report_job_progress":"compact","context_compact":{"delta_ids":["pd_a"]}}"#,
+                r#"{"status":"working","progress":"compact","context_compact":{"delta_ids":["pd_a"]}}"#,
                 "context_compact[0].summary_required",
             ),
         ];
@@ -658,7 +671,7 @@ mod tests {
     #[test]
     fn malformed_truncated_json_returns_invalid_json_without_panic() {
         let env = parse_envelope(
-            r#"{"status":"working","report_job_progress":"正在查询","next_actions":[{"action":"memmgr","intent":"查询"#,
+            r#"{"status":"working","progress":"正在查询","working_still_action":[{"action":"memmgr","intent":"查询"#,
             &caps(),
         );
 
@@ -672,8 +685,10 @@ fn is_allowed_response_top_level_key(key: &str) -> bool {
     matches!(
         key,
         "status"
+            | "progress"
             | "report_job_progress"
             | "final_answer"
+            | "working_still_action"
             | "next_actions"
             | "action_groups"
             | "free_talk"
@@ -691,23 +706,23 @@ pub fn protocol_repair_instruction(issue: &str) -> &'static str {
         issue,
         "unsupported_action:final_answer" | "unsupported_action:final_response"
     ) {
-        return "检查到刚刚的输出格式有点问题：final_answer/final_response 不是工具 action。最终回答请使用 status:\"finished\" 和 final_answer 顶层字段，不要放在 next_actions/action 中。Return exactly one valid JSON object. Do not use markdown fences.";
+        return "检查到刚刚的输出格式有点问题：final_answer/final_response 不是工具 action。最终回答请使用 status:\"ALL_FINISHED\" 和 final_answer 顶层字段，不要放在 working_still_action/action 中。Return exactly one valid JSON object. Do not use markdown fences.";
     }
     match issue {
         "final_answer_requires_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你提供了 final_answer，但缺少 status:\"finished\"。如果当前用户请求已经完成，请同时提供 status:\"finished\" 和 final_answer；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请去掉 final_answer，并提供 next_actions。Return exactly one valid JSON object. Do not use markdown fences."
+            "检查到刚刚的输出格式有点问题：你提供了 final_answer，但缺少 status:\"ALL_FINISHED\"。如果所有用户的 open/pending 请求已经完成，请同时提供 status:\"ALL_FINISHED\" 和 final_answer；这不会关闭 Timem session。如果仍需要 runtime 继续工作，请去掉 final_answer，并提供 working_still_action。Return exactly one valid JSON object. Do not use markdown fences."
         }
         "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你提供了 status:\"finished\"，但缺少 final_answer。如果当前用户请求已经完成，请同时提供 status:\"finished\" 和 final_answer；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要使用 status:\"finished\"，并提供 next_actions。Return exactly one valid JSON object. Do not use markdown fences."
+            "检查到刚刚的输出格式有点问题：你提供了 status:\"ALL_FINISHED\"，但缺少 final_answer。如果所有用户的 open/pending 请求已经完成，请同时提供 status:\"ALL_FINISHED\" 和 final_answer；这不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要使用 status:\"ALL_FINISHED\"，并提供 working_still_action。Return exactly one valid JSON object. Do not use markdown fences."
         }
         "status_finished_must_not_include_next_actions" => {
-            "检查到刚刚的输出格式有点问题：status:\"finished\" 表示当前用户请求已完成，因此不能同时包含 next_actions。如果还需要 runtime 执行动作，请使用 status:\"working\" 或省略 status，并提供 next_actions；拿到 action result 后再用 status:\"finished\" + final_answer 给最终答案。Return exactly one valid JSON object. Do not use markdown fences."
+            "检查到刚刚的输出格式有点问题：status:\"ALL_FINISHED\" 表示所有用户的 open/pending 请求已完成，因此不能同时包含 working_still_action。如果还需要 runtime 执行动作，请使用 status:\"working\" 或省略 status，并提供 working_still_action；拿到 action result 后再用 status:\"ALL_FINISHED\" + final_answer 给最终答案。Return exactly one valid JSON object. Do not use markdown fences."
         }
         "next_actions_required_when_status_working" => {
-            "检查到刚刚的输出格式有点问题：status:\"working\" 表示还需要 runtime 继续执行动作，因此必须提供 next_actions。如果当前用户请求已经完成，请改用 status:\"finished\" 和 final_answer；finished 不会关闭 Timem session。Return exactly one valid JSON object. Do not use markdown fences."
+            "检查到刚刚的输出格式有点问题：status:\"working\" 表示还需要 runtime 继续执行动作，因此必须提供 working_still_action。如果所有用户的 open/pending 请求已经完成，请改用 status:\"ALL_FINISHED\" 和 final_answer。Return exactly one valid JSON object. Do not use markdown fences."
         }
         _ => {
-            "Return exactly one valid JSON object. Omitted status defaults to working; include next_actions when working. Use status:\"finished\" together with final_answer when the current user request is complete; this does not close the Timem session. Do not use markdown fences."
+            "Return exactly one valid JSON object. Omitted status defaults to working; include working_still_action when working. Use status:\"ALL_FINISHED\" together with final_answer when all user's open and pending requests are complete. Do not use markdown fences."
         }
     }
 }
@@ -717,7 +732,7 @@ pub fn protocol_repair_reason(issue: &str) -> &'static str {
         issue,
         "unsupported_action:final_answer" | "unsupported_action:final_response"
     ) {
-        return "The previous model response tried to use final_answer/final_response as a tool action, but final answers must use status:\"finished\" with final_answer.";
+        return "The previous model response tried to use final_answer/final_response as a tool action, but final answers must use status:\"ALL_FINISHED\" with final_answer.";
     }
     match issue {
         "truncated_model_output" => {
@@ -728,13 +743,13 @@ pub fn protocol_repair_reason(issue: &str) -> &'static str {
             "The previous model response parsed as JSON, but the root value was not an object."
         }
         "final_answer_requires_status_finished" => {
-            "The previous model response included final_answer without status:\"finished\"."
+            "The previous model response included final_answer without status:\"ALL_FINISHED\"."
         }
         "final_answer_required_when_status_finished" => {
-            "The previous model response included status:\"finished\" without final_answer."
+            "The previous model response included status:\"ALL_FINISHED\" without final_answer."
         }
         "status_finished_must_not_include_next_actions" => {
-            "The previous model response used status:\"finished\" together with next_actions. Finished responses must not request more runtime actions."
+            "The previous model response used status:\"ALL_FINISHED\" together with working_still_action. Finished responses must not request more runtime actions."
         }
         "final_answer_must_not_start_with_runtime_progress_marker" => {
             "The final_answer started with a runtime UI progress marker instead of user-facing content."
@@ -777,10 +792,12 @@ fn repair_focus_char_index(issue: &str, text: &str) -> Option<usize> {
     let marker = match issue {
         "final_answer_requires_status_finished"
         | "final_answer_must_not_start_with_runtime_progress_marker" => "final_answer",
-        "final_answer_required_when_status_finished" | "status_must_be_working_or_finished" => {
+        "final_answer_required_when_status_finished" | "status_must_be_working_or_all_finished" => {
             "status"
         }
-        issue if issue.starts_with("next_actions") => "next_actions",
+        issue if issue.starts_with("next_actions") || issue.starts_with("actions") => {
+            "working_still_action"
+        }
         issue if issue.contains("memmgr") => "memmgr",
         issue if issue.contains("capmgr") => "capmgr",
         _ => "",
@@ -970,7 +987,9 @@ fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::
 pub(crate) fn is_likely_response_envelope(value: &Value) -> bool {
     let normalized = unwrap_fields_envelope(value.clone());
     normalized.as_object().is_some_and(|object| {
-        object.contains_key("report_job_progress")
+        object.contains_key("progress")
+            || object.contains_key("report_job_progress")
+            || object.contains_key("working_still_action")
             || object.contains_key("next_actions")
             || object.contains_key("final_answer")
             || object.contains_key("status")

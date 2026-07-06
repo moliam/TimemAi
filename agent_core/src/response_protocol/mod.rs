@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn json_markdown_xml_protocols_parse_same_final_answer() {
         assert_protocols_equivalent(
-            r#"{"status":"finished","final_answer":"done"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
             "## Status\nfinished\n\n## Final_Answer\ndone",
             "<response><status>ALL_FINISHED</status><final_answer>done</final_answer></response>",
         );
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn json_markdown_xml_protocols_parse_same_working_actions() {
         assert_protocols_equivalent(
-            r#"{"report_job_progress":"checking","free_talk":"state","next_actions":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
+            r#"{"progress":"checking","free_talk":"state","working_still_action":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Progress\nchecking\n\n## Free_talk\nstate\n\n## Working_Still_Action\n```action\n{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}\n```\n```action\n{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}\n```",
             r#"<response><progress>checking</progress><free_talk>state</free_talk><working_still_action><action_json><![CDATA[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}}]]></action_json><action_json><![CDATA[{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
         );
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn json_markdown_xml_protocols_parse_same_bare_action_array() {
         assert_protocols_equivalent(
-            r#"{"report_job_progress":"checking","next_actions":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
+            r#"{"progress":"checking","working_still_action":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Progress\nchecking\n\n## Working_Still_Action\n[{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}},{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]",
             r#"<response><progress>checking</progress><working_still_action><![CDATA[[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]]]></working_still_action></response>"#,
         );
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn json_markdown_xml_protocols_parse_same_mixed_action_group_array() {
         assert_protocols_equivalent(
-            r#"{"report_job_progress":"checking","next_actions":[{"order":"parallel","intent":"Check both.","actions":[{"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},{"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b","timeout_ms":5000}}]},{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
+            r#"{"progress":"checking","working_still_action":[{"order":"parallel","intent":"Check both.","actions":[{"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},{"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b","timeout_ms":5000}}]},{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Progress\nchecking\n\n## Working_Still_Action\n[{\"order\":\"parallel\",\"intent\":\"Check both.\",\"actions\":[{\"action\":\"run_bash\",\"args\":{\"cmd\":\"printf a\",\"timeout_ms\":5000}},{\"action\":\"run_bash\",\"intent\":\"Check B.\",\"args\":{\"cmd\":\"printf b\",\"timeout_ms\":5000}}]},{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]",
             r#"<response><progress>checking</progress><working_still_action><action_json><![CDATA[[{"order":"parallel","intent":"Check both.","actions":[{"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},{"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b","timeout_ms":5000}}]},{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json></working_still_action></response>"#,
         );
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn json_markdown_xml_protocols_parse_same_context_compact() {
         assert_protocols_equivalent(
-            r#"{"report_job_progress":"compact","context_compact":{"delta_ids":["pd_a"],"summary":"keep state"},"next_actions":[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]}"#,
+            r#"{"progress":"compact","context_compact":{"delta_ids":["pd_a"],"summary":"keep state"},"working_still_action":{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}}"#,
             "## Progress\ncompact\n\n## Context Compact\ndelta_ids: pd_a\nsummary:\nkeep state\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```",
             r#"<response><progress>compact</progress><context_compact><delta_ids>pd_a</delta_ids><summary>keep state</summary></context_compact><working_still_action><action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]]></action_json></working_still_action></response>"#,
         );
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn json_markdown_xml_protocols_repair_same_finished_with_actions() {
         let json_env = parse_json(
-            r#"{"status":"finished","final_answer":"done","next_actions":[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}]}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"done","working_still_action":{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}}"#,
         );
         let markdown_env = parse_markdown(
             "## Status\nfinished\n\n## Final_Answer\ndone\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Verify output.\",\"args\":{\"cmd\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```",
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn json_markdown_xml_protocols_repair_same_working_without_actions() {
-        let json_env = parse_json(r#"{"status":"working","report_job_progress":"checking"}"#);
+        let json_env = parse_json(r#"{"status":"working","progress":"checking"}"#);
         let markdown_env = parse_markdown("## Status\nworking\n\n## Progress\nchecking");
         let xml_env =
             parse_xml("<response><status>working</status><progress>checking</progress></response>");
@@ -464,7 +464,7 @@ mod tests {
             "intent": "Check files.",
             "args": {"cmd": "pwd", "timeout_ms": 5000}
         });
-        let json_env = parse_json(&json!({"next_actions":[action.clone()]}).to_string());
+        let json_env = parse_json(&json!({"working_still_action":[action.clone()]}).to_string());
         let markdown_env = parse_markdown(&format!(
             "## Working_Still_Action\n```action\n{}\n```",
             action

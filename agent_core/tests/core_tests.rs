@@ -162,7 +162,7 @@ fn prompt_is_append_only_and_segmented() {
     assert!(!first.contains("{\"segment_type\""));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"你好"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"你好"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -190,7 +190,7 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
 
     let _ = core.begin_turn("你好", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"你好"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"你好"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -234,7 +234,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     core.set_max_rounds(1);
     let _ = core.begin_turn("需要两步完成", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Need evidence.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Need evidence.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -280,7 +280,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     assert!(!prompt.contains("rounds_remaining: 50"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Need evidence after continuation.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Need evidence after continuation.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -304,7 +304,7 @@ fn round_limit_stop_resolution_is_core_owned() {
     core.set_max_rounds(1);
     let _ = core.begin_turn("需要两步完成", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Need evidence.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Need evidence.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -463,7 +463,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
 
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_700),
         truncated: false,
@@ -524,7 +524,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
 
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_700),
         truncated: false,
@@ -538,7 +538,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Run local command under configured approval policy.","args":{"cmd":"printf configured"}}]}"#,
+            r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Run local command under configured approval policy.","args":{"cmd":"printf configured"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -582,7 +582,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     );
     let _ = core.begin_turn("需要推理一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":"先分析","status":"finished","final_answer":"结论"}"#),
+        content: scored(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"结论"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -685,7 +685,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
     let _ = core.begin_turn("我的测试代号是什么？", None);
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查找已确认的测试代号记忆。","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#.to_string(),
+        content: r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查找已确认的测试代号记忆。","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#.to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -730,7 +730,7 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -750,7 +750,7 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
     assert!(!prompt.contains("REMOVE_THIS_DELTA"));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"done"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -777,7 +777,7 @@ fn memmgr_context_shrink_removes_whole_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -848,7 +848,7 @@ fn prompt_shrink_can_remove_visible_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Hide one rendered prompt delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Hide one rendered prompt delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -869,7 +869,7 @@ fn prompt_shrink_can_remove_visible_delta_by_delta_id() {
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"done"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -977,7 +977,7 @@ fn long_context_does_not_inject_shrink_review_below_ninety_percent_window() {
     core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_600),
         truncated: false,
@@ -1001,7 +1001,7 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
     core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_700),
         truncated: false,
@@ -1028,7 +1028,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(2_700),
         truncated: false,
@@ -1069,7 +1069,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     core.set_max_llm_input_tokens(10_000);
     let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"seeded"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(13_253),
         truncated: false,
@@ -1087,7 +1087,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!delta_ids.is_empty());
 
     let shrink_response = format!(
-        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
+        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
         serde_json::to_string(&delta_ids).unwrap()
     );
     let step = core.apply_model_response(LlmResponse {
@@ -1107,7 +1107,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!next_prompt.contains("mode=force_shrink_required"));
 
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"压缩已完成，可以继续对话。"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage_with_prompt_tokens(1_200),
         truncated: false,
@@ -1141,7 +1141,7 @@ fn memory_candidates_are_persisted() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是 ALPHA-42", None);
     let final_step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"记住了","memory_candidates":[{"content":"测试代号是 ALPHA-42"}]}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"记住了","memory_candidates":[{"content":"测试代号是 ALPHA-42"}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1167,7 +1167,7 @@ fn query_memory_action_returns_action_result_delta() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("测试项目纪念日是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"query","query":"测试项目 纪念日","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"query","query":"测试项目 纪念日","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1192,7 +1192,7 @@ fn memmgr_durable_query_returns_action_result_delta() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("测试项目纪念日是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test durable query","args":{"type":"durable","op":"query","query":"测试项目 纪念日","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test durable query","args":{"type":"durable","op":"query","query":"测试项目 纪念日","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1221,7 +1221,7 @@ fn canonical_tools_accept_json_object_args() {
     let _ = core.begin_turn("用 JSON object args 跑工具", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"测试 JSON object args。","next_actions":[{"action":"memmgr","intent":"查询测试代号记忆。","args":{"type":"durable","op":"query","query":"测试代号","limit":5}},{"action":"run_bash","intent":"验证 shell JSON object args。","args":{"cmd":"printf kv-ok","timeout_ms":5000}},{"action":"self_tool","intent":"查看 Timem 信息。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","progress":"测试 JSON object args。","working_still_action":[{"action":"memmgr","intent":"查询测试代号记忆。","args":{"type":"durable","op":"query","query":"测试代号","limit":5}},{"action":"run_bash","intent":"验证 shell JSON object args。","args":{"cmd":"printf kv-ok","timeout_ms":5000}},{"action":"self_tool","intent":"查看 Timem 信息。","args":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1245,7 +1245,7 @@ fn action_input_field_is_rejected_instead_of_compatibly_executed() {
     let _ = core.begin_turn("查一下记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"旧协议测试。","next_actions":[{"action":"memmgr","intent":"查询测试代号记忆","input":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#, // allow_legacy_input_negative_test
+            r#"{"status":"working","progress":"旧协议测试。","working_still_action":[{"action":"memmgr","intent":"查询测试代号记忆","input":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#, // allow_legacy_input_negative_test
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1257,7 +1257,7 @@ fn action_input_field_is_rejected_instead_of_compatibly_executed() {
     };
     assert!(prompt.contains("## SYSTEM"));
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("next_actions[0].args_required"));
+    assert!(prompt.contains("actions[0].args_required"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -1277,7 +1277,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("路径在哪里", None);
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"根据测试配置，当前数据存储路径位于 `/tmp/timem_fixture`。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"根据测试配置，当前数据存储路径位于 `/tmp/timem_fixture`。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1291,7 +1291,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("查项目代号并统计文件", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"正在检索长期记忆，并统计当前目录的文件总数...","free_talk":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"next_actions":[{"action":"memmgr","intent":"查询持久化记忆中与项目代号相关的信息","args":{"type":"durable","op":"query","query":"project codename","limit":5}},{"action":"run_bash","intent":"统计当前工作目录的文件数量以辅助确认上下文","args":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","progress":"正在检索长期记忆，并统计当前目录的文件总数...","free_talk":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"working_still_action":[{"action":"memmgr","intent":"查询持久化记忆中与项目代号相关的信息","args":{"type":"durable","op":"query","query":"project codename","limit":5}},{"action":"run_bash","intent":"统计当前工作目录的文件数量以辅助确认上下文","args":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1307,7 +1307,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("最终确认发布包", None);
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"项目编译并打包成功，目标文件已生成在 `target/timem_protocol_examples/release.tar.gz` 路径下。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"项目编译并打包成功，目标文件已生成在 `target/timem_protocol_examples/release.tar.gz` 路径下。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1323,7 +1323,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("更新冲突后的事实", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"检测到持久化记忆版本冲突，正在尝试带版本号重写...","free_talk":{"content":"使用查询得到的 expected_version=3 更新测试事实。","keep_in_context":false},"next_actions":[{"action":"memmgr","intent":"更新测试事实，指定预期版本号以防止并发冲突","args":{"type":"durable","op":"update","id":"fact_992","expected_version":3,"content":"测试项目代号为：Project-Alpha"}}]}"#,
+            r#"{"status":"working","progress":"检测到持久化记忆版本冲突，正在尝试带版本号重写...","free_talk":{"content":"使用查询得到的 expected_version=3 更新测试事实。","keep_in_context":false},"working_still_action":[{"action":"memmgr","intent":"更新测试事实，指定预期版本号以防止并发冲突","args":{"type":"durable","op":"update","id":"fact_992","expected_version":3,"content":"测试项目代号为：Project-Alpha"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1338,7 +1338,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("读取受保护路径", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"尝试修改启动变量被系统拦截，正在转换为只读查询...","free_talk":{"content":"启动变量不可运行期修改，改为读取路径。","keep_in_context":false},"next_actions":[{"action":"self_tool","intent":"既然无法直接修改启动环境，先读取当前内存路径以便向用户说明现状","args":{"type":"mem_path","op":"read"}}]}"#,
+            r#"{"status":"working","progress":"尝试修改启动变量被系统拦截，正在转换为只读查询...","free_talk":{"content":"启动变量不可运行期修改，改为读取路径。","keep_in_context":false},"working_still_action":[{"action":"self_tool","intent":"既然无法直接修改启动环境，先读取当前内存路径以便向用户说明现状","args":{"type":"mem_path","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1353,7 +1353,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("上下文收缩", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"为了保证响应效率，正在对历史冗余上下文进行清理和暂存...","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"next_actions":[{"action":"memmgr","intent":"将过期的 Prompt Delta 离线暂存到临时便签中","args":{"type":"scratch","op":"write","kind":"context_offload","label":"test offload","delta_ids":"pd_001,pd_002"}},{"action":"memmgr","intent":"从当前活跃 Prompt Context 中裁剪掉已暂存的 delta_ids","args":{"type":"context","op":"shrink","delta_ids":"pd_001,pd_002"}}]}"#,
+            r#"{"status":"working","progress":"为了保证响应效率，正在对历史冗余上下文进行清理和暂存...","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"working_still_action":[{"action":"memmgr","intent":"将过期的 Prompt Delta 离线暂存到临时便签中","args":{"type":"scratch","op":"write","kind":"context_offload","label":"test offload","delta_ids":"pd_001,pd_002"}},{"action":"memmgr","intent":"从当前活跃 Prompt Context 中裁剪掉已暂存的 delta_ids","args":{"type":"context","op":"shrink","delta_ids":"pd_001,pd_002"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1369,7 +1369,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("读取错误日志", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"正在调取系统构建日志以分析故障原因...","next_actions":[{"action":"run_bash","intent":"拉取异常日志摘要。","args":{"cmd":"printf ERROR","timeout_ms":8000}}]}"#,
+            r#"{"status":"working","progress":"正在调取系统构建日志以分析故障原因...","working_still_action":[{"action":"run_bash","intent":"拉取异常日志摘要。","args":{"cmd":"printf ERROR","timeout_ms":8000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1383,7 +1383,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
 
     let _ = core.begin_turn("最小动作", None);
     let prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"next_actions":[{"action":"run_bash","intent":"Check status","args":{"cmd":"printf minimal"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"action":"run_bash","intent":"Check status","args":{"cmd":"printf minimal"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1401,8 +1401,8 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
             "comment_and_trailing_comma",
             r#"{
   "status": "working",
-  "report_job_progress": "正在处理...", // 非法注释
-  "next_actions": [
+  "progress": "正在处理...", // 非法注释
+  "working_still_action": [
     {
       "action": "run_bash",
       "intent": "清理缓存",
@@ -1414,22 +1414,22 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
         ),
         (
             "truncated_json",
-            r#"{"status":"working","report_job_progress":"正在调取长期记忆...","next_actions":[{"action":"memmgr","intent":"查询"#,
+            r#"{"status":"working","progress":"正在调取长期记忆...","working_still_action":[{"action":"memmgr","intent":"查询"#,
             "invalid_json",
         ),
         (
             "missing_intent_and_args",
-            r#"{"status":"working","next_actions":[{"action":"run_bash"}]}"#,
-            "next_actions[0].args_required",
+            r#"{"status":"working","working_still_action":[{"action":"run_bash"}]}"#,
+            "actions[0].args_required",
         ),
         (
             "invented_tool",
-            r#"{"status":"working","report_job_progress":"尝试调用未授权的第三方工具...","next_actions":[{"action":"fetch_web_page","intent":"去外网抓取数据（系统并未提供此工具）","args":{"url":"https://example.com"}}]}"#,
+            r#"{"status":"working","progress":"尝试调用未授权的第三方工具...","working_still_action":[{"action":"fetch_web_page","intent":"去外网抓取数据（系统并未提供此工具）","args":{"url":"https://example.com"}}]}"#,
             "unsupported_action:fetch_web_page",
         ),
         (
             "extra_top_level_fields",
-            r#"{"status":"finished","final_answer":"处理完毕。","custom_debug_token":"fixture-token","model_confidence_score":0.98}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"处理完毕。","custom_debug_token":"fixture-token","model_confidence_score":0.98}"#,
             "unexpected_top_level_field",
         ),
     ];
@@ -1468,7 +1468,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
     let _ = core.begin_turn("既结束又工作", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"这是给用户的最终回答。","next_actions":[{"action":"run_bash","intent":"但我这里还想执行一个后台命令","args":{"cmd":"printf downgraded","background":true}}]}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"这是给用户的最终回答。","working_still_action":[{"action":"run_bash","intent":"但我这里还想执行一个后台命令","args":{"cmd":"printf downgraded","background":true}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1486,7 +1486,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
     let _ = core.begin_turn("字符串 args 应被拒绝", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"正在检查内存...","next_actions":[{"action":"memmgr","intent":"查询记忆","args":"type=durable op=query query='project codename' limit=5"}]}"#, // allow_string_args_negative_test
+            r#"{"status":"working","progress":"正在检查内存...","working_still_action":[{"action":"memmgr","intent":"查询记忆","args":"type=durable op=query query='project codename' limit=5"}]}"#, // allow_string_args_negative_test
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1497,7 +1497,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
     };
     assert!(prompt.contains("## SYSTEM"));
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("next_actions[0].args_must_be_object"));
+    assert!(prompt.contains("actions[0].args_must_be_object"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -1516,7 +1516,7 @@ fn memmgr_raw_chat_query_reads_persisted_chat_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test raw chat query","args":{"type":"raw_chat","op":"query","query":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test raw chat query","args":{"type":"raw_chat","op":"query","query":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1560,7 +1560,7 @@ fn status_finished_uses_final_answer_as_host_final_answer() {
     );
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"这是最终结论。"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"这是最终结论。"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1599,7 +1599,7 @@ fn fields_wrapped_finished_answer_is_accepted_without_repair() {
     );
     let _ = core.begin_turn("hello", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"fields":{"status":"finished","final_answer":"你好。"}}"#),
+        content: scored(r#"{"fields":{"status":"ALL_FINISHED","final_answer":"你好。"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1654,7 +1654,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
     core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","report_job_progress":"完成了"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","progress":"完成了"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1669,7 +1669,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
     assert!(prompt.contains("issue: final_answer_required_when_status_finished"));
     assert!(prompt.contains("缺少 `## Final_Answer`"));
     assert!(prompt.contains("同时提供 `## Status` 和 `## Final_Answer`"));
-    assert!(prompt.contains(r#"{"status":"finished","report_job_progress":"完成了"}"#));
+    assert!(prompt.contains(r#"{"status":"ALL_FINISHED","progress":"完成了"}"#));
 }
 
 #[test]
@@ -1682,7 +1682,7 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
     core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("总结", None);
     let raw = format!(
-        "BEGIN_SHOULD_NOT_APPEAR{}{{\"report_job_progress\":\"BAD_JSON_FOCUS\nTAIL_NEAR_FOCUS\"}}{}END_SHOULD_NOT_APPEAR",
+        "BEGIN_SHOULD_NOT_APPEAR{}{{\"progress\":\"BAD_JSON_FOCUS\nTAIL_NEAR_FOCUS\"}}{}END_SHOULD_NOT_APPEAR",
         "x".repeat(8_000),
         "y".repeat(8_000)
     );
@@ -1708,7 +1708,7 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
 }
 
 #[test]
-fn status_working_requires_next_actions_and_keeps_progress_separate() {
+fn status_working_requires_working_still_action_and_keeps_progress_separate() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -1716,7 +1716,7 @@ fn status_working_requires_next_actions_and_keeps_progress_separate() {
     );
     let _ = core.begin_turn("查一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"working","report_job_progress":"正在查询。","next_actions":[{"action":"memmgr","intent":"Find evidence.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
+        content: scored(r#"{"status":"working","progress":"正在查询。","working_still_action":[{"action":"memmgr","intent":"Find evidence.","args":{"type":"durable","op":"query","query":"x","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1726,7 +1726,7 @@ fn status_working_requires_next_actions_and_keeps_progress_separate() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
-    assert!(!prompt.contains("report_job_progress:\n正在查询。"));
+    assert!(!prompt.contains("progress:\n正在查询。"));
     assert!(!prompt.contains("正在查询。"));
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("intent: Find evidence."));
@@ -1765,7 +1765,7 @@ fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
     );
     let _ = core.begin_turn("继续汇报", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"◉ 分析完成，汇报结果..."}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"◉ 分析完成，汇报结果..."}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1799,7 +1799,8 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
     assert!(matches!(step, CoreStep::NeedModel { .. }));
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"next_actions: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#.to_string(),
+        content: r#"working_still_action: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#
+            .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1835,7 +1836,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
     core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("写一个很长的报告", None);
     let step = core.apply_model_response(LlmResponse {
-        content: "{\"report_job_progress\":\"partial".to_string(),
+        content: "{\"progress\":\"partial".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: true,
@@ -1850,7 +1851,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
     assert!(prompt.contains("truncated_model_output"));
     assert!(prompt.contains("max output token"));
     assert!(prompt.contains("Markdown response protocol"));
-    assert!(prompt.contains(r#"{"report_job_progress":"partial"#));
+    assert!(prompt.contains(r#"{"progress":"partial"#));
 }
 
 #[test]
@@ -1862,7 +1863,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
 
     let step = core.apply_model_response_with_repair_audit(
         LlmResponse {
-            content: "{\"report_job_progress\":\"partial".to_string(),
+            content: "{\"progress\":\"partial".to_string(),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
             truncated: true,
@@ -1928,7 +1929,7 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
     );
     let _ = core.begin_turn("写一个很长的报告", None);
     let step = core.apply_model_response(LlmResponse {
-        content: "{\"report_job_progress\":\"partial".to_string(),
+        content: "{\"progress\":\"partial".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: true,
@@ -1936,7 +1937,7 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
     assert!(matches!(step, CoreStep::NeedModel { .. }));
 
     let step = core.apply_model_response(LlmResponse {
-        content: "{\"report_job_progress\":\"still partial".to_string(),
+        content: "{\"progress\":\"still partial".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: true,
@@ -1971,7 +1972,7 @@ fn mixed_protocol_transcript_extracts_final_json_without_leaking_raw_segments() 
     );
     let _ = core.begin_turn("展示一个耗尽 8 步交互的操作", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":"Round 7","report_job_progress":"","next_actions":[{"action":"run_bash","intent":"old action","args":{"cmd":"uptime"}}]}
+        content: scored(r#"{"free_talk":"Round 7","progress":"","working_still_action":[{"action":"run_bash","intent":"old action","args":{"cmd":"uptime"}}]}
 
 [BEGIN DELTA]
 delta_id: pd_18
@@ -1986,7 +1987,7 @@ ok
 
 {
   "free_talk": "Final summary",
-  "status": "finished",
+  "status": "ALL_FINISHED",
   "final_answer": "只展示最终摘要。"
 }"#),
         model_name: "qwen-plus".to_string(),
@@ -1999,7 +2000,7 @@ ok
     };
     assert_eq!(final_turn.final_answer, "只展示最终摘要。");
     assert!(!final_turn.final_answer.contains("[BEGIN SEGMENT"));
-    assert!(!final_turn.final_answer.contains("next_actions"));
+    assert!(!final_turn.final_answer.contains("working_still_action"));
 }
 
 #[test]
@@ -2017,7 +2018,7 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
 
 ```json
 {
-  "status": "finished",
+  "status": "ALL_FINISHED",
   "final_answer": "转码已在后台顺利运行，输出文件：`~/Videos/example_3x.mp4`。"
 }
 ```"#,
@@ -2049,7 +2050,7 @@ fn response_text_with_unescaped_inner_quotes_is_repaired() {
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{
   "free_talk": "The answer is available from chat history.",
-  "status": "finished",
+  "status": "ALL_FINISHED",
   "final_answer": "根据聊天记录，你问"当前目录的代码量，rust 代码有多少行？"这个问题的时间是今天（2026-06-23）17:46:36 左右。"
 }"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
@@ -2077,7 +2078,7 @@ fn response_text_preserves_valid_complex_symbols_and_quotes() {
 第二行。"#;
     let payload = serde_json::json!({
         "free_talk": "Symbols should remain normal text.",
-        "status": "finished",
+        "status": "ALL_FINISHED",
         "final_answer": text
     });
     let step = core.apply_model_response(LlmResponse {
@@ -2103,7 +2104,7 @@ fn response_text_decodes_common_json_escape_sequences() {
     );
     let _ = core.begin_turn("展示 escape 符号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
@@ -2128,7 +2129,7 @@ fn action_input_decodes_common_json_escape_sequences() {
     );
     let _ = core.begin_turn("记住一段 escape 文本", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Store escaped text exactly after JSON decoding.","args":{"type":"durable","op":"insert","content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Store escaped text exactly after JSON decoding.","args":{"type":"durable","op":"insert","content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}]}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
@@ -2154,8 +2155,8 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
     let step = core.apply_model_response(LlmResponse {
         content: scored(
             r#"{
-  "report_job_progress": "",
-  "next_actions": [
+  "progress": "",
+  "working_still_action": [
     {
       "action": "memmgr",
       "intent": "查找用户说过的"当前目录"相关问题",
@@ -2186,8 +2187,7 @@ fn malformed_complex_protocol_is_blocked_without_raw_leak() {
     core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("展示各种奇怪符号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: "```json\n{\"report_job_progress\":\"bad dangling \\ path and raw \n newline"
-            .to_string(),
+        content: "```json\n{\"progress\":\"bad dangling \\ path and raw \n newline".to_string(),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
@@ -2239,7 +2239,7 @@ fn invalid_action_shape_requests_protocol_repair() {
     );
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"query"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"query"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2249,14 +2249,12 @@ fn invalid_action_shape_requests_protocol_repair() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(
-        prompt.contains("issue: next_actions[0].input.query_required_when_op=query,type=durable")
-    );
+    assert!(prompt.contains("issue: actions[0].input.query_required_when_op=query,type=durable"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
 #[test]
-fn progress_and_next_actions_continue_with_implicit_continue_note() {
+fn progress_and_working_still_action_continue_with_implicit_continue_note() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -2265,7 +2263,7 @@ fn progress_and_next_actions_continue_with_implicit_continue_note() {
     let _ = core.begin_turn("请一直完成任务，不要停止", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"备份完成。现在继续查证。","next_actions":[{"action":"memmgr","intent":"查找相关记忆。","args":{"type":"durable","op":"query","query":"项目状态","limit":1}}]}"#,
+            r#"{"progress":"备份完成。现在继续查证。","working_still_action":[{"action":"memmgr","intent":"查找相关记忆。","args":{"type":"durable","op":"query","query":"项目状态","limit":1}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -2290,7 +2288,7 @@ fn next_action_without_intent_uses_action_name_fallback() {
     );
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2313,7 +2311,7 @@ fn unsupported_action_is_not_executed_silently() {
     );
     let _ = core.begin_turn("打开文件", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"delete_file","intent":"test action","args":{"path":"/tmp/x"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"delete_file","intent":"test action","args":{"path":"/tmp/x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2334,7 +2332,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
     );
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Create a task checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Create a task checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2360,7 +2358,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         .expect("scratch id should exist");
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Read saved checkpoint by id.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
+        content: scored(format!(r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Read saved checkpoint by id.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2374,7 +2372,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
     assert!(prompt.contains("continue this task later"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove completed checkpoint.","args":{{"type":"scratch","op":"delete","id":"{}"}}}}]}}"#, scratch_id)),
+        content: scored(format!(r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove completed checkpoint.","args":{{"type":"scratch","op":"delete","id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2399,7 +2397,7 @@ fn memmgr_scratch_write_and_read_notes() {
     );
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Create a task checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Create a task checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2426,7 +2424,7 @@ fn memmgr_scratch_write_and_read_notes() {
         .expect("scratch id should exist");
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Read saved checkpoint by id.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
+        content: scored(format!(r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Read saved checkpoint by id.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2450,7 +2448,7 @@ fn memmgr_missing_op_requests_protocol_repair_from_manifest_idl() {
     );
     let _ = core.begin_turn("查一下记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Broken memory action","args":{"type":"durable","query":"测试代号"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Broken memory action","args":{"type":"durable","query":"测试代号"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2460,7 +2458,7 @@ fn memmgr_missing_op_requests_protocol_repair_from_manifest_idl() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.op_required"));
+    assert!(prompt.contains("issue: actions[0].input.op_required"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -2481,7 +2479,7 @@ fn scratch_query_empty_query_lists_recent_notes_with_limit() {
 
     let _ = core.begin_turn("列出最近一条草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"List recent checkpoints.","args":{"type":"scratch","op":"query","query":"","limit":1}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"List recent checkpoints.","args":{"type":"scratch","op":"query","query":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2507,7 +2505,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 
     let _ = core.begin_turn("写一条空草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Create empty checkpoint.","args":{}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Create empty checkpoint.","args":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2517,13 +2515,13 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.type_required"));
+    assert!(prompt.contains("issue: actions[0].input.type_required"));
     assert!(!prompt.contains("Action result: memmgr"));
     assert!(!core.scratch_file().exists());
 
     let _ = core.begin_turn("写一条没有标签的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Create unlabeled checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","content":"x"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Create unlabeled checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","content":"x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2533,14 +2531,12 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(
-        prompt.contains("issue: next_actions[0].input.label_required_when_op=write,type=scratch")
-    );
+    assert!(prompt.contains("issue: actions[0].input.label_required_when_op=write,type=scratch"));
     assert!(!prompt.contains("Action result: memmgr"));
 
     let _ = core.begin_turn("读取一条没有 id 的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Read checkpoint.","args":{"type":"scratch","op":"read"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Read checkpoint.","args":{"type":"scratch","op":"read"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2550,12 +2546,12 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.id_required_when_op=read,type=scratch"));
+    assert!(prompt.contains("issue: actions[0].input.id_required_when_op=read,type=scratch"));
     assert!(!prompt.contains("Action result: memmgr"));
 
     let _ = core.begin_turn("删除一条没有 id 的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Delete checkpoint.","args":{"type":"scratch","op":"delete"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Delete checkpoint.","args":{"type":"scratch","op":"delete"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2565,7 +2561,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.id_required_when_op=delete,type=scratch"));
+    assert!(prompt.contains("issue: actions[0].input.id_required_when_op=delete,type=scratch"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -2585,7 +2581,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 
     let _ = core.begin_turn("删除不存在的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Delete missing checkpoint.","args":{"type":"scratch","op":"delete","id":"scratch_missing"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Delete missing checkpoint.","args":{"type":"scratch","op":"delete","id":"scratch_missing"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2620,7 +2616,7 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt delta by id.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"large investigation context","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Offload visible prompt delta by id.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"large investigation context","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2647,7 +2643,7 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Read offloaded prompt context.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Read offloaded prompt context.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#,
             scratch_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2672,7 +2668,7 @@ fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
     );
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Attempt invalid offload.","args":{"type":"scratch","op":"write","kind":"context_offload","label":"bad refs","delta_ids":["pd_missing"]}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Attempt invalid offload.","args":{"type":"scratch","op":"write","kind":"context_offload","label":"bad refs","delta_ids":["pd_missing"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2695,7 +2691,7 @@ fn scratch_context_offload_requires_prompt_refs_in_protocol() {
     );
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Missing refs.","args":{"type":"scratch","op":"write","kind":"context_offload","label":"missing refs"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Missing refs.","args":{"type":"scratch","op":"write","kind":"context_offload","label":"missing refs"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2717,7 +2713,7 @@ fn memory_write_action_requires_content_or_query() {
     );
     let _ = core.begin_turn("记住", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"insert"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"insert"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2727,8 +2723,7 @@ fn memory_write_action_requires_content_or_query() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt
-        .contains("issue: next_actions[0].input.content_required_when_op=insert,type=durable"));
+    assert!(prompt.contains("issue: actions[0].input.content_required_when_op=insert,type=durable"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -2744,7 +2739,7 @@ fn query_memory_does_not_expand_semantic_aliases() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"query","query":"user's name","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"query","query":"user's name","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2770,7 +2765,7 @@ fn query_memory_exposes_version_for_conflict_safe_updates() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查测试代号记忆版本", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Find versioned durable memory before update.","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Find versioned durable memory before update.","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2840,7 +2835,7 @@ fn sql_read_action_returns_rows() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我最早什么时候告诉你测试代号的", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2867,7 +2862,7 @@ fn memory_sql_query_reads_memory_versions_and_normalizes_legacy_rows() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆版本", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Read durable memory versions for safe update.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, updated_at_ms, content FROM memories ORDER BY created_at_ms ASC","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Read durable memory versions for safe update.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, updated_at_ms, content FROM memories ORDER BY created_at_ms ASC","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2893,7 +2888,7 @@ fn sql_read_allows_with_cte_reads() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("按时间查测试代号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2919,7 +2914,7 @@ fn sql_read_rejects_write_statement() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("改记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2945,7 +2940,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2968,7 +2963,7 @@ fn sql_read_rejects_other_tables() {
     );
     let _ = core.begin_turn("列出表", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT name FROM sqlite_master LIMIT 5"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT name FROM sqlite_master LIMIT 5"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2989,7 +2984,7 @@ fn memory_schema_action_returns_native_schema_contract() {
     );
     let _ = core.begin_turn("有哪些记忆表", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查看记忆结构","args":{"type":"durable","op":"schema"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查看记忆结构","args":{"type":"durable","op":"schema"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3016,7 +3011,7 @@ fn memory_sql_query_allows_pragma_table_info() {
     );
     let _ = core.begin_turn("查看 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(memories)","limit":20}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(memories)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3039,7 +3034,7 @@ fn memory_sql_query_allows_chat_messages_table_info() {
     );
     let _ = core.begin_turn("查看聊天 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(chat_messages)","limit":20}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(chat_messages)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3063,7 +3058,7 @@ fn memory_sql_query_rejects_non_memories_pragma() {
     );
     let _ = core.begin_turn("查看 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(sqlite_master)","limit":20}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(sqlite_master)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3084,7 +3079,7 @@ fn sql_read_action_requires_sql_for_repair() {
     );
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3094,7 +3089,7 @@ fn sql_read_action_requires_sql_for_repair() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.sql_required_when_op=sql,type=durable"));
+    assert!(prompt.contains("issue: actions[0].input.sql_required_when_op=sql,type=durable"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -3110,7 +3105,7 @@ fn memory_sql_query_requires_params_for_placeholders() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3136,7 +3131,7 @@ fn memory_sql_query_rejects_extra_params_for_placeholders() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%mynameis%","%Iam%"],"limit":20}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%mynameis%","%Iam%"],"limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3166,7 +3161,7 @@ fn chat_history_query_reads_persisted_chat_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查询聊天记录","args":{"type":"raw_chat","op":"query","query":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询聊天记录","args":{"type":"raw_chat","op":"query","query":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3199,7 +3194,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("旧格式里说过什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查询旧格式聊天记录","args":{"type":"raw_chat","op":"query","query":"测试物品 GREEN-29","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询旧格式聊天记录","args":{"type":"raw_chat","op":"query","query":"测试物品 GREEN-29","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3223,14 +3218,14 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
     );
     let _ = core.begin_turn("第一轮我说了测试物品 BLUE-17", None);
     let _ = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"收到"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"收到"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     });
     let _ = core.begin_turn("我刚才说了什么物品", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查询聊天记录","args":{"type":"raw_chat","op":"query","query":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询聊天记录","args":{"type":"raw_chat","op":"query","query":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3263,7 +3258,7 @@ fn chat_history_query_empty_query_lists_recent_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"列出最近聊天记录","args":{"type":"raw_chat","op":"query","query":"","limit":1}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"列出最近聊天记录","args":{"type":"raw_chat","op":"query","query":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3295,7 +3290,7 @@ fn memory_sql_query_reads_chat_messages_with_time_window() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查最近窗口聊天", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"按时间窗口查询聊天记录","args":{"type":"durable","op":"sql","sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"按时间窗口查询聊天记录","args":{"type":"durable","op":"sql","sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3354,7 +3349,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
         let mut core = AgentCore::new("STATIC", profile("custom", "aws-claude-sonnet-4-6"), &dir);
         let _ = core.begin_turn("我今天和你聊过什么？", None);
         let content = scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"查询今天的聊天记录",{}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"查询今天的聊天记录",{}}}]}}"#,
             action_fields
         ));
         let step = core.apply_model_response(LlmResponse {
@@ -3392,7 +3387,7 @@ fn memory_sql_query_rejects_raw_update_sql() {
     );
     let _ = core.begin_turn("更新记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='bad'","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='bad'","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3422,7 +3417,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("删除聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Attempt to delete chat history through SQL.","args":{"type":"durable","op":"sql","sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Attempt to delete chat history through SQL.","args":{"type":"durable","op":"sql","sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3454,7 +3449,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("删除包含目标的聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Delete matching chat record.","args":{"type":"raw_chat","op":"delete","query":"删除目标","limit":10}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Delete matching chat record.","args":{"type":"raw_chat","op":"delete","query":"删除目标","limit":10}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3477,7 +3472,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("记住我的测试代号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"upsert","id":"user_name","content":"测试代号是 ALPHA-42"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"upsert","id":"user_name","content":"测试代号是 ALPHA-42"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3494,7 +3489,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         .contains("测试代号是 ALPHA-42"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","id":"user_name","content":"测试代号是 BETA-43"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","id":"user_name","content":"测试代号是 BETA-43"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3509,7 +3504,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         .contains("测试代号是 ALPHA-42\""));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","id":"user_name","expected_version":1,"content":"测试代号是 BETA-43"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","id":"user_name","expected_version":1,"content":"测试代号是 BETA-43"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3526,7 +3521,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     assert!(core.memory_git_commit_count() >= 2);
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"delete","id":"user_name","expected_version":2}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"delete","id":"user_name","expected_version":2}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3550,7 +3545,7 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 
     let _ = core_a.begin_turn("创建共享记忆", None);
     let step = core_a.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Insert shared row.","args":{"type":"durable","op":"upsert","id":"shared_fact","content":"版本1"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Insert shared row.","args":{"type":"durable","op":"upsert","id":"shared_fact","content":"版本1"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3559,7 +3554,7 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 
     let _ = core_a.begin_turn("A 更新", None);
     let step = core_a.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Update shared row from A.","args":{"type":"durable","op":"update","id":"shared_fact","expected_version":1,"content":"版本2 from A"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Update shared row from A.","args":{"type":"durable","op":"update","id":"shared_fact","expected_version":1,"content":"版本2 from A"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3572,7 +3567,7 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 
     let _ = core_b.begin_turn("B 用旧版本更新", None);
     let step = core_b.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Update shared row from B with stale version.","args":{"type":"durable","op":"update","id":"shared_fact","expected_version":1,"content":"版本2 from B"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Update shared row from B with stale version.","args":{"type":"durable","op":"update","id":"shared_fact","expected_version":1,"content":"版本2 from B"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3596,7 +3591,7 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
     let mut seed_core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = seed_core.begin_turn("创建共享记忆", None);
     let step = seed_core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Insert shared conflict row.","args":{"type":"durable","op":"upsert","id":"shared_conflict","content":"初始值"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Insert shared conflict row.","args":{"type":"durable","op":"upsert","id":"shared_conflict","content":"初始值"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3615,7 +3610,7 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
             barrier.wait();
             let step = core.apply_model_response(LlmResponse {
                 content: scored(format!(
-                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Concurrent same-version update.","args":{{"type":"durable","op":"update","id":"shared_conflict","expected_version":1,"content":"winner candidate {idx}"}}}}]}}"#
+                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Concurrent same-version update.","args":{{"type":"durable","op":"update","id":"shared_conflict","expected_version":1,"content":"winner candidate {idx}"}}}}]}}"#
                 )),
                 model_name: "qwen-plus".to_string(),
                 usage: usage(),
@@ -3772,7 +3767,7 @@ fn mem_guard_keeps_concurrent_memory_updates_from_losing_records() {
             barrier.wait();
             let step = core.apply_model_response(LlmResponse {
                 content: scored(format!(
-                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Concurrent durable write.","args":{{"type":"durable","op":"upsert","id":"guard_id_{idx}","content":"guard content {idx}"}}}}]}}"#
+                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Concurrent durable write.","args":{{"type":"durable","op":"upsert","id":"guard_id_{idx}","content":"guard content {idx}"}}}}]}}"#
                 )),
                 model_name: "qwen-plus".to_string(),
                 usage: usage(),
@@ -3810,7 +3805,7 @@ fn memory_update_requires_protocol_fields() {
     );
     let _ = core.begin_turn("更新记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","content":"x"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","content":"x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3820,7 +3815,7 @@ fn memory_update_requires_protocol_fields() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.id_required_when_op=update,type=durable"));
+    assert!(prompt.contains("issue: actions[0].input.id_required_when_op=update,type=durable"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -3834,7 +3829,7 @@ fn run_bash_allows_readonly_count_command() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"count output lines","args":{"cmd":"pwd | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"count output lines","args":{"cmd":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3854,7 +3849,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("整理这个任务", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"记录任务计划","args":{"type":"scratch","op":"write","kind":"notes","label":"任务计划","content":"step one"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"记录任务计划","args":{"type":"scratch","op":"write","kind":"notes","label":"任务计划","content":"step one"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3864,7 +3859,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
         other => panic!("unexpected step: {other:?}"),
     }
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查询任务计划","args":{"type":"scratch","op":"query","query":"step","limit":3}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询任务计划","args":{"type":"scratch","op":"query","query":"step","limit":3}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3908,7 +3903,7 @@ fn run_bash_rejects_old_timeout_sec_field() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"count output lines","args":{"cmd":"pwd | wc -l","timeout_sec":1}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"count output lines","args":{"cmd":"pwd | wc -l","timeout_sec":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3918,7 +3913,7 @@ fn run_bash_rejects_old_timeout_sec_field() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.timeout_sec_unsupported"));
+    assert!(prompt.contains("issue: actions[0].input.timeout_sec_unsupported"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -3932,7 +3927,7 @@ fn run_bash_can_start_and_poll_background_job() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("run a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","args":{"cmd":"sleep 0.1; printf background-ok","background":true}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a background task.","args":{"cmd":"sleep 0.1; printf background-ok","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3948,7 +3943,7 @@ fn run_bash_can_start_and_poll_background_job() {
     std::thread::sleep(std::time::Duration::from_millis(250));
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"shell_job_status","intent":"Poll background task.","args":{{"job_id":"{}","timeout_ms":1000}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"shell_job_status","intent":"Poll background task.","args":{{"job_id":"{}","timeout_ms":1000}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -3974,7 +3969,7 @@ fn shell_job_status_missing_job_id_returns_tool_input_error() {
     );
     let _ = core.begin_turn("poll a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"shell_job_status","intent":"Poll background task.","args":{"op":"status"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"shell_job_status","intent":"Poll background task.","args":{"op":"status"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3984,7 +3979,7 @@ fn shell_job_status_missing_job_id_returns_tool_input_error() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.job_id_required"));
+    assert!(prompt.contains("issue: actions[0].input.job_id_required"));
     assert!(!prompt.contains("Action result: shell_job_status"));
 }
 
@@ -3997,7 +3992,7 @@ fn shell_job_status_missing_timeout_uses_immediate_check() {
     );
     let _ = core.begin_turn("poll a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"shell_job_status","intent":"Poll background task.","args":{"job_id":"job_1"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"shell_job_status","intent":"Poll background task.","args":{"job_id":"job_1"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4021,7 +4016,7 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("run a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","args":{"cmd":"sleep 0.4; printf waited-ok","background":true}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a background task.","args":{"cmd":"sleep 0.4; printf waited-ok","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4035,7 +4030,7 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"shell_job_status","intent":"Wait for background task.","args":{{"job_id":"{}","timeout_ms":1500}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"shell_job_status","intent":"Wait for background task.","args":{{"job_id":"{}","timeout_ms":1500}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -4062,7 +4057,7 @@ fn run_bash_rejects_removed_read_back_protocol() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"read back count","args":{"cmd":"pwd","read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"read back count","args":{"cmd":"pwd","read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4072,7 +4067,7 @@ fn run_bash_rejects_removed_read_back_protocol() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.read_back_command_unsupported"));
+    assert!(prompt.contains("issue: actions[0].input.read_back_command_unsupported"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -4086,7 +4081,7 @@ fn run_bash_rejects_removed_large_readback_protocol() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"pwd","large_readback_opt_in":"need full output","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"pwd","large_readback_opt_in":"need full output","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4096,7 +4091,7 @@ fn run_bash_rejects_removed_large_readback_protocol() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.large_readback_opt_in_unsupported"));
+    assert!(prompt.contains("issue: actions[0].input.large_readback_opt_in_unsupported"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -4106,7 +4101,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("delete something", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"rm not_allowed"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4166,7 +4161,7 @@ fn run_bash_allows_compound_local_write_commands() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("write local file", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4191,7 +4186,7 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
     );
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"pwd && rm not_allowed"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"pwd && rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4214,7 +4209,7 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
     );
     let _ = core.begin_turn("test shell syntax", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Run shell syntax after approval.","args":{"cmd":"x=ok; printf $x | tr o O","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Run shell syntax after approval.","args":{"cmd":"x=ok; printf $x | tr o O","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4244,7 +4239,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
     );
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4254,7 +4249,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.any_required:cmd|loop_cmd"));
+    assert!(prompt.contains("issue: actions[0].input.any_required:cmd|loop_cmd"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -4267,7 +4262,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
     );
     let _ = core.begin_turn("read passwd", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"cat /etc/passwd"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"cat /etc/passwd"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4291,7 +4286,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("inspect system identity", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Read system identity.","args":{"cmd":"uname -s","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Read system identity.","args":{"cmd":"uname -s","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4322,7 +4317,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(first_prompt.contains("## USER\n\n测试项目纪念日是 2099-06-12"));
     assert!(first_prompt.contains("## SYSTEM\n\nruntime_time:"));
     let write_final = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"已记录。","memory_candidates":[{"content":"测试项目纪念日是 2099-06-12"}]}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"已记录。","memory_candidates":[{"content":"测试项目纪念日是 2099-06-12"}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4334,7 +4329,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 
     let _ = core.begin_turn("2099-06-12 是什么测试日期", None);
     let recall_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Find durable birthday memory before answering.","args":{"type":"durable","op":"query","query":"测试项目 纪念日 2099-06-12","limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Find durable birthday memory before answering.","args":{"type":"durable","op":"query","query":"测试项目 纪念日 2099-06-12","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4345,7 +4340,9 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(recall_prompt.contains("Action result: memmgr"));
     assert!(recall_prompt.contains("测试项目纪念日是 2099-06-12"));
     let recall_final = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"2099-06-12是测试项目纪念日。"}"#),
+        content: scored(
+            r#"{"status":"ALL_FINISHED","final_answer":"2099-06-12是测试项目纪念日。"}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4358,7 +4355,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 
     let _ = core.begin_turn("删除测试项目纪念日这条记忆", None);
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Delete the user-requested birthday memory.","args":{"type":"durable","op":"delete","id":"mem_0"}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Delete the user-requested birthday memory.","args":{"type":"durable","op":"delete","id":"mem_0"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4370,7 +4367,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(delete_prompt.contains("error: id_not_found"));
 
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Find exact memory id before deleting.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%测试项目纪念日%"],"limit":5}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Find exact memory id before deleting.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%测试项目纪念日%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4394,7 +4391,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         })
         .expect("memory id should exist");
     let delete_final_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Delete exact durable birthday memory.","args":{{"type":"durable","op":"delete","id":"{}","expected_version":1}}}}]}}"#, memory_id)),
+        content: scored(format!(r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Delete exact durable birthday memory.","args":{{"type":"durable","op":"delete","id":"{}","expected_version":1}}}}]}}"#, memory_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4408,7 +4405,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         .contains("测试项目纪念日"));
 
     let delete_final = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"已删除。"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"已删除。"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4421,7 +4418,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("请统计当前目录文件数量", None);
     let shell_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Count files in current project folder.","args":{"cmd":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Count files in current project folder.","args":{"cmd":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4435,7 +4432,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("把 /etc/passwd 读出来", None);
     let security_request = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","args":{"cmd":"cat /etc/passwd","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","args":{"cmd":"cat /etc/passwd","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4453,7 +4450,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         );
         let step = core.apply_model_response(LlmResponse {
             content: scored(format!(
-                r#"{{"status":"finished","final_answer":"ok {}"}}"#,
+                r#"{{"status":"ALL_FINISHED","final_answer":"ok {}"}}"#,
                 index
             )),
             model_name: "qwen-plus".to_string(),
@@ -4486,7 +4483,7 @@ fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
     );
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"先查看项目结构和测试入口。","next_actions":[{"action":"run_bash","intent":"Inspect Rust project files and test definitions.","args":{"cmd":"mkdir -p target; printf %s\\n src/lib.rs src/main.rs tests/core_tests.rs > target/timem_scenario_files.txt; printf %s\\n smoke_test regression_test > target/timem_scenario_tests.rs; wc -l target/timem_scenario_files.txt target/timem_scenario_tests.rs","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","progress":"先查看项目结构和测试入口。","working_still_action":[{"action":"run_bash","intent":"Inspect Rust project files and test definitions.","args":{"cmd":"mkdir -p target; printf %s\\n src/lib.rs src/main.rs tests/core_tests.rs > target/timem_scenario_files.txt; printf %s\\n smoke_test regression_test > target/timem_scenario_tests.rs; wc -l target/timem_scenario_files.txt target/timem_scenario_tests.rs","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4502,7 +4499,7 @@ fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
 
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"根据本地检查结果，项目入口和测试文件已定位；下一步应针对失败点补小范围测试并运行相关 cargo test。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"根据本地检查结果，项目入口和测试文件已定位；下一步应针对失败点补小范围测试并运行相关 cargo test。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4542,7 +4539,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
     let _ = core.begin_turn("我的测试代号是什么？测试时段我们聊了什么？", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"查询长期记忆和聊天记录后再回答。","next_actions":[{"action":"memmgr","intent":"查询测试代号长期记忆。","args":{"type":"durable","op":"query","query":"用户 测试代号","limit":5}},{"action":"memmgr","intent":"查询测试时段聊天记录。","args":{"type":"raw_chat","op":"query","query":"测试时段 发布检查 CI TTY","limit":5}}]}"#,
+            r#"{"status":"working","progress":"查询长期记忆和聊天记录后再回答。","working_still_action":[{"action":"memmgr","intent":"查询测试代号长期记忆。","args":{"type":"durable","op":"query","query":"用户 测试代号","limit":5}},{"action":"memmgr","intent":"查询测试时段聊天记录。","args":{"type":"raw_chat","op":"query","query":"测试时段 发布检查 CI TTY","limit":5}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4558,7 +4555,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
 
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"测试代号是 ALPHA-42。测试时段我们聊的是 测试发布检查，重点是完整 CI 和真实 TTY smoke。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"测试代号是 ALPHA-42。测试时段我们聊的是 测试发布检查，重点是完整 CI 和真实 TTY smoke。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4580,7 +4577,7 @@ fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
     let _ = core.begin_turn("你是谁？把本轮调试标记设成 enabled，再确认你的路径。", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"查询 Timem 自身信息并设置非敏感运行期标记。","next_actions":[{"action":"self_tool","intent":"查看 Timem 身份和进程。","args":{"type":"about_me","op":"read"}},{"action":"self_tool","intent":"设置非敏感调试标记。","args":{"type":"env","op":"write","key":"TIMEM_SCENARIO_DEBUG","value":"enabled"}},{"action":"self_tool","intent":"查看当前记忆和审计路径。","args":{"type":"mem_path","op":"read"}}]}"#,
+            r#"{"status":"working","progress":"查询 Timem 自身信息并设置非敏感运行期标记。","working_still_action":[{"action":"self_tool","intent":"查看 Timem 身份和进程。","args":{"type":"about_me","op":"read"}},{"action":"self_tool","intent":"设置非敏感调试标记。","args":{"type":"env","op":"write","key":"TIMEM_SCENARIO_DEBUG","value":"enabled"}},{"action":"self_tool","intent":"查看当前记忆和审计路径。","args":{"type":"mem_path","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4600,7 +4597,7 @@ fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
 
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"我是 TimemAi，当前调试标记已在本进程设置为 enabled；记忆和审计路径也已通过 self_tool 确认。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"我是 TimemAi，当前调试标记已在本进程设置为 enabled；记忆和审计路径也已通过 self_tool 确认。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4625,7 +4622,7 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
     let _ = core.begin_turn("帮我写一份简短发布检查 md，并确认文件内容。", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"写入发布检查文档并读回验证。","next_actions":[{"action":"run_bash","intent":"Create and verify a release checklist markdown file.","args":{"cmd":"mkdir -p target/timem_scenario_output; printf %s\\n Release_Check CI_passed Sensitive_scan_passed Real_TTY_smoke_passed > target/timem_scenario_output/release_check.md; sed -n 1,20p target/timem_scenario_output/release_check.md","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","progress":"写入发布检查文档并读回验证。","working_still_action":[{"action":"run_bash","intent":"Create and verify a release checklist markdown file.","args":{"cmd":"mkdir -p target/timem_scenario_output; printf %s\\n Release_Check CI_passed Sensitive_scan_passed Real_TTY_smoke_passed > target/timem_scenario_output/release_check.md; sed -n 1,20p target/timem_scenario_output/release_check.md","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4647,7 +4644,7 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
 
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"已生成并读回验证 `target/timem_scenario_output/release_check.md`，内容包含 CI、敏感扫描和真实 TTY smoke 检查项。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"已生成并读回验证 `target/timem_scenario_output/release_check.md`，内容包含 CI、敏感扫描和真实 TTY smoke 检查项。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4669,7 +4666,9 @@ fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
     );
     let _ = core.begin_turn("需要推理一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":"推导一下","status":"finished","final_answer":"好的"}"#),
+        content: scored(
+            r#"{"free_talk":"推导一下","status":"ALL_FINISHED","final_answer":"好的"}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4694,7 +4693,7 @@ fn free_talk_field_optional_does_not_trigger_repair() {
     );
     let _ = core.begin_turn("简单问答", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"好的"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"好的"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4717,7 +4716,7 @@ fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
     );
     let _ = core.begin_turn("需要推理", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":{"content":"对象形式的思考","keep_in_context":true},"status":"finished","final_answer":"好的"}"#),
+        content: scored(r#"{"free_talk":{"content":"对象形式的思考","keep_in_context":true},"status":"ALL_FINISHED","final_answer":"好的"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4740,7 +4739,7 @@ fn free_talk_object_keep_in_context_false_is_still_persisted() {
     );
     let _ = core.begin_turn("需要推理", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":{"content":"临时思考不保留","keep_in_context":false},"status":"finished","final_answer":"好的"}"#),
+        content: scored(r#"{"free_talk":{"content":"临时思考不保留","keep_in_context":false},"status":"ALL_FINISHED","final_answer":"好的"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4776,7 +4775,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(protocol_section.contains("## Response Protocol"));
     assert!(protocol_section.contains("final_answer"));
     assert!(protocol_section.contains("{{RESPONSE_V1_SCHEMA}}"));
-    assert!(protocol_section.contains("DO NOT leave or add anything outside"));
+    assert!(protocol_section.contains("Always use exactly one top-level JSON object."));
 }
 
 #[test]
@@ -4943,8 +4942,10 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(json_prompt.contains("All your output things MUST BE enclosed"));
+    assert!(json_prompt.contains("Always use exactly one top-level JSON object."));
     assert!(json_prompt.contains("protocol-compliant response in JSON format"));
+    assert!(json_prompt.contains("\"working_still_action\""));
+    assert!(json_prompt.contains("\"ALL_FINISHED\""));
     assert!(!json_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
     let mut xml_core = AgentCore::new(
@@ -4994,7 +4995,7 @@ fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
 
     let repair_prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"checking files","next_actions":[{"action":"run_bash","intent":"Count files.","args":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","progress":"checking files","working_still_action":[{"action":"run_bash","intent":"Count files.","args":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5114,7 +5115,7 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
     let _ = core.begin_turn("检查项目", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","free_talk":"先说明一下检查思路。","report_job_progress":"正在检查项目结构","next_actions":[{"action":"run_bash","intent":"列出 Rust 文件","args":{"cmd":"rg --files -g '*.rs'","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","free_talk":"先说明一下检查思路。","progress":"正在检查项目结构","working_still_action":[{"action":"run_bash","intent":"列出 Rust 文件","args":{"cmd":"rg --files -g '*.rs'","timeout_ms":5000}}]}"#,
         ),
         usage: usage(),
         model_name: "qwen-plus".to_string(),
@@ -5176,7 +5177,7 @@ fn protocol_repair_does_not_publish_invalid_model_response_topic() {
     let _ = core.begin_turn("检查项目", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"正在检查","next_actions":[{"action":"run_bash","intent":"List.""#,
+            r#"{"status":"working","progress":"正在检查","working_still_action":[{"action":"run_bash","intent":"List.""#,
         ),
         usage: usage(),
         model_name: "qwen-plus".to_string(),
@@ -5314,7 +5315,7 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"正在查询记忆。","next_actions":[{"action":"memmgr","intent":"Query durable memory through manifest-backed tool.","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#,
+            r#"{"progress":"正在查询记忆。","working_still_action":[{"action":"memmgr","intent":"Query durable memory through manifest-backed tool.","args":{"type":"durable","op":"query","query":"测试代号","limit":5}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5347,7 +5348,7 @@ fn legacy_actions_are_not_visible_or_executable() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"旧动作应被拒绝。","next_actions":[{"action":"query_memory","intent":"Legacy fallback check.","args":{"query":"测试代号","limit":1}}]}"#,
+            r#"{"progress":"旧动作应被拒绝。","working_still_action":[{"action":"query_memory","intent":"Legacy fallback check.","args":{"query":"测试代号","limit":1}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5377,7 +5378,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
     let _ = core.begin_turn("准备发布", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"加载发布检查 skill。","next_actions":[{"action":"capmgr","intent":"Load release quality instructions before auditing.","args":{"op":"load","kind":"skill","id":"release_quality_gate"}}]}"#,
+            r#"{"progress":"加载发布检查 skill。","working_still_action":[{"action":"capmgr","intent":"Load release quality instructions before auditing.","args":{"op":"load","kind":"skill","id":"release_quality_gate"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5401,7 +5402,7 @@ fn self_tool_reads_mem_paths_and_about_info() {
     let _ = core.begin_turn("Timem 的记忆路径和版本是什么？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"查询 Timem 自身信息。","next_actions":[{"action":"self_tool","intent":"查看本次记忆和审计路径。","args":{"type":"mem_path","op":"read"}},{"action":"self_tool","intent":"查看 Timem 软件信息。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","progress":"查询 Timem 自身信息。","working_still_action":[{"action":"self_tool","intent":"查看本次记忆和审计路径。","args":{"type":"mem_path","op":"read"}},{"action":"self_tool","intent":"查看 Timem 软件信息。","args":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5426,7 +5427,7 @@ fn self_tool_reads_mem_paths_and_about_info() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"TimemAi 当前进程信息和记忆路径已确认。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"TimemAi 当前进程信息和记忆路径已确认。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5464,7 +5465,7 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
     let _ = core.begin_turn("查看运行时信息", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"查询 Timem 运行时信息。","next_actions":[{"action":"self_tool","intent":"读取运行时路径。","args":{"type":"mem_path","op":"read"}},{"action":"self_tool","intent":"读取 Timem 软件身份。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","progress":"查询 Timem 运行时信息。","working_still_action":[{"action":"self_tool","intent":"读取运行时路径。","args":{"type":"mem_path","op":"read"}},{"action":"self_tool","intent":"读取 Timem 软件身份。","args":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5500,7 +5501,7 @@ fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
     let _ = core.begin_turn("调整 Timem 的运行期环境。", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"检查并更新运行期环境。","next_actions":[{"action":"self_tool","intent":"确认 API key 不会暴露。","args":{"type":"env","op":"read","key":"TIMEM_API_KEY"}},{"action":"self_tool","intent":"设置一个非敏感运行期标记。","args":{"type":"env","op":"write","key":"TIMEM_SELF_TOOL_TEST","value":"enabled"}},{"action":"self_tool","intent":"读取刚设置的运行期标记。","args":{"type":"env","op":"read","key":"TIMEM_SELF_TOOL_TEST"}}]}"#,
+            r#"{"status":"working","progress":"检查并更新运行期环境。","working_still_action":[{"action":"self_tool","intent":"确认 API key 不会暴露。","args":{"type":"env","op":"read","key":"TIMEM_API_KEY"}},{"action":"self_tool","intent":"设置一个非敏感运行期标记。","args":{"type":"env","op":"write","key":"TIMEM_SELF_TOOL_TEST","value":"enabled"}},{"action":"self_tool","intent":"读取刚设置的运行期标记。","args":{"type":"env","op":"read","key":"TIMEM_SELF_TOOL_TEST"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5528,7 +5529,7 @@ fn self_tool_env_denies_memory_path_writes_through_core_action() {
     let attempted_path = "/tmp/timem-should-not-become-data-root";
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"status":"working","report_job_progress":"尝试更新 Timem 数据目录。","next_actions":[{{"action":"self_tool","intent":"更新 Timem 数据根目录。","args":{{"type":"env","op":"write","key":"TIMEM_DATA_DIR","value":"{attempted_path}"}}}},{{"action":"self_tool","intent":"更新 Timem 记忆空间。","args":{{"type":"env","op":"write","key":"TIMEM_SPACE","value":".other_mem"}}}}]}}"#
+            r#"{{"status":"working","progress":"尝试更新 Timem 数据目录。","working_still_action":[{{"action":"self_tool","intent":"更新 Timem 数据根目录。","args":{{"type":"env","op":"write","key":"TIMEM_DATA_DIR","value":"{attempted_path}"}}}},{{"action":"self_tool","intent":"更新 Timem 记忆空间。","args":{{"type":"env","op":"write","key":"TIMEM_SPACE","value":".other_mem"}}}}]}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5556,7 +5557,7 @@ fn self_tool_supports_identity_and_process_qa_replay() {
     let _ = core.begin_turn("你是谁？你这个 Timem 进程是什么？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"查询 Timem 自身身份和进程。","next_actions":[{"action":"self_tool","intent":"查看 Timem 身份、版本、作者和当前进程。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","progress":"查询 Timem 自身身份和进程。","working_still_action":[{"action":"self_tool","intent":"查看 Timem 身份、版本、作者和当前进程。","args":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5579,7 +5580,7 @@ fn self_tool_supports_identity_and_process_qa_replay() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"我是 TimemAi。当前 self_tool 已返回版本、作者、pid、current_dir 和 executable，可据此说明我正在本机 Timem 进程中运行。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"我是 TimemAi。当前 self_tool 已返回版本、作者、pid、current_dir 和 executable，可据此说明我正在本机 Timem 进程中运行。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5604,7 +5605,7 @@ fn capmgr_load_missing_kind_requests_protocol_repair_from_manifest_idl() {
     let _ = core.begin_turn("准备发布", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"加载 skill。","next_actions":[{"action":"capmgr","intent":"Load missing skill.","args":{"op":"load"}}]}"#,
+            r#"{"progress":"加载 skill。","working_still_action":[{"action":"capmgr","intent":"Load missing skill.","args":{"op":"load"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5616,7 +5617,7 @@ fn capmgr_load_missing_kind_requests_protocol_repair_from_manifest_idl() {
     };
 
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.kind_required_when_op=load"));
+    assert!(prompt.contains("issue: actions[0].input.kind_required_when_op=load"));
     assert!(!prompt.contains("Action result: capmgr"));
 }
 
@@ -5625,13 +5626,13 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
     for (case, payload, expected_issue) in [
         (
             "bad_op",
-            r#"{"report_job_progress":"检查 capability。","next_actions":[{"action":"capmgr","intent":"Use an unsupported capability operation.","args":{"op":"remove","kind":"skill","id":"release_quality_gate"}}]}"#,
-            "issue: next_actions[0].input.op_unsupported:remove",
+            r#"{"progress":"检查 capability。","working_still_action":[{"action":"capmgr","intent":"Use an unsupported capability operation.","args":{"op":"remove","kind":"skill","id":"release_quality_gate"}}]}"#,
+            "issue: actions[0].input.op_unsupported:remove",
         ),
         (
             "bad_kind",
-            r#"{"report_job_progress":"检查 capability。","next_actions":[{"action":"capmgr","intent":"Use an unsupported capability kind.","args":{"op":"load","kind":"resource","id":"release_quality_gate"}}]}"#,
-            "issue: next_actions[0].input.kind_unsupported:resource",
+            r#"{"progress":"检查 capability。","working_still_action":[{"action":"capmgr","intent":"Use an unsupported capability kind.","args":{"op":"load","kind":"resource","id":"release_quality_gate"}}]}"#,
+            "issue: actions[0].input.kind_unsupported:resource",
         ),
     ] {
         let mut core = AgentCore::new(
@@ -5699,7 +5700,7 @@ example_json: |
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"运行 overlay command。","next_actions":[{"action":"echo_payload","intent":"Echo runtime payload.","args":{"text":"hello"}}]}"#,
+            r#"{"progress":"运行 overlay command。","working_still_action":[{"action":"echo_payload","intent":"Echo runtime payload.","args":{"text":"hello"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5753,7 +5754,7 @@ example_json: |
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"运行 overlay command。","next_actions":[{"action":"echo_payload","intent":"Echo runtime payload in background.","args":{"text":"hello","background":true}}]}"#
+            r#"{"progress":"运行 overlay command。","working_still_action":[{"action":"echo_payload","intent":"Echo runtime payload in background.","args":{"text":"hello","background":true}}]}"#
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5765,7 +5766,7 @@ example_json: |
     };
 
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("next_actions[0].input.background_unsupported"));
+    assert!(prompt.contains("actions[0].input.background_unsupported"));
     assert!(!prompt.contains("background_started"));
 }
 
@@ -5818,7 +5819,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"后台运行 overlay command。","next_actions":[{"action":"echo_payload","intent":"Echo runtime payload in background.","args":{"text":"hello","background":true,"timeout_ms":5000}}]}"#
+            r#"{"progress":"后台运行 overlay command。","working_still_action":[{"action":"echo_payload","intent":"Echo runtime payload in background.","args":{"text":"hello","background":true,"timeout_ms":5000}}]}"#
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5839,7 +5840,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"检查后台工具任务。","next_actions":[{{"action":"capmgr","intent":"Wait for registered background tool.","args":{{"op":"job_status","job_id":"{}","timeout_ms":3000}}}}]}}"#,
+            r#"{{"progress":"检查后台工具任务。","working_still_action":[{{"action":"capmgr","intent":"Wait for registered background tool.","args":{{"op":"job_status","job_id":"{}","timeout_ms":3000}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -5902,7 +5903,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"后台运行慢工具。","next_actions":[{"action":"slow_payload","intent":"Start slow registered tool.","args":{"background":true,"timeout_ms":5000}}]}"#
+            r#"{"progress":"后台运行慢工具。","working_still_action":[{"action":"slow_payload","intent":"Start slow registered tool.","args":{"background":true,"timeout_ms":5000}}]}"#
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5920,7 +5921,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"取消后台工具任务。","next_actions":[{{"action":"capmgr","intent":"Cancel registered background tool.","args":{{"op":"job_cancel","job_id":"{}"}}}}]}}"#,
+            r#"{{"progress":"取消后台工具任务。","working_still_action":[{{"action":"capmgr","intent":"Cancel registered background tool.","args":{{"op":"job_cancel","job_id":"{}"}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -5944,7 +5945,7 @@ fn finished_with_actions_requests_repair_and_executes_nothing() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("完成任务", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"Verify.","args":{"cmd":"true","timeout_ms":2000}}]}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"任务已完成","working_still_action":[{"action":"run_bash","intent":"Verify.","args":{"cmd":"true","timeout_ms":2000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5968,11 +5969,11 @@ fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
     for (case, payload) in [
         (
             "multiple",
-            r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"First.","args":{"cmd":"true","timeout_ms":2000}},{"action":"run_bash","intent":"Last.","args":{"cmd":"true","timeout_ms":2000}}]}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"任务已完成","working_still_action":[{"action":"run_bash","intent":"First.","args":{"cmd":"true","timeout_ms":2000}},{"action":"run_bash","intent":"Last.","args":{"cmd":"true","timeout_ms":2000}}]}"#,
         ),
         (
             "self_tool",
-            r#"{"status":"finished","final_answer":"好的，以下是我的版本信息。","next_actions":[{"action":"self_tool","intent":"获取 Timem 的版本和运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"好的，以下是我的版本信息。","working_still_action":[{"action":"self_tool","intent":"获取 Timem 的版本和运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
         ),
     ] {
         let mut core = core_with_builtin_capabilities(&format!("finished_actions_repair_{case}"));
@@ -6007,7 +6008,7 @@ fn prose_then_final_answer_only_json_extracts_payload() {
         content: scored(
             r#"你叫张三！
 
-{"status":"finished","final_answer":"你叫**张三**！"}
+{"status":"ALL_FINISHED","final_answer":"你叫**张三**！"}
 "#,
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
@@ -6080,7 +6081,7 @@ fn final_answer_containing_json_code_example() {
     let _ = core.begin_turn("show json example", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"Use this format:\n```json\n{\"name\": \"test\"}\n```"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"Use this format:\n```json\n{\"name\": \"test\"}\n```"}"#,
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
@@ -6143,7 +6144,7 @@ fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
 }
 
 #[test]
-fn array_of_actions_auto_wrapped_as_next_actions() {
+fn array_of_actions_auto_wrapped_as_working_still_action() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
@@ -6239,7 +6240,7 @@ fn performance_guard_large_context_prompt_render_is_bounded() {
         let _ = core.begin_turn(&format!("user turn {idx}: {repeated_context}"), None);
         let step = core.apply_model_response(LlmResponse {
             content: scored(&format!(
-                r#"{{"status":"finished","final_answer":"assistant turn {idx}: done"}}"#
+                r#"{{"status":"ALL_FINISHED","final_answer":"assistant turn {idx}: done"}}"#
             )),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
@@ -6286,7 +6287,7 @@ fn performance_guard_topic_generation_for_many_actions_is_bounded() {
     let _ = core.begin_turn("emit many action topics", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(&format!(
-            r#"{{"status":"working","report_job_progress":"checking many actions","next_actions":[{actions}]}}"#
+            r#"{{"status":"working","progress":"checking many actions","working_still_action":[{actions}]}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),

@@ -772,7 +772,7 @@ mod tests {
             Err("provider_http_500: upstream overloaded".to_string()),
             Err("provider_network_error: curl: (16) Error in the HTTP2 framing layer".to_string()),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"重试后成功。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"重试后成功。"}"#,
                 1_000,
                 false,
             )),
@@ -889,7 +889,7 @@ mod tests {
         let mut model = ReplayModel::new([
             Ok(llm(
                 format!(
-                    r#"{{"status":"working","report_job_progress":"等待 CI 完成。","next_actions":[{{"action":"run_bash","intent":"启动稍后完成的后台任务。","args":{{"cmd":{},"timeout_ms":1000}}}},{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
+                    r#"{{"status":"working","progress":"等待 CI 完成。","working_still_action":[{{"action":"run_bash","intent":"启动稍后完成的后台任务。","args":{{"cmd":{},"timeout_ms":1000}}}},{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
                     serde_json::to_string(&bootstrap_command).unwrap(),
                     serde_json::to_string(&check_command).unwrap()
                 ),
@@ -897,7 +897,7 @@ mod tests {
                 false,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"CI 已完成。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"CI 已完成。"}"#,
                 1_200,
                 false,
             )),
@@ -952,12 +952,12 @@ mod tests {
         let mut ui = DeclineLongRunningCommandUi::default();
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","report_job_progress":"运行一个长命令。","next_actions":[{"action":"run_bash","intent":"Run a blocking command for user testing.","args":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":5000}}]}"#,
+                r#"{"status":"working","progress":"运行一个长命令。","working_still_action":[{"action":"run_bash","intent":"Run a blocking command for user testing.","args":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":5000}}]}"#,
                 1_000,
                 false,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"已按用户停止等待后的补充继续处理。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"已按用户停止等待后的补充继续处理。"}"#,
                 1_100,
                 false,
             )),
@@ -1309,12 +1309,12 @@ finished
         let mut ui = SupplementDuringModelUi::default();
         let mut model = PollingReplayModel::new([
             Ok(llm(
-                r#"{"status":"finished","final_answer":"旧答案。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"旧答案。"}"#,
                 1_000,
                 false,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"已按补充重新回答。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"已按补充重新回答。"}"#,
                 1_200,
                 false,
             )),
@@ -1367,12 +1367,12 @@ finished
         let mut ui = SupplementAndExpansionUi::default();
         let mut model = PollingReplayModel::new([
             Ok(llm(
-                r#"{"status":"finished","final_answer":"旧输出被截断"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"旧输出被截断"#,
                 10_000,
                 true,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"已按补充重新回答。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"已按补充重新回答。"}"#,
                 1_200,
                 false,
             )),
@@ -1427,12 +1427,12 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","report_job_progress":"查询 scratch 后继续。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#,
+                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}}"#,
                 5_000,
                 false,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"没有找到相关 scratch。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"没有找到相关 scratch。"}"#,
                 5_800,
                 false,
             )),
@@ -1495,12 +1495,12 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","report_job_progress":"查询 scratch 后继续。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#,
+                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#,
                 5_000,
                 false,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"没有找到相关 scratch。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"没有找到相关 scratch。"}"#,
                 5_800,
                 false,
             )),
@@ -1524,13 +1524,13 @@ finished
 
         assert_eq!(outcome.text, "没有找到相关 scratch。");
         assert_eq!(model.prompts.len(), 2);
-        assert!(model.prompts[0].contains("All your output things MUST BE enclosed"));
-        assert!(model.prompts[1].contains("All your output things MUST BE enclosed"));
+        assert!(model.prompts[0].contains("Always use exactly one top-level JSON object."));
+        assert!(model.prompts[1].contains("Always use exactly one top-level JSON object."));
 
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
         assert!(second_parts
             .static_prompt
-            .contains("All your output things MUST BE enclosed"));
+            .contains("Always use exactly one top-level JSON object."));
         assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
         assert!(second_parts.new_delta.contains("Action result: memmgr"));
         let second_blocks = crate::plan_incremental_cache(second_parts);
@@ -1711,7 +1711,7 @@ finished
         let mut ui = NoopTurnUi;
 
         let mut first_model = ReplayModel::new([Ok(llm(
-            r#"{"status":"finished","free_talk":"previous free talk","final_answer":"previous answer"}"#,
+            r#"{"status":"ALL_FINISHED","free_talk":"previous free talk","final_answer":"previous answer"}"#,
             4_000,
             false,
         ))]);
@@ -1733,7 +1733,7 @@ finished
         assert_eq!(first.text, "previous answer");
 
         let mut second_model = ReplayModel::new([Ok(llm(
-            r#"{"status":"finished","final_answer":"second answer"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"second answer"}"#,
             4_200,
             false,
         ))]);
@@ -1776,7 +1776,7 @@ finished
         let mut config = test_config();
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([Ok(llm(
-            r#"{"status":"finished","final_answer":"host context ok"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"host context ok"}"#,
             1_000,
             false,
         ))]);
@@ -1819,13 +1819,13 @@ finished
         second_usage.cached_tokens = 6_500;
         let mut model = ReplayModel::new([
             Ok(LlmResponse {
-                content: r#"{"status":"working","report_job_progress":"先查询 scratch。","next_actions":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#.to_string(),
+                content: r#"{"status":"working","progress":"先查询 scratch。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#.to_string(),
                 model_name: "test-model".to_string(),
                 usage: first_usage.clone(),
                 truncated: false,
             }),
             Ok(LlmResponse {
-                content: r#"{"status":"finished","final_answer":"完成。"}"#.to_string(),
+                content: r#"{"status":"ALL_FINISHED","final_answer":"完成。"}"#.to_string(),
                 model_name: "test-model".to_string(),
                 usage: second_usage.clone(),
                 truncated: false,
@@ -1886,7 +1886,7 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
+                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 13_253, false));
@@ -1897,7 +1897,7 @@ finished
             assert!(prompt.contains("op: shrink"));
             assert!(!prompt.contains("mode=force_shrink_required"));
             Ok(llm(
-                r#"{"status":"finished","final_answer":"压缩已完成，可以继续对话。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
                 1_200,
                 false,
             ))
@@ -2021,7 +2021,7 @@ finished
         let mut model = ReplayModel::new([
             Ok(llm("{not valid json}", 5_000, false)),
             Ok(llm(
-                r#"next_actions: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#,
+                r#"working_still_action: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#,
                 5_100,
                 false,
             )),
@@ -2141,7 +2141,7 @@ finished
 
         let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
         let seed_step = core.apply_model_response(llm(
-            r#"{"status":"finished","final_answer":"seeded"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#,
             13_253,
             false,
         ));
@@ -2237,9 +2237,9 @@ finished
             last_topic_blocking: false,
         };
         let mut model = ReplayModel::new([
-            Ok(llm(r#"{"report_job_progress":"partial""#, 5_000, true)),
+            Ok(llm(r#"{"progress":"partial""#, 5_000, true)),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"扩容后完成。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"扩容后完成。"}"#,
                 5_100,
                 false,
             )),
@@ -2295,9 +2295,9 @@ finished
         config.max_llm_output_tokens = 8192;
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
-            Ok(llm(r#"{"report_job_progress":"partial""#, 5_000, true)),
+            Ok(llm(r#"{"progress":"partial""#, 5_000, true)),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"默认扩容后完成。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"默认扩容后完成。"}"#,
                 5_100,
                 false,
             )),
@@ -2360,7 +2360,7 @@ finished
             expansion_requests: 0,
         };
         let mut model = ReplayModel::new([Ok(llm(
-            r#"{"status":"finished","final_answer":"partial"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"partial"#,
             5_000,
             true,
         ))]);
@@ -2436,12 +2436,12 @@ finished
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Look up evidence before answering.","args":{"type":"durable","op":"query","query":"round limit e2e","limit":5}}]}"#,
+                r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence before answering.","args":{"type":"durable","op":"query","query":"round limit e2e","limit":5}}]}"#,
                 4_000,
                 false,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"续跑后完成。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"续跑后完成。"}"#,
                 4_200,
                 false,
             )),
@@ -2492,12 +2492,12 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","report_job_progress":"","next_actions":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"query","query":"round limit noop","limit":5}}]}"#,
+                r#"{"status":"working","progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"query","query":"round limit noop","limit":5}}]}"#,
                 4_000,
                 false,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"默认续跑后完成。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"默认续跑后完成。"}"#,
                 4_100,
                 false,
             )),
@@ -2557,7 +2557,7 @@ finished
             continue_requests: 0,
         };
         let mut model = ReplayModel::new([Ok(llm(
-            r#"{"status":"working","report_job_progress":"先查证据。","next_actions":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"query","query":"round limit stop","limit":5}}]}"#,
+            r#"{"status":"working","progress":"先查证据。","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"query","query":"round limit stop","limit":5}}]}"#,
             4_000,
             false,
         ))]);
@@ -2616,7 +2616,7 @@ finished
         let output_file = dir.join("approved.txt");
         let command = format!("printf approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"run_bash","intent":"Write approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -2629,7 +2629,7 @@ finished
         let mut model = ReplayModel::new([
             Ok(llm(first_response, 3_000, false)),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"命令已执行并确认。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"命令已执行并确认。"}"#,
                 3_100,
                 false,
             )),
@@ -2705,7 +2705,7 @@ finished
         let output_file = dir.join("cancelled.txt");
         let command = format!("printf cancelled > {}", output_file.display());
         let first_response = format!(
-            r#"{{"status":"working","report_job_progress":"需要审批。","next_actions":[{{"action":"run_bash","intent":"Write cancelled test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"status":"working","progress":"需要审批。","working_still_action":[{{"action":"run_bash","intent":"Write cancelled test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -2721,7 +2721,7 @@ finished
         let mut model = ReplayModel::new([
             Ok(llm(first_response, 3_000, false)),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"用户取消审批，已停止执行。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"用户取消审批，已停止执行。"}"#,
                 3_100,
                 false,
             )),
@@ -2764,7 +2764,7 @@ finished
         let output_file = dir.join("approved_by_default.txt");
         let command = format!("printf default-approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"status":"working","report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write default approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"status":"working","progress":"","working_still_action":[{{"action":"run_bash","intent":"Write default approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -2775,7 +2775,7 @@ finished
         let mut model = ReplayModel::new([
             Ok(llm(first_response, 3_000, false)),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"默认审批后完成。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"默认审批后完成。"}"#,
                 3_100,
                 false,
             )),
@@ -2822,12 +2822,12 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"finished","final_answer":"文件已生成并验证。","next_actions":[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"true","timeout_ms":5000}}]}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"文件已生成并验证。","working_still_action":[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"true","timeout_ms":5000}}]}"#,
                 3_000,
                 false,
             )),
             Ok(llm(
-                r#"{"status":"finished","final_answer":"文件已生成并验证。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"文件已生成并验证。"}"#,
                 3_100,
                 false,
             )),
@@ -2880,7 +2880,7 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}]}}"#,
+                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}]}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 4_000, false));
@@ -2892,7 +2892,7 @@ finished
             assert!(prompt.contains("id: scratch_"));
             assert!(prompt.contains("label: session e2e offload"));
             Ok(llm(
-                r#"{"status":"finished","final_answer":"scratch 已记录，可以继续。"}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"scratch 已记录，可以继续。"}"#,
                 4_100,
                 false,
             ))
@@ -3059,7 +3059,7 @@ Markdown 协议动作已执行。"#,
             self.prompts.push(prompt.to_string());
             match self.calls {
                 1 => Ok(llm(
-                    r#"{"status":"finished","final_answer":"你好，我在。"}"#,
+                    r#"{"status":"ALL_FINISHED","final_answer":"你好，我在。"}"#,
                     2_000,
                     false,
                 )),
@@ -3069,7 +3069,7 @@ Markdown 协议动作已执行。"#,
                     Ok(llm("畸形回复已恢复为用户可读文本。", 2_200, false))
                 }
                 4 => Ok(llm(
-                    r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"记录测试项目代号。","args":{"type":"durable","op":"upsert","id":"project_code","content":"测试项目代号是 OMEGA-7"}}]}"#,
+                    r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"记录测试项目代号。","args":{"type":"durable","op":"upsert","id":"project_code","content":"测试项目代号是 OMEGA-7"}}]}"#,
                     2_300,
                     false,
                 )),
@@ -3079,13 +3079,13 @@ Markdown 协议动作已执行。"#,
                     assert!(prompt.contains("op: insert"));
                     assert!(prompt.contains("project_code"));
                     Ok(llm(
-                        r#"{"status":"finished","final_answer":"已记录测试项目代号。"}"#,
+                        r#"{"status":"ALL_FINISHED","final_answer":"已记录测试项目代号。"}"#,
                         2_400,
                         false,
                     ))
                 }
                 6 => Ok(llm(
-                    r#"{"report_job_progress":"","next_actions":[{"action":"memmgr","intent":"查询测试项目代号记忆。","args":{"type":"durable","op":"query","query":"测试项目代号","limit":5}}]}"#,
+                    r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询测试项目代号记忆。","args":{"type":"durable","op":"query","query":"测试项目代号","limit":5}}]}"#,
                     2_500,
                     false,
                 )),
@@ -3095,7 +3095,7 @@ Markdown 协议动作已执行。"#,
                     assert!(prompt.contains("op: query"));
                     assert!(prompt.contains("测试项目代号是 OMEGA-7"));
                     Ok(llm(
-                        r#"{"status":"finished","final_answer":"测试项目代号是 OMEGA-7。"}"#,
+                        r#"{"status":"ALL_FINISHED","final_answer":"测试项目代号是 OMEGA-7。"}"#,
                         7_600,
                         false,
                     ))
@@ -3110,7 +3110,7 @@ Markdown 协议动作已执行。"#,
                         "forced shrink prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}]}}"#,
+                        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}]}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_650, false))
@@ -3129,7 +3129,7 @@ Markdown 协议动作已执行。"#,
                         "post-scratch forced shrink prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"report_job_progress":"","next_actions":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
+                        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_700, false))
@@ -3140,7 +3140,7 @@ Markdown 协议动作已执行。"#,
                     assert!(prompt.contains("op: shrink"));
                     assert!(!prompt.contains("mode=force_shrink_required"));
                     Ok(llm(
-                        r#"{"status":"finished","final_answer":"上下文已转存并压缩，可以继续。"}"#,
+                        r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
                         2_000,
                         false,
                     ))

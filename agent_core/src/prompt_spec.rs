@@ -40,7 +40,7 @@ mod tests {
         assert!(summary.get("$id").is_none());
         assert!(summary
             .get("fields")
-            .and_then(|value| value.get("report_job_progress?"))
+            .and_then(|value| value.get("progress?"))
             .is_some());
         assert!(summary
             .get("fields")
@@ -53,16 +53,17 @@ mod tests {
         assert!(summary
             .get("fields")
             .and_then(|value| value.get("free_talk?"))
-            .and_then(|value| value.get("keep_in_context"))
+            .and_then(Value::as_str)
             .is_some());
         assert!(summary
             .get("fields")
             .and_then(|value| value.get("free_talk?"))
-            .and_then(|value| value.get("durable"))
-            .is_none());
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("kept visible"));
         assert!(summary
             .get("action_object_spec")
-            .and_then(|value| value.get("intent"))
+            .and_then(|value| value.get("intent?"))
             .is_some());
         let text = serde_json::to_string(&summary).unwrap();
         assert!(text.contains("context_compact?"));

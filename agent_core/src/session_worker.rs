@@ -731,7 +731,9 @@ impl TurnUi for WorkerTurnUi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApiProtocol, BashApprovalMode, CoreProfile, LlmResponse, UsageStats};
+    use crate::{
+        ApiProtocol, BashApprovalMode, CoreProfile, LlmResponse, ResponseProtocolKind, UsageStats,
+    };
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier, Mutex};
     use std::time::Instant;
@@ -1969,6 +1971,110 @@ mod tests {
         calls: Arc<Mutex<Vec<StressModelCall>>>,
     }
 
+    struct ProtocolTurnStressModel {
+        worker_idx: usize,
+        protocol: ResponseProtocolKind,
+        calls: Arc<Mutex<Vec<ProtocolTurnStressCall>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ProtocolTurnStressCall {
+        worker_idx: usize,
+        protocol: ResponseProtocolKind,
+        turn_idx: usize,
+        has_own_supplement: bool,
+        saw_cross_session_marker: bool,
+    }
+
+    fn protocol_turn_payload(
+        protocol: ResponseProtocolKind,
+        answer: &str,
+        free_talk: &str,
+    ) -> String {
+        match protocol {
+            ResponseProtocolKind::Json => serde_json::json!({
+                "status": "ALL_FINISHED",
+                "free_talk": free_talk,
+                "final_answer": answer,
+            })
+            .to_string(),
+            ResponseProtocolKind::Markdown => {
+                format!(
+                    "## Free_talk\n{free_talk}\n\n## Status\nfinished\n\n## Final_Answer\n{answer}"
+                )
+            }
+            ResponseProtocolKind::Xml => {
+                format!(
+                    "<response><free_talk>{}</free_talk><status>ALL_FINISHED</status><final_answer>{}</final_answer></response>",
+                    free_talk, answer
+                )
+            }
+        }
+    }
+
+    impl ModelClient for ProtocolTurnStressModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            if should_cancel() {
+                return Err("cancelled_by_user".to_string());
+            }
+            let turn_idx = latest_stress_turn(prompt, self.worker_idx, 10_000);
+            let own_marker = format!("PROTO_SUPP_MARKER_{}_{}", self.worker_idx, turn_idx);
+            let has_own_supplement = prompt.contains(&own_marker);
+            let saw_cross_session_marker = (0..6)
+                .filter(|idx| *idx != self.worker_idx)
+                .any(|idx| prompt.contains(&format!("PROTO_SUPP_MARKER_{idx}_")));
+            self.calls.lock().unwrap().push(ProtocolTurnStressCall {
+                worker_idx: self.worker_idx,
+                protocol: self.protocol,
+                turn_idx,
+                has_own_supplement,
+                saw_cross_session_marker,
+            });
+            if turn_idx % 10 == 0 && !has_own_supplement {
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_millis(80) {
+                    if should_cancel() {
+                        return Err("cancelled_by_user".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            let answer = if saw_cross_session_marker {
+                format!("PROTO_WORKER_{}_LEAK", self.worker_idx)
+            } else if has_own_supplement {
+                format!(
+                    "PROTO_WORKER_{}_TURN_{turn_idx}_SUPPLEMENTED",
+                    self.worker_idx
+                )
+            } else {
+                format!("PROTO_WORKER_{}_TURN_{turn_idx}_OK", self.worker_idx)
+            };
+            let content = protocol_turn_payload(
+                self.protocol,
+                &answer,
+                &format!("worker {} turn {turn_idx} protocol stress", self.worker_idx),
+            );
+            Ok(LlmResponse {
+                content,
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 800,
+                    completion_tokens: 32,
+                    total_tokens: 832,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            })
+        }
+    }
+
     fn stress_marker(worker_idx: usize, turn_idx: usize, step_idx: usize) -> String {
         format!("STRESS_ACTION_DONE_W{worker_idx}_T{turn_idx}_S{step_idx}")
     }
@@ -2344,6 +2450,196 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore = "dedicated high-pressure worker test: 6 workers, >1000 turns, protocol-compliant payloads"]
+    fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
+        const WORKERS: usize = 6;
+        const TURNS_PER_WORKER: usize = 167;
+        const TOTAL_TURNS: usize = WORKERS * TURNS_PER_WORKER;
+        assert!(TOTAL_TURNS > 1000);
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut host_threads = Vec::new();
+        let started = Instant::now();
+
+        for worker_idx in 0..WORKERS {
+            let protocol = match worker_idx % 3 {
+                0 => ResponseProtocolKind::Json,
+                1 => ResponseProtocolKind::Markdown,
+                _ => ResponseProtocolKind::Xml,
+            };
+            let dir = tmp_dir(&format!("protocol_turn_stress_worker_{worker_idx}"));
+            let mut core = AgentCore::new(
+                "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+                CoreProfile {
+                    name: "test".to_string(),
+                    provider: "test".to_string(),
+                    model: "test-model".to_string(),
+                },
+                &dir,
+            );
+            core.set_response_protocol(protocol);
+            core.set_max_rounds(50);
+            core.set_max_llm_input_tokens(1_000_000);
+            let mut config = test_config();
+            config.response_protocol = protocol;
+            let worker = CoreSessionWorker::spawn_with_model_client(
+                core,
+                config,
+                test_worker_config(
+                    &dir,
+                    &format!("protocol_stress_session_{worker_idx}"),
+                    worker_idx as u32 + 1,
+                ),
+                ProtocolTurnStressModel {
+                    worker_idx,
+                    protocol,
+                    calls: Arc::clone(&calls),
+                },
+            );
+
+            host_threads.push(thread::spawn(move || {
+                let handle = worker.handle();
+                let _lifecycle = worker
+                    .events()
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("protocol stress worker should emit lifecycle");
+                let mut response_topics = 0usize;
+                let mut final_zero_worker_topics = 0usize;
+                let mut supplemented_turns = 0usize;
+                for turn in 0..TURNS_PER_WORKER {
+                    let input = format!("stress worker {worker_idx} turn {turn}");
+                    handle
+                        .run_turn(input, None)
+                        .expect("protocol stress worker should accept turn");
+                    if turn % 10 == 0 {
+                        supplemented_turns += 1;
+                        handle.add_user_supplement(format!(
+                            "PROTO_SUPP_MARKER_{worker_idx}_{turn}: supplement for turn {turn}"
+                        ));
+                    }
+                    loop {
+                        match worker
+                            .events()
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("protocol stress turn should finish")
+                        {
+                            CoreSessionWorkerEvent::Topics(events) => {
+                                for event in events {
+                                    if let Some(response) = event.as_model_response() {
+                                        response_topics += 1;
+                                        if response.global.working_worker_count == 0 {
+                                            final_zero_worker_topics += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            CoreSessionWorkerEvent::TurnFinished { outcome } => {
+                                let expected = if turn % 10 == 0 {
+                                    format!("PROTO_WORKER_{worker_idx}_TURN_{turn}_SUPPLEMENTED")
+                                } else {
+                                    format!("PROTO_WORKER_{worker_idx}_TURN_{turn}_OK")
+                                };
+                                assert_eq!(outcome.text, expected);
+                                break;
+                            }
+                            CoreSessionWorkerEvent::ModelRequest { .. }
+                            | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                            other => panic!(
+                                "protocol stress worker {worker_idx} unexpected event: {other:?}"
+                            ),
+                        }
+                    }
+                }
+                handle.request_shutdown().unwrap();
+                loop {
+                    match worker
+                        .events()
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("protocol stress worker should stop")
+                    {
+                        CoreSessionWorkerEvent::WorkerStopped => break,
+                        CoreSessionWorkerEvent::Topics(_)
+                        | CoreSessionWorkerEvent::ModelRequest { .. }
+                        | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                        other => panic!(
+                            "protocol stress worker {worker_idx} unexpected stop event: {other:?}"
+                        ),
+                    }
+                }
+                worker.shutdown().unwrap();
+                (
+                    response_topics,
+                    final_zero_worker_topics,
+                    supplemented_turns,
+                )
+            }));
+        }
+
+        let mut response_topics = 0usize;
+        let mut final_zero_worker_topics = 0usize;
+        let mut supplemented_turns = 0usize;
+        for host_thread in host_threads {
+            let (worker_responses, worker_zero_topics, worker_supplements) = host_thread
+                .join()
+                .expect("protocol stress host thread should not panic");
+            response_topics += worker_responses;
+            final_zero_worker_topics += worker_zero_topics;
+            supplemented_turns += worker_supplements;
+        }
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.len() >= TOTAL_TURNS,
+            "supplemented turns may add stale/discarded model calls"
+        );
+        assert_eq!(response_topics, TOTAL_TURNS);
+        assert!(
+            final_zero_worker_topics >= 1,
+            "the final model response topic should tell UI no worker remains active"
+        );
+        assert!(
+            calls.iter().all(|call| !call.saw_cross_session_marker),
+            "no worker prompt should include another worker's supplement marker"
+        );
+        assert_eq!(
+            calls.iter().filter(|call| call.has_own_supplement).count(),
+            supplemented_turns
+        );
+        for protocol in [
+            ResponseProtocolKind::Json,
+            ResponseProtocolKind::Markdown,
+            ResponseProtocolKind::Xml,
+        ] {
+            assert!(
+                calls.iter().any(|call| call.protocol == protocol),
+                "protocol stress should include {protocol:?}"
+            );
+        }
+        for worker_idx in 0..WORKERS {
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call.worker_idx == worker_idx)
+                    .count(),
+                TURNS_PER_WORKER
+            );
+            assert!(
+                calls
+                    .iter()
+                    .any(|call| call.worker_idx == worker_idx
+                        && call.turn_idx == TURNS_PER_WORKER - 1),
+                "worker {worker_idx} should complete the final turn"
+            );
+        }
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(180),
+            "dedicated worker stress should finish without deadlock or unbounded growth; elapsed={elapsed:?}"
+        );
     }
 
     fn wait_for_stress_turn_finished(
