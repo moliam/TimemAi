@@ -921,6 +921,29 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_request_sends_formatted_response_trailer_without_cache_control() {
+        let mut config = config(ApiProtocol::Anthropic);
+        config.provider = "anthropic".to_string();
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
+            crate::prompt_render::formatted_response_trailer("XML")
+        );
+
+        let prepared = prepare_provider_request(&config, &prompt);
+        let content = prepared.body["messages"][0]["content"].as_array().unwrap();
+
+        assert_eq!(
+            content.last().unwrap()["text"],
+            "Follow the system prompt, give your XML formatted response:"
+        );
+        assert_eq!(content.last().unwrap().get("cache_control"), None);
+        assert!(!content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Follow the system prompt, give your XML formatted response:"));
+    }
+
+    #[test]
     fn openai_responses_request_uses_official_shape() {
         let mut config = config(ApiProtocol::OpenAiResponses);
         config.provider = "openai".to_string();
@@ -994,6 +1017,29 @@ mod tests {
                 .contains(&format!("delta {idx}")));
             assert_eq!(messages[idx]["cache_control"]["type"], "ephemeral");
         }
+    }
+
+    #[test]
+    fn openai_compatible_request_sends_formatted_response_trailer_without_cache_control() {
+        let mut config = config(ApiProtocol::OpenAiCompatible);
+        config.provider = "aliyun".to_string();
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
+            crate::prompt_render::formatted_response_trailer("JSON")
+        );
+
+        let prepared = prepare_provider_request(&config, &prompt);
+        let messages = prepared.body["messages"].as_array().unwrap();
+
+        assert_eq!(
+            messages.last().unwrap()["content"],
+            "Follow the system prompt, give your JSON formatted response:"
+        );
+        assert_eq!(messages.last().unwrap().get("cache_control"), None);
+        assert!(!messages[messages.len() - 2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Follow the system prompt, give your JSON formatted response:"));
     }
 
     #[test]

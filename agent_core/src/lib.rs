@@ -1755,6 +1755,7 @@ impl AgentCore {
             &self.rendered_static_prompt,
             &self.deltas,
             &self.assistant_speaker_name,
+            self.response_protocol.lang_format(),
         )
     }
     fn render_prompt_slices(&self) -> Vec<PromptSlice> {

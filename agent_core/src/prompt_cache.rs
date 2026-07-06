@@ -1,3 +1,5 @@
+use crate::prompt_render::split_formatted_response_trailer;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptBlockRole {
     System,
@@ -76,6 +78,7 @@ pub fn split_old_and_new_delta(dynamic_prompt: &str) -> (String, String) {
 }
 
 pub fn prompt_parts_from_rendered_prompt(rendered_prompt: &str) -> PromptParts {
+    let rendered_prompt = split_formatted_response_trailer(rendered_prompt).0;
     let (static_prompt, dynamic_prompt) = split_prompt(rendered_prompt);
     let dynamic_prompt = if dynamic_prompt.is_empty() {
         rendered_prompt.to_string()
@@ -134,7 +137,17 @@ pub fn plan_incremental_cache(parts: PromptParts) -> Vec<PromptBlock> {
 }
 
 pub fn plan_prompt_cache(rendered_prompt: &str) -> Vec<PromptBlock> {
-    plan_incremental_cache(prompt_parts_from_rendered_prompt(rendered_prompt))
+    let (prompt_without_trailer, trailer) = split_formatted_response_trailer(rendered_prompt);
+    let mut blocks =
+        plan_incremental_cache(prompt_parts_from_rendered_prompt(prompt_without_trailer));
+    if let Some(trailer) = trailer {
+        blocks.push(PromptBlock {
+            role: PromptBlockRole::User,
+            text: trailer,
+            cache: CacheControl::None,
+        });
+    }
+    blocks
 }
 
 pub fn stable_text_fingerprint(text: &str) -> String {
@@ -256,6 +269,33 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert!(blocks[1].text.contains("slice one"));
         assert!(blocks[1].text.contains("slice two"));
+    }
+
+    #[test]
+    fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]\n\n{}",
+            crate::prompt_render::formatted_response_trailer("XML")
+        );
+
+        let parts = prompt_parts_from_rendered_prompt(&prompt);
+        assert!(parts.new_delta.contains("delta1"));
+        assert!(!parts
+            .new_delta
+            .contains("Follow the system prompt, give your XML formatted response:"));
+
+        let blocks = plan_prompt_cache(&prompt);
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks[1].text.contains("delta1"));
+        assert!(!blocks[1]
+            .text
+            .contains("Follow the system prompt, give your XML formatted response:"));
+        assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
+        assert_eq!(
+            blocks[2].text,
+            "Follow the system prompt, give your XML formatted response:"
+        );
+        assert_eq!(blocks[2].cache, CacheControl::None);
     }
 
     #[derive(Debug, Default)]

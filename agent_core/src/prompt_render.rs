@@ -3,6 +3,29 @@ use crate::prompt_spec;
 use crate::response_protocol::ResponseProtocolSuite;
 use crate::{PromptDelta, PromptSlice};
 
+pub(crate) fn formatted_response_trailer(protocol_language: &str) -> String {
+    format!(
+        "Follow the system prompt, give your {} formatted response:",
+        protocol_language.trim()
+    )
+}
+
+pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
+    let trimmed = rendered_prompt.trim_end();
+    let Some(line_start) = trimmed.rfind('\n') else {
+        return (rendered_prompt, None);
+    };
+    let candidate = trimmed[line_start + 1..].trim();
+    if candidate.starts_with("Follow the system prompt, give your ")
+        && candidate.ends_with(" formatted response:")
+        && candidate.len() > "Follow the system prompt, give your  formatted response:".len()
+    {
+        let prefix = trimmed[..line_start].trim_end();
+        return (prefix, Some(candidate.to_string()));
+    }
+    (rendered_prompt, None)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisiblePromptRole {
     User,
@@ -61,6 +84,7 @@ pub(crate) fn render_prompt_with_rendered_static(
     rendered_static_prompt: &str,
     deltas: &[PromptDelta],
     assistant_heading: &str,
+    protocol_language: &str,
 ) -> String {
     let mut out = format!("{}", rendered_static_prompt);
 
@@ -90,6 +114,8 @@ pub(crate) fn render_prompt_with_rendered_static(
         out.push_str("\n[END DELTA]");
     }
 
+    out.push_str("\n\n");
+    out.push_str(&formatted_response_trailer(protocol_language));
     out
 }
 
@@ -159,8 +185,12 @@ mod tests {
             &CapabilityRegistry::builtin(),
             &MarkdownSuiteV1,
         );
-        let rendered =
-            render_prompt_with_rendered_static(&rendered_static, &[delta], "TIMEM_ASSISTANT");
+        let rendered = render_prompt_with_rendered_static(
+            &rendered_static,
+            &[delta],
+            "TIMEM_ASSISTANT",
+            "Markdown",
+        );
         assert!(rendered.contains("Response Protocol"));
         assert!(rendered.contains("memmgr"));
         assert!(rendered.contains("hello"));
@@ -172,6 +202,21 @@ mod tests {
         assert!(!rendered.contains("slice_id:"));
         assert!(!rendered.contains("prompt_type:"));
         assert!(!rendered.contains("HIDDEN"));
+        assert!(
+            rendered.ends_with("Follow the system prompt, give your Markdown formatted response:")
+        );
+    }
+
+    #[test]
+    fn formatted_response_trailer_parser_preserves_protocol_name() {
+        let prompt =
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nFollow the system prompt, give your XML formatted response:";
+        let (prefix, trailer) = split_formatted_response_trailer(prompt);
+        assert_eq!(prefix, "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]");
+        assert_eq!(
+            trailer.as_deref(),
+            Some("Follow the system prompt, give your XML formatted response:")
+        );
     }
 
     #[test]

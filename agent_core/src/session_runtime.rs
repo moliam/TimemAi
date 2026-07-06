@@ -1258,9 +1258,14 @@ finished
         assert_eq!(model.prompts.len(), 2);
 
         let first_blocks = crate::plan_prompt_cache(&model.prompts[0]);
-        assert_eq!(first_blocks.len(), 2);
+        assert_eq!(first_blocks.len(), 3);
         assert_eq!(first_blocks[0].cache, crate::CacheControl::Ephemeral);
         assert_eq!(first_blocks[1].cache, crate::CacheControl::Ephemeral);
+        assert_eq!(first_blocks[2].cache, crate::CacheControl::None);
+        assert_eq!(
+            first_blocks[2].text,
+            "Follow the system prompt, give your XML formatted response:"
+        );
 
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
         assert!(second_parts.static_prompt.contains("test static prompt"));

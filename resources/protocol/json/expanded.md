@@ -418,3 +418,5 @@ unless the current user task actually requires the same action.
 
 
 [END SYSTEM PROMPT]
+
+Follow the system prompt, give your JSON formatted response:

@@ -650,6 +650,12 @@ Algorithm:
    exact slice boundaries.
 4. Mark the latest `DYNAMIC_TAIL_CACHE_BLOCKS = 3` dynamic blocks cacheable.
 5. Leave older dynamic blocks unmarked.
+6. Append the temporary
+   `Follow the system prompt, give your <protocol> formatted response:` trailer
+   as the final user block without cache control, for example
+   `Follow the system prompt, give your XML formatted response:`. This trailer
+   is not a prompt delta and must not be merged into the latest delta cache
+   block.
 
 This is a tail-checkpoint strategy, not an old-deltas strategy. It deliberately
 marks the newest prompt tail cacheable. For append-only conversations, the
