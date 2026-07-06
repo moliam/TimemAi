@@ -1229,7 +1229,7 @@ mod tests {
     fn thinking_view_renders_observation_panel_and_status_line() {
         let mut observations = ObservationPanel::new(8, 60);
         observations.apply(ObservationEvent::Persistent("正在分析用户请求".into()));
-        observations.apply(ObservationEvent::Active("Bash: rg --files | wc -l".into()));
+        observations.apply(ObservationEvent::Active("rg --files | wc -l".into()));
         let view = render_thinking_view_at(
             &ThinkingViewSnapshot {
                 status: ShellStatusSnapshot {
@@ -1264,7 +1264,7 @@ mod tests {
         assert!(view.contains("Thought / Action"));
         assert!(view.contains("Thought / Action  ⏳ 00:12"));
         assert!(view.contains("· 正在分析用户请求"));
-        assert!(view.contains("\x1b[38;5;245m· Bash: rg --files | wc -l"));
+        assert!(view.contains("\x1b[38;5;245m· rg --files | wc -l"));
         assert!(view.contains("aliyun:qwen-plus ⇌2 ║ ▲1.2K | ▼20 | KVC(⌁300)"));
         assert!(view.contains("├─ context : ▰▱▱▱▱▱▱▱▱▱"));
         assert!(view.contains("└─ △800  ▽12"));
@@ -1287,7 +1287,7 @@ mod tests {
                 "整理任务现场：保留用户目标、当前进度、下一步，不展示模型私有 thought。".into(),
             ));
             observations.apply(ObservationEvent::ActiveChild {
-                text: format!("Bash: {command}"),
+                text: format!("{command}"),
                 is_last: true,
             });
             observations.apply(ObservationEvent::Transient("思考中...".into()));
@@ -1356,9 +1356,9 @@ mod tests {
         assert_eq!(rendered.matches("思考中...").count(), 3);
         assert!(rendered.contains("aliyun:qwen-plus ⇌12 (⚠3)"));
         assert!(rendered.contains("KVC(⌁53.9K ✚4.9K)"));
-        assert!(rendered.contains("└─ Bash: cargo test -p agent_core"));
-        assert!(rendered.contains("└─ Bash: printf"));
-        assert!(rendered.contains("└─ Bash: rg -n"));
+        assert!(rendered.contains("└─ cargo test -p agent_core"));
+        assert!(rendered.contains("└─ printf"));
+        assert!(rendered.contains("└─ rg -n"));
         assert!(!rendered.contains("private model thought"));
         assert!(!rendered.contains("run_bash"));
 

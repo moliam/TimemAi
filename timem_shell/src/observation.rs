@@ -14,15 +14,32 @@ const MAX_WRAPPED_LINES_PER_ITEM: usize = 4;
 pub enum ObservationEvent {
     Persistent(String),
     Active(String),
-    PersistentChild { text: String, is_last: bool },
-    ActiveChild { text: String, is_last: bool },
+    PersistentChild {
+        text: String,
+        is_last: bool,
+    },
+    ActiveChild {
+        text: String,
+        is_last: bool,
+    },
     Transient(String),
     EnsureTransient(String),
     FinishTransient(String),
     ClearTransient,
     SettleActive,
-    ActiveWithTimer { text: String, timer: ActionTimer },
-    ActiveChildWithTimer { text: String, is_last: bool, timer: ActionTimer },
+    ActiveWithTimer {
+        text: String,
+        timer: ActionTimer,
+    },
+    UpdateActionStatus {
+        active_text: String,
+        status_text: String,
+    },
+    ActiveChildWithTimer {
+        text: String,
+        is_last: bool,
+        timer: ActionTimer,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +55,6 @@ pub struct ActionTimer {
     pub interval_ms: Option<u64>,
     pub once_timeout_ms: Option<u64>,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationLine {
@@ -127,7 +143,15 @@ impl ObservationPanel {
                     Some(timer),
                 );
             }
-            ObservationEvent::ActiveChildWithTimer { text, is_last, timer } => {
+            ObservationEvent::UpdateActionStatus {
+                active_text,
+                status_text,
+            } => self.update_action_status(&active_text, status_text),
+            ObservationEvent::ActiveChildWithTimer {
+                text,
+                is_last,
+                timer,
+            } => {
                 self.push_line_with_timer(
                     text,
                     ObservationLineStyle::ActiveBlink,
@@ -136,6 +160,28 @@ impl ObservationPanel {
                 );
             }
         }
+    }
+
+    fn update_action_status(&mut self, active_text: &str, status_text: String) {
+        if status_text.trim().is_empty() {
+            return;
+        }
+        if let Some(line) = self
+            .lines
+            .iter_mut()
+            .rev()
+            .find(|line| line.text == active_text)
+        {
+            line.text = status_text;
+            line.style = ObservationLineStyle::Normal;
+            line.timer = None;
+            return;
+        }
+        self.push_line(
+            status_text,
+            ObservationLineStyle::Normal,
+            OBSERVATION_LINE_PREFIX.to_string(),
+        );
     }
 
     pub fn apply_all(&mut self, events: impl IntoIterator<Item = ObservationEvent>) {
@@ -261,32 +307,105 @@ fn transient_label(transient: &TransientObservation) -> String {
     }
 }
 
-
 fn format_countdown(timer: &ActionTimer, now_ms: u64) -> String {
     let elapsed_ms = now_ms.saturating_sub(timer.started_at_ms);
-    
-    // For polling mode, show loop_timeout countdown
-    if let Some(loop_timeout) = timer.loop_timeout_ms {
-        let remaining = loop_timeout.saturating_sub(elapsed_ms);
-        let secs = remaining / 1000;
-        return format!("⏱ {}s", secs);
+
+    if let (Some(loop_timeout), Some(interval_ms)) = (timer.loop_timeout_ms, timer.interval_ms) {
+        let total_remaining = loop_timeout.saturating_sub(elapsed_ms);
+        if interval_ms == 0 {
+            return format!(
+                "⏱ ↻{}",
+                format_duration_short_unpadded(total_remaining, true)
+            );
+        }
+        let interval_remaining = interval_ms.saturating_sub(elapsed_ms % interval_ms);
+        if interval_ms < 2000 {
+            return format!(
+                "⏱ ↻{}",
+                format_duration_short_unpadded(total_remaining, true)
+            );
+        }
+        return format!(
+            "⏱ {}/{}",
+            format_interval_countdown(interval_remaining),
+            format_duration_short_unpadded(total_remaining, true)
+        );
     }
-    
-    // For normal mode, show timeout countdown
+
     if let Some(timeout) = timer.timeout_ms {
         let remaining = timeout.saturating_sub(elapsed_ms);
-        let secs = remaining / 1000;
-        return format!("⏱ {}s", secs);
+        return format!("⏱ {}", format_duration_short(remaining, true));
     }
-    
-    // For once_timeout in polling, show per-check timeout
-    if let Some(once_timeout) = timer.once_timeout_ms {
-        let remaining = once_timeout.saturating_sub(elapsed_ms % once_timeout);
-        let secs = remaining / 1000;
-        return format!("⏱ {}s", secs);
-    }
-    
     String::new()
+}
+
+fn format_spinner_label(tick: usize) -> String {
+    match tick % 3 {
+        0 => "[.  ]".to_string(),
+        1 => "[.. ]".to_string(),
+        _ => "[...]".to_string(),
+    }
+}
+
+fn bracket_label(label: &str) -> String {
+    if label.starts_with('[') {
+        label.to_string()
+    } else {
+        format!("[{label}]")
+    }
+}
+
+fn inject_action_activity(text: &str, activity: &str) -> Option<String> {
+    let activity = bracket_label(activity);
+    if let Some(rest) = text.strip_prefix('`') {
+        if let Some(command) = rest.strip_suffix('`') {
+            return Some(format!("`{activity} {command}`"));
+        }
+    }
+    if let Some(rest) = text.strip_prefix("**(后台执行)** `") {
+        if let Some(command) = rest.strip_suffix('`') {
+            return Some(format!("**(后台执行)** `{activity} {command}`"));
+        }
+    }
+    None
+}
+
+fn format_interval_countdown(ms: u64) -> String {
+    let secs = ms.saturating_add(999) / 1000;
+    secs.saturating_sub(1).to_string()
+}
+
+fn format_duration_short(ms: u64, suffix_seconds: bool) -> String {
+    let mut secs = ms.saturating_add(999) / 1000;
+    if ms > 0 && secs == 0 {
+        secs = 1;
+    }
+    if secs < 60 {
+        if suffix_seconds {
+            format!("{secs:02}s")
+        } else {
+            format!("{secs:02}")
+        }
+    } else if secs < 3600 {
+        format!("{:02}:{:02}", secs / 60, secs % 60)
+    } else {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
+fn format_duration_short_unpadded(ms: u64, suffix_seconds: bool) -> String {
+    let secs = ms.saturating_add(999) / 1000;
+    if secs < 60 {
+        if suffix_seconds {
+            format!("{secs}s")
+        } else {
+            secs.to_string()
+        }
+    } else if secs < 3600 {
+        format!("{:02}:{:02}", secs / 60, secs % 60)
+    } else {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
 }
 
 pub fn render_observation_panel(panel: &ObservationPanel) -> String {
@@ -327,23 +446,32 @@ pub fn render_observation_panel_at_with_elapsed(
         .as_millis() as u64;
 
     for line in panel.visible_lines() {
-        let countdown = line.timer.as_ref().map(|t| format_countdown(t, now_ms)).unwrap_or_default();
-        let countdown_width = display_width(&countdown);
+        let activity = if line.style == ObservationLineStyle::ActiveBlink {
+            line.timer
+                .as_ref()
+                .map(|t| format_countdown(t, now_ms))
+                .unwrap_or_else(|| format_spinner_label(tick))
+        } else {
+            String::new()
+        };
+        let line_text = if activity.is_empty() {
+            line.text.clone()
+        } else {
+            inject_action_activity(&line.text, &activity).unwrap_or_else(|| line.text.clone())
+        };
         let marker_extra_width = terminal_marker_extra_width(&line.text);
         let text_width = line_width
             .saturating_sub(display_width(&line.prefix))
-            .saturating_sub(marker_extra_width)
-            .saturating_sub(countdown_width);
-        let wrapped =
-            wrap_display_width_limited(&line.text, text_width, MAX_WRAPPED_LINES_PER_ITEM);
-        for (idx, wrapped) in wrapped.into_iter().enumerate() {
+            .saturating_sub(marker_extra_width);
+        let rendered_lines =
+            render_markdown_lines_limited(&line_text, text_width, MAX_WRAPPED_LINES_PER_ITEM);
+        for (idx, rendered) in rendered_lines.into_iter().enumerate() {
             let prefix = if idx == 0 {
                 line.prefix.clone()
             } else {
                 " ".repeat(display_width(&line.prefix))
             };
-            let suffix = if idx == 0 && !countdown.is_empty() { format!(" {countdown}") } else { String::new() };
-            render_rows.push((line.style, format!("{prefix}{wrapped}{suffix}")));
+            render_rows.push((line.style, format!("{prefix}{rendered}")));
         }
     }
     if render_rows.len() > panel.max_lines {
@@ -391,13 +519,17 @@ pub fn observation_events_from_core_topic_events(
     events: &[CoreTopicEvent],
 ) -> Vec<ObservationEvent> {
     let mut observations = Vec::new();
+    let mut active_parent_intent: Option<String> = None;
+    let mut last_child_index_for_active_parent: Option<usize> = None;
     for event in events {
         if let Some(model_response) = event.as_model_response() {
+            active_parent_intent = None;
+            last_child_index_for_active_parent = None;
             let free_talk = model_response.free_talk.trim();
             if !free_talk.is_empty() {
                 observations.push(ObservationEvent::Persistent(format!("💡 {free_talk}")));
             }
-            let progress = model_response.report_job_progress.trim();
+            let progress = model_response.progress.trim();
             if !progress.is_empty() {
                 observations.push(ObservationEvent::Persistent(format!("⚙️ {progress}")));
             }
@@ -411,57 +543,141 @@ pub fn observation_events_from_core_topic_events(
             continue;
         }
         if event.as_work_instruction_load().is_some() {
+            active_parent_intent = None;
+            last_child_index_for_active_parent = None;
             continue;
         }
         if let Some(action) = event.as_action() {
+            let (detail_text, timer) = action_detail_for_shell(&action.kind);
+            if action.event == "finish" {
+                observations.push(ObservationEvent::UpdateActionStatus {
+                    active_text: detail_text,
+                    status_text: action_status_detail_for_shell(&action.kind, &action.status),
+                });
+                active_parent_intent = None;
+                last_child_index_for_active_parent = None;
+                continue;
+            }
             let child_style = if action.active {
                 ObservationLineStyle::ActiveBlink
             } else {
                 ObservationLineStyle::Normal
             };
-            let (detail_text, timer) = action_detail_for_shell(&action.kind);
-            observations.extend(action_observation_pair(
-                action.intent.as_deref(),
-                child_style,
-                detail_text,
-                timer,
-            ));
+            if let Some(parent_intent) = action
+                .parent_intent
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                if active_parent_intent.as_deref() != Some(parent_intent) {
+                    active_parent_intent = Some(parent_intent.to_string());
+                    last_child_index_for_active_parent = None;
+                    observations.push(ObservationEvent::Persistent(parent_intent.to_string()));
+                }
+                if let Some(idx) = last_child_index_for_active_parent {
+                    set_child_is_last(&mut observations[idx], false);
+                }
+                observations.push(action_child_observation(
+                    child_style,
+                    detail_text,
+                    timer,
+                    true,
+                ));
+                last_child_index_for_active_parent = observations.len().checked_sub(1);
+            } else {
+                active_parent_intent = None;
+                last_child_index_for_active_parent = None;
+                observations.extend(action_observation_pair(
+                    action.intent.as_deref(),
+                    child_style,
+                    detail_text,
+                    timer,
+                ));
+            }
         }
     }
     observations
 }
 
+fn set_child_is_last(event: &mut ObservationEvent, value: bool) {
+    match event {
+        ObservationEvent::PersistentChild { is_last, .. }
+        | ObservationEvent::ActiveChild { is_last, .. }
+        | ObservationEvent::ActiveChildWithTimer { is_last, .. } => {
+            *is_last = value;
+        }
+        _ => {}
+    }
+}
+
+fn action_child_observation(
+    child_style: ObservationLineStyle,
+    child_text: String,
+    timer: Option<ActionTimer>,
+    is_last: bool,
+) -> ObservationEvent {
+    match (child_style, timer) {
+        (ObservationLineStyle::Normal, _) => ObservationEvent::PersistentChild {
+            text: child_text,
+            is_last,
+        },
+        (ObservationLineStyle::ActiveBlink, Some(t)) => ObservationEvent::ActiveChildWithTimer {
+            text: child_text,
+            is_last,
+            timer: t,
+        },
+        (ObservationLineStyle::ActiveBlink, None) => ObservationEvent::ActiveChild {
+            text: child_text,
+            is_last,
+        },
+    }
+}
+
 fn action_detail_for_shell(kind: &CoreActionKind) -> (String, Option<ActionTimer>) {
     match kind {
-        CoreActionKind::Bash { command, mode, interval_ms, timeout_ms, loop_timeout_ms, once_timeout_ms } => {
-            let timer = if timeout_ms.is_some() || loop_timeout_ms.is_some() || once_timeout_ms.is_some() {
-                Some(ActionTimer {
-                    started_at_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                    timeout_ms: timeout_ms.map(|t| t as u64),
-                    loop_timeout_ms: loop_timeout_ms.map(|t| t as u64),
-                    interval_ms: *interval_ms,
-                    once_timeout_ms: *once_timeout_ms,
-                })
-            } else { None };
+        CoreActionKind::Bash {
+            command,
+            mode,
+            interval_ms,
+            timeout_ms,
+            loop_timeout_ms,
+            once_timeout_ms,
+        } => {
+            let timer =
+                if timeout_ms.is_some() || loop_timeout_ms.is_some() || once_timeout_ms.is_some() {
+                    Some(ActionTimer {
+                        started_at_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        timeout_ms: timeout_ms.map(|t| t as u64),
+                        loop_timeout_ms: loop_timeout_ms.map(|t| t as u64),
+                        interval_ms: *interval_ms,
+                        once_timeout_ms: *once_timeout_ms,
+                    })
+                } else {
+                    None
+                };
             let text = if mode == "poll" {
-                format!("Poll: {}", command.trim())
+                format!("`{}`", command.trim())
+            } else if mode == "background" {
+                format!("**(后台执行)** `{}`", command.trim())
             } else {
-                format!("Bash: {}", command.trim())
+                format!("`{}`", command.trim())
             };
             (text, timer)
         }
-        CoreActionKind::ShellJob { job_id } => {
-            (format!("后台任务: {}", fallback_unknown(job_id.trim())), None)
-        }
+        CoreActionKind::ShellJob { job_id } => (
+            format!("后台任务: {}", fallback_unknown(job_id.trim())),
+            None,
+        ),
         CoreActionKind::Memory { surface, operation } => {
             (memory_action_detail(surface.trim(), operation.trim()), None)
         }
-        CoreActionKind::Capability { op, kind, id } => {
-            (capmgr_action_detail(op.trim(), kind.trim(), id.trim()), None)
-        }
+        CoreActionKind::Capability { op, kind, id } => (
+            capmgr_action_detail(op.trim(), kind.trim(), id.trim()),
+            None,
+        ),
         CoreActionKind::SelfTool { self_type, op } => {
             (self_tool_action_detail(self_type.trim(), op.trim()), None)
         }
@@ -469,6 +685,47 @@ fn action_detail_for_shell(kind: &CoreActionKind) -> (String, Option<ActionTimer
             (memory_action_detail("raw_chat", operation.trim()), None)
         }
         CoreActionKind::Other { action } => (format!("Action: {action}"), None),
+    }
+}
+
+fn action_status_detail_for_shell(kind: &CoreActionKind, status: &str) -> String {
+    match kind {
+        CoreActionKind::Bash { command, mode, .. } => {
+            let label = action_status_label(status);
+            if mode == "poll" {
+                format!("`[{label}] {}`", command.trim())
+            } else if status == "background_running" || mode == "background" {
+                format!("**(后台执行)** `[{label}] {}`", command.trim())
+            } else {
+                format!("`[{label}] {}`", command.trim())
+            }
+        }
+        CoreActionKind::ShellJob { job_id } => match status {
+            "background_finished" => format!("后台命令退出: {}", fallback_unknown(job_id.trim())),
+            "cancelled" => format!("后台命令取消: {}", fallback_unknown(job_id.trim())),
+            "background_running" => {
+                format!("后台命令仍在执行: {}", fallback_unknown(job_id.trim()))
+            }
+            _ => format!("后台任务状态: {}", fallback_unknown(job_id.trim())),
+        },
+        _ => match status {
+            "completed" => "Action: 已完成".to_string(),
+            "timeout" => "Action: 超时".to_string(),
+            "cancelled" => "Action: 已取消".to_string(),
+            "failed" => "Action: 失败".to_string(),
+            _ => "Action: 已结束".to_string(),
+        },
+    }
+}
+
+fn action_status_label(status: &str) -> &'static str {
+    match status {
+        "completed" => "✔",
+        "timeout" => "超时",
+        "cancelled" => "已取消",
+        "failed" => "失败",
+        "background_running" => "后台执行",
+        _ => "已结束",
     }
 }
 
@@ -541,7 +798,12 @@ fn action_observation_pair(
     let Some(intent) = intent else {
         return match (child_style, timer) {
             (ObservationLineStyle::Normal, _) => vec![ObservationEvent::Persistent(child_text)],
-            (ObservationLineStyle::ActiveBlink, Some(t)) => vec![ObservationEvent::ActiveWithTimer { text: child_text, timer: t }],
+            (ObservationLineStyle::ActiveBlink, Some(t)) => {
+                vec![ObservationEvent::ActiveWithTimer {
+                    text: child_text,
+                    timer: t,
+                }]
+            }
             (ObservationLineStyle::ActiveBlink, None) => vec![ObservationEvent::Active(child_text)],
         };
     };
@@ -599,6 +861,29 @@ fn wrap_display_width_limited(text: &str, width: usize, max_lines: usize) -> Vec
         *last = fit_with_ellipsis(last, width);
     }
     lines
+}
+
+fn render_markdown_lines_limited(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    if let Some(code) = single_inline_code_span(text) {
+        return wrap_display_width_limited(code, width, max_lines)
+            .into_iter()
+            .map(|line| termimad::inline(&format!("`{line}`")).to_string())
+            .collect();
+    }
+
+    wrap_display_width_limited(text, width, max_lines)
+        .into_iter()
+        .map(|line| termimad::inline(&line).to_string())
+        .collect()
+}
+
+fn single_inline_code_span(text: &str) -> Option<&str> {
+    let stripped = text.strip_prefix('`')?.strip_suffix('`')?;
+    if stripped.contains('`') {
+        None
+    } else {
+        Some(stripped)
+    }
 }
 
 fn fit_with_ellipsis(text: &str, width: usize) -> String {
@@ -707,6 +992,36 @@ mod tests {
         kind: CoreActionKind,
         active: bool,
     ) -> CoreTopicEvent {
+        action_topic_with_parent(action, intent, None, kind, active)
+    }
+
+    fn action_topic_with_parent(
+        action: &str,
+        intent: Option<&str>,
+        parent_intent: Option<&str>,
+        kind: CoreActionKind,
+        active: bool,
+    ) -> CoreTopicEvent {
+        action_topic_with_status(
+            action,
+            intent,
+            parent_intent,
+            kind,
+            active,
+            "start",
+            "running",
+        )
+    }
+
+    fn action_topic_with_status(
+        action: &str,
+        intent: Option<&str>,
+        parent_intent: Option<&str>,
+        kind: CoreActionKind,
+        active: bool,
+        event: &str,
+        status: &str,
+    ) -> CoreTopicEvent {
         CoreTopicEvent::new(
             "session_test",
             CoreTopic::new(
@@ -715,15 +1030,19 @@ mod tests {
                     "name": CORE_TOPIC_ACTION,
                     "action": action,
                     "active": active,
+                    "event": event,
                 }),
             ),
             CoreSessionState::Running,
             json!({
                 "intent": intent,
+                "parent_intent": parent_intent,
                 "action": action,
                 "input": serde_json::Value::Null,
                 "kind": kind,
                 "active": active,
+                "event": event,
+                "status": status,
                 "memory_activity": CoreMemoryActivity::None,
             }),
         )
@@ -746,12 +1065,12 @@ mod tests {
             mode: "poll".to_string(),
             interval_ms: Some(5000),
             timeout_ms: None,
-            loop_timeout_ms: None,
-            once_timeout_ms: None,
+            loop_timeout_ms: Some(60000),
+            once_timeout_ms: Some(5000),
         }
     }
 
-    fn model_response_topic(free_talk: &str, report_job_progress: &str) -> CoreTopicEvent {
+    fn model_response_topic(free_talk: &str, progress: &str) -> CoreTopicEvent {
         CoreTopicEvent::new(
             "session_test",
             CoreTopic::new(
@@ -764,7 +1083,7 @@ mod tests {
             json!({
                 "status": "working",
                 "free_talk": free_talk,
-                "report_job_progress": report_job_progress,
+                "progress": progress,
                 "final_answer": "",
                 "continue_work": true,
             }),
@@ -773,7 +1092,7 @@ mod tests {
 
     fn model_response_topic_with_worker_count(
         free_talk: &str,
-        report_job_progress: &str,
+        progress: &str,
         working_worker_count: usize,
     ) -> CoreTopicEvent {
         CoreTopicEvent::new(
@@ -788,7 +1107,7 @@ mod tests {
             json!({
                 "status": "working",
                 "free_talk": free_talk,
-                "report_job_progress": report_job_progress,
+                "progress": progress,
                 "final_answer": "",
                 "continue_work": true,
                 "global": {
@@ -830,17 +1149,19 @@ mod tests {
     #[test]
     fn active_lines_cycle_text_depth_across_ticks() {
         let mut panel = ObservationPanel::new(8, 48);
-        panel.apply(ObservationEvent::Active("Bash: pwd".to_string()));
+        panel.apply(ObservationEvent::Active("`pwd`".to_string()));
 
         let dark = render_observation_panel_at(&panel, 0);
         let mid = render_observation_panel_at(&panel, 1);
         let light = render_observation_panel_at(&panel, 2);
         let looped = render_observation_panel_at(&panel, 3);
 
-        assert!(dark.contains("\x1b[38;5;245m· Bash"));
-        assert!(mid.contains("\x1b[38;5;250m· Bash"));
-        assert!(light.contains("\x1b[38;5;255m· Bash"));
-        assert!(looped.contains("\x1b[38;5;245m· Bash"));
+        assert!(dark.contains("\x1b[38;5;245m"));
+        assert!(mid.contains("\x1b[38;5;250m"));
+        assert!(light.contains("\x1b[38;5;255m"));
+        assert!(looped.contains("\x1b[38;5;245m"));
+        assert!(strip_ansi(&dark).contains("· [.  ] pwd"));
+        assert!(!strip_ansi(&dark).contains("`Bash"));
     }
 
     #[test]
@@ -926,16 +1247,18 @@ mod tests {
     #[test]
     fn active_line_can_settle_to_normal() {
         let mut panel = ObservationPanel::new(8, 48);
-        panel.apply(ObservationEvent::Active("Bash: pwd".to_string()));
-        assert!(render_observation_panel(&panel).contains("\x1b[38;5;245m· Bash"));
+        panel.apply(ObservationEvent::Active("`pwd`".to_string()));
+        let active = render_observation_panel(&panel);
+        assert!(active.contains("\x1b[38;5;245m"));
+        assert!(strip_ansi(&active).contains("· [.  ] pwd"));
         panel.apply(ObservationEvent::SettleActive);
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains("· Bash: pwd"));
-        assert!(!rendered.contains("\x1b[38;5;245m· Bash"));
+        assert!(strip_ansi(&rendered).contains("· pwd"));
+        assert!(!rendered.contains("\x1b[38;5;245m"));
     }
 
     #[test]
-    fn continuing_report_job_progress_renders_progress_marker() {
+    fn continuing_progress_renders_progress_marker() {
         let events = observation_events_from_core_topic_events(&[
             model_response_topic("", "已经完成备份，继续写文件。"),
             action_topic("run_bash", Some("写入文件"), bash_kind("printf ok"), true),
@@ -946,7 +1269,7 @@ mod tests {
                 ObservationEvent::Persistent("⚙️ 已经完成备份，继续写文件。".to_string()),
                 ObservationEvent::Persistent("写入文件".to_string()),
                 ObservationEvent::ActiveChild {
-                    text: "Bash: printf ok".to_string(),
+                    text: "`printf ok`".to_string(),
                     is_last: true
                 }
             ]
@@ -1038,7 +1361,7 @@ mod tests {
             vec![
                 ObservationEvent::Persistent("统计当前代码量".to_string()),
                 ObservationEvent::ActiveChild {
-                    text: "Bash: rg --files | wc -l".to_string(),
+                    text: "`rg --files | wc -l`".to_string(),
                     is_last: true
                 }
             ]
@@ -1057,12 +1380,120 @@ mod tests {
             events,
             vec![
                 ObservationEvent::Persistent("等待 CI 完成".to_string()),
-                ObservationEvent::ActiveChild {
-                    text: "Poll: gh run list --branch main".to_string(),
-                    is_last: true
+                ObservationEvent::ActiveChildWithTimer {
+                    text: "`gh run list --branch main`".to_string(),
+                    is_last: true,
+                    timer: ActionTimer {
+                        started_at_ms: events
+                            .iter()
+                            .find_map(|event| match event {
+                                ObservationEvent::ActiveChildWithTimer { timer, .. } => {
+                                    Some(timer.started_at_ms)
+                                }
+                                _ => None,
+                            })
+                            .unwrap(),
+                        timeout_ms: None,
+                        loop_timeout_ms: Some(60000),
+                        interval_ms: Some(5000),
+                        once_timeout_ms: Some(5000),
+                    }
                 }
             ]
         );
+    }
+
+    #[test]
+    fn polling_action_topic_renders_active_countdown() {
+        let events = observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("等待文件出现"),
+            polling_bash_kind("test -f /tmp/timem_poll_demo"),
+            true,
+        )]);
+        let mut panel = ObservationPanel::new(8, 80);
+        panel.apply_all(events);
+
+        let rendered = render_observation_panel_at(&panel, 0);
+        let plain = strip_ansi(&rendered);
+        assert!(
+            plain.contains("[⏱ 4/01:00] test -f /tmp/timem_poll_demo"),
+            "{plain}"
+        );
+        assert!(!plain.contains("Poll"));
+        assert!(rendered.contains("\x1b[38;5;245m"));
+    }
+
+    #[test]
+    fn action_finish_topic_updates_existing_bash_line() {
+        let kind = bash_kind("printf done");
+        let start = observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("执行检查"),
+            kind.clone(),
+            true,
+        )]);
+        let finish = observation_events_from_core_topic_events(&[action_topic_with_status(
+            "run_bash",
+            Some("执行检查"),
+            None,
+            kind,
+            false,
+            "finish",
+            "completed",
+        )]);
+
+        let mut panel = ObservationPanel::new(8, 80);
+        panel.apply_all(start);
+        panel.apply_all(finish);
+        let rendered = render_observation_panel(&panel);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("[✔] printf done"));
+        assert_eq!(plain.matches("printf done").count(), 1);
+        assert!(!rendered.contains("\x1b[38;5;245m"));
+    }
+
+    #[test]
+    fn background_action_and_exit_status_render_user_facing_state() {
+        let background_kind = CoreActionKind::Bash {
+            command: "sleep 30".to_string(),
+            mode: "background".to_string(),
+            interval_ms: None,
+            timeout_ms: None,
+            loop_timeout_ms: None,
+            once_timeout_ms: None,
+        };
+        let background = observation_events_from_core_topic_events(&[action_topic_with_status(
+            "run_bash",
+            Some("启动后台任务"),
+            None,
+            background_kind,
+            false,
+            "finish",
+            "background_running",
+        )]);
+        let mut panel = ObservationPanel::new(8, 80);
+        panel.apply_all(background);
+        let rendered = render_observation_panel(&panel);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("(后台执行) [后台执行] sleep 30"), "{plain}");
+        assert!(rendered.contains(ANSI_BOLD) || rendered.contains("\x1b["));
+
+        let finished = observation_events_from_core_topic_events(&[action_topic_with_status(
+            "shell_job_status",
+            None,
+            None,
+            CoreActionKind::ShellJob {
+                job_id: "job_42".to_string(),
+            },
+            false,
+            "finish",
+            "background_finished",
+        )]);
+        panel.apply_all(finished);
+        let rendered = render_observation_panel(&panel);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("后台命令退出: job_42"), "{plain}");
     }
 
     #[test]
@@ -1078,7 +1509,7 @@ mod tests {
             vec![
                 ObservationEvent::Persistent("整理 v0.5.2 之后的提交".to_string()),
                 ObservationEvent::ActiveChild {
-                    text: "Bash: git log --oneline v0.5.2..HEAD".to_string(),
+                    text: "`git log --oneline v0.5.2..HEAD`".to_string(),
                     is_last: true
                 }
             ]
@@ -1102,7 +1533,7 @@ mod tests {
                 ObservationEvent::Persistent("⚙️ 正在检查项目状态。".to_string()),
                 ObservationEvent::Persistent("查看当前 git 状态".to_string()),
                 ObservationEvent::ActiveChild {
-                    text: "Bash: git status --short".to_string(),
+                    text: "`git status --short`".to_string(),
                     is_last: true
                 }
             ]
@@ -1127,7 +1558,7 @@ mod tests {
                 ObservationEvent::Persistent("⚙️ 正在检查项目状态。".to_string()),
                 ObservationEvent::Persistent("查看当前 git 状态".to_string()),
                 ObservationEvent::ActiveChild {
-                    text: "Bash: git status --short".to_string(),
+                    text: "`git status --short`".to_string(),
                     is_last: true
                 }
             ]
@@ -1165,9 +1596,78 @@ mod tests {
                 },
                 ObservationEvent::Persistent("列出源码文件".to_string()),
                 ObservationEvent::ActiveChild {
-                    text: "Bash: rg --files -g '*.rs'".to_string(),
+                    text: "`rg --files -g '*.rs'`".to_string(),
                     is_last: true
                 }
+            ]
+        );
+    }
+
+    #[test]
+    fn action_group_parent_intent_groups_child_bash_lines() {
+        let events = observation_events_from_core_topic_events(&[
+            action_topic_with_parent(
+                "run_bash",
+                None,
+                Some("先做项目检查"),
+                bash_kind("printf a"),
+                true,
+            ),
+            action_topic_with_parent(
+                "run_bash",
+                None,
+                Some("先做项目检查"),
+                bash_kind("printf b"),
+                true,
+            ),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("先做项目检查".to_string()),
+                ObservationEvent::ActiveChild {
+                    text: "`printf a`".to_string(),
+                    is_last: false
+                },
+                ObservationEvent::ActiveChild {
+                    text: "`printf b`".to_string(),
+                    is_last: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn action_intent_overrides_group_parent_and_unlabeled_actions_render_directly() {
+        let events = observation_events_from_core_topic_events(&[
+            action_topic_with_parent(
+                "run_bash",
+                Some("进行 yyy 的分任务"),
+                None,
+                bash_kind("printf named"),
+                true,
+            ),
+            action_topic("run_bash", None, bash_kind("printf plain"), true),
+            action_topic(
+                "memmgr",
+                None,
+                CoreActionKind::Memory {
+                    surface: "durable".to_string(),
+                    operation: "query".to_string(),
+                },
+                false,
+            ),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("进行 yyy 的分任务".to_string()),
+                ObservationEvent::ActiveChild {
+                    text: "`printf named`".to_string(),
+                    is_last: true
+                },
+                ObservationEvent::Active("`printf plain`".to_string()),
+                ObservationEvent::Persistent("长期记忆: 查询".to_string()),
             ]
         );
     }
@@ -1287,7 +1787,7 @@ mod tests {
             vec![
                 ObservationEvent::Persistent("写入包含 JSON 的示例".to_string()),
                 ObservationEvent::ActiveChild {
-                    text: "Bash: printf '{\"ok\":true}' > target/example.json".to_string(),
+                    text: "`printf '{\"ok\":true}' > target/example.json`".to_string(),
                     is_last: true
                 }
             ]
@@ -1332,8 +1832,10 @@ mod tests {
             true,
         )]));
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains("· 统计"));
-        assert!(rendered.contains("└─ Bash:"));
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("· 统计"));
+        assert!(plain.contains("└─"));
+        assert!(!plain.contains("`Bash"));
         assert!(!rendered.contains("run_bash"));
     }
 
@@ -1342,15 +1844,16 @@ mod tests {
         let mut panel = ObservationPanel::new(8, 44);
         panel.apply(ObservationEvent::Persistent("统计当前代码量".to_string()));
         panel.apply(ObservationEvent::ActiveChild {
-            text: "Bash: 123456789012345678901234567890 tail".to_string(),
+            text: "`123456789012345678901234567890 tail`".to_string(),
             is_last: true,
         });
 
         let rendered = render_observation_panel(&panel);
-        assert!(rendered.contains("· 统计当前代码量"));
-        assert!(rendered.contains("└─ Bash: 123456789012345678901234"));
-        assert_eq!(rendered.matches("└─").count(), 1);
-        assert!(rendered.contains("tail"));
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("· 统计当前代码量"));
+        assert!(plain.contains("└─ [.  ] 123456789012345"));
+        assert_eq!(plain.matches("└─").count(), 1);
+        assert!(plain.contains("tail"));
     }
 
     #[test]
@@ -1363,7 +1866,7 @@ mod tests {
         )]);
         assert_eq!(
             events,
-            vec![ObservationEvent::Active("Bash: ls -la".to_string())]
+            vec![ObservationEvent::Active("`ls -la`".to_string())]
         );
     }
 
@@ -1371,7 +1874,7 @@ mod tests {
     fn panel_wraps_long_command_and_truncates_one_item_after_four_rows() {
         let mut panel = ObservationPanel::new(8, 44);
         panel.apply(ObservationEvent::Active(format!(
-            "Bash: {}",
+            "{}",
             "rg --files -g '*.rs' | xargs wc -l && echo very-long-tail && echo more-output && echo another-long-part && echo segment-four && echo segment-five && echo segment-six && echo hidden-tail-after-limit"
         )));
         let rendered = render_observation_panel(&panel);
@@ -1412,8 +1915,7 @@ mod tests {
             "正在执行长命令并刷新状态".to_string(),
         ));
         panel.apply(ObservationEvent::ActiveChild {
-            text: "Bash: echo \"=== git status ===\"; git status; echo; git diff --cached"
-                .to_string(),
+            text: "echo \"=== git status ===\"; git status; echo; git diff --cached".to_string(),
             is_last: true,
         });
         panel.apply(ObservationEvent::Transient("思考中...".to_string()));
@@ -1439,7 +1941,7 @@ mod tests {
         ));
         panel.apply(ObservationEvent::ActiveChild {
             text: format!(
-                "Bash: {}",
+                "`{}`",
                 format!(
                     "{} tail-marker-should-not-render-after-limit",
                     "echo start; git status --short; git diff --stat; printf '%s' very-long-segment; "
@@ -1456,8 +1958,9 @@ mod tests {
             visible_widths.iter().all(|width| *width == 80),
             "all observation rows should stay aligned: {visible_widths:?}\n{rendered}"
         );
-        assert!(rendered.contains("⚙️ 正在处理"));
-        assert!(rendered.contains("└─ Bash:"));
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("⚙️ 正在处理"));
+        assert!(plain.contains("└─"));
         assert!(rendered.contains('…'));
         assert!(!rendered.contains("run_bash"));
         assert!(!rendered.contains("tail-marker-should-not-render-after-limit"));
@@ -1508,7 +2011,7 @@ mod tests {
             once_timeout_ms: None,
         };
         let (text, timer) = action_detail_for_shell(&kind);
-        assert_eq!(text, "Bash: sleep 10");
+        assert_eq!(text, "`sleep 10`");
         assert!(timer.is_some());
         let t = timer.unwrap();
         assert_eq!(t.timeout_ms, Some(10000));
@@ -1526,7 +2029,7 @@ mod tests {
             once_timeout_ms: Some(10000),
         };
         let (text, timer) = action_detail_for_shell(&kind);
-        assert_eq!(text, "Poll: check_status");
+        assert_eq!(text, "`check_status`");
         assert!(timer.is_some());
         let t = timer.unwrap();
         assert_eq!(t.loop_timeout_ms, Some(60000));
@@ -1538,8 +2041,44 @@ mod tests {
     fn no_timer_for_bash_without_timeout() {
         let kind = bash_kind("echo hello");
         let (text, timer) = action_detail_for_shell(&kind);
-        assert_eq!(text, "Bash: echo hello");
+        assert_eq!(text, "`echo hello`");
         assert!(timer.is_none());
+    }
+
+    #[test]
+    fn normal_bash_without_timeout_renders_without_countdown() {
+        let mut panel = ObservationPanel::new(8, 80);
+        panel.apply_all(observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("执行普通命令"),
+            bash_kind("sleep 10 && touch /tmp/timem_poll_demo2.txt"),
+            true,
+        )]));
+        let rendered = render_observation_panel_at(&panel, 0);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("sleep 10 && touch /tmp/timem_poll_demo2.txt"));
+        assert!(!plain.contains("⏱"), "{plain}");
+        assert!(rendered.contains("\x1b[38;5;245m"));
+    }
+
+    #[test]
+    fn normal_bash_without_timeout_still_blinks_while_active() {
+        let mut panel = ObservationPanel::new(8, 80);
+        panel.apply_all(observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            None,
+            bash_kind("printf active"),
+            true,
+        )]));
+
+        let dark = render_observation_panel_at(&panel, 0);
+        let mid = render_observation_panel_at(&panel, 1);
+        let light = render_observation_panel_at(&panel, 2);
+
+        assert!(dark.contains("\x1b[38;5;245m"));
+        assert!(mid.contains("\x1b[38;5;250m"));
+        assert!(light.contains("\x1b[38;5;255m"));
+        assert!(!strip_ansi(&dark).contains("⏱"));
     }
 
     #[test]
@@ -1553,7 +2092,7 @@ mod tests {
             once_timeout_ms: None,
         };
         let countdown = format_countdown(&timer, now_ms);
-        assert!(countdown.contains("7"), "Expected ~7s remaining, got: {}", countdown);
+        assert_eq!(countdown, "⏱ 07s");
     }
 
     #[test]
@@ -1567,7 +2106,74 @@ mod tests {
             once_timeout_ms: None,
         };
         let countdown = format_countdown(&timer, now_ms);
-        assert!(countdown.contains("55"), "Expected ~55s remaining, got: {}", countdown);
+        assert_eq!(countdown, "⏱ 4/55s");
+    }
+
+    #[test]
+    fn format_countdown_uses_shortest_time_shape_and_never_zero_while_running() {
+        assert_eq!(format_duration_short(1, true), "01s");
+        assert_eq!(format_duration_short(999, true), "01s");
+        assert_eq!(format_duration_short(60_000, true), "01:00");
+        assert_eq!(format_duration_short(3_661_000, true), "1:01:01");
+        assert_eq!(format_duration_short(2_000, false), "02");
+
+        let now_ms = 1000000u64;
+        let timer = ActionTimer {
+            started_at_ms: now_ms - 59_100,
+            timeout_ms: Some(60_000),
+            loop_timeout_ms: None,
+            interval_ms: None,
+            once_timeout_ms: None,
+        };
+        assert_eq!(format_countdown(&timer, now_ms), "⏱ 01s");
+    }
+
+    #[test]
+    fn format_countdown_uses_poll_pulse_for_one_second_interval() {
+        let now_ms = 1000000u64;
+        let timer = ActionTimer {
+            started_at_ms: now_ms - 9000,
+            timeout_ms: None,
+            loop_timeout_ms: Some(10000),
+            interval_ms: Some(1000),
+            once_timeout_ms: Some(1000),
+        };
+        assert_eq!(format_countdown(&timer, now_ms), "⏱ ↻1s");
+    }
+
+    #[test]
+    fn format_countdown_shows_two_second_poll_interval_as_one_then_zero() {
+        let now_ms = 1000000u64;
+        let timer = ActionTimer {
+            started_at_ms: now_ms,
+            timeout_ms: None,
+            loop_timeout_ms: Some(10000),
+            interval_ms: Some(2000),
+            once_timeout_ms: Some(1000),
+        };
+        assert_eq!(format_countdown(&timer, now_ms), "⏱ 1/10s");
+
+        let timer = ActionTimer {
+            started_at_ms: now_ms - 1000,
+            timeout_ms: None,
+            loop_timeout_ms: Some(10000),
+            interval_ms: Some(2000),
+            once_timeout_ms: Some(1000),
+        };
+        assert_eq!(format_countdown(&timer, now_ms), "⏱ 0/9s");
+    }
+
+    #[test]
+    fn format_countdown_rounds_ms_up_for_ui_display() {
+        let now_ms = 1000000u64;
+        let timer = ActionTimer {
+            started_at_ms: now_ms - 1001,
+            timeout_ms: Some(2001),
+            loop_timeout_ms: None,
+            interval_ms: None,
+            once_timeout_ms: None,
+        };
+        assert_eq!(format_countdown(&timer, now_ms), "⏱ 01s");
     }
 
     #[test]
@@ -1577,19 +2183,50 @@ mod tests {
             started_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_millis() as u64 - 2000,
+                .as_millis() as u64
+                - 2000,
             timeout_ms: Some(10000),
             loop_timeout_ms: None,
             interval_ms: None,
             once_timeout_ms: None,
         };
         panel.apply(ObservationEvent::ActiveWithTimer {
-            text: "Bash: sleep 10".to_string(),
+            text: "`sleep 10`".to_string(),
             timer,
         });
         let rendered = render_observation_panel_at(&panel, 0);
-        assert!(rendered.contains("\u{23f1}"), "Expected countdown symbol in output");
-        assert!(rendered.contains("Bash: sleep 10"));
+        assert!(
+            rendered.contains("\u{23f1}"),
+            "Expected countdown symbol in output"
+        );
+        assert!(rendered.contains("\x1b[38;5;245m"));
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("[⏱ 08s] sleep 10"));
+        assert!(!plain.contains("`sleep 10`"));
     }
 
+    #[test]
+    fn long_active_command_keeps_countdown_after_bash_label() {
+        let mut panel = ObservationPanel::new(10, 88);
+        let timer = ActionTimer {
+            started_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                - 1000,
+            timeout_ms: None,
+            loop_timeout_ms: Some(15000),
+            interval_ms: Some(3000),
+            once_timeout_ms: Some(1000),
+        };
+        panel.apply(ObservationEvent::ActiveChildWithTimer {
+            text: "`if [ ! -f /tmp/poll_start_c2.txt ]; then date +%s > /tmp/poll_start_c2.txt; fi; START=$(cat /tmp/poll_start_c2.txt); NOW=$(date +%s); ELAPSED=$((NOW - START)); echo \"已过 ${ELAPSED}s\"; [ $ELAPSED -ge 10 ] && echo '条件满足，提前退出' && exit 0 || exit 1`".to_string(),
+            is_last: true,
+            timer,
+        });
+
+        let plain = strip_ansi(&render_observation_panel_at(&panel, 0));
+        assert!(plain.contains("[⏱ 1/14s] if [ ! -f"), "{plain}");
+        assert!(!plain.contains("Bash:"), "{plain}");
+    }
 }

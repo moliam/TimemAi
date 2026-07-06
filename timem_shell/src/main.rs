@@ -423,6 +423,7 @@ impl TurnUi for CliTurnUi<'_> {
 
     fn on_model_request(&mut self, round: u32, prompt: &str) {
         if let Some(status) = self.status.as_deref_mut() {
+            status.settle_active_observations();
             status.set_model_direction(round, ModelDirection::Upstream);
             status.set_pending_request_usage(estimate_prompt_context_tokens(prompt));
             status.set_transient_observation("思考中...");
@@ -450,7 +451,6 @@ impl TurnUi for CliTurnUi<'_> {
                 status.set_intent(intent, hint.memory_activity);
             }
             status.apply_observation_events(observation_events_from_core_topic_events(events));
-            status.settle_active_observations();
         }
     }
 
@@ -3102,7 +3102,7 @@ fn rewrite_submitted_user_line(input: &str, status_line_visible: bool) {
 }
 
 fn render_user_input_prompt(time_label: &str) -> String {
-    format!("[{time_label}] \x1b[1mYou\x1b[0m ❯❯ ")
+    format!("\x1b[94;1m[{time_label}] You ❯❯\x1b[0m ")
 }
 
 fn render_submitted_user_line_rewrite(
@@ -5403,14 +5403,18 @@ mod static_prompt_tests {
     fn submitted_user_line_rewrite_clears_wrapped_input_rows() {
         let rendered = render_submitted_user_line_rewrite("abcdef", false, 10, "12:00:00");
         assert!(rendered.starts_with("\x1b[3F\r\x1b[J"));
-        assert!(rendered.ends_with("[12:00:00] \x1b[1mYou\x1b[0m ❯❯ abcdef\n"));
+        assert!(rendered.ends_with("\x1b[94;1m[12:00:00] You ❯❯\x1b[0m abcdef\n"));
     }
 
     #[test]
-    fn user_input_prompt_uses_bold_you_and_double_arrow() {
+    fn user_input_prompt_uses_bright_blue_prefix_and_double_arrow() {
         assert_eq!(
             render_user_input_prompt("12:00:00"),
-            "[12:00:00] \x1b[1mYou\x1b[0m ❯❯ "
+            "\x1b[94;1m[12:00:00] You ❯❯\x1b[0m "
+        );
+        assert_eq!(
+            display_width(&render_user_input_prompt("12:00:00")),
+            display_width("[12:00:00] You ❯❯ ")
         );
     }
 

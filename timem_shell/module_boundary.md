@@ -150,6 +150,11 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Prompt/resource language that should be shared by other Timem hosts.
 - Prompt/supporting-context assembly rules. Shell should provide context source
   values, not decide how runtime identity and additional context are combined.
+- Session prompt component assembly. Shell may submit user input, user
+  supplements, and host-provided context values through core APIs, but it must
+  not build dynamic prompt deltas itself or format `## USER` / `## SYSTEM` /
+  assistant blocks. The per-session pending component buffer and
+  `build_next_prompt()` belong to `agent_core`.
 - Long-lived runtime state that another UI would need to reproduce.
 - User-facing stopped-turn copy inside the reusable turn loop. A stopped turn
   should be represented structurally so non-terminal hosts can render it in
