@@ -1740,7 +1740,7 @@ mod tests {
             self.call_no += 1;
             let content = if self.call_no == 1 {
                 self.first_call_barrier.wait();
-                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"执行一个短命令。\",\"args\":{\"cmd\":\"printf worker-count-ok\",\"timeout_ms\":5000}}\n```"
+                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"action\":\"self_tool\",\"intent\":\"读取运行时自身信息以推进测试回合。\",\"args\":{\"type\":\"about_me\",\"op\":\"read\"}}\n```"
                     .to_string()
             } else {
                 "## Status\nfinished\n\n## Final_Answer\nWORKER_COUNT_DONE".to_string()
