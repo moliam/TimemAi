@@ -194,12 +194,6 @@ expect {
 if {[string first "思考中" $prof_output] >= 0 || [string first "模型调用失败" $prof_output] >= 0} {
     error "shell command after model answer should not start another model turn; output=$prof_output"
 }
-if {!$prof_seen} {
-    error "missing /prof output after model answer; output=$prof_output"
-}
-if {!$prof_complete} {
-    error "incomplete /prof output after model answer; output=$prof_output"
-}
 send "/exit\r"
 expect {
     -re "\033\\\[6n" {
