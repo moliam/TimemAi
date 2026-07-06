@@ -1928,7 +1928,7 @@ mod tests {
         assert!(!rendered.contains("large_readback"));
         assert!(!rendered.contains("check_timeout_ms"));
         assert!(rendered.contains("`background`:"));
-        assert!(rendered.contains("Normal returns status and bounded output"));
+        assert!(rendered.contains("Normal/Polling returns status and bounded output"));
         assert!(rendered.contains("Use loop_cmd with interval_ms"));
         assert!(rendered.contains("`op`:"));
         assert!(rendered.contains("`kind`:"));

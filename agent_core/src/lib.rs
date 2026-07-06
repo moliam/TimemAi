@@ -2050,7 +2050,7 @@ impl AgentCore {
             && actions.iter().all(|action| {
                 action.action == "run_bash"
                     && !action.background()
-                    && action.timeout_ms_i64(5000) >= 0
+                    && action.timeout_ms_i64(5000) > 0
             })
     }
 

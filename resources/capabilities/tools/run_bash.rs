@@ -352,11 +352,19 @@ pub(crate) fn execute_run_bash(
             bash_validation_message(&reason),
         ));
     }
-    if !background
-        && timeout_ms >= 0
-        && is_regular_command
-        && contains_long_normal_sleep(command_to_run)
-    {
+    if !background && is_regular_command && timeout_ms <= 0 {
+        return ActionExecution::Completed(bash_action_not_executed(
+            Some(command_to_run),
+            "timeout_ms must be a positive integer. Choose a wait budget that matches the command.",
+        ));
+    }
+    if !background && !is_regular_command && timeout_ms <= 0 {
+        return ActionExecution::Completed(bash_action_not_executed(
+            Some(command_to_run),
+            "loop_timeout_ms must be a positive integer. Choose a total polling wait budget that matches the external state you are waiting for.",
+        ));
+    }
+    if !background && is_regular_command && contains_long_normal_sleep(command_to_run) {
         return ActionExecution::Completed(bash_action_not_executed(
             Some(command_to_run),
             "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.",
@@ -461,10 +469,41 @@ pub(crate) fn execute_polling_bash(
     once_timeout_ms: u64,
     runtime: &mut dyn ActionRuntime,
 ) -> String {
-    let interval = Duration::from_millis(interval_ms.clamp(1000, 60_000));
-    let max_wait =
-        (timeout_ms >= 0).then(|| Duration::from_millis((timeout_ms as u64).clamp(1000, 900_000)));
-    let once_timeout_ms = once_timeout_ms.clamp(1000, 15_000);
+    if timeout_ms <= 0 {
+        return polling_result(
+            command,
+            "not_executed",
+            0,
+            Duration::ZERO,
+            None,
+            "",
+            Some("loop_timeout_ms must be a positive integer."),
+        );
+    }
+    if interval_ms == 0 {
+        return polling_result(
+            command,
+            "not_executed",
+            0,
+            Duration::ZERO,
+            None,
+            "",
+            Some("interval_ms must be a positive integer."),
+        );
+    }
+    if once_timeout_ms == 0 {
+        return polling_result(
+            command,
+            "not_executed",
+            0,
+            Duration::ZERO,
+            None,
+            "",
+            Some("once_timeout_ms must be a positive integer."),
+        );
+    }
+    let interval = Duration::from_millis(interval_ms);
+    let max_wait = Duration::from_millis(timeout_ms as u64);
     let started = Instant::now();
     let mut attempts = 0_u64;
     let mut last_status = None;
@@ -504,7 +543,7 @@ pub(crate) fn execute_polling_bash(
             }
         }
 
-        if max_wait.is_some_and(|max_wait| started.elapsed() >= max_wait) {
+        if started.elapsed() >= max_wait {
             return polling_result(
                 command,
                 "timeout",
@@ -516,9 +555,7 @@ pub(crate) fn execute_polling_bash(
             );
         }
 
-        let wait = max_wait
-            .map(|max_wait| interval.min(max_wait.saturating_sub(started.elapsed())))
-            .unwrap_or(interval);
+        let wait = interval.min(max_wait.saturating_sub(started.elapsed()));
         sleep_cancelable(wait, &mut || runtime.should_cancel());
     }
 }
@@ -664,6 +701,9 @@ fn execute_one_bash_structured_with_prompt_after(
     runtime: &mut dyn ActionRuntime,
     long_running_prompt_after: Duration,
 ) -> BashCommandOutput {
+    if timeout_ms <= 0 {
+        return bash_error(command, "invalid_timeout");
+    }
     let spawn = Command::new("/bin/sh")
         .arg("-lc")
         .arg(command)
@@ -675,8 +715,7 @@ fn execute_one_bash_structured_with_prompt_after(
         Err(_) => return bash_error(command, "command_failed"),
     };
     let started = Instant::now();
-    let timeout =
-        (timeout_ms >= 0).then(|| Duration::from_millis((timeout_ms as u64).clamp(1000, 15000)));
+    let timeout = Duration::from_millis(timeout_ms as u64);
     let mut next_long_running_check = long_running_prompt_after;
     loop {
         if runtime.should_cancel() {
@@ -684,12 +723,12 @@ fn execute_one_bash_structured_with_prompt_after(
             let _ = child.wait();
             return bash_error(command, "cancelled");
         }
-        if timeout.is_none() && started.elapsed() >= next_long_running_check {
+        if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
             let status = LongRunningCommandStatus {
                 action: "run_bash".to_string(),
                 command: command.to_string(),
                 elapsed: started.elapsed(),
-                timeout_ms: None,
+                timeout_ms: Some(timeout_ms),
             };
             if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
                 let _ = child.kill();
@@ -701,7 +740,7 @@ fn execute_one_bash_structured_with_prompt_after(
         }
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if timeout.is_some_and(|timeout| started.elapsed() >= timeout) => {
+            Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return bash_error(command, "timeout");
@@ -813,6 +852,9 @@ fn bash_runtime_error_message(error: &str) -> &'static str {
         }
         "cancelled" | "cancelled_by_user" => {
             "The command was cancelled before it completed."
+        }
+        "invalid_timeout" => {
+            "The command was not executed because timeout_ms must be a positive integer."
         }
         "command_failed" => {
             "The local shell could not start or wait for the command successfully."
@@ -935,18 +977,24 @@ mod tests {
     }
 
     #[test]
-    fn normal_bash_timeout_minus_one_waits_without_runtime_timeout() {
+    fn normal_bash_rejects_non_positive_timeout() {
         let mut runtime = NeverCancelRuntime;
-        let result = execute_one_bash("sleep 1; printf no_timeout_ok", -1, &mut runtime);
-        assert!(result.contains("Exit code: 0"), "{result}");
-        assert!(result.contains("no_timeout_ok"), "{result}");
+        let marker = tmp_memory_dir("invalid_timeout").join("marker.txt");
+        let command = format!("printf should_not_run > {}", marker.display());
+        let result = execute_one_bash(&command, -1, &mut runtime);
+        assert!(
+            result.contains("timeout_ms must be a positive integer"),
+            "{result}"
+        );
+        assert!(!result.contains("Exit code: 0"), "{result}");
+        assert!(!marker.exists(), "{result}");
     }
 
     #[test]
-    fn normal_bash_timeout_minus_one_reports_long_running_status_to_runtime() {
+    fn normal_bash_positive_timeout_reports_long_running_status_to_runtime() {
         let _guard = set_long_running_command_prompt_after_for_tests(Duration::from_millis(50));
         let mut runtime = CancelAfterLongRunningPromptRuntime::default();
-        let result = execute_one_bash("sleep 2; printf should_not_finish", -1, &mut runtime);
+        let result = execute_one_bash("sleep 2; printf should_not_finish", 5000, &mut runtime);
 
         assert!(result.contains("cancelled before it completed"), "{result}");
         assert_eq!(runtime.prompts.len(), 1);
@@ -955,7 +1003,7 @@ mod tests {
             runtime.prompts[0].command,
             "sleep 2; printf should_not_finish"
         );
-        assert_eq!(runtime.prompts[0].timeout_ms, None);
+        assert_eq!(runtime.prompts[0].timeout_ms, Some(5000));
         assert!(runtime.prompts[0].elapsed >= Duration::from_millis(50));
     }
 

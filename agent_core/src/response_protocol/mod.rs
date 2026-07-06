@@ -153,7 +153,7 @@ impl ParsedAction {
     }
 
     pub fn shell_timeout_ms(&self) -> u64 {
-        self.timeout_ms(5000).clamp(1000, 15000)
+        self.timeout_ms(5000).max(1)
     }
 
     pub fn status_timeout_ms(&self) -> u64 {

@@ -66,9 +66,10 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   application, process execution, command output/evidence shaping, and tool
   audit. Hosts may provide user decisions and cancellation signals, but the
   executor remains a core responsibility.
-- Long foreground command lifecycle for `timeout_ms=-1`: core owns process
-  waiting, long-running decision requests, cancellation, action result shaping,
-  and user-supplement insertion after host/user cancellation.
+- Long foreground command lifecycle for positive model-provided `timeout_ms`:
+  core owns process waiting, long-running decision requests, cancellation,
+  action result shaping, and user-supplement insertion after host/user
+  cancellation.
 - Structured reports, requests, stop reasons, status snapshots, and topic events
   for any host UI to render.
 - Optional per-session worker lifecycle. Core may provide a worker that owns one

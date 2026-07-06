@@ -71,10 +71,10 @@ Normal/background execution is part of the capability interface:
   bounds each individual check command. The model owns the check command; core
   owns the fixed success condition, interval/timeout bounds, cancellation
   checks, bounded output, approval, audit, and the structured action result.
-- Normal `run_bash` can use `timeout_ms=-1` when the user explicitly wants a
-  command to block without a runtime timeout. Core still owns the process and
-  emits a structured host decision request after the long-command threshold, so
-  a UI can let the user keep waiting or stop waiting. Stopping waiting becomes a
+- Normal `run_bash` uses a positive model-provided `timeout_ms`. Core still owns
+  the process and emits a structured host decision request after the
+  long-command threshold, so a UI can render elapsed/remaining time and let the
+  user keep waiting or stop waiting. Stopping waiting becomes a
   `cancelled_by_user` action result plus a `user_supplement` for the next model
   response.
 - A model cannot opt a registered command tool into background execution unless
@@ -154,7 +154,8 @@ Command binding protocol:
   `{"action": "...", "intent": "...", "args": {"key": "value"}}`.
 - Script stdout/stderr is captured as the action result and truncated to a
   bounded size.
-- Execution timeout follows the action's `timeout_ms`, clamped to 1-15 seconds.
+- Execution timeout follows the action's positive `timeout_ms` without an upper
+  clamp.
   Long-running work should still use a builtin/background executor.
 
 ### Skill

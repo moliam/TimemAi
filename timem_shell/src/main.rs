@@ -1038,12 +1038,20 @@ fn render_stale_context_choices(selected: ApprovalChoice) -> String {
 }
 
 fn render_long_running_command_prompt(request: &LongRunningCommandContinueRequest) -> String {
-    let timeout_text = request
-        .timeout_ms
-        .map(|timeout_ms| format!("{timeout_ms} ms"))
-        .unwrap_or_else(|| "无 runtime timeout".to_string());
+    let timeout_text = request.timeout_ms.map_or_else(
+        || "未提供 timeout_ms".to_string(),
+        |timeout_ms| {
+            let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+            let remaining = timeout.saturating_sub(request.elapsed);
+            format!(
+                "{}，剩余约 {}",
+                format_idle_duration(timeout),
+                format_idle_duration(remaining)
+            )
+        },
+    );
     format!(
-        "\n命令仍在执行，已运行 {}，timeout_ms={}。\ncommand: {}\n是否继续等待？选择“停止等待”会取消当前命令，并把这次取消作为用户补充交给模型继续判断。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        "\n命令仍在执行，已运行 {}，timeout={}。\ncommand: {}\n是否继续等待？选择“停止等待”会取消当前命令，并把这次取消作为用户补充交给模型继续判断。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
         format_idle_duration(request.elapsed),
         timeout_text,
         request.command
@@ -3848,12 +3856,12 @@ mod static_prompt_tests {
             "run_bash",
             "sleep 120",
             Duration::from_secs(65),
-            None,
+            Some(180_000),
         );
 
         let prompt = render_long_running_command_prompt(&request);
         assert!(prompt.contains("已运行 1 分钟"));
-        assert!(prompt.contains("timeout_ms=无 runtime timeout"));
+        assert!(prompt.contains("timeout=3 分钟，剩余约 1 分钟"));
         assert!(prompt.contains("command: sleep 120"));
         assert!(prompt.contains("作为用户补充交给模型"));
         assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));

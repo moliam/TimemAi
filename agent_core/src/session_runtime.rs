@@ -904,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn session_turn_long_no_timeout_command_decline_becomes_user_supplement() {
+    fn session_turn_long_positive_timeout_command_decline_becomes_user_supplement() {
         let _guard = crate::shell_exec::set_long_running_command_prompt_after_for_tests(
             Duration::from_millis(50),
         );
@@ -916,7 +916,7 @@ mod tests {
         let mut ui = DeclineLongRunningCommandUi::default();
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","report_job_progress":"运行一个无 runtime timeout 的长命令。","next_actions":[{"action":"run_bash","intent":"Run a blocking command for user testing.","args":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":-1}}]}"#,
+                r#"{"status":"working","report_job_progress":"运行一个长命令。","next_actions":[{"action":"run_bash","intent":"Run a blocking command for user testing.","args":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":5000}}]}"#,
                 1_000,
                 false,
             )),
@@ -946,7 +946,7 @@ mod tests {
         assert_eq!(outcome.text, "已按用户停止等待后的补充继续处理。");
         assert_eq!(ui.requests.len(), 1);
         assert_eq!(ui.requests[0].command, "sleep 2; printf should_not_finish");
-        assert_eq!(ui.requests[0].timeout_ms, None);
+        assert_eq!(ui.requests[0].timeout_ms, Some(5000));
         assert!(model.prompts[1].contains("user cancels the command"));
         assert!(
             model.prompts[1].contains("You can initiate action to check current working status")
@@ -958,11 +958,11 @@ mod tests {
     }
 
     #[test]
-    fn parallel_group_with_no_timeout_command_uses_sequential_decision_path() {
+    fn sequential_group_with_long_timeout_command_uses_host_decision_path() {
         let _guard = crate::shell_exec::set_long_running_command_prompt_after_for_tests(
             Duration::from_millis(50),
         );
-        let dir = tmp_dir("parallel_no_timeout_decline");
+        let dir = tmp_dir("sequential_long_timeout_decline");
         let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -971,16 +971,16 @@ mod tests {
         let mut model = ReplayModel::new([
             Ok(llm(
                 r#"## Progress
-启动并行动作组。
+启动顺序动作组。
 
 ## Working_Still_Action
 ```action
 [
   {
-    "order": "parallel",
+    "order": "sequential",
     "actions": [
       {"action":"run_bash","intent":"短检查","args":{"cmd":"printf quick","timeout_ms":3000}},
-      {"action":"run_bash","intent":"长阻塞检查","args":{"cmd":"sleep 2; printf late","timeout_ms":-1}}
+      {"action":"run_bash","intent":"长阻塞检查","args":{"cmd":"sleep 2; printf late","timeout_ms":5000}}
     ]
   }
 ]
@@ -1016,8 +1016,11 @@ finished
         );
 
         assert_eq!(outcome.text, "已按停止等待后的补充继续。");
-        assert_eq!(ui.requests.len(), 1);
-        assert_eq!(ui.requests[0].command, "sleep 2; printf late");
+        assert!(!ui.requests.is_empty());
+        assert_eq!(
+            ui.requests.last().map(|request| request.command.as_str()),
+            Some("sleep 2; printf late")
+        );
         assert!(model.prompts[1].contains("quick"));
         assert!(model.prompts[1].contains("user cancels the command"));
         assert!(core

@@ -990,13 +990,13 @@ Current local-command approval is configured at startup:
 The runtime validates structured action shape and command limits. It does not
 infer the user's semantic goal from the natural-language text.
 
-Normal commands use `cmd`. A positive `timeout_ms` is the runtime wait
-budget. `timeout_ms=-1` means the command blocks without a runtime timeout; the
-same execution path remains cancel-aware so host/UI cancellation can stop the
-active command. If such a command is still running after the long-command
-threshold, core emits a structured host decision request asking whether to keep
-waiting. If the host/user stops waiting, core terminates the active process and
-adds a `user_supplement` delta that tells the model the user cancelled the
+Normal commands use `cmd`. A positive model-provided `timeout_ms` is the
+runtime wait budget and is not upper-clamped by core. The execution path remains
+cancel-aware so host/UI cancellation can stop the active command. If such a
+command is still running after the long-command threshold, core emits a
+structured host decision request with elapsed/remaining time asking whether to
+keep waiting. If the host/user stops waiting, core terminates the active process
+and adds a `user_supplement` delta that tells the model the user cancelled the
 command and may request a status check or a new action if still necessary.
 Long-running work that should survive later prompt deltas should use
 `background=true` or `mode=background`. Runtime returns a `job_id`, output file,
