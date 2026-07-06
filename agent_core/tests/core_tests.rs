@@ -185,8 +185,8 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("assistant_heading"),
     );
-    core.set_assistant_speaker_name("[Ai2]\nignored");
-    assert_eq!(core.assistant_speaker_name(), "[Ai2] ignored");
+    core.set_assistant_speaker_name("ID2\nignored");
+    assert_eq!(core.assistant_speaker_name(), "ID2 ignored");
 
     let _ = core.begin_turn("你好", None);
     let step = core.apply_model_response(LlmResponse {
@@ -201,7 +201,7 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## [Ai2] ignored"));
+    assert!(prompt.contains("## ID2 ignored"));
     assert!(!prompt.contains("## TIMEM_ASSISTANT\n\nAll previous"));
 }
 

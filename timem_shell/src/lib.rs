@@ -1345,12 +1345,12 @@ mod tests {
         );
 
         let rendered = render_worker_thinking_views_at(
-            &[("[Ai1]", &ai1), ("[Ai2]", &ai2), ("Review", &ai3)],
+            &[("ID0", &ai1), ("ID1", &ai2), ("Review", &ai3)],
             "09:30:00",
         );
 
-        assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 [Ai1]  ⬇"));
-        assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 [Ai2]  ⬇"));
+        assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 ID0  ⬇"));
+        assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 ID1  ⬇"));
         assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 Review  ⬇"));
         assert_eq!(rendered.matches("Thought / Action  ⏳").count(), 3);
         assert_eq!(rendered.matches("思考中...").count(), 3);

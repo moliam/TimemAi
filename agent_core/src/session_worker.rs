@@ -4,8 +4,9 @@ use crate::{
     HostDecision, HostDecisionRequest, ModelClient, ProviderConfig, ProviderModelClient,
     RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnUi, UsageStats,
 };
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -230,6 +231,214 @@ pub struct CoreSessionWorker {
     handle: CoreSessionWorkerHandle,
     event_rx: Receiver<CoreSessionWorkerEvent>,
     join: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreSessionWorkerLifecycleState {
+    Running,
+    Stopping,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreSessionWorkerStatus {
+    pub identity: CoreSessionWorkerIdentity,
+    pub state: CoreSessionWorkerLifecycleState,
+}
+
+struct ManagedSessionWorker {
+    identity: CoreSessionWorkerIdentity,
+    state: CoreSessionWorkerLifecycleState,
+    worker: CoreSessionWorker,
+}
+
+pub struct CoreSessionWorkerManager {
+    runtime: CoreSessionWorkerRuntime,
+    next_ordinal: u32,
+    workers: BTreeMap<String, ManagedSessionWorker>,
+}
+
+impl CoreSessionWorkerManager {
+    pub fn new() -> Self {
+        Self {
+            runtime: CoreSessionWorkerRuntime::new(),
+            next_ordinal: 0,
+            workers: BTreeMap::new(),
+        }
+    }
+
+    pub fn runtime(&self) -> CoreSessionWorkerRuntime {
+        self.runtime.clone()
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    pub fn working_worker_count(&self) -> usize {
+        self.runtime.working_worker_count()
+    }
+
+    pub fn statuses(&self) -> Vec<CoreSessionWorkerStatus> {
+        self.workers
+            .values()
+            .map(|worker| CoreSessionWorkerStatus {
+                identity: worker.identity.clone(),
+                state: worker.state,
+            })
+            .collect()
+    }
+
+    pub fn handle(&self, session_id: &str) -> Option<CoreSessionWorkerHandle> {
+        self.workers
+            .get(session_id)
+            .map(|worker| worker.worker.handle())
+    }
+
+    pub fn ensure_default_worker(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+    ) -> Result<String, String> {
+        if let Some(session_id) = self.workers.keys().next() {
+            return Ok(session_id.clone());
+        }
+        self.spawn_worker(core, config, workspace, None, None)
+    }
+
+    pub fn ensure_default_worker_with_model_client<M>(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
+        if let Some(session_id) = self.workers.keys().next() {
+            return Ok(session_id.clone());
+        }
+        self.spawn_worker_with_model_client(core, config, workspace, None, None, model_client)
+    }
+
+    pub fn spawn_worker(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        display_name: Option<String>,
+        parent_session_id: Option<String>,
+    ) -> Result<String, String> {
+        self.spawn_worker_with_model_client(
+            core,
+            config,
+            workspace,
+            display_name,
+            parent_session_id,
+            ProviderModelClient,
+        )
+    }
+
+    pub fn spawn_worker_with_model_client<M>(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        display_name: Option<String>,
+        parent_session_id: Option<String>,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self
+            .next_ordinal
+            .checked_add(1)
+            .ok_or_else(|| "session_worker_ordinal_overflow".to_string())?;
+        let session_id = format!("session_{ordinal}");
+        let identity = CoreSessionWorkerIdentity::new(
+            session_id.clone(),
+            ordinal,
+            display_name,
+            parent_session_id,
+        );
+        let worker = CoreSessionWorker::spawn_with_runtime_model_client(
+            core,
+            config,
+            CoreSessionWorkerConfig::new(identity.clone(), workspace),
+            self.runtime.clone(),
+            model_client,
+        );
+        self.workers.insert(
+            session_id.clone(),
+            ManagedSessionWorker {
+                identity,
+                state: CoreSessionWorkerLifecycleState::Running,
+                worker,
+            },
+        );
+        Ok(session_id)
+    }
+
+    pub fn try_recv_event(&mut self, session_id: &str) -> Option<CoreSessionWorkerEvent> {
+        let managed = self.workers.get_mut(session_id)?;
+        match managed.worker.events().try_recv() {
+            Ok(event) => {
+                if matches!(event, CoreSessionWorkerEvent::WorkerStopped) {
+                    managed.state = CoreSessionWorkerLifecycleState::Stopped;
+                }
+                Some(event)
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
+        }
+    }
+
+    pub fn request_shutdown(&mut self, session_id: &str) -> Result<(), String> {
+        let managed = self
+            .workers
+            .get_mut(session_id)
+            .ok_or_else(|| "session_worker_not_found".to_string())?;
+        managed.state = CoreSessionWorkerLifecycleState::Stopping;
+        managed.worker.handle().request_shutdown()
+    }
+
+    pub fn remove_stopped(&mut self, session_id: &str) -> Result<(), String> {
+        let Some(managed) = self.workers.get(session_id) else {
+            return Err("session_worker_not_found".to_string());
+        };
+        if managed.state != CoreSessionWorkerLifecycleState::Stopped {
+            return Err("session_worker_not_stopped".to_string());
+        }
+        let managed = self.workers.remove(session_id).unwrap();
+        managed.worker.shutdown()
+    }
+
+    pub fn shutdown_all(mut self) -> Result<(), String> {
+        for managed in self.workers.values_mut() {
+            let _ = managed.worker.handle().request_shutdown();
+            managed.state = CoreSessionWorkerLifecycleState::Stopping;
+        }
+        let mut first_error = None;
+        for (_session_id, managed) in self.workers {
+            if let Err(err) = managed.worker.shutdown() {
+                first_error.get_or_insert(err);
+            }
+        }
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Default for CoreSessionWorkerManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CoreSessionWorker {
@@ -658,7 +867,7 @@ mod tests {
                         .worker
                         .as_ref()
                         .map(|worker| worker.display_name.as_str()),
-                    Some("[Ai1]")
+                    Some("ID1")
                 );
                 assert_eq!(lifecycle.context.unwrap().visible_delta_count, 0);
             }
@@ -753,7 +962,7 @@ mod tests {
         match lifecycle {
             CoreSessionWorkerEvent::Topics(events) => {
                 let lifecycle = events[0].as_lifecycle().unwrap();
-                assert_eq!(lifecycle.worker.unwrap().display_name, "[Ai3]");
+                assert_eq!(lifecycle.worker.unwrap().display_name, "ID3");
             }
             other => panic!("unexpected first worker event: {other:?}"),
         }
@@ -772,6 +981,273 @@ mod tests {
         }
 
         worker.shutdown().unwrap();
+    }
+
+    struct ManagerOkModel;
+
+    impl ModelClient for ManagerOkModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            _prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            Ok(LlmResponse {
+                content: "## Status\nfinished\n\n## Final_Answer\nMANAGER_OK".to_string(),
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    total_tokens: 12,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            })
+        }
+    }
+
+    fn wait_for_manager_event(
+        manager: &mut CoreSessionWorkerManager,
+        session_id: &str,
+        label: &str,
+    ) -> CoreSessionWorkerEvent {
+        let started = Instant::now();
+        loop {
+            if let Some(event) = manager.try_recv_event(session_id) {
+                return event;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{label} timed out waiting for manager event"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn session_worker_manager_allocates_id0_default_and_tracks_lifecycle() {
+        let dir = tmp_dir("manager_default");
+        let core = AgentCore::new(
+            "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+            CoreProfile {
+                name: "test".to_string(),
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+            },
+            &dir,
+        );
+        let mut manager = CoreSessionWorkerManager::new();
+        let session_id = manager
+            .ensure_default_worker_with_model_client(
+                core,
+                test_config(),
+                CoreSessionWorkerWorkspace::new(
+                    &dir,
+                    dir.join("api_audit.jsonl"),
+                    "test-runtime",
+                    "local",
+                ),
+                ManagerOkModel,
+            )
+            .expect("manager should spawn default worker");
+        assert_eq!(session_id, "session_0");
+        assert_eq!(manager.worker_count(), 1);
+        assert_eq!(manager.statuses()[0].identity.display_name, "ID0");
+        assert_eq!(
+            manager.statuses()[0].state,
+            CoreSessionWorkerLifecycleState::Running
+        );
+
+        match wait_for_manager_event(&mut manager, &session_id, "manager lifecycle") {
+            CoreSessionWorkerEvent::Topics(events) => {
+                let lifecycle = events[0].as_lifecycle().unwrap();
+                assert_eq!(lifecycle.worker.unwrap().display_name, "ID0");
+            }
+            other => panic!("unexpected manager lifecycle event: {other:?}"),
+        }
+
+        let handle = manager.handle(&session_id).expect("manager handle");
+        handle
+            .run_turn("hello through manager", None)
+            .expect("manager worker should accept turn");
+        let outcome = loop {
+            match wait_for_manager_event(&mut manager, &session_id, "manager turn") {
+                CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+                CoreSessionWorkerEvent::Topics(_)
+                | CoreSessionWorkerEvent::ModelRequest { .. }
+                | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                other => panic!("unexpected manager turn event: {other:?}"),
+            }
+        };
+        assert_eq!(outcome.text, "MANAGER_OK");
+
+        manager
+            .request_shutdown(&session_id)
+            .expect("manager should request shutdown");
+        assert_eq!(
+            manager.statuses()[0].state,
+            CoreSessionWorkerLifecycleState::Stopping
+        );
+        loop {
+            match wait_for_manager_event(&mut manager, &session_id, "manager shutdown") {
+                CoreSessionWorkerEvent::WorkerStopped => break,
+                CoreSessionWorkerEvent::Topics(_) => {}
+                other => panic!("unexpected manager shutdown event: {other:?}"),
+            }
+        }
+        assert_eq!(
+            manager.statuses()[0].state,
+            CoreSessionWorkerLifecycleState::Stopped
+        );
+        manager
+            .remove_stopped(&session_id)
+            .expect("stopped worker should be removable");
+        assert_eq!(manager.worker_count(), 0);
+    }
+
+    #[test]
+    fn session_worker_manager_allocates_multiple_workers_from_id0() {
+        let mut manager = CoreSessionWorkerManager::new();
+        let mut session_ids = Vec::new();
+        for idx in 0..2 {
+            let dir = tmp_dir(&format!("manager_multi_{idx}"));
+            let core = AgentCore::new(
+                "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+                CoreProfile {
+                    name: "test".to_string(),
+                    provider: "test".to_string(),
+                    model: "test-model".to_string(),
+                },
+                &dir,
+            );
+            let session_id = manager
+                .spawn_worker_with_model_client(
+                    core,
+                    test_config(),
+                    CoreSessionWorkerWorkspace::new(
+                        &dir,
+                        dir.join("api_audit.jsonl"),
+                        "test-runtime",
+                        "local",
+                    ),
+                    None,
+                    None,
+                    ManagerOkModel,
+                )
+                .expect("manager should spawn worker");
+            session_ids.push(session_id);
+        }
+        assert_eq!(session_ids, vec!["session_0", "session_1"]);
+        let names = manager
+            .statuses()
+            .into_iter()
+            .map(|status| status.identity.display_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ID0", "ID1"]);
+        manager.shutdown_all().unwrap();
+    }
+
+    struct BlockingManagerModel {
+        release: Arc<AtomicBool>,
+    }
+
+    impl ModelClient for BlockingManagerModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            _prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            while !self.release.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok(LlmResponse {
+                content: "## Status\nfinished\n\n## Final_Answer\nCOUNT_OK".to_string(),
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    total_tokens: 12,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            })
+        }
+    }
+
+    #[test]
+    fn session_worker_manager_tracks_global_working_count() {
+        let release = Arc::new(AtomicBool::new(false));
+        let mut manager = CoreSessionWorkerManager::new();
+        let mut session_ids = Vec::new();
+        for idx in 0..2 {
+            let dir = tmp_dir(&format!("manager_count_{idx}"));
+            let core = AgentCore::new(
+                "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+                CoreProfile {
+                    name: "test".to_string(),
+                    provider: "test".to_string(),
+                    model: "test-model".to_string(),
+                },
+                &dir,
+            );
+            let session_id = manager
+                .spawn_worker_with_model_client(
+                    core,
+                    test_config(),
+                    CoreSessionWorkerWorkspace::new(
+                        &dir,
+                        dir.join("api_audit.jsonl"),
+                        "test-runtime",
+                        "local",
+                    ),
+                    None,
+                    None,
+                    BlockingManagerModel {
+                        release: Arc::clone(&release),
+                    },
+                )
+                .unwrap();
+            let _ = wait_for_manager_event(&mut manager, &session_id, "manager count lifecycle");
+            manager
+                .handle(&session_id)
+                .unwrap()
+                .run_turn(format!("count {idx}"), None)
+                .unwrap();
+            session_ids.push(session_id);
+        }
+
+        for session_id in &session_ids {
+            loop {
+                match wait_for_manager_event(&mut manager, session_id, "manager count request") {
+                    CoreSessionWorkerEvent::ModelRequest { .. } => break,
+                    CoreSessionWorkerEvent::Topics(_) => {}
+                    other => panic!("unexpected manager count pre-release event: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(manager.working_worker_count(), 2);
+
+        release.store(true, Ordering::SeqCst);
+        for session_id in &session_ids {
+            loop {
+                match wait_for_manager_event(&mut manager, session_id, "manager count finish") {
+                    CoreSessionWorkerEvent::TurnFinished { outcome } => {
+                        assert_eq!(outcome.text, "COUNT_OK");
+                        break;
+                    }
+                    CoreSessionWorkerEvent::Topics(_)
+                    | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                    other => panic!("unexpected manager count finish event: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(manager.working_worker_count(), 0);
+        manager.shutdown_all().unwrap();
     }
 
     struct ApprovalReplayModel {
@@ -882,7 +1358,7 @@ mod tests {
             test_config(),
             test_worker_config(&dir, "session_worker_heading", 4),
             AssistantHeadingModel {
-                expected_heading: "## [Ai4]".to_string(),
+                expected_heading: "## ID4".to_string(),
                 calls: 0,
             },
         );
@@ -1197,7 +1673,7 @@ mod tests {
                 .worker
                 .unwrap()
                 .display_name,
-            "[Ai1]"
+            "ID1"
         );
         assert_eq!(
             lifecycle_b
@@ -1206,7 +1682,7 @@ mod tests {
                 .worker
                 .unwrap()
                 .display_name,
-            "[Ai2]"
+            "ID2"
         );
 
         handle_a
@@ -1704,7 +2180,7 @@ mod tests {
                         .worker
                         .unwrap()
                         .display_name,
-                    format!("[Ai{}]", worker_idx + 1)
+                    format!("ID{}", worker_idx + 1)
                 );
 
                 handle

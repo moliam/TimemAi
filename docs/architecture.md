@@ -388,10 +388,19 @@ thread. It emits the same `CoreTopicEvent` values and `TurnOutcome` structures
 as the synchronous path. Hosts should not share one mutable `AgentCore` across
 multiple sessions or recreate a terminal-specific model/action loop.
 
+`CoreSessionWorkerManager` is the core-side multi-session owner. It allocates
+worker identities from ordinal 0, creates `ID0` as the default worker when a
+host asks for the default session, keeps a registry of workers by session id,
+exposes handles/status snapshots, polls worker events without forcing a
+terminal-specific event loop, and requests or joins shutdown across all workers.
+Workers created by one manager share one `CoreSessionWorkerRuntime`, so global
+working-worker counts published in model-response topics reflect all active
+sessions managed by that host.
+
 A session worker has a stable identity and a workspace description. Identity is
 core/UI protocol data, not a shell label: `session_id`, display name, ordinal,
 and optional parent session id. If no display name is supplied, workers use
-`[Ai1]`, `[Ai2]`, ... by ordinal. A parent agent or host may create a worker
+`ID0`, `ID1`, ... by ordinal. A parent agent or host may create a worker
 with a more specific name, and the name can later be changed through the worker
 handle; the update is emitted as a lifecycle topic. Workspace data describes
 where the worker is operating: current directory when known, data directory,

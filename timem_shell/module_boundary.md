@@ -80,7 +80,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Lifecycle topic rendering. Shell may render `core.lifecycle` as startup status
   text, but it should not invent reusable core lifecycle state from local
   control flow when core already exposes a structured topic.
-- Session worker display. Shell may render worker display names such as `[Ai1]`
+- Session worker display. Shell may render worker display names such as `ID0`
   or user-renamed labels from lifecycle topics. It must not keep the canonical
   worker identity as terminal-only state; identity belongs to the core/UI
   protocol so future web/iOS hosts see the same worker.

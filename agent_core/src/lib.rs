@@ -144,7 +144,8 @@ pub use session_runtime::{
 };
 pub use session_worker::{
     CoreSessionWorker, CoreSessionWorkerConfig, CoreSessionWorkerEvent, CoreSessionWorkerHandle,
-    CoreSessionWorkerRuntime,
+    CoreSessionWorkerLifecycleState, CoreSessionWorkerManager, CoreSessionWorkerRuntime,
+    CoreSessionWorkerStatus,
 };
 use shell_exec::FileShellJobStore;
 pub use shell_exec::ShellJobRecord;

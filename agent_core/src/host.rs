@@ -416,7 +416,6 @@ impl CoreSessionWorkerIdentity {
         display_name: Option<String>,
         parent_session_id: Option<String>,
     ) -> Self {
-        let ordinal = ordinal.max(1);
         Self {
             session_id: session_id.into(),
             display_name: session_worker_default_display_name(ordinal, display_name),
@@ -437,7 +436,7 @@ pub fn session_worker_default_display_name(ordinal: u32, requested: Option<Strin
     requested
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("[Ai{}]", ordinal.max(1)))
+        .unwrap_or_else(|| format!("ID{ordinal}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

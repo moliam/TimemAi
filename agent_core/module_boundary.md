@@ -76,13 +76,18 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   thread. This is a host adapter convenience for multi-session/web-style
   execution; it must preserve the same topic/request semantics as the
   synchronous `run_session_turn` path.
+- Multi-session worker management. Core owns the standard manager that allocates
+  session worker identities from `ID0`, keeps worker handles/status snapshots,
+  shares global working-worker state across workers, polls worker events, and
+  shuts workers down. Hosts may choose to use the manager or manage workers
+  explicitly, but they should not create incompatible identity/lifecycle rules.
 - Session worker shutdown semantics. Core owns cancellation and cleanup for its
   worker threads: shutdown cancels the active turn, rejects new work, skips
   queued turn/rename commands that have not started, emits a stop event, and
   joins the thread when the worker owner shuts down or is dropped.
 - Session worker identity and workspace metadata. Worker identity includes
   `session_id`, display name, ordinal, and optional parent session id. Default
-  display names are `[Ai1]`, `[Ai2]`, ... by ordinal, but host/user/parent-agent
+  display names are `ID0`, `ID1`, ... by ordinal, but host/user/parent-agent
   code may rename a worker through core's worker handle. Workspace metadata may
   include current directory, data/audit paths, runtime, bash target, sanitized
   environment, and workspace reference directories. Do not expose full prompt

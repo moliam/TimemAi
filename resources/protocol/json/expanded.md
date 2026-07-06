@@ -74,7 +74,7 @@ compact or offload old dynamic context.
 
 Prompt delta example:
 Prompt deltas use only `## USER`, the current assistant/session-worker heading
-(for example `## TIMEM_ASSISTANT` or `## [Ai1]`), and `## SYSTEM` as visible
+(for example `## TIMEM_ASSISTANT` or `## ID0`), and `## SYSTEM` as visible
 speakers, in chronological order.
 
 [BEGIN DELTA]
