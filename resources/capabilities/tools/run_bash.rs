@@ -10,6 +10,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -19,6 +21,8 @@ use std::os::unix::process::CommandExt;
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static LONG_RUNNING_COMMAND_PROMPT_AFTER_MS: AtomicU64 = AtomicU64::new(60_000);
+#[cfg(test)]
+static LONG_RUNNING_COMMAND_PROMPT_AFTER_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellJobRecord {
@@ -797,6 +801,7 @@ fn long_running_command_prompt_after() -> Duration {
 #[cfg(test)]
 pub(crate) struct LongRunningPromptAfterGuard {
     previous_ms: u64,
+    _lock: MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
@@ -810,9 +815,15 @@ impl Drop for LongRunningPromptAfterGuard {
 pub(crate) fn set_long_running_command_prompt_after_for_tests(
     duration: Duration,
 ) -> LongRunningPromptAfterGuard {
+    let lock = LONG_RUNNING_COMMAND_PROMPT_AFTER_LOCK
+        .lock()
+        .expect("long running prompt threshold test lock should not be poisoned");
     let previous_ms = LONG_RUNNING_COMMAND_PROMPT_AFTER_MS
         .swap(duration.as_millis().max(1) as u64, Ordering::Relaxed);
-    LongRunningPromptAfterGuard { previous_ms }
+    LongRunningPromptAfterGuard {
+        previous_ms,
+        _lock: lock,
+    }
 }
 
 fn bash_error(command: &str, error: &str) -> BashCommandOutput {
