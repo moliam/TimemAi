@@ -350,18 +350,26 @@ Timem shell currently supports macOS and Linux. Windows is not supported yet.
 `install.sh` detects the OS before building:
 
 - macOS: checks Xcode Command Line Tools and `curl`.
-- Linux: checks `cc`, `make`, `curl`, and `ca-certificates`; when possible it
-  installs them with `apt-get`, `dnf`, `yum`, `pacman`, or `zypper`.
+- Linux: checks `cc`, `make`, `curl`, `pkg-config`, and `ca-certificates`;
+  when possible it installs them with `apt-get`, `dnf`, `yum`, `pacman`, or
+  `zypper`.
 
 If Rust/cargo is not installed, `install.sh` installs the Rust toolchain with
-rustup first, then builds the release binary. Cargo 1.78+ is required because
-the repository uses `Cargo.lock` v4; if an older Cargo is found and `rustup`
-exists, the installer updates the stable toolchain automatically. To disable
-automatic Rust install/update:
+rustup first. Cargo 1.78+ is required because the repository uses
+`Cargo.lock` v4; if an older Cargo is found and `rustup` exists, the installer
+updates the stable toolchain automatically. To disable automatic Rust
+install/update:
 
 ```bash
 TIMEM_SHELL_SKIP_RUST_INSTALL=1 ./install.sh
 ```
+
+After Rust is ready, the installer runs `cargo fetch --locked` and
+`cargo build --locked -p timem_shell --release`. Cargo downloads Rust crates
+from `Cargo.lock` automatically, including terminal rendering dependencies such
+as `termimad`; users do not manually install those crate libraries. If this
+step fails on a fresh machine, check network access to crates.io and rerun
+`./install.sh`.
 
 If a manual `cargo run` fails with `lock file version '4' was found`, update
 Rust first:

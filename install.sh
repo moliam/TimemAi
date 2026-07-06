@@ -50,34 +50,34 @@ ensure_build_dependencies() {
       fi
       ;;
     linux)
-      if command -v cc >/dev/null 2>&1 && command -v make >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+      if command -v cc >/dev/null 2>&1 && command -v make >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1; then
         return
       fi
-      echo "Linux build tools are required: cc, make, curl."
+      echo "Linux build tools are required: cc, make, curl, pkg-config."
       if command -v apt-get >/dev/null 2>&1; then
         echo "Installing Linux build dependencies with apt-get..."
         install_with_sudo_if_available apt-get update
-        install_with_sudo_if_available apt-get install -y build-essential curl ca-certificates
+        install_with_sudo_if_available apt-get install -y build-essential curl ca-certificates pkg-config
       elif command -v dnf >/dev/null 2>&1; then
         echo "Installing Linux build dependencies with dnf..."
-        install_with_sudo_if_available dnf install -y gcc gcc-c++ make curl ca-certificates
+        install_with_sudo_if_available dnf install -y gcc gcc-c++ make curl ca-certificates pkgconf-pkg-config
       elif command -v yum >/dev/null 2>&1; then
         echo "Installing Linux build dependencies with yum..."
-        install_with_sudo_if_available yum install -y gcc gcc-c++ make curl ca-certificates
+        install_with_sudo_if_available yum install -y gcc gcc-c++ make curl ca-certificates pkgconfig
       elif command -v pacman >/dev/null 2>&1; then
         echo "Installing Linux build dependencies with pacman..."
-        install_with_sudo_if_available pacman -Sy --needed --noconfirm base-devel curl ca-certificates
+        install_with_sudo_if_available pacman -Sy --needed --noconfirm base-devel curl ca-certificates pkgconf
       elif command -v zypper >/dev/null 2>&1; then
         echo "Installing Linux build dependencies with zypper..."
-        install_with_sudo_if_available zypper install -y gcc gcc-c++ make curl ca-certificates
+        install_with_sudo_if_available zypper install -y gcc gcc-c++ make curl ca-certificates pkg-config
       else
         echo "error: unsupported Linux package manager." >&2
-        echo "Install cc, make, curl, and ca-certificates manually, then rerun ./install.sh." >&2
+        echo "Install cc, make, curl, pkg-config, and ca-certificates manually, then rerun ./install.sh." >&2
         exit 1
       fi
-      if ! command -v cc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+      if ! command -v cc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v pkg-config >/dev/null 2>&1; then
         echo "error: build dependencies are still missing after install attempt." >&2
-        echo "Install cc, make, curl, and ca-certificates manually, then rerun ./install.sh." >&2
+        echo "Install cc, make, curl, pkg-config, and ca-certificates manually, then rerun ./install.sh." >&2
         exit 1
       fi
       ;;
@@ -149,12 +149,32 @@ rust_version_at_least() {
   [ "$actual_patch" -ge "$required_patch" ]
 }
 
+fetch_rust_dependencies() {
+  echo "Fetching Rust crate dependencies from Cargo.lock..."
+  echo "Cargo will download crates such as termimad automatically; no manual crate install is needed."
+  if ! cargo fetch --locked; then
+    echo "error: failed to fetch Rust crate dependencies." >&2
+    echo "Check network access to crates.io, then rerun ./install.sh." >&2
+    exit 1
+  fi
+}
+
+build_release_binary() {
+  echo "Building Timem release binary..."
+  if ! cargo build --locked -p timem_shell --release; then
+    echo "error: release build failed." >&2
+    echo "If this is a fresh machine, rerun ./install.sh after confirming Rust and system build dependencies installed successfully." >&2
+    exit 1
+  fi
+}
+
 main() {
   OS_KIND="$(detect_os)"
   ensure_build_dependencies "$OS_KIND"
   ensure_rust
 
-  cargo build -p timem_shell --release
+  fetch_rust_dependencies
+  build_release_binary
 
   mkdir -p "$INSTALL_DIR"
   cp "$ROOT_DIR/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
