@@ -92,7 +92,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
 
     let mut repair_issue = None;
     let continue_work = match status_raw.trim() {
-        "finished" | "done" | "complete" => false,
+        "all_finished" => false,
         "working" | "in_progress" | "in progress" => true,
         "" => {
             if has_actions(response_body) {
@@ -104,7 +104,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
             }
         }
         _ => {
-            repair_issue = Some("status_must_be_working_or_finished".to_string());
+            repair_issue = Some("status_must_be_working_or_all_finished".to_string());
             true
         }
     };
@@ -117,7 +117,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         repair_issue = Some("final_answer_required_when_status_finished".to_string());
     }
     if repair_issue.is_none() && !final_answer.trim().is_empty() {
-        if !matches!(status_raw.trim(), "finished" | "done" | "complete") {
+        if !matches!(status_raw.trim(), "all_finished") {
             repair_issue = Some("final_answer_requires_status_finished".to_string());
         }
     }
@@ -324,22 +324,22 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <progress> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
         }
         "external_tool_call_protocol" => {
-            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 XML response protocol：需要动作时写 <progress> 和 <working_still_action><action_json><![CDATA[{...}]]></action_json></working_still_action>；完成时写 <status>finished</status> 和 <final_answer>...</final_answer>。"
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 XML response protocol：需要动作时写 <progress> 和 <working_still_action><action_json><![CDATA[{...}]]></action_json></working_still_action>；完成时写 <status>ALL_FINISHED</status> 和 <final_answer>...</final_answer>。"
         }
         "final_answer_requires_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你给了 <final_answer>，但没有明确 <status>finished</status>。如果当前用户请求已经完成，请同时提供 <status>finished</status> 和 <final_answer>；如果仍需 runtime 继续工作，请不要写 <final_answer>，改写 <progress> 和 <working_still_action>。"
+            "检查到刚刚的输出格式有点问题：你给了 <final_answer>，但没有明确 <status>ALL_FINISHED</status>。如果当前用户请求已经完成，请同时提供 <status>ALL_FINISHED</status> 和 <final_answer>；如果仍需 runtime 继续工作，请不要写 <final_answer>，改写 <progress> 和 <working_still_action>。"
         }
         "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你写了 <status>finished</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果仍需 runtime 继续工作，请不要写 finished，并提供 <progress> 和需要的 <working_still_action>。"
+            "检查到刚刚的输出格式有点问题：你写了 <status>ALL_FINISHED</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果仍需 runtime 继续工作，请不要写 ALL_FINISHED，并提供 <progress> 和需要的 <working_still_action>。"
         }
         "status_finished_must_not_include_next_actions" => {
-            "检查到刚刚的输出格式有点问题：<status>finished</status> 表示当前用户请求已完成，因此不能同时包含 <working_still_action>。如果还需要 runtime 执行动作，请保持 working，用 <progress> 和 <working_still_action> 继续；拿到 action result 后再写 finished 和 <final_answer>。"
+            "检查到刚刚的输出格式有点问题：<status>ALL_FINISHED</status> 表示当前用户请求已完成，因此不能同时包含 <working_still_action>。如果还需要 runtime 执行动作，请保持 working，用 <progress> 和 <working_still_action> 继续；拿到 action result 后再写 ALL_FINISHED 和 <final_answer>。"
         }
         "next_actions_required_when_status_working" => {
-            "检查到刚刚的输出格式有点问题：working 表示还需要 runtime 继续执行动作，因此必须提供 <progress> 和 <working_still_action>。如果当前用户请求已经完成，请改用 <status>finished</status> 和 <final_answer>。"
+            "检查到刚刚的输出格式有点问题：working 表示还需要 runtime 继续执行动作，因此必须提供 <progress> 和 <working_still_action>。如果当前用户请求已经完成，请改用 <status>ALL_FINISHED</status> 和 <final_answer>。"
         }
         _ => {
-            "Use the XML response protocol. If work still needs runtime action, write <progress> and concrete <working_still_action>. If the current user request is complete, write <status>finished</status> with <final_answer>; this does not close the Timem session."
+            "Use the XML response protocol. If work still needs runtime action, write <progress> and concrete <working_still_action>. If the current user request is complete, write <status>ALL_FINISHED</status> with <final_answer>; this does not close the Timem session."
         }
     }
 }
@@ -367,12 +367,26 @@ mod tests {
     #[test]
     fn parses_final_answer() {
         let env = parse_xml_envelope(
-            "<response><status>finished</status><final_answer>done</final_answer></response>",
+            "<response><status>ALL_FINISHED</status><final_answer>done</final_answer></response>",
             &caps(),
         );
         assert!(env.repair_issue.is_none());
         assert!(!env.continue_work);
         assert_eq!(env.final_answer, "done");
+    }
+
+    #[test]
+    fn old_finished_status_requests_repair() {
+        let env = parse_xml_envelope(
+            "<response><status>finished</status><final_answer>done</final_answer></response>",
+            &caps(),
+        );
+
+        assert_eq!(
+            env.repair_issue.as_deref(),
+            Some("status_must_be_working_or_all_finished")
+        );
+        assert!(env.continue_work);
     }
 
     #[test]

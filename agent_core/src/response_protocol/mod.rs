@@ -370,7 +370,7 @@ mod tests {
         assert_protocols_equivalent(
             r#"{"status":"finished","final_answer":"done"}"#,
             "## Status\nfinished\n\n## Final_Answer\ndone",
-            "<response><status>finished</status><final_answer>done</final_answer></response>",
+            "<response><status>ALL_FINISHED</status><final_answer>done</final_answer></response>",
         );
     }
 
@@ -410,7 +410,7 @@ mod tests {
             "## Status\nfinished\n\n## Final_Answer\ndone\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Verify output.\",\"args\":{\"cmd\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```",
         );
         let xml_env = parse_xml(
-            r#"<response><status>finished</status><final_answer>done</final_answer><working_still_action><action_json><![CDATA[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
+            r#"<response><status>ALL_FINISHED</status><final_answer>done</final_answer><working_still_action><action_json><![CDATA[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
         );
         assert_eq!(
             json_env.repair_issue.as_deref(),

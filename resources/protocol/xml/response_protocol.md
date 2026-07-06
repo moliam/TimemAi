@@ -12,12 +12,12 @@ Required tag rules:
   `<status>working</status>`, provide `<progress>` when useful, and include
   concrete actions when runtime work is needed. Do not write `<final_answer>`
   while still working; use `<progress>` for user-visible ongoing reports.
-- If the task is complete, write `<status>finished</status>` and provide
-  `<final_answer>`. `finished` means the current user request is complete; it
+- If the task is complete, write `<status>ALL_FINISHED</status>` and provide
+  `<final_answer>`. `ALL_FINISHED` means the current user request is complete; it
   does not close the Timem session or prevent the user from continuing. Do not
   use `working` only to keep the chat session open.
 - Any response containing `<final_answer>` must also contain
-  `<status>finished</status>`, including responses that also contain
+  `<status>ALL_FINISHED</status>`, including responses that also contain
   `<context_compact>`.
 - Final answers are not actions.
 - `<free_talk>` is optional. Use it for casual reasoning, next plans, or context
@@ -27,7 +27,7 @@ Required tag rules:
   `<action_json>` block contains JSON for a single action object, an array of
   action objects, or an array of action groups. Wrap JSON in CDATA when it
   contains quotes, angle brackets, shell punctuation, or multi-line content.
-  DO NOT include `<working_still_action>` when `<status>` is `finished`.
+  DO NOT include `<working_still_action>` when `<status>` is `ALL_FINISHED`.
 - `<context_compact>` lets you replace old dynamic context with a concise
   summary. Provide `<delta_ids>` plus `<summary>`. Runtime will hide the
   referenced dynamic prompt deltas and append your summary as a new dynamic
@@ -35,7 +35,7 @@ Required tag rules:
   working environment facts, current progress, todo/next steps, and only the few
   high-level work principles that still guide the task. Do not put the compact
   summary into a `memmgr type=context` action. If compact completes the current
-  user request, use `<status>finished</status>` with `<final_answer>`.
+  user request, use `<status>ALL_FINISHED</status>` with `<final_answer>`.
 
 The response protocol summary is:
 
@@ -46,7 +46,7 @@ Examples below are format examples ONLY:
 ## -------- Example: final answer --------
 
 <response>
-  <status>finished</status>
+  <status>ALL_FINISHED</status>
   <final_answer>好的，我明白了。</final_answer>
 </response>
 

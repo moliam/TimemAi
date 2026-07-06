@@ -1450,7 +1450,7 @@ finished
             )),
             Ok(llm(
                 r#"<response>
-<status>finished</status>
+<status>ALL_FINISHED</status>
 <final_answer>没有找到相关 scratch。</final_answer>
 </response>"#,
                 5_800,

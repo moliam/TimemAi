@@ -12,7 +12,7 @@ As you think, user may keep inputting new quesions/suggestions/guides etc. User'
 (Note: since you are stateless, the new prompt will also contain all historical records. So every prompt is self-enclosed.)
 
 4. You receive new prompt, give new reponse according to protocol.
-5. Goto 3 until the task is completed(you respond with status finished).
+5. Goto 3 until the task is completed(you respond with the protocol-specific finished status).
 
 You should properly make a plan first for a complex task.
 

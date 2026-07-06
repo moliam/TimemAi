@@ -20,7 +20,7 @@ As you think, user may keep inputting new quesions/suggestions/guides etc. User'
 (Note: since you are stateless, the new prompt will also contain all historical records. So every prompt is self-enclosed.)
 
 4. You receive new prompt, give new reponse according to protocol.
-5. Goto 3 until the task is completed(you respond with status finished).
+5. Goto 3 until the task is completed(you respond with the protocol-specific finished status).
 
 You should properly make a plan first for a complex task.
 
@@ -287,12 +287,12 @@ Required tag rules:
   `<status>working</status>`, provide `<progress>` when useful, and include
   concrete actions when runtime work is needed. Do not write `<final_answer>`
   while still working; use `<progress>` for user-visible ongoing reports.
-- If the task is complete, write `<status>finished</status>` and provide
-  `<final_answer>`. `finished` means the current user request is complete; it
+- If the task is complete, write `<status>ALL_FINISHED</status>` and provide
+  `<final_answer>`. `ALL_FINISHED` means the current user request is complete; it
   does not close the Timem session or prevent the user from continuing. Do not
   use `working` only to keep the chat session open.
 - Any response containing `<final_answer>` must also contain
-  `<status>finished</status>`, including responses that also contain
+  `<status>ALL_FINISHED</status>`, including responses that also contain
   `<context_compact>`.
 - Final answers are not actions.
 - `<free_talk>` is optional. Use it for casual reasoning, next plans, or context
@@ -302,7 +302,7 @@ Required tag rules:
   `<action_json>` block contains JSON for a single action object, an array of
   action objects, or an array of action groups. Wrap JSON in CDATA when it
   contains quotes, angle brackets, shell punctuation, or multi-line content.
-  DO NOT include `<working_still_action>` when `<status>` is `finished`.
+  DO NOT include `<working_still_action>` when `<status>` is `ALL_FINISHED`.
 - `<context_compact>` lets you replace old dynamic context with a concise
   summary. Provide `<delta_ids>` plus `<summary>`. Runtime will hide the
   referenced dynamic prompt deltas and append your summary as a new dynamic
@@ -310,7 +310,7 @@ Required tag rules:
   working environment facts, current progress, todo/next steps, and only the few
   high-level work principles that still guide the task. Do not put the compact
   summary into a `memmgr type=context` action. If compact completes the current
-  user request, use `<status>finished</status>` with `<final_answer>`.
+  user request, use `<status>ALL_FINISHED</status>` with `<final_answer>`.
 
 The response protocol summary is:
 
@@ -318,18 +318,18 @@ XML response tags. The top-level response is XML. Tool actions are JSON objects
 inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
 
 - `<response>`: required root element.
-- `<status>`: optional. Use `finished` only when the current user request is
+- `<status>`: optional. Use `ALL_FINISHED` only when the current user request is
   complete and no more runtime interaction is needed for that request. Omit it
   or use `working` while work continues.
 - `<progress>`: optional progress report for multi-round tasks.
 - `<final_answer>`: final user-facing answer. Use only together with
-  `<status>finished</status>`.
+  `<status>ALL_FINISHED</status>`.
 - `<free_talk>`: optional casual reasoning, current plan, or context you want
   kept visible to you in later prompt context.
-- `<working_still_action>`: runtime action section for work that still needs tool execution. Put one or more
-  `<action_json><![CDATA[{...}]]></action_json>` blocks inside it. The JSON
-  content may be a single action object, an array of action objects, or an array
-  of action groups.
+- `<working_still_action>`: runtime action section for work that still needs
+  tool execution. Put one or more `<action_json><![CDATA[{...}]]></action_json>`
+  blocks inside it. The JSON content may be a single action object, an array of
+  action objects, or an array of action groups.
 - `<context_compact>`: optional context compaction block. Include `<delta_ids>`
   with comma-separated prompt delta ids and `<summary>` with the compacted
   state. Runtime hides those dynamic prompt deltas and appends the summary as a
@@ -354,7 +354,7 @@ Examples below are format examples ONLY:
 ## -------- Example: final answer --------
 
 <response>
-  <status>finished</status>
+  <status>ALL_FINISHED</status>
   <final_answer>好的，我明白了。</final_answer>
 </response>
 

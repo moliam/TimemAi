@@ -316,6 +316,7 @@ static_prompt_snapshot_xml_required=(
   "XML response tags."
   "The top-level response is XML."
   "\`<response>\`"
+  "<status>ALL_FINISHED</status>"
   "\`<working_still_action>\`"
 )
 
