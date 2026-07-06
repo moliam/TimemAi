@@ -176,13 +176,6 @@ expect {
     -re "action_audit: \[^\r\n\]*" {
         append prof_output $expect_out(buffer)
         set prof_complete 1
-        exp_continue
-    }
-    -re "❯❯" {
-        if {!$prof_seen} {
-            exp_continue
-        }
-        append prof_output $expect_out(buffer)
     }
     timeout {
         error "timeout waiting for /prof after model answer"
@@ -191,6 +184,10 @@ expect {
         error "unexpected EOF waiting for /prof after model answer"
     }
 }
+if {!$prof_complete} {
+    error "profiling output did not include action_audit"
+}
+wait_prompt
 if {[string first "思考中" $prof_output] >= 0 || [string first "模型调用失败" $prof_output] >= 0} {
     error "shell command after model answer should not start another model turn; output=$prof_output"
 }
