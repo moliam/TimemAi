@@ -138,6 +138,21 @@ expect {
         exit 0
     }
     timeout {
+        # Strip ANSI escape sequences and check if STRESS_OK was present
+        set stripped $output
+        regsub -all {\[[0-9;]*[a-zA-Z]} $stripped "" stripped
+        regsub -all {\[[0-9;]*m} $stripped "" stripped
+        regsub -all {\[[\?]?[0-9;]*[hlsr]} $stripped "" stripped
+        if {[string first "STRESS_OK" $stripped] >= 0} {
+            wait_prompt
+            if {[string first "Bash:" $output] < 0} {
+                error "stress scenario did not render Bash action"
+            }
+            send "/exit"
+            catch {close}
+            puts "real_tty_stress: ok (after escape stripping)"
+            exit 0
+        }
         error "timeout waiting for stress answer; captured output=$output"
     }
     eof {
