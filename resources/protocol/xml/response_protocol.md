@@ -17,7 +17,7 @@ Examples below are format examples ONLY:
   <final_answer>好的，我明白了。</final_answer>
 </response>
 
-## -------- Example: receive a new input and need actions --------
+## -------- Example: receive a new input during working, need actions --------
 
 <response>
   <free_talk>好的，你关于 yy 的整改要求我收到了，等会我做完 xx 后再进行。</free_talk>
@@ -30,24 +30,6 @@ Examples below are format examples ONLY:
   "args": {
     "cmd": "printf '%s\\n' example",
     "timeout_ms": 5000
-  }
-}
-    ]]></action_json>
-  </working_still_action>
-</response>
-
-## -------- Example: receive a user task, plan, and start doing --------
-
-<response>
-  <free_talk>这个任务我将会分成几个步骤进行，下面先进行目录浏览。</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[
-{
-  "action": "run_bash",
-  "intent": "浏览当前目录的文件",
-  "args": {
-    "cmd": "ls -al",
-    "timeout_ms": 1000
   }
 }
     ]]></action_json>
@@ -70,28 +52,39 @@ This is the summary....
 ## -------- Example: multiple actions and polling --------
 
 <response>
-  <free_talk>我会先并行检查两个本地状态，然后轮询等待外部状态就绪。</free_talk>
+  <free_talk> 我会几个阶段: .... 先第一个阶段。这个阶段先做做 xxx ，再执行yyy ，最后执行单个收尾操作。</free_talk>   --> the plan, also help you recall the whole picture.
   <working_still_action>
     <action_json><![CDATA[
 [
   {
     "order": "parallel",
+    "intent": "先做...",   --> can be used as whole group intent
     "actions": [
       {
         "action": "run_bash",
-        "intent": "检查当前分支",
-        "args": {
-          "cmd": "git branch --show-current",
-          "timeout_ms": 3000
-        }
+        "args": { "cmd": ..., "timeout_ms": ... }
       },
       {
         "action": "run_bash",
-        "intent": "检查工作区状态",
-        "args": {
-          "cmd": "git status --short",
-          "timeout_ms": 3000
-        }
+        "args": { "cmd": ..., "timeout_ms": ... }
+      }
+    ]
+  },
+  {
+    "order": "parallel",
+    "actions": [
+      {
+        "action": "run_bash",
+        "intent": "进行 yyy 的分任务...",  --> can be used as single action intent
+        "args": { "cmd": ..., "timeout_ms": ... }
+      },
+      {
+        "action": "run_bash",    --> intent can be omiteed
+        "args": { "cmd": ...., "timeout_ms": ... }
+      },
+      {
+        "action": "memmgr",  --> built in cmd
+        "args": { ....}
       }
     ]
   },
@@ -99,7 +92,7 @@ This is the summary....
     "action": "run_bash",
     "intent": "等待 CI 完成",
     "args": {
-      "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
+      "loop_cmd": ...,
       "interval_ms": 10000,
       "loop_timeout_ms": 600000,
       "once_timeout_ms": 5000

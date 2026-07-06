@@ -114,15 +114,18 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
             };
         }
     };
-    // Auto-wrap action-only shapes into {"next_actions": [...]}.
+    // Auto-wrap action/group-only shapes into {"next_actions": [...]}.
     let value = if value.is_array() {
         let arr = value.as_array().unwrap();
-        let all_actions = !arr.is_empty()
+        let all_actions_or_groups = !arr.is_empty()
             && arr.iter().all(|item| {
-                item.as_object()
-                    .is_some_and(|obj| obj.contains_key("action"))
+                item.as_object().is_some_and(|obj| {
+                    obj.contains_key("action")
+                        || obj.contains_key("actions")
+                        || obj.contains_key("order")
+                })
             });
-        if all_actions {
+        if all_actions_or_groups {
             json!({"next_actions": value})
         } else {
             value
@@ -226,10 +229,16 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                     repair_issue = Some(format!("action_groups[{group_idx}].actions_required"));
                     break;
                 };
+                let group_intent = group_object.get("intent").and_then(Value::as_str);
                 let mut parsed_group_actions = Vec::new();
                 for (action_idx, action) in actions.iter().enumerate() {
                     let label = format!("action_groups[{group_idx}].actions[{action_idx}]");
-                    match parse_action_value(action, &label, capabilities) {
+                    match parse_action_value_with_fallback(
+                        action,
+                        &label,
+                        capabilities,
+                        group_intent,
+                    ) {
                         Ok(action) => {
                             next_actions.push(action.clone());
                             parsed_group_actions.push(action);
@@ -271,24 +280,59 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         None
     };
     if let Some(actions) = action_values {
-        let mut group_actions = Vec::new();
         for (idx, action) in actions.iter().enumerate() {
-            match parse_action_value(action, &format!("next_actions[{idx}]"), capabilities) {
-                Ok(action) => {
-                    next_actions.push(action.clone());
-                    group_actions.push(action);
+            if action.get("actions").is_some() || action.get("order").is_some() {
+                let order = action
+                    .get("order")
+                    .and_then(Value::as_str)
+                    .map(ActionGroupOrder::from_name)
+                    .unwrap_or(ActionGroupOrder::Sequential);
+                let group_intent = action.get("intent").and_then(Value::as_str);
+                let Some(group_actions) = action.get("actions").and_then(Value::as_array) else {
+                    repair_issue = Some(format!("next_actions[{idx}].actions_required"));
+                    break;
+                };
+                let mut parsed_group_actions = Vec::new();
+                for (action_idx, action) in group_actions.iter().enumerate() {
+                    let label = format!("next_actions[{idx}].actions[{action_idx}]");
+                    match parse_action_value_with_fallback(
+                        action,
+                        &label,
+                        capabilities,
+                        group_intent,
+                    ) {
+                        Ok(action) => {
+                            next_actions.push(action.clone());
+                            parsed_group_actions.push(action);
+                        }
+                        Err(issue) => {
+                            repair_issue = Some(issue);
+                            break;
+                        }
+                    }
                 }
-                Err(issue) => {
-                    repair_issue = Some(issue);
+                if repair_issue.is_some() {
                     break;
                 }
+                action_groups.push(ParsedActionGroup {
+                    order,
+                    actions: parsed_group_actions,
+                });
+            } else {
+                match parse_action_value(action, &format!("next_actions[{idx}]"), capabilities) {
+                    Ok(action) => {
+                        next_actions.push(action.clone());
+                        action_groups.push(ParsedActionGroup {
+                            order: ActionGroupOrder::Sequential,
+                            actions: vec![action],
+                        });
+                    }
+                    Err(issue) => {
+                        repair_issue = Some(issue);
+                        break;
+                    }
+                }
             }
-        }
-        if repair_issue.is_none() && !group_actions.is_empty() {
-            action_groups.push(ParsedActionGroup {
-                order: ActionGroupOrder::Sequential,
-                actions: group_actions,
-            });
         }
     }
     let mut memory_candidates = Vec::new();
@@ -374,6 +418,15 @@ fn parse_action_value(
     label: &str,
     capabilities: &CapabilityRegistry,
 ) -> Result<ParsedAction, String> {
+    parse_action_value_with_fallback(action, label, capabilities, None)
+}
+
+fn parse_action_value_with_fallback(
+    action: &Value,
+    label: &str,
+    capabilities: &CapabilityRegistry,
+    fallback_intent: Option<&str>,
+) -> Result<ParsedAction, String> {
     let name = action
         .get("action")
         .and_then(Value::as_str)
@@ -394,9 +447,15 @@ fn parse_action_value(
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    if intent.is_empty() {
-        return Err(format!("{label}.intent_required"));
-    }
+    let parent_intent = if intent.is_empty() {
+        fallback_intent
+            .map(str::trim)
+            .filter(|intent| !intent.is_empty())
+            .map(ToString::to_string)
+    } else {
+        None
+    };
+    let intent = intent.to_string();
     let normalized_name = name.as_str();
     if !capabilities.contains_tool(normalized_name) {
         return Err(format!("unsupported_action:{normalized_name}"));
@@ -406,7 +465,8 @@ fn parse_action_value(
     }
     Ok(ParsedAction {
         action: name,
-        intent: intent.to_string(),
+        intent,
+        parent_intent,
         raw_input: input,
     })
 }
@@ -541,10 +601,6 @@ mod tests {
             (
                 r#"{"status":"working","report_job_progress":"checking","next_actions":[{"action":"run_bash","intent":"List."}]}"#,
                 "next_actions[0].args_required",
-            ),
-            (
-                r#"{"status":"working","report_job_progress":"checking","next_actions":[{"action":"run_bash","args":{"cmd":"ls"}}]}"#,
-                "next_actions[0].intent_required",
             ),
             (
                 r#"{"status":"working","report_job_progress":"checking","next_actions":[{"action":"fetch_web_page","intent":"Fetch.","args":{"url":"https://example.test"}}]}"#,

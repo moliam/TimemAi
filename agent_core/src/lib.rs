@@ -31,6 +31,7 @@ pub mod memmgr;
 mod notification;
 pub mod profiler;
 pub mod prompt_cache;
+pub mod prompt_components;
 pub mod prompt_render;
 pub mod prompt_spec;
 pub mod provider;
@@ -111,6 +112,7 @@ pub use prompt_cache::{
     split_old_and_new_delta, split_prompt, stable_text_fingerprint, CacheControl, PromptBlock,
     PromptBlockRole, PromptParts,
 };
+pub use prompt_components::{PromptComponent, PromptComponentRole};
 pub use provider::{
     build_provider_request, default_api_protocol_for_provider, default_base_url_for_provider,
     default_model_for_provider, interpret_provider_http_response, is_default_base_url_for_provider,
@@ -274,6 +276,16 @@ fn normalize_assistant_speaker_name(name: &str) -> String {
     }
 }
 
+fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> PromptComponentRole {
+    match prompt_type {
+        "user_question" | "user_supplement" => PromptComponentRole::user(),
+        "llm_response" | "llm_free_talk" => {
+            PromptComponentRole::assistant(assistant_speaker_name.to_string())
+        }
+        _ => PromptComponentRole::system(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApprovalRequest {
     pub approval_id: String,
@@ -360,6 +372,18 @@ pub(crate) struct PendingApproval {
     request: ApprovalRequest,
     approved_action: PendingApprovedAction,
     intent: String,
+    continuation: Option<PendingApprovalContinuation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingApprovalContinuation {
+    ParallelGroup {
+        actions: Vec<ParsedAction>,
+        current_index: usize,
+        approved: Vec<(usize, PendingApproval)>,
+        denied_results: Vec<(usize, String)>,
+        completed_results: Vec<(usize, String)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,6 +565,8 @@ pub struct LongRunningCommandStatus {
 
 pub trait ActionRuntime {
     fn should_cancel(&mut self) -> bool;
+
+    fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
 
     fn on_long_running_command(
         &mut self,
@@ -758,7 +784,8 @@ pub struct AgentCore {
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
-    pending_next_turn_slices: Vec<(String, String)>,
+    pending_prompt_components: Vec<PromptComponent>,
+    prompt_component_sequence: u64,
     assistant_speaker_name: String,
 }
 impl AgentCore {
@@ -811,7 +838,8 @@ impl AgentCore {
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
-            pending_next_turn_slices: Vec::new(),
+            pending_prompt_components: Vec::new(),
+            prompt_component_sequence: 0,
             assistant_speaker_name: "TIMEM_ASSISTANT".to_string(),
         }
     }
@@ -1089,7 +1117,11 @@ impl AgentCore {
             now_ms(),
             &self.current_action_user_question,
         );
-        let mut slices = std::mem::take(&mut self.pending_next_turn_slices);
+        let pending_token_estimate = self
+            .pending_prompt_components
+            .iter()
+            .map(|component| estimate_prompt_tokens(&component.content))
+            .sum::<u32>();
         let should_memory_precheck = supporting_context
             .map(should_run_memory_precheck)
             .unwrap_or(false);
@@ -1107,27 +1139,38 @@ impl AgentCore {
             token_estimate_text.push_str(system_text);
         }
         let incoming_prompt_tokens = estimate_prompt_tokens(&token_estimate_text);
-        let pending_dynamic_tokens = estimate_prompt_tokens(&token_estimate_text)
-            + slices
-                .iter()
-                .map(|(_, text)| estimate_prompt_tokens(text))
-                .sum::<u32>();
+        let pending_dynamic_tokens =
+            estimate_prompt_tokens(&token_estimate_text) + pending_token_estimate;
         if let Some(shrink_review) =
             self.consume_shrink_review_if_needed(incoming_prompt_tokens, pending_dynamic_tokens)
         {
             system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
         }
-        slices.push(("user_question".to_string(), text));
+        self.submit_prompt_component(
+            PromptComponentRole::user(),
+            "user_question",
+            text,
+            "user_input",
+        );
         for system_text in system_texts {
-            slices.push(("runtime_note".to_string(), system_text));
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "runtime_note",
+                system_text,
+                "runtime",
+            );
         }
         if should_memory_precheck {
             let result = self.runtime_memory_precheck(user_input, 5);
-            slices.push(("result_of_llm_action".to_string(), result));
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "result_of_llm_action",
+                result,
+                "runtime_memory_precheck",
+            );
         }
-        self.append_delta(slices);
         CoreStep::NeedModel {
-            prompt: self.render_prompt(),
+            prompt: self.build_next_prompt(),
             rounds_remaining: self.round_budget,
         }
     }
@@ -1262,6 +1305,13 @@ impl AgentCore {
             });
         }
         self.last_notifications = notification::notifications_from_envelope(&parsed);
+        if !self.last_notifications.is_empty() {
+            let events = host::notification_topic_events(
+                &self.current_session_id(),
+                &self.last_notifications,
+            );
+            runtime.on_core_topic_events(&events);
+        }
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
@@ -1584,6 +1634,14 @@ impl AgentCore {
             self.pending_approval = Some(pending);
             return CoreStep::NeedsUserApproval { request };
         }
+        if let Some(continuation) = pending.continuation.clone() {
+            return self.resolve_parallel_group_approval_with_runtime(
+                pending,
+                approved,
+                continuation,
+                runtime,
+            );
+        }
         let result = if approved {
             match &pending.approved_action {
                 PendingApprovedAction::RunBash {
@@ -1620,6 +1678,145 @@ impl AgentCore {
         let result = annotate_action_result_with_intent(result, &pending.intent);
         self.record_pending_approval_audit(&pending, approved, &result);
         self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
+        self.append_in_turn_shrink_review_if_needed();
+        if self.remaining_rounds() == 0 {
+            return CoreStep::RoundLimitReached {
+                max_rounds: self.round_budget,
+            };
+        }
+        CoreStep::NeedModel {
+            prompt: self.render_prompt(),
+            rounds_remaining: self.remaining_rounds(),
+        }
+    }
+
+    fn denied_approval_result(&self, pending: &PendingApproval) -> String {
+        annotate_action_result_with_intent(
+            format!(
+                "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
+                pending.request.action,
+                pending.approved_action.command(),
+                pending.request.approval_id,
+                pending.request.reason
+            ),
+            &pending.intent,
+        )
+    }
+
+    fn finish_parallel_group_after_approvals(
+        &mut self,
+        actions: Vec<ParsedAction>,
+        approved: Vec<(usize, PendingApproval)>,
+        denied_results: Vec<(usize, String)>,
+        completed_results: Vec<(usize, String)>,
+        runtime: &mut dyn ActionRuntime,
+    ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
+        let mut results = vec![None; actions.len()];
+        for (idx, result) in denied_results.into_iter().chain(completed_results) {
+            if let Some(slot) = results.get_mut(idx) {
+                *slot = Some(result);
+            }
+        }
+
+        let mut handles = Vec::new();
+        for (idx, pending) in approved {
+            handles.push(self.spawn_approved_parallel_bash_action(idx, pending));
+        }
+
+        for (idx, action) in actions.iter().cloned().enumerate() {
+            if results.get(idx).is_some_and(Option::is_some) || action.action == "run_bash" {
+                continue;
+            }
+            match self.execute_action(action, runtime) {
+                ActionExecution::Completed(result) => {
+                    if let Some(slot) = results.get_mut(idx) {
+                        *slot = Some(result);
+                    }
+                }
+                ActionExecution::NeedsApproval(pending) => {
+                    self.collect_approved_parallel_bash_handles(handles, &mut results, runtime);
+                    return Err((Self::ordered_parallel_results(results), pending));
+                }
+            }
+        }
+
+        self.collect_approved_parallel_bash_handles(handles, &mut results, runtime);
+        Ok(Self::ordered_parallel_results(results))
+    }
+
+    fn resolve_parallel_group_approval_with_runtime(
+        &mut self,
+        mut pending: PendingApproval,
+        approved_by_user: bool,
+        continuation: PendingApprovalContinuation,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
+        let PendingApprovalContinuation::ParallelGroup {
+            actions,
+            current_index,
+            mut approved,
+            mut denied_results,
+            mut completed_results,
+        } = continuation;
+
+        pending.continuation = None;
+        if approved_by_user {
+            approved.push((current_index, pending));
+        } else {
+            let result = self.denied_approval_result(&pending);
+            self.record_pending_approval_audit(&pending, false, &result);
+            denied_results.push((current_index, result));
+        }
+
+        for next_index in (current_index + 1)..actions.len() {
+            let action = actions[next_index].clone();
+            if action.action != "run_bash" {
+                continue;
+            }
+            match self.execute_action(action, runtime) {
+                ActionExecution::Completed(result) => {
+                    completed_results.push((next_index, result));
+                }
+                ActionExecution::NeedsApproval(next_pending) => {
+                    let pending = Self::pending_approval_with_parallel_continuation(
+                        next_pending,
+                        actions,
+                        next_index,
+                        approved,
+                        denied_results,
+                        completed_results,
+                    );
+                    let request = pending.request.clone();
+                    self.pending_approval = Some(pending);
+                    return CoreStep::NeedsUserApproval { request };
+                }
+            }
+        }
+
+        let result_lines = match self.finish_parallel_group_after_approvals(
+            actions,
+            approved,
+            denied_results,
+            completed_results,
+            runtime,
+        ) {
+            Ok(results) => results,
+            Err((partial, pending)) => {
+                self.pending_approval = Some(pending.clone());
+                self.append_delta(vec![(
+                    "result_of_llm_action".to_string(),
+                    partial.join("\n\n"),
+                )]);
+                return CoreStep::NeedsUserApproval {
+                    request: pending.request,
+                };
+            }
+        };
+
+        self.append_delta(vec![(
+            "result_of_llm_action".to_string(),
+            result_lines.join("\n\n"),
+        )]);
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
             return CoreStep::RoundLimitReached {
@@ -1758,6 +1955,23 @@ impl AgentCore {
             self.response_protocol.lang_format(),
         )
     }
+
+    pub fn submit_prompt_component(
+        &mut self,
+        role: PromptComponentRole,
+        kind: impl Into<String>,
+        content: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Option<String> {
+        let logical_time_ms = now_ms();
+        self.submit_prompt_component_at(role, kind, content, source, logical_time_ms)
+    }
+
+    pub fn build_next_prompt(&mut self) -> String {
+        self.flush_pending_prompt_components();
+        self.render_prompt()
+    }
+
     fn render_prompt_slices(&self) -> Vec<PromptSlice> {
         prompt_render::render_prompt_slices(&self.deltas)
     }
@@ -1801,17 +2015,72 @@ impl AgentCore {
         }
     }
 
+    fn submit_prompt_component_at(
+        &mut self,
+        role: PromptComponentRole,
+        kind: impl Into<String>,
+        content: impl Into<String>,
+        source: impl Into<String>,
+        logical_time_ms: i64,
+    ) -> Option<String> {
+        let content = content.into();
+        if content.trim().is_empty() {
+            return None;
+        }
+        self.prompt_component_sequence = self.prompt_component_sequence.saturating_add(1);
+        let sequence = self.prompt_component_sequence;
+        let batch_id = format!("pcb_{}", logical_time_ms);
+        let id = format!("pc_{}_{}", logical_time_ms, sequence);
+        self.pending_prompt_components.push(PromptComponent {
+            id: id.clone(),
+            role,
+            kind: kind.into(),
+            content,
+            source: source.into(),
+            created_at_ms: logical_time_ms,
+            sequence,
+            batch_id,
+            cache_policy_hint: None,
+        });
+        Some(id)
+    }
+
+    fn submit_prompt_components_from_slice_texts(
+        &mut self,
+        slice_texts: Vec<(String, String)>,
+        source: &str,
+        logical_time_ms: i64,
+    ) {
+        for (prompt_type, text) in slice_texts {
+            let role = role_for_prompt_type(&prompt_type, &self.assistant_speaker_name);
+            self.submit_prompt_component_at(role, prompt_type, text, source, logical_time_ms);
+        }
+    }
+
     fn append_delta(&mut self, slice_texts: Vec<(String, String)>) {
-        if slice_texts.is_empty() {
+        let logical_time_ms = now_ms();
+        self.submit_prompt_components_from_slice_texts(slice_texts, "runtime", logical_time_ms);
+        self.flush_pending_prompt_components();
+    }
+
+    fn flush_pending_prompt_components(&mut self) {
+        if self.pending_prompt_components.is_empty() {
             return;
         }
-        let timestamp = now_ms();
+        let mut components = std::mem::take(&mut self.pending_prompt_components);
+        components.sort_by_key(|component| (component.created_at_ms, component.sequence));
+        let timestamp = components
+            .iter()
+            .map(|component| component.created_at_ms)
+            .min()
+            .unwrap_or_else(now_ms);
         let delta_id = format!("pd_{}_{}", timestamp, self.deltas.len() + 1);
-        let chunks = slice_texts
+        let chunks = components
             .into_iter()
-            .flat_map(|(prompt_type, text)| {
-                let slice_time_ms = now_ms();
-                split_text_for_prompt_slices(&text, PROMPT_SLICE_TEXT_LIMIT)
+            .flat_map(|component| {
+                let prompt_type = component.prompt_type();
+                let slice_time_ms = component.created_at_ms;
+                split_text_for_prompt_slices(&component.content, PROMPT_SLICE_TEXT_LIMIT)
                     .into_iter()
                     .map(move |chunk| (prompt_type.clone(), slice_time_ms, chunk))
                     .collect::<Vec<_>>()
@@ -1847,10 +2116,11 @@ impl AgentCore {
     }
 
     fn defer_next_turn_slices(&mut self, slice_texts: Vec<(String, String)>) {
-        self.pending_next_turn_slices.extend(
-            slice_texts
-                .into_iter()
-                .filter(|(_, text)| !text.trim().is_empty()),
+        let logical_time_ms = now_ms();
+        self.submit_prompt_components_from_slice_texts(
+            slice_texts,
+            "previous_model_response",
+            logical_time_ms,
         );
     }
 
@@ -2026,11 +2296,14 @@ impl AgentCore {
     ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
         let mut result_lines = Vec::new();
         for group in groups {
-            if group.order == ActionGroupOrder::Parallel
-                && group.actions.len() > 1
-                && self.can_execute_parallel_bash_group(&group.actions)
-            {
-                result_lines.extend(self.execute_parallel_bash_group(group.actions));
+            if group.order == ActionGroupOrder::Parallel && group.actions.len() > 1 {
+                match self.execute_parallel_action_group(group.actions, runtime) {
+                    Ok(group_results) => result_lines.extend(group_results),
+                    Err((group_results, pending)) => {
+                        result_lines.extend(group_results);
+                        return Err((result_lines, pending));
+                    }
+                }
                 continue;
             }
             for action in group.actions {
@@ -2045,81 +2318,229 @@ impl AgentCore {
         Ok(result_lines)
     }
 
-    fn can_execute_parallel_bash_group(&self, actions: &[ParsedAction]) -> bool {
-        self.bash_approval_mode == BashApprovalMode::Approve
-            && actions.iter().all(|action| {
-                action.action == "run_bash"
-                    && !action.background()
-                    && action.timeout_ms_i64(5000) > 0
-            })
+    fn can_spawn_parallel_bash_action(&self, action: &ParsedAction) -> bool {
+        self.bash_approval_mode == BashApprovalMode::Approve && action.action == "run_bash"
     }
 
-    fn execute_parallel_bash_group(&mut self, actions: Vec<ParsedAction>) -> Vec<String> {
-        let mut handles = Vec::new();
-        for action in actions {
-            let action_for_audit = action.clone();
-            let shell_jobs = self.shell_jobs.clone();
-            let session_id = self.current_session_id();
-            let turn_id = self.current_action_turn_id();
-            self.current_stats.tool_calls += 1;
-            handles.push(thread::spawn(move || {
-                let loop_command = action.input_str("loop_cmd");
-                let is_regular_command = loop_command.is_empty();
-                let cmd_command = action.input_str("cmd");
-                let command = if is_regular_command {
-                    cmd_command.clone()
-                } else {
-                    loop_command.clone()
-                };
-                let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
-                    ActionExecution::Completed(
-                        "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.".to_string(),
-                    )
-                } else {
+    fn spawn_approved_parallel_bash_action(
+        &mut self,
+        idx: usize,
+        pending: PendingApproval,
+    ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)> {
+        let action = ParsedAction {
+            action: pending.request.action.clone(),
+            intent: pending.intent.clone(),
+            parent_intent: None,
+            raw_input: pending.approved_action.audit_input(
+                &pending.request.approval_id,
+                &pending.request.risk,
+                &pending.request.reason,
+            ),
+        };
+        let pending_for_thread = pending.clone();
+        let shell_jobs = self.shell_jobs.clone();
+        self.current_stats.tool_calls += 1;
+        thread::spawn(move || {
+            let result = match &pending_for_thread.approved_action {
+                PendingApprovedAction::RunBash {
+                    command,
+                    background,
+                    timeout_ms,
+                    interval_ms,
+                    once_timeout_ms,
+                    session_id,
+                    turn_id,
+                } => {
                     let mut should_cancel = || false;
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
-                    shell_exec::execute_run_bash(
-                        &command,
-                        action.background(),
-                        if is_regular_command {
-                            action.timeout_ms_i64(5000)
-                        } else {
-                            action.input_i64("loop_timeout_ms").unwrap_or(600_000)
-                        },
-                        action.input_u64("interval_ms"),
-                        action.input_u64("once_timeout_ms").unwrap_or(5000),
-                        BashApprovalMode::Approve,
-                        &action.intent,
+                    shell_exec::execute_approved_bash(
+                        command,
+                        *background,
+                        *timeout_ms,
+                        *interval_ms,
+                        *once_timeout_ms,
+                        session_id,
+                        turn_id,
+                        interval_ms.is_none(),
+                        &pending_for_thread.request,
                         &shell_jobs,
-                        &session_id,
-                        &turn_id,
-                        is_regular_command,
                         &mut runtime,
                     )
-                };
-                let result = match result {
-                    ActionExecution::Completed(result) => result,
-                    ActionExecution::NeedsApproval(_) => format!(
-                        "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
-                        &command,
-                    ),
-                };
-                (action_for_audit, result)
-            }));
-        }
-        let mut result_lines = Vec::new();
+                }
+            };
+            (idx, action, pending_for_thread, result)
+        })
+    }
+
+    fn spawn_parallel_bash_action(
+        &mut self,
+        idx: usize,
+        action: ParsedAction,
+    ) -> thread::JoinHandle<(usize, ParsedAction, String)> {
+        let action_for_audit = action.clone();
+        let shell_jobs = self.shell_jobs.clone();
+        let session_id = self.current_session_id();
+        let turn_id = self.current_action_turn_id();
+        self.current_stats.tool_calls += 1;
+        thread::spawn(move || {
+            let loop_command = action.input_str("loop_cmd");
+            let is_regular_command = loop_command.is_empty();
+            let cmd_command = action.input_str("cmd");
+            let command = if is_regular_command {
+                cmd_command.clone()
+            } else {
+                loop_command.clone()
+            };
+            let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
+                ActionExecution::Completed(
+                    "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.".to_string(),
+                )
+            } else {
+                let mut should_cancel = || false;
+                let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
+                shell_exec::execute_run_bash(
+                    &command,
+                    action.background(),
+                    if is_regular_command {
+                        action.timeout_ms_i64(5000)
+                    } else {
+                        action.input_i64("loop_timeout_ms").unwrap_or(600_000)
+                    },
+                    action.input_u64("interval_ms"),
+                    action.input_u64("once_timeout_ms").unwrap_or(5000),
+                    BashApprovalMode::Approve,
+                    &action.intent,
+                    &shell_jobs,
+                    &session_id,
+                    &turn_id,
+                    is_regular_command,
+                    &mut runtime,
+                )
+            };
+            let result = match result {
+                ActionExecution::Completed(result) => result,
+                ActionExecution::NeedsApproval(_) => format!(
+                    "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
+                    &command,
+                ),
+            };
+            (idx, action_for_audit, result)
+        })
+    }
+
+    fn collect_parallel_bash_handles(
+        &self,
+        handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
+        results: &mut [Option<String>],
+        runtime: &mut dyn ActionRuntime,
+    ) {
         for handle in handles {
             match handle.join() {
-                Ok((action, result)) => {
+                Ok((idx, action, result)) => {
                     let result = annotate_action_result_with_intent(result, &action.intent);
                     self.record_action_audit(&action, "completed", Some(&result));
-                    result_lines.push(result);
+                    self.emit_action_finish_topic(&action, &result, runtime);
+                    if let Some(slot) = results.get_mut(idx) {
+                        *slot = Some(result);
+                    }
                 }
-                Err(_) => result_lines
-                    .push("Action result: run_bash\nerror: parallel_action_panicked".to_string()),
+                Err(_) => {
+                    let result =
+                        "Action result: run_bash\nerror: parallel_action_panicked".to_string();
+                    if let Some(slot) = results.iter_mut().find(|slot| slot.is_none()) {
+                        *slot = Some(result);
+                    }
+                }
             }
         }
-        result_lines
+    }
+
+    fn collect_approved_parallel_bash_handles(
+        &self,
+        handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)>>,
+        results: &mut [Option<String>],
+        runtime: &mut dyn ActionRuntime,
+    ) {
+        for handle in handles {
+            match handle.join() {
+                Ok((idx, action, pending, result)) => {
+                    let result = annotate_action_result_with_intent(result, &action.intent);
+                    self.record_pending_approval_audit(&pending, true, &result);
+                    self.emit_action_finish_topic(&action, &result, runtime);
+                    if let Some(slot) = results.get_mut(idx) {
+                        *slot = Some(result);
+                    }
+                }
+                Err(_) => {
+                    let result =
+                        "Action result: run_bash\nerror: parallel_action_panicked".to_string();
+                    if let Some(slot) = results.iter_mut().find(|slot| slot.is_none()) {
+                        *slot = Some(result);
+                    }
+                }
+            }
+        }
+    }
+
+    fn ordered_parallel_results(results: Vec<Option<String>>) -> Vec<String> {
+        results.into_iter().flatten().collect()
+    }
+
+    fn pending_approval_with_parallel_continuation(
+        mut pending: PendingApproval,
+        actions: Vec<ParsedAction>,
+        current_index: usize,
+        approved: Vec<(usize, PendingApproval)>,
+        denied_results: Vec<(usize, String)>,
+        completed_results: Vec<(usize, String)>,
+    ) -> PendingApproval {
+        pending.continuation = Some(PendingApprovalContinuation::ParallelGroup {
+            actions,
+            current_index,
+            approved,
+            denied_results,
+            completed_results,
+        });
+        pending
+    }
+
+    fn execute_parallel_action_group(
+        &mut self,
+        actions: Vec<ParsedAction>,
+        runtime: &mut dyn ActionRuntime,
+    ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
+        let action_count = actions.len();
+        let mut results = vec![None; action_count];
+        let mut handles = Vec::new();
+        for (idx, action) in actions.iter().cloned().enumerate() {
+            if self.can_spawn_parallel_bash_action(&action) {
+                handles.push(self.spawn_parallel_bash_action(idx, action));
+                continue;
+            }
+            match self.execute_action(action, runtime) {
+                ActionExecution::Completed(result) => {
+                    results[idx] = Some(result);
+                }
+                ActionExecution::NeedsApproval(pending) => {
+                    self.collect_parallel_bash_handles(handles, &mut results, runtime);
+                    let pending = Self::pending_approval_with_parallel_continuation(
+                        pending,
+                        actions,
+                        idx,
+                        Vec::new(),
+                        Vec::new(),
+                        results
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(idx, result)| result.map(|result| (idx, result)))
+                            .collect(),
+                    );
+                    return Err((Vec::new(), pending));
+                }
+            }
+        }
+        self.collect_parallel_bash_handles(handles, &mut results, runtime);
+        Ok(Self::ordered_parallel_results(results))
     }
 
     fn execute_action(
@@ -2180,6 +2601,7 @@ impl AgentCore {
             ActionExecution::Completed(result) => {
                 let result = annotate_action_result_with_intent(result, &action.intent);
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
+                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
                 ActionExecution::Completed(result)
             }
             ActionExecution::NeedsApproval(pending) => {
@@ -2197,6 +2619,22 @@ impl AgentCore {
         }
     }
 
+    fn emit_action_finish_topic(
+        &self,
+        action: &ParsedAction,
+        result: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) {
+        let notification = notification::notification_from_action(action);
+        let mut event = host::notification_topic_event(&self.current_session_id(), &notification);
+        event.topic.attributes["event"] = json!("finish");
+        event.topic.attributes["active"] = json!(false);
+        event.payload["event"] = json!("finish");
+        event.payload["active"] = json!(false);
+        event.payload["status"] = json!(Self::action_finish_status(action, result));
+        runtime.on_core_topic_events(&[event]);
+    }
+
     fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> String {
         self.current_stats.tool_calls += 1;
         let payload = json!({
@@ -2208,6 +2646,49 @@ impl AgentCore {
             return self.tool_jobs.spawn(&action.action, path, &payload);
         }
         executor::execute_command_action(&action.action, path, &payload, action.shell_timeout_ms())
+    }
+
+    fn action_finish_status(action: &ParsedAction, result: &str) -> &'static str {
+        let lower = result.to_lowercase();
+        if action.action == "run_bash" && action.background() {
+            return "background_running";
+        }
+        if action.action == "shell_job_status"
+            || (action.action == "capmgr" && action.input_lower("op") == "job_status")
+        {
+            if lower.contains("state: finished") || lower.contains("has finished") {
+                return "background_finished";
+            }
+            if lower.contains("state: cancelled") || lower.contains("was cancelled") {
+                return "cancelled";
+            }
+            if lower.contains("state: running") || lower.contains("still running") {
+                return "background_running";
+            }
+        }
+        if lower.contains("polling state: finished")
+            || lower.contains("exit code: 0")
+            || lower.contains("status: 0")
+            || lower.contains("the command finished")
+        {
+            return "completed";
+        }
+        if lower.contains("polling state: timeout")
+            || lower.contains("timed out")
+            || lower.contains("timeout")
+        {
+            return "timeout";
+        }
+        if lower.contains("cancelled") {
+            return "cancelled";
+        }
+        if lower.contains("not executed")
+            || lower.contains("invalid_input")
+            || lower.contains("error:")
+        {
+            return "failed";
+        }
+        "completed"
     }
 
     fn record_action_audit(&self, action: &ParsedAction, status: &str, result: Option<&str>) {
@@ -3825,5 +4306,120 @@ fn step_to_json(step: CoreStep) -> serde_json::Value {
             "repair_issue": turn.repair_issue,
             "stop_summary": turn.stop_summary
         }),
+    }
+}
+
+#[cfg(test)]
+mod prompt_component_tests {
+    use super::*;
+
+    fn test_core(name: &str) -> AgentCore {
+        let dir = std::env::temp_dir().join(format!(
+            "timem_prompt_component_test_{}_{}",
+            name,
+            super::unique_id("tmp")
+        ));
+        AgentCore::new(
+            "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+            CoreProfile {
+                name: "test".to_string(),
+                provider: "test".to_string(),
+                model: "test".to_string(),
+            },
+            dir,
+        )
+    }
+
+    #[test]
+    fn build_next_prompt_orders_pending_components_without_role_merging() {
+        let mut core = test_core("ordering");
+        core.set_assistant_speaker_name("Ai4");
+
+        core.submit_prompt_component_at(
+            PromptComponentRole::system(),
+            "result_of_llm_action",
+            "Action result: run_bash\nold result",
+            "previous_model_response",
+            10,
+        );
+        core.submit_prompt_component_at(
+            PromptComponentRole::user(),
+            "user_question",
+            "new input",
+            "user_input",
+            20,
+        );
+        core.submit_prompt_component_at(
+            PromptComponentRole::system(),
+            "runtime_note",
+            "found something new",
+            "runtime",
+            30,
+        );
+        core.submit_prompt_component_at(
+            PromptComponentRole::assistant("Ai4"),
+            "free_talk",
+            "assistant note",
+            "previous_model_response",
+            40,
+        );
+
+        let prompt = core.build_next_prompt();
+        let system_first = prompt.find("## SYSTEM\n\nAction result: run_bash").unwrap();
+        let user = prompt.find("## USER\n\nnew input").unwrap();
+        let system_second = prompt.find("## SYSTEM\n\nfound something new").unwrap();
+        let assistant = prompt.find("## Ai4\n\nassistant note").unwrap();
+
+        assert!(system_first < user);
+        assert!(user < system_second);
+        assert!(system_second < assistant);
+        assert_eq!(prompt.matches("## SYSTEM").count(), 2);
+        let dynamic_prompt = prompt.split("[BEGIN DELTA]").nth(1).unwrap_or("");
+        assert!(!dynamic_prompt.contains("created_at_ms"));
+        assert!(!dynamic_prompt.contains("sequence"));
+        assert!(!dynamic_prompt.contains("batch_id"));
+    }
+
+    #[test]
+    fn previous_model_response_components_share_earliest_logical_time() {
+        let mut core = test_core("previous_batch");
+        let batch_time = 100;
+        core.submit_prompt_components_from_slice_texts(
+            vec![
+                (
+                    "llm_free_talk".to_string(),
+                    "previous free talk".to_string(),
+                ),
+                (
+                    "llm_response".to_string(),
+                    "All previous pending open tasks are completed.  Final Answer:\nprevious final"
+                        .to_string(),
+                ),
+            ],
+            "previous_model_response",
+            batch_time,
+        );
+        core.submit_prompt_component_at(
+            PromptComponentRole::user(),
+            "user_question",
+            "next user input",
+            "user_input",
+            200,
+        );
+
+        assert_eq!(core.pending_prompt_components.len(), 3);
+        assert!(core.pending_prompt_components[..2]
+            .iter()
+            .all(|component| component.created_at_ms == batch_time));
+        assert!(
+            core.pending_prompt_components[0].sequence < core.pending_prompt_components[1].sequence
+        );
+
+        let prompt = core.build_next_prompt();
+        let free_talk = prompt.find("previous free talk").unwrap();
+        let final_answer = prompt.find("previous final").unwrap();
+        let user = prompt.find("next user input").unwrap();
+        assert!(free_talk < user);
+        assert!(final_answer < user);
     }
 }

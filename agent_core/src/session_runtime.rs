@@ -1,7 +1,7 @@
 use crate::{
     append_audit_event, model_retry_audit_event, model_retry_decision, normalize_user_supplements,
     turn_supporting_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
-    CoreTopicEventSink, HostDecisionRequest, LlmResponse, LongRunningCommandContinueRequest,
+    HostDecisionRequest, LlmResponse, LongRunningCommandContinueRequest,
     LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome, ModelSystemRetryPolicy,
     OutputExpansionRequest, OutputExpansionResolution, ProviderConfig, ProviderModelClient,
     RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn,
@@ -160,8 +160,6 @@ pub fn run_session_turn_with_model_client(
                         user_wait_this_turn =
                             user_wait_this_turn.saturating_add(action_runtime.user_wait());
                         let command_supplements = action_runtime.take_pending_supplements();
-                        let mut sink = TurnUiTopicEventSink { ui };
-                        core.notify_last_topic_events(request.session, &mut sink);
                         if !command_supplements.is_empty() {
                             if let Some(next_step) = core.append_user_supplements_with_audit(
                                 command_supplements,
@@ -288,16 +286,6 @@ pub fn run_session_turn_with_model_client(
     outcome
 }
 
-struct TurnUiTopicEventSink<'a> {
-    ui: &'a mut dyn TurnUi,
-}
-
-impl CoreTopicEventSink for TurnUiTopicEventSink<'_> {
-    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
-        self.ui.on_core_topic_events(events);
-    }
-}
-
 struct TurnActionRuntime<'a> {
     ui: &'a mut dyn TurnUi,
     session: &'a str,
@@ -327,6 +315,10 @@ impl<'a> TurnActionRuntime<'a> {
 impl ActionRuntime for TurnActionRuntime<'_> {
     fn should_cancel(&mut self) -> bool {
         self.ui.is_cancel_requested()
+    }
+
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        self.ui.on_core_topic_events(events);
     }
 
     fn on_long_running_command(
@@ -856,18 +848,49 @@ mod tests {
         let dir = tmp_dir("run_bash_poll_session");
         let audit = dir.join("audit.json");
         let flag = dir.join("ci_done.flag");
-        let check_command = format!(
-            "test -f {} || (touch {}; exit 1)",
+        let bootstrap_command = format!(
+            "rm -f {}; (sleep 0.3; touch {}) &",
             shell_quote(&flag),
             shell_quote(&flag)
         );
+        let check_command = format!("test -f {}", shell_quote(&flag));
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
         let mut config = test_config();
-        let mut ui = NoopTurnUi;
+        struct PollTopicTimingUi {
+            flag: std::path::PathBuf,
+            saw_poll_before_flag: bool,
+            events: Vec<CoreTopicEvent>,
+        }
+        impl TurnUi for PollTopicTimingUi {
+            fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+                for event in events {
+                    let is_poll = event.as_action().is_some_and(|topic| {
+                        matches!(
+                            topic.kind,
+                            CoreActionKind::Bash {
+                                ref mode,
+                                ..
+                            } if mode == "poll"
+                        )
+                    });
+                    if is_poll && !self.flag.exists() {
+                        self.saw_poll_before_flag = true;
+                    }
+                }
+                self.events.extend_from_slice(events);
+            }
+        }
+        let mut ui = PollTopicTimingUi {
+            flag: flag.clone(),
+            saw_poll_before_flag: false,
+            events: Vec::new(),
+        };
         let mut model = ReplayModel::new([
             Ok(llm(
                 format!(
-                    r#"{{"status":"working","report_job_progress":"等待 CI 完成。","next_actions":[{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":1000,"loop_timeout_ms":5000,"once_timeout_ms":1000}}}}]}}"#,
+                    r#"{{"status":"working","report_job_progress":"等待 CI 完成。","next_actions":[{{"action":"run_bash","intent":"启动稍后完成的后台任务。","args":{{"cmd":{},"timeout_ms":1000}}}},{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
+                    serde_json::to_string(&bootstrap_command).unwrap(),
                     serde_json::to_string(&check_command).unwrap()
                 ),
                 1_000,
@@ -897,10 +920,23 @@ mod tests {
         );
 
         assert_eq!(outcome.text, "CI 已完成。");
+        assert!(
+            ui.saw_poll_before_flag,
+            "poll action topic should be delivered before polling command finishes"
+        );
+        assert!(
+            ui.events.iter().any(|event| {
+                event.as_action().is_some_and(
+                |topic| topic.event == "finish"
+                    && topic.status == "completed"
+                    && matches!(topic.kind, CoreActionKind::Bash { ref mode, .. } if mode == "poll")
+            )
+            }),
+            "poll action should emit a finish/completed topic"
+        );
         assert_eq!(model.prompts.len(), 2);
         assert!(model.prompts[1].contains("Action result: run_bash"));
         assert!(model.prompts[1].contains("Polling state: finished"));
-        assert!(model.prompts[1].contains("Attempts: 2"));
     }
 
     #[test]
@@ -1100,6 +1136,167 @@ finished
         assert!(model.prompts[1].contains("group_a"));
         assert!(model.prompts[1].contains("group_b"));
         assert!(model.prompts[1].contains("group_c"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_order() {
+        let dir = tmp_dir("mixed_parallel_action_group_session");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"## Progress
+并行执行两个 bash，同时执行一个 builtin 查询。
+
+## Working_Still_Action
+```action
+[
+  {
+    "order": "parallel",
+    "actions": [
+      {"action":"run_bash","intent":"First bash.","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
+      {"action":"memmgr","intent":"Builtin memory query.","args":{"type":"durable","op":"query","query":"project","limit":1}},
+      {"action":"run_bash","intent":"Second bash.","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
+    ]
+  }
+]
+```"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"## Status
+finished
+
+## Final_Answer
+混合并行动作完成。"#,
+                1_200,
+                false,
+            )),
+        ]);
+
+        let started = std::time::Instant::now();
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "执行混合 parallel 动作",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome.text, "混合并行动作完成。");
+        assert!(
+            elapsed < std::time::Duration::from_millis(1800),
+            "parallel group should spawn bash before builtin work; elapsed={elapsed:?}"
+        );
+        let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
+        let first_bash = second_parts.new_delta.find("group_a").unwrap();
+        let builtin = second_parts
+            .new_delta
+            .find("Action result: memmgr")
+            .unwrap();
+        let second_bash = second_parts.new_delta.find("group_b").unwrap();
+        assert!(first_bash < builtin);
+        assert!(builtin < second_bash);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently() {
+        let dir = tmp_dir("parallel_approval_group_session");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_bash_approval_mode(BashApprovalMode::Ask);
+        let mut config = test_config();
+        let mut ui = ApproveAllUi {
+            approval_requests: 0,
+        };
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"## Progress
+先审批两个 Bash，然后并发执行。
+
+## Working_Still_Action
+```action
+[
+  {
+    "order": "parallel",
+    "actions": [
+      {"action":"run_bash","intent":"First approved bash.","args":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},
+      {"action":"memmgr","intent":"Builtin memory query.","args":{"type":"durable","op":"query","query":"project","limit":1}},
+      {"action":"run_bash","intent":"Second approved bash.","args":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}
+    ]
+  }
+]
+```"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"## Status
+finished
+
+## Final_Answer
+审批后的并行动作完成。"#,
+                1_200,
+                false,
+            )),
+        ]);
+
+        let started = std::time::Instant::now();
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "执行需要审批的并行动作",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome.text, "审批后的并行动作完成。");
+        assert_eq!(ui.approval_requests, 2);
+        assert!(
+            elapsed < std::time::Duration::from_millis(1800),
+            "approved parallel bash actions should run concurrently after approval; elapsed={elapsed:?}"
+        );
+        let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
+        let first_bash = second_parts
+            .new_delta
+            .find("intent: First approved bash.")
+            .unwrap();
+        let builtin = second_parts
+            .new_delta
+            .find("intent: Builtin memory query.")
+            .unwrap();
+        let second_bash = second_parts
+            .new_delta
+            .find("intent: Second approved bash.")
+            .unwrap();
+        assert!(first_bash < builtin);
+        assert!(builtin < second_bash);
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "user_approval"), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1500,6 +1697,74 @@ finished
         assert!(second_blocks[1..]
             .iter()
             .all(|block| block.cache == crate::CacheControl::Ephemeral));
+    }
+
+    #[test]
+    fn session_turn_replays_previous_assistant_components_before_next_user_input() {
+        let dir = tmp_dir("session_prompt_component_replay");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
+        core.set_assistant_speaker_name("Ai4");
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Json;
+        let mut ui = NoopTurnUi;
+
+        let mut first_model = ReplayModel::new([Ok(llm(
+            r#"{"status":"finished","free_talk":"previous free talk","final_answer":"previous answer"}"#,
+            4_000,
+            false,
+        ))]);
+        let first = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "first user input",
+                session: "component_replay_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut first_model,
+        );
+        assert_eq!(first.text, "previous answer");
+
+        let mut second_model = ReplayModel::new([Ok(llm(
+            r#"{"status":"finished","final_answer":"second answer"}"#,
+            4_200,
+            false,
+        ))]);
+        let second = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "second user input",
+                session: "component_replay_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: Some("runtime note after user"),
+            },
+            &mut ui,
+            None,
+            &mut second_model,
+        );
+        assert_eq!(second.text, "second answer");
+
+        let prompt = &second_model.prompts[0];
+        let free_talk = prompt.find("previous free talk").unwrap();
+        let previous_answer = prompt.find("previous answer").unwrap();
+        let user = prompt.find("second user input").unwrap();
+        let runtime_note = prompt.find("runtime note after user").unwrap();
+        assert!(free_talk < user);
+        assert!(previous_answer < user);
+        assert!(user < runtime_note);
+        assert!(prompt.contains("## Ai4"));
+        assert!(!prompt.contains("created_at_ms"));
+        assert!(!prompt.contains("batch_id"));
     }
 
     #[test]
@@ -2744,7 +3009,7 @@ Markdown 协议动作已执行。"#,
         assert!(ui.events.iter().any(|event| {
             event
                 .as_model_response()
-                .map(|topic| topic.report_job_progress == "正在检查本地 shell。")
+                .map(|topic| topic.progress == "正在检查本地 shell。")
                 .unwrap_or(false)
         }));
         assert!(ui.events.iter().any(|event| {

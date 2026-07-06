@@ -173,6 +173,15 @@ fn parse_single_action(
     idx: usize,
     capabilities: &CapabilityRegistry,
 ) -> Result<ParsedAction, String> {
+    parse_single_action_with_fallback(value, idx, capabilities, None)
+}
+
+fn parse_single_action_with_fallback(
+    value: &Value,
+    idx: usize,
+    capabilities: &CapabilityRegistry,
+    fallback_intent: Option<&str>,
+) -> Result<ParsedAction, String> {
     let name = value
         .get("action")
         .and_then(Value::as_str)
@@ -199,9 +208,14 @@ fn parse_single_action(
         .trim()
         .to_string();
 
-    if intent.is_empty() {
-        return Err(format!("actions[{idx}].intent_required"));
-    }
+    let parent_intent = if intent.is_empty() {
+        fallback_intent
+            .map(str::trim)
+            .filter(|intent| !intent.is_empty())
+            .map(ToString::to_string)
+    } else {
+        None
+    };
 
     if !capabilities.contains_tool(&name) {
         return Err(format!("unsupported_action:{name}"));
@@ -214,6 +228,7 @@ fn parse_single_action(
     Ok(ParsedAction {
         action: name,
         intent,
+        parent_intent,
         raw_input: input,
     })
 }
@@ -231,40 +246,39 @@ fn parse_action_groups_value(
     let Some(items) = value.as_array() else {
         return Err("actions_section_must_be_action_or_array".to_string());
     };
-    if items
-        .iter()
-        .all(|item| item.get("actions").is_some() || item.get("order").is_some())
-    {
-        let mut groups = Vec::new();
-        for (group_idx, group) in items.iter().enumerate() {
+    let mut groups = Vec::new();
+    for (group_idx, group) in items.iter().enumerate() {
+        if group.get("actions").is_some() || group.get("order").is_some() {
             let order = group
                 .get("order")
                 .and_then(Value::as_str)
                 .map(ActionGroupOrder::from_name)
                 .unwrap_or(ActionGroupOrder::Sequential);
+            let group_intent = group.get("intent").and_then(Value::as_str);
             let Some(actions) = group.get("actions").and_then(Value::as_array) else {
                 return Err(format!("action_groups[{group_idx}].actions_required"));
             };
             let mut parsed_actions = Vec::new();
             for (action_idx, action) in actions.iter().enumerate() {
-                parsed_actions.push(parse_single_action(action, action_idx, capabilities)?);
+                parsed_actions.push(parse_single_action_with_fallback(
+                    action,
+                    action_idx,
+                    capabilities,
+                    group_intent,
+                )?);
             }
             groups.push(ParsedActionGroup {
                 order,
                 actions: parsed_actions,
             });
+        } else {
+            groups.push(ParsedActionGroup {
+                order: ActionGroupOrder::Sequential,
+                actions: vec![parse_single_action(group, group_idx, capabilities)?],
+            });
         }
-        return Ok(groups);
     }
-
-    let mut actions = Vec::new();
-    for (idx, item) in items.iter().enumerate() {
-        actions.push(parse_single_action(item, idx, capabilities)?);
-    }
-    Ok(vec![ParsedActionGroup {
-        order: ActionGroupOrder::Sequential,
-        actions,
-    }])
+    Ok(groups)
 }
 
 fn extract_fenced_json(text: &str) -> Option<String> {
@@ -906,6 +920,102 @@ checking
         assert_eq!(env.action_groups[0].actions.len(), 2);
         assert_eq!(env.action_groups[1].order, ActionGroupOrder::Sequential);
         assert_eq!(env.next_actions.len(), 3);
+    }
+
+    #[test]
+    fn actions_section_accepts_mixed_groups_and_actions_with_optional_intent() {
+        let input = r#"## Progress
+checking
+
+## Working_Still_Action
+```action
+[
+  {
+    "order": "parallel",
+    "intent": "Check both files.",
+    "actions": [
+      {"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},
+      {"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b","timeout_ms":5000}}
+    ]
+  },
+  {"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}
+]
+```"#;
+        let env = parse_markdown_envelope(input, &caps());
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 2);
+        assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
+        assert_eq!(env.action_groups[0].actions[0].intent, "");
+        assert_eq!(
+            env.action_groups[0].actions[0].parent_intent.as_deref(),
+            Some("Check both files.")
+        );
+        assert_eq!(env.action_groups[0].actions[1].intent, "Check B.");
+        assert_eq!(env.action_groups[0].actions[1].parent_intent, None);
+        assert_eq!(env.action_groups[1].order, ActionGroupOrder::Sequential);
+        assert_eq!(env.action_groups[1].actions[0].intent, "");
+        assert_eq!(env.action_groups[1].actions[0].parent_intent, None);
+        assert_eq!(env.next_actions.len(), 3);
+    }
+
+    #[test]
+    fn mixed_actions_preserve_model_order() {
+        let input = r#"## Progress
+checking
+
+## Working_Still_Action
+```action
+[
+  {"action":"run_bash","intent":"First.","args":{"cmd":"printf first","timeout_ms":5000}},
+  {
+    "order": "parallel",
+    "intent": "Middle group.",
+    "actions": [
+      {"action":"run_bash","args":{"cmd":"printf middle-a","timeout_ms":5000}},
+      {"action":"run_bash","args":{"cmd":"printf middle-b","timeout_ms":5000}}
+    ]
+  },
+  {"action":"run_bash","intent":"Last.","args":{"cmd":"printf last","timeout_ms":5000}}
+]
+```"#;
+        let env = parse_markdown_envelope(input, &caps());
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 3);
+        assert_eq!(env.action_groups[0].order, ActionGroupOrder::Sequential);
+        assert_eq!(
+            env.action_groups[0].actions[0].input_str("cmd"),
+            "printf first"
+        );
+        assert_eq!(env.action_groups[1].order, ActionGroupOrder::Parallel);
+        assert_eq!(
+            env.action_groups[1].actions[0].input_str("cmd"),
+            "printf middle-a"
+        );
+        assert_eq!(
+            env.action_groups[1].actions[1].input_str("cmd"),
+            "printf middle-b"
+        );
+        assert_eq!(env.action_groups[2].order, ActionGroupOrder::Sequential);
+        assert_eq!(
+            env.action_groups[2].actions[0].input_str("cmd"),
+            "printf last"
+        );
+        let commands = env
+            .next_actions
+            .iter()
+            .map(|action| action.input_str("cmd"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commands,
+            vec![
+                "printf first",
+                "printf middle-a",
+                "printf middle-b",
+                "printf last"
+            ]
+        );
     }
 
     #[test]

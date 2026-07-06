@@ -31,7 +31,7 @@ input_schema: |
     "properties": {
       "cmd": {"type": "string", "description": "Shell command to execute."},
       "loop_cmd": {"type": "string", "description": "Polling check command. Runtime re-runs it until it exits with code 0."},
-      "timeout_ms": {"type": ">0 integer", "description": "Normal command wait budget in milliseconds."},
+      "timeout_ms": {"type": ">0 integer", "description": "Normal command wait budget in milliseconds. Default: 5000"},
       "loop_timeout_ms": {"type": ">0 integer", "description": "Total polling wait budget in milliseconds when loop_cmd is present."},
       "once_timeout_ms": {"type": ">0 integer", "description": "Per-check timeout in polling mode."},
       "interval_ms": {"type": ">0 integer", "description": "Polling interval. Requires loop_cmd."},

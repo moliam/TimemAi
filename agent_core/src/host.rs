@@ -348,7 +348,7 @@ static TOPIC_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub struct CoreModelResponseTopic {
     pub status: String,
     pub free_talk: String,
-    pub report_job_progress: String,
+    pub progress: String,
     pub final_answer: String,
     pub continue_work: bool,
     pub global: CoreGlobalWorkerStatus,
@@ -386,10 +386,13 @@ impl Default for CoreGlobalWorkerStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreActionTopic {
     pub intent: Option<String>,
+    pub parent_intent: Option<String>,
     pub action: String,
     pub input: Value,
     pub kind: CoreActionKind,
     pub active: bool,
+    pub event: String,
+    pub status: String,
     pub memory_activity: CoreMemoryActivity,
 }
 
@@ -589,7 +592,7 @@ impl CoreTopicEvent {
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
-            report_job_progress: self.payload["report_job_progress"]
+            progress: self.payload["progress"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
@@ -617,6 +620,11 @@ impl CoreTopicEvent {
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
                 .map(str::to_string),
+            parent_intent: self.payload["parent_intent"]
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string),
             action: self.payload["action"]
                 .as_str()
                 .unwrap_or_default()
@@ -627,6 +635,14 @@ impl CoreTopicEvent {
                 self.payload["action"].as_str().unwrap_or_default(),
             ),
             active: self.payload["active"].as_bool().unwrap_or(false),
+            event: self.payload["event"]
+                .as_str()
+                .unwrap_or("start")
+                .to_string(),
+            status: self.payload["status"]
+                .as_str()
+                .unwrap_or("running")
+                .to_string(),
             memory_activity: memory_activity_from_topic_payload(&self.payload["memory_activity"]),
         })
     }
@@ -1151,7 +1167,7 @@ pub(crate) fn notification_topic_event(
         CoreNotification::ModelResponse {
             status,
             free_talk,
-            report_job_progress,
+            progress,
             final_answer,
             continue_work,
         } => {
@@ -1168,7 +1184,7 @@ pub(crate) fn notification_topic_event(
                 json!({
                     "status": status,
                     "free_talk": free_talk,
-                    "report_job_progress": report_job_progress,
+                    "progress": progress,
                     "final_answer": final_answer,
                     "continue_work": continue_work,
                     "global": global_worker_status_payload(CoreGlobalWorkerStatus::new(direct_turn_worker_count)),
@@ -1177,6 +1193,7 @@ pub(crate) fn notification_topic_event(
         }
         CoreNotification::Action {
             intent,
+            parent_intent,
             action,
             input,
             kind,
@@ -1190,15 +1207,19 @@ pub(crate) fn notification_topic_event(
                     "name": CORE_TOPIC_ACTION,
                     "action": action,
                     "active": active,
+                    "event": "start",
                 }),
             ),
             CoreSessionState::Running,
             json!({
                 "intent": intent,
+                "parent_intent": parent_intent,
                 "action": action,
                 "input": input,
                 "kind": action_kind_topic_payload(kind),
                 "active": active,
+                "event": "start",
+                "status": "running",
                 "memory_activity": memory_activity,
             }),
         ),
@@ -1991,7 +2012,7 @@ mod tests {
             &CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: String::new(),
-                report_job_progress: "not waiting".to_string(),
+                progress: "not waiting".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
@@ -2038,7 +2059,7 @@ mod tests {
             &CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: String::new(),
-                report_job_progress: "not waiting".to_string(),
+                progress: "not waiting".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
@@ -2055,12 +2076,13 @@ mod tests {
             CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: "planning next step".to_string(),
-                report_job_progress: "checking context".to_string(),
+                progress: "checking context".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
             CoreNotification::Action {
                 intent: Some("Inspect local files.".to_string()),
+                parent_intent: None,
                 action: "run_bash".to_string(),
                 input: serde_json::json!({"cmd": "pwd"}),
                 kind: crate::CoreActionKind::Bash {
@@ -2099,7 +2121,7 @@ mod tests {
                 "payload": {
                     "status": "working",
                     "free_talk": "planning next step",
-                    "report_job_progress": "checking context",
+                    "progress": "checking context",
                     "final_answer": "",
                     "continue_work": true,
                     "global": {
@@ -2114,7 +2136,7 @@ mod tests {
             Some(CoreModelResponseTopic {
                 status: "working".to_string(),
                 free_talk: "planning next step".to_string(),
-                report_job_progress: "checking context".to_string(),
+                progress: "checking context".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
                 global: CoreGlobalWorkerStatus::new(1),
@@ -2135,6 +2157,7 @@ mod tests {
                         "name": CORE_TOPIC_ACTION,
                         "action": "run_bash",
                         "active": true,
+                        "event": "start",
                     },
                 },
                 "state": {
@@ -2142,6 +2165,7 @@ mod tests {
                 },
                 "payload": {
                     "intent": "Inspect local files.",
+                    "parent_intent": null,
                     "action": "run_bash",
                     "input": {
                         "cmd": "pwd",
@@ -2156,6 +2180,8 @@ mod tests {
                         "once_timeout_ms": null,
                     },
                     "active": true,
+                    "event": "start",
+                    "status": "running",
                     "memory_activity": "none",
                 },
             })
@@ -2164,6 +2190,7 @@ mod tests {
             events[1].as_action(),
             Some(CoreActionTopic {
                 intent: Some("Inspect local files.".to_string()),
+                parent_intent: None,
                 action: "run_bash".to_string(),
                 input: serde_json::json!({"cmd": "pwd"}),
                 kind: CoreActionKind::Bash {
@@ -2175,6 +2202,8 @@ mod tests {
                     once_timeout_ms: None,
                 },
                 active: true,
+                event: "start".to_string(),
+                status: "running".to_string(),
                 memory_activity: CoreMemoryActivity::None,
             })
         );
@@ -2347,6 +2376,7 @@ mod tests {
     fn topic_callbacks_can_copy_owned_snapshots_for_async_hosts() {
         let notifications = vec![CoreNotification::Action {
             intent: Some("Inspect local files.".to_string()),
+            parent_intent: None,
             action: "run_bash".to_string(),
             input: serde_json::json!({"cmd": "pwd"}),
             kind: CoreActionKind::Bash {

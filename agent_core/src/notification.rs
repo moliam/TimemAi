@@ -51,12 +51,13 @@ pub enum CoreNotification {
     ModelResponse {
         status: String,
         free_talk: String,
-        report_job_progress: String,
+        progress: String,
         final_answer: String,
         continue_work: bool,
     },
     Action {
         intent: Option<String>,
+        parent_intent: Option<String>,
         action: String,
         input: Value,
         kind: CoreActionKind,
@@ -96,7 +97,7 @@ pub fn notifications_from_envelope(envelope: &ParsedEnvelope) -> Vec<CoreNotific
             "finished".to_string()
         },
         free_talk: envelope.thought.trim().to_string(),
-        report_job_progress: if envelope.continue_work {
+        progress: if envelope.continue_work {
             envelope.report_job_progress.trim().to_string()
         } else {
             String::new()
@@ -110,8 +111,15 @@ pub fn notifications_from_envelope(envelope: &ParsedEnvelope) -> Vec<CoreNotific
 
 pub fn notification_from_action(action: &ParsedAction) -> CoreNotification {
     let intent = (!action.intent.trim().is_empty()).then(|| action.intent.trim().to_string());
+    let parent_intent = action
+        .parent_intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|intent| !intent.is_empty())
+        .map(ToString::to_string);
     CoreNotification::Action {
         intent,
+        parent_intent,
         action: action.action.clone(),
         input: action.raw_input.clone(),
         kind: action_kind(action),
@@ -200,12 +208,13 @@ mod tests {
                 CoreNotification::ModelResponse {
                     status: "working".to_string(),
                     free_talk: "先说明一下我的判断。".to_string(),
-                    report_job_progress: "正在检查。".to_string(),
+                    progress: "正在检查。".to_string(),
                     final_answer: String::new(),
                     continue_work: true,
                 },
                 CoreNotification::Action {
                     intent: Some("查询项目记忆".to_string()),
+                    parent_intent: None,
                     action: "memmgr".to_string(),
                     input: serde_json::json!({
                         "type": "durable",
@@ -221,6 +230,7 @@ mod tests {
                 },
                 CoreNotification::Action {
                     intent: Some("查看文件".to_string()),
+                    parent_intent: None,
                     action: "run_bash".to_string(),
                     input: serde_json::json!({
                         "cmd": "pwd"
@@ -238,6 +248,7 @@ mod tests {
                 },
                 CoreNotification::Action {
                     intent: Some("读取运行时信息".to_string()),
+                    parent_intent: None,
                     action: "self_tool".to_string(),
                     input: serde_json::json!({
                         "type": "about_me",
@@ -270,6 +281,38 @@ mod tests {
                     active: true,
                     ..
                 } if op == "job_status" && id == "tool_job_42"
+            )
+        }));
+    }
+
+    #[test]
+    fn group_intent_is_preserved_as_parent_intent_without_overwriting_action_intent() {
+        let suite = ResponseProtocolKind::Json.suite();
+        let envelope = suite.parse(
+            r#"{"report_job_progress":"checking","next_actions":[{"order":"parallel","intent":"先做项目检查","actions":[{"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},{"action":"run_bash","intent":"单独检查 B","args":{"cmd":"printf b","timeout_ms":5000}}]}]}"#,
+            &crate::capability::CapabilityRegistry::builtin(),
+        );
+        let events = notifications_from_envelope(&envelope);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                CoreNotification::Action {
+                    intent: None,
+                    parent_intent: Some(parent),
+                    kind: CoreActionKind::Bash { command, .. },
+                    ..
+                } if parent == "先做项目检查" && command == "printf a"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                CoreNotification::Action {
+                    intent: Some(intent),
+                    parent_intent: None,
+                    kind: CoreActionKind::Bash { command, .. },
+                    ..
+                } if intent == "单独检查 B" && command == "printf b"
             )
         }));
     }

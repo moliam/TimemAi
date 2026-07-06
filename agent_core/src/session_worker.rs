@@ -2356,7 +2356,7 @@ mod tests {
                 CoreSessionWorkerEvent::Topics(events) => {
                     for event in events {
                         if let Some(response) = event.as_model_response() {
-                            if response.report_job_progress.len() > 2_000 {
+                            if response.progress.len() > 2_000 {
                                 long_progress_seen = true;
                             }
                         }

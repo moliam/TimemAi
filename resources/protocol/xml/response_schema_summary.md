@@ -7,7 +7,8 @@ inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
   or use `working` while work continues.
 - `<progress>`: optional progress report for multi-round tasks.
 - `<final_answer>`: summary/answer of all pending tasks. Use only together with
-  `<status>ALL_FINISHED</status>`. Use structured markdown text by default.
+  `<status>ALL_FINISHED</status>`. Please use Markdown format for this text by default.
+  For table, start/end with |---|...|---| for better rendering.
 - `<free_talk>`: optional important reasoning, current plan, or context you want
   kept visible to you in later prompt context. Or some explanation to user.
 - `<working_still_action>`: action section for work that still needs
@@ -23,7 +24,7 @@ Action object inside `<action_json>`:
 
 - `action`: required tool name exactly as listed in the Available tool
   capabilities catalog. Do not invent names.
-- `intent`: required concise user-visible reason for the action.
+- `intent`: optional. concise user-visible reason for the action. can be used for single_action/single_group.
 - `args`: required object. Put every tool parameter as a JSON field inside
   `args`, for example `{"type":"durable","op":"query","query":"<search text>","limit":5}`.
 

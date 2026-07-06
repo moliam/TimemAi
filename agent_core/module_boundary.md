@@ -34,6 +34,20 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   type: a terminal host, server host, or desktop app may expose local command
   execution, while a mobile app or sandboxed host may not.
 - Prompt context construction and runtime-injected context sections.
+- Session prompt component assembly. Core owns the per-session pending prompt
+  component buffer, `submit_prompt_component(...)`, and `build_next_prompt()`.
+  Runtime/model/user/action outputs enter the next model prompt as structured
+  `PromptComponent` records with role, kind, source, logical timestamp, and
+  sequence. `build_next_prompt()` is the single formatting exit that drains the
+  pending buffer into dynamic prompt deltas. Other modules should not hand-roll
+  visible prompt text or bypass this queue when adding context for the next
+  model call.
+- Prompt component ordering. The pending prompt buffer is a timeline, not a
+  role map. It must preserve repeated visible roles such as
+  `SYSTEM -> USER -> SYSTEM -> Ai4`. Components derived from one previous LLM
+  response parsing/execution batch use the same earliest logical timestamp so
+  they appear before later user/runtime submissions. Logical timestamps are only
+  for prompt assembly order and must not be rendered into the model prompt.
 - Active-turn context updates such as user supplements entered while a model
   turn is in progress, including their prompt-slice insertion and audit events.
 - Host-decision results once chosen by the UI, such as applying user approval

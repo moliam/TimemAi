@@ -2282,7 +2282,7 @@ fn progress_and_next_actions_continue_with_implicit_continue_note() {
 }
 
 #[test]
-fn next_action_requires_intent_for_user_visible_action_status() {
+fn next_action_without_intent_uses_action_name_fallback() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -2299,9 +2299,9 @@ fn next_action_requires_intent_for_user_visible_action_status() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("intent_required"));
-    assert!(!prompt.contains("Action result: memmgr"));
+    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("intent_required"));
+    assert!(prompt.contains("Action result: memmgr"));
 }
 
 #[test]
@@ -5138,7 +5138,7 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
     );
     let model_response = received[0].as_model_response().unwrap();
     assert_eq!(model_response.free_talk, "先说明一下检查思路。");
-    assert_eq!(model_response.report_job_progress, "正在检查项目结构");
+    assert_eq!(model_response.progress, "正在检查项目结构");
     assert_eq!(model_response.status, "working");
     assert_eq!(model_response.global.working_worker_count, 1);
 

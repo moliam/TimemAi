@@ -211,7 +211,7 @@ Use cmd for a shell command. Optional: timeout_ms, background=true or mode=backg
 - `loop_timeout_ms`: Total polling wait budget in milliseconds when loop_cmd is present.
 - `mode`: Execution mode alias. Allowed: `normal`, `background`.
 - `once_timeout_ms`: Per-check timeout in polling mode.
-- `timeout_ms`: Normal command wait budget in milliseconds.
+- `timeout_ms`: Normal command wait budget in milliseconds. Default: 5000
 - Required one of: `cmd`, `loop_cmd`
 
 **Result**

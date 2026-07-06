@@ -408,6 +408,7 @@ pub(crate) fn execute_run_bash(
                 turn_id: turn_id.to_string(),
             },
             intent: intent.to_string(),
+            continuation: None,
         });
     }
     if background {
@@ -1171,6 +1172,48 @@ mod tests {
             }
             other => panic!("expected pairing error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn polling_bash_waits_until_async_file_appears() {
+        let dir = tmp_memory_dir("poll_async_file");
+        let flag = dir.join("done.flag");
+        let flag_path = shell_quote_path(&flag);
+        let mut runtime = NeverCancelRuntime;
+        let _ = fs::remove_file(&flag);
+        let mut child = Command::new("/bin/sh")
+            .arg("-lc")
+            .arg(format!("sleep 0.3; touch {flag_path}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn delayed flag creator");
+
+        let started = Instant::now();
+        let result = execute_polling_bash(
+            &format!("test -f {flag_path}"),
+            100,
+            2000,
+            1000,
+            &mut runtime,
+        );
+        let elapsed = started.elapsed();
+
+        assert!(result.contains("Polling state: finished"), "{result}");
+        assert!(
+            result.contains("Success condition: exit code 0"),
+            "{result}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "poll should wait for asynchronous file creation, elapsed={elapsed:?}\n{result}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "poll should return soon after condition succeeds, elapsed={elapsed:?}\n{result}"
+        );
+        let _ = child.wait();
     }
 
     #[test]
