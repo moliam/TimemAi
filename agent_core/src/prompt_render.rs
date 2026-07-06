@@ -7,7 +7,6 @@ use crate::{PromptDelta, PromptSlice};
 enum VisiblePromptRole {
     User,
     You,
-    Actions,
     System,
 }
 
@@ -16,7 +15,6 @@ impl VisiblePromptRole {
         match self {
             VisiblePromptRole::User => "USER",
             VisiblePromptRole::You => "TIMEM_ASSISTANT",
-            VisiblePromptRole::Actions => "ACTIONS",
             VisiblePromptRole::System => "SYSTEM",
         }
     }
@@ -26,8 +24,9 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
     match prompt_type {
         "user_question" | "user_supplement" => VisiblePromptRole::User,
         "llm_response" | "llm_free_talk" => VisiblePromptRole::You,
-        "result_of_llm_action" => VisiblePromptRole::Actions,
-        "response_repair" | "context_compacted" => VisiblePromptRole::System,
+        "result_of_llm_action" | "response_repair" | "context_compacted" => {
+            VisiblePromptRole::System
+        }
         _ => VisiblePromptRole::System,
     }
 }
@@ -81,9 +80,6 @@ pub(crate) fn render_prompt_with_rendered_static(
             if last_role != Some(role) {
                 out.push('\n');
                 out.push_str(&format!("## {}\n", role.heading()));
-                if role == VisiblePromptRole::Actions {
-                    out.push_str("You initiated actions. The results are:\n");
-                }
                 last_role = Some(role);
             }
             out.push('\n');
@@ -144,6 +140,15 @@ mod tests {
                     slice_index: 2,
                     slice_count: 2,
                 },
+                PromptSlice {
+                    delta_id: "pd_test_1".to_string(),
+                    slice_id: "ps_test_1_s003".to_string(),
+                    prompt_type: "result_of_llm_action".to_string(),
+                    time_ms: 4,
+                    text: "Action result: run_bash\nok".to_string(),
+                    slice_index: 3,
+                    slice_count: 3,
+                },
             ],
         };
         let rendered_static = render_static_prompt(
@@ -159,6 +164,9 @@ mod tests {
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("[BEGIN DELTA]"));
         assert!(rendered.contains("## USER"));
+        assert!(rendered.contains("## SYSTEM"));
+        assert!(!rendered.contains("## ACTIONS"));
+        assert!(rendered.contains("Action result: run_bash"));
         assert!(!rendered.contains("slice_id:"));
         assert!(!rendered.contains("prompt_type:"));
         assert!(!rendered.contains("HIDDEN"));

@@ -65,6 +65,8 @@ Use `delta_id` when you need to
 compact or offload old dynamic context.
 
 Prompt delta example:
+Prompt deltas use only `## USER`, `## TIMEM_ASSISTANT`, and `## SYSTEM` as
+visible speakers, in chronological order.
 
 [BEGIN DELTA]
 delta_id: xxx
@@ -78,15 +80,14 @@ progress.
 your previous free_talk, response, or final answer already shown in the user
 interface.
 
-## ACTIONS
-You initiated actions. The results are:
+## SYSTEM
+runtime's active injection, feedback, etc, such as response repair, context compaction notes, work
+instructions, pending work, runtime action results, etc.
+
+Example runtime action result:
 
 Action result: run_bash
 ...
-
-## SYSTEM
-runtime's active injection, feedback, etc, such as response repair, context compaction notes, or work
-instructions, pending work, etc.
 
 [END DELTA]
 

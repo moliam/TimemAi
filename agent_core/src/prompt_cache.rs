@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn cache_planner_keeps_one_delta_as_one_addressable_block() {
-        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nslice one\n\n## ACTIONS\nslice two\n[END DELTA]";
+        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nslice one\n\n## SYSTEM\nslice two\n[END DELTA]";
 
         let blocks = plan_prompt_cache(prompt);
 

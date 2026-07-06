@@ -3553,7 +3553,7 @@ fn prompt_type_role_for_scratch(prompt_type: &str) -> &'static str {
     match prompt_type {
         "user_question" | "user_supplement" => "USER",
         "llm_response" | "llm_free_talk" => "TIMEM_ASSISTANT",
-        "result_of_llm_action" => "ACTIONS",
+        "result_of_llm_action" => "SYSTEM",
         _ => "SYSTEM",
     }
 }

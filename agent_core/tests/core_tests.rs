@@ -2775,7 +2775,7 @@ fn memory_lookup_context_triggers_runtime_precheck_before_model_reply() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("## USER"));
-    assert!(prompt.contains("## ACTIONS"));
+    assert!(prompt.contains("## SYSTEM"));
     assert!(prompt.contains("Action result: runtime_memory_precheck"));
     assert!(prompt.contains("lexical_results: none"));
     assert!(prompt.contains("recent_memory_evidence"));
