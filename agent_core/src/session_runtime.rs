@@ -867,7 +867,7 @@ mod tests {
         let mut model = ReplayModel::new([
             Ok(llm(
                 format!(
-                    r#"{{"status":"working","report_job_progress":"等待 CI 完成。","next_actions":[{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":1000,"timeout_ms":5000,"check_timeout_ms":1000}}}}]}}"#,
+                    r#"{{"status":"working","report_job_progress":"等待 CI 完成。","next_actions":[{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":1000,"loop_timeout_ms":5000,"once_timeout_ms":1000}}}}]}}"#,
                     serde_json::to_string(&check_command).unwrap()
                 ),
                 1_000,
@@ -2744,6 +2744,8 @@ Markdown 协议动作已执行。"#,
                             mode: "foreground".to_string(),
                             interval_ms: None,
                             timeout_ms: Some(5000),
+                            loop_timeout_ms: None,
+                            once_timeout_ms: None,
                         }
             })
         }));

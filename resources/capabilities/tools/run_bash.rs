@@ -291,13 +291,18 @@ pub(crate) fn execute_run_bash_action(
             "Action result: run_bash\nerror: cmd_and_loop_cmd_conflict".to_string(),
         );
     }
-    let command_to_run = if loop_command.is_empty() {
+    let is_regular_command = loop_command.is_empty();
+    let command_to_run = if is_regular_command {
         command_from_action(action)
     } else {
-        loop_command
+        loop_command.clone()
     };
     let interval_ms = action.input_u64("interval_ms");
-    let timeout_ms = action.timeout_ms_i64(5000);
+    let timeout_ms = if is_regular_command {
+        action.timeout_ms_i64(5000)
+    } else {
+        action.input_i64("loop_timeout_ms").unwrap_or(600_000)
+    };
     let session_id = core.current_session_id();
     let turn_id = core.current_action_turn_id();
     execute_run_bash(
@@ -305,13 +310,13 @@ pub(crate) fn execute_run_bash_action(
         action.background(),
         timeout_ms,
         interval_ms,
-        action.input_u64("check_timeout_ms").unwrap_or(5000),
+        action.input_u64("once_timeout_ms").unwrap_or(5000),
         core.bash_approval_mode,
         &action.intent,
         &core.shell_jobs,
         &session_id,
         &turn_id,
-        action.input_str("loop_cmd").is_empty(),
+        is_regular_command,
         runtime,
     )
 }
@@ -321,7 +326,7 @@ pub(crate) fn execute_run_bash(
     background: bool,
     timeout_ms: i64,
     interval_ms: Option<u64>,
-    check_timeout_ms: u64,
+    once_timeout_ms: u64,
     approval_mode: BashApprovalMode,
     intent: &str,
     shell_jobs: &FileShellJobStore,
@@ -385,7 +390,7 @@ pub(crate) fn execute_run_bash(
                 background,
                 timeout_ms,
                 interval_ms,
-                check_timeout_ms,
+                once_timeout_ms,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
             },
@@ -400,7 +405,7 @@ pub(crate) fn execute_run_bash(
             command_to_run,
             interval_ms,
             timeout_ms,
-            check_timeout_ms,
+            once_timeout_ms,
             runtime,
         ));
     }
@@ -412,7 +417,7 @@ pub(crate) fn execute_approved_bash(
     background: bool,
     timeout_ms: i64,
     interval_ms: Option<u64>,
-    check_timeout_ms: u64,
+    once_timeout_ms: u64,
     session_id: &str,
     turn_id: &str,
     _is_regular_command: bool,
@@ -427,7 +432,7 @@ pub(crate) fn execute_approved_bash(
             command.trim(),
             interval_ms,
             timeout_ms,
-            check_timeout_ms,
+            once_timeout_ms,
             runtime,
         )
     } else {
@@ -448,13 +453,13 @@ pub(crate) fn execute_polling_bash(
     command: &str,
     interval_ms: u64,
     timeout_ms: i64,
-    check_timeout_ms: u64,
+    once_timeout_ms: u64,
     runtime: &mut dyn ActionRuntime,
 ) -> String {
     let interval = Duration::from_millis(interval_ms.clamp(1000, 60_000));
     let max_wait =
         (timeout_ms >= 0).then(|| Duration::from_millis((timeout_ms as u64).clamp(1000, 900_000)));
-    let check_timeout_ms = check_timeout_ms.clamp(1000, 15_000);
+    let once_timeout_ms = once_timeout_ms.clamp(1000, 15_000);
     let started = Instant::now();
     let mut attempts = 0_u64;
     let mut last_status = None;
@@ -475,7 +480,7 @@ pub(crate) fn execute_polling_bash(
         }
 
         attempts = attempts.saturating_add(1);
-        let result = execute_one_bash_structured(command, check_timeout_ms as i64, runtime);
+        let result = execute_one_bash_structured(command, once_timeout_ms as i64, runtime);
         last_status = result.status;
         last_output = result.output;
         last_error = result.error;

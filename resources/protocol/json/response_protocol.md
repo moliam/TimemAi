@@ -81,46 +81,36 @@ unless the current user task actually requires the same action.
   "final_answer": "上下文已压缩，当前请求已完成。Timem session 仍保持开启，可继续接收后续输入。"
 }
 
-### Example: grouped actions
+### Example: multiple actions and polling
 
 {
   "report_job_progress": "正在并行检查本地状态，然后等待 CI 完成。",
-  "action_groups": [
+  "next_actions": [
     {
-      "order": "parallel",
-      "actions": [
-        {
-          "action": "run_bash",
-          "intent": "检查当前分支",
-          "args": {
-            "cmd": "git branch --show-current",
-            "timeout_ms": 3000
-          }
-        },
-        {
-          "action": "run_bash",
-          "intent": "检查工作区状态",
-          "args": {
-            "cmd": "git status --short",
-            "timeout_ms": 3000
-          }
-        }
-      ]
+      "action": "run_bash",
+      "intent": "检查当前分支",
+      "args": {
+        "cmd": "git branch --show-current",
+        "timeout_ms": 3000
+      }
     },
     {
-      "order": "sequential",
-      "actions": [
-        {
-          "action": "run_bash",
-          "intent": "等待 CI 完成",
-          "args": {
-            "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
-            "interval_ms": 10000,
-            "timeout_ms": 600000,
-            "check_timeout_ms": 5000
-          }
-        }
-      ]
+      "action": "run_bash",
+      "intent": "检查工作区状态",
+      "args": {
+        "cmd": "git status --short",
+        "timeout_ms": 3000
+      }
+    },
+    {
+      "action": "run_bash",
+      "intent": "等待 CI 完成",
+      "args": {
+        "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
+        "interval_ms": 10000,
+        "loop_timeout_ms": 600000,
+        "once_timeout_ms": 5000
+      }
     }
   ]
 }

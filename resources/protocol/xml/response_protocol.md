@@ -100,7 +100,7 @@ This is the summary....
   </context_compact>
 </response>
 
-## -------- Example: multi action groups and polling --------
+## -------- Example: multiple actions and polling --------
 
 <response>
   <free_talk>我会先并行检查两个本地状态，然后轮询等待外部状态就绪。</free_talk>
@@ -129,19 +129,14 @@ This is the summary....
     ]
   },
   {
-    "order": "sequential",
-    "actions": [
-      {
-        "action": "run_bash",
-        "intent": "等待 CI 完成",
-        "args": {
-          "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
-          "interval_ms": 10000,
-          "timeout_ms": 600000,
-          "check_timeout_ms": 5000
-        }
-      }
-    ]
+    "action": "run_bash",
+    "intent": "等待 CI 完成",
+    "args": {
+      "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
+      "interval_ms": 10000,
+      "loop_timeout_ms": 600000,
+      "once_timeout_ms": 5000
+    }
   }
 ]
     ]]></action_json>

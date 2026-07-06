@@ -990,10 +990,10 @@ of repeating the long command.
 
 Waiting on external state is a structured `run_bash` mode, not a separate tool.
 The model uses `loop_cmd` with `interval_ms`; core repeatedly runs that check
-command until its exit code is 0, the total `timeout_ms` expires, or the active
-turn is cancelled. The success condition is intentionally fixed at exit code 0
-and is not a separate configurable action field. This keeps `sleep 90 && check`
-out of foreground Bash,
+command until its exit code is 0, the total `loop_timeout_ms` expires, or the
+active turn is cancelled. `once_timeout_ms` bounds each individual check
+command. The success condition is intentionally fixed at exit code 0 and is not
+a separate configurable action field. This keeps `sleep 90 && check` out of foreground Bash,
 lets the UI render a Poll action through the existing `core.action` topic, and
 preserves the model/runtime boundary: the model defines the command, while core
 owns the fixed success condition, approval, wait bounds, audit, bounded output,

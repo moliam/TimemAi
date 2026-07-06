@@ -67,10 +67,10 @@ Foreground/background execution is part of the capability interface:
 - External or remote status waiting should use `run_bash` polling mode, not a
   foreground `sleep && check` command. When `interval_ms` is present,
   `run_bash` repeatedly runs the command until it exits with code 0, the total
-  `timeout_ms` expires, or the active turn is cancelled. The model owns the
-  check command; core owns the fixed success condition, interval/timeout bounds,
-  cancellation checks, bounded output, approval, audit, and the structured
-  action result.
+  `loop_timeout_ms` expires, or the active turn is cancelled. `once_timeout_ms`
+  bounds each individual check command. The model owns the check command; core
+  owns the fixed success condition, interval/timeout bounds, cancellation
+  checks, bounded output, approval, audit, and the structured action result.
 - Foreground `run_bash` can use `timeout_ms=-1` when the user explicitly wants a
   command to block without a runtime timeout. Core still owns the process and
   emits a structured host decision request after the long-command threshold, so

@@ -85,8 +85,8 @@ Action result: run_bash
 ...
 
 ## SYSTEM
-runtime feedback such as response repair, context compaction notes, or work
-instructions.
+runtime's active injection, feedback, etc, such as response repair, context compaction notes, or work
+instructions, pending work, etc.
 
 [END DELTA]
 

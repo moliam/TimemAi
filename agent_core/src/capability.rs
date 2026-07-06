@@ -1909,6 +1909,8 @@ mod tests {
         assert!(!rendered.contains("#### `tool_job_status`"));
         assert!(rendered.contains("#### `self_tool`"));
         assert!(rendered.contains("interval_ms"));
+        assert!(rendered.contains("loop_timeout_ms"));
+        assert!(rendered.contains("once_timeout_ms"));
         assert!(rendered.contains("exits with code 0"));
         assert!(rendered.contains("**Synopsis**"));
         assert!(rendered.contains("**Options**"));
@@ -1924,6 +1926,7 @@ mod tests {
         assert!(!rendered.contains("**Example action**"));
         assert!(!rendered.contains("read_back_command"));
         assert!(!rendered.contains("large_readback"));
+        assert!(!rendered.contains("check_timeout_ms"));
         assert!(rendered.contains("`background`:"));
         assert!(rendered.contains("Foreground returns status and bounded output"));
         assert!(rendered.contains("Use loop_cmd with interval_ms"));
@@ -2262,9 +2265,12 @@ mod tests {
 
         assert!(input_properties.contains_key("cmd"));
         assert!(input_properties.contains_key("loop_cmd"));
+        assert!(input_properties.contains_key("loop_timeout_ms"));
+        assert!(input_properties.contains_key("once_timeout_ms"));
         assert!(!input_properties.contains_key("command"));
         assert!(!input_properties.contains_key("read_back_command"));
         assert!(!input_properties.contains_key("large_readback_opt_in"));
+        assert!(!input_properties.contains_key("check_timeout_ms"));
         assert!(!input_properties.contains_key("expect"));
         assert!(!input_properties.contains_key("expect_timeout_ms"));
 
@@ -2282,6 +2288,9 @@ mod tests {
         let prompt = registry.render_tool_catalog_markdown();
         assert!(prompt.contains("run_bash cmd=<shell_command>"));
         assert!(prompt.contains("run_bash loop_cmd=<check_command>"));
+        assert!(prompt.contains("loop_timeout_ms"));
+        assert!(prompt.contains("once_timeout_ms"));
+        assert!(!prompt.contains("check_timeout_ms"));
         assert!(!prompt.contains("`expect`:"));
         assert!(!prompt.contains("expect_timeout_ms"));
     }

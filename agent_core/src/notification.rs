@@ -18,6 +18,8 @@ pub enum CoreActionKind {
         mode: String,
         interval_ms: Option<u64>,
         timeout_ms: Option<i64>,
+        loop_timeout_ms: Option<i64>,
+        once_timeout_ms: Option<u64>,
     },
     ShellJob {
         job_id: String,
@@ -138,7 +140,13 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
                     "foreground".to_string()
                 },
                 interval_ms,
-                timeout_ms: action.input_i64("timeout_ms"),
+                timeout_ms: if interval_ms.is_some() {
+                    None
+                } else {
+                    action.input_i64("timeout_ms")
+                },
+                loop_timeout_ms: interval_ms.and_then(|_| action.input_i64("loop_timeout_ms")),
+                once_timeout_ms: interval_ms.and_then(|_| action.input_u64("once_timeout_ms")),
             }
         }
         "shell_job_status" => CoreActionKind::ShellJob {
@@ -222,6 +230,8 @@ mod tests {
                         mode: "foreground".to_string(),
                         interval_ms: None,
                         timeout_ms: None,
+                        loop_timeout_ms: None,
+                        once_timeout_ms: None,
                     },
                     active: true,
                     memory_activity: CoreMemoryActivity::None,

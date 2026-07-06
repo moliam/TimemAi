@@ -5084,6 +5084,8 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
             mode: "foreground".to_string(),
             interval_ms: None,
             timeout_ms: Some(5000),
+            loop_timeout_ms: None,
+            once_timeout_ms: None,
         }
     );
     assert!(action.active);

@@ -349,7 +349,7 @@ pub(crate) enum PendingApprovedAction {
         background: bool,
         timeout_ms: i64,
         interval_ms: Option<u64>,
-        check_timeout_ms: u64,
+        once_timeout_ms: u64,
         session_id: String,
         turn_id: String,
     },
@@ -369,7 +369,7 @@ impl PendingApprovedAction {
                 background,
                 timeout_ms,
                 interval_ms,
-                check_timeout_ms,
+                once_timeout_ms,
                 session_id,
                 turn_id,
             } => json!({
@@ -377,7 +377,8 @@ impl PendingApprovedAction {
                 "background": background,
                 "timeout_ms": timeout_ms,
                 "interval_ms": interval_ms,
-                "check_timeout_ms": check_timeout_ms,
+                "loop_timeout_ms": if interval_ms.is_some() { Some(*timeout_ms) } else { None },
+                "once_timeout_ms": if interval_ms.is_some() { Some(*once_timeout_ms) } else { None },
                 "session_id": session_id,
                 "turn_id": turn_id,
                 "approval_id": approval_id,
@@ -1553,7 +1554,7 @@ impl AgentCore {
                     background,
                     timeout_ms,
                     interval_ms,
-                    check_timeout_ms,
+                    once_timeout_ms,
                     session_id,
                     turn_id,
                 } => shell_exec::execute_approved_bash(
@@ -1561,7 +1562,7 @@ impl AgentCore {
                     *background,
                     *timeout_ms,
                     *interval_ms,
-                    *check_timeout_ms,
+                    *once_timeout_ms,
                     session_id,
                     turn_id,
                     interval_ms.is_none(),
@@ -2031,9 +2032,13 @@ impl AgentCore {
                     shell_exec::execute_run_bash(
                         &command,
                         action.background(),
-                        action.timeout_ms_i64(5000),
+                        if is_regular_command {
+                            action.timeout_ms_i64(5000)
+                        } else {
+                            action.input_i64("loop_timeout_ms").unwrap_or(600_000)
+                        },
                         action.input_u64("interval_ms"),
-                        action.input_u64("check_timeout_ms").unwrap_or(5000),
+                        action.input_u64("once_timeout_ms").unwrap_or(5000),
                         BashApprovalMode::Approve,
                         &action.intent,
                         &shell_jobs,

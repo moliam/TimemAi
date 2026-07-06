@@ -6,7 +6,7 @@ requires_host: local_command_execution
 summary: Run local shell commands.
 prompt_synopsis: |
   run_bash cmd=<shell_command> [timeout_ms=<n|-1>] [background=true|mode=background]
-  run_bash loop_cmd=<check_command> interval_ms=<n> timeout_ms=<total_wait_ms|-1> [check_timeout_ms=<n>]
+  run_bash loop_cmd=<check_command> interval_ms=<n> loop_timeout_ms=<total_wait_ms|-1> [once_timeout_ms=<n>]
 description: |
   `run_bash` runs a shell command on the local machine and collects bounded
   evidence from the command result. It supports foreground, background, and
@@ -15,14 +15,14 @@ description: |
   Use timeout_ms=-1 only when you explicitly want the command to block
   without a runtime timeout. Do not put long sleeps in cmd. For waiting on
   external state, use loop_cmd with interval_ms. The loop command is re-run
-  until it exits with code 0 or timeout_ms total wait budget is reached. For
+  until it exits with code 0 or loop_timeout_ms total wait budget is reached. For
   long local work that should keep running across later turns, use
   background=true and shell_job_status.
 prompt_input: |
   Use cmd for a shell command. Optional: timeout_ms, background=true or
   mode=background. Use loop_cmd with interval_ms for polling/waiting. loop_cmd
-  is run repeatedly until it exits with code 0 or timeout_ms total wait budget
-  is reached. check_timeout_ms is the per-check command timeout.
+  is run repeatedly until it exits with code 0 or loop_timeout_ms total wait budget
+  is reached. once_timeout_ms is the per-check command timeout.
 prompt_result: |
   Foreground returns status and bounded output. Background returns job_id; use
   shell_job_status with that job_id and your chosen timeout_ms to wait/check.
@@ -38,8 +38,9 @@ input_schema: |
     "properties": {
       "cmd": {"type": "string", "description": "Shell command to execute."},
       "loop_cmd": {"type": "string", "description": "Polling check command. Runtime re-runs it until it exits with code 0."},
-      "timeout_ms": {"type": "integer", "description": "Foreground wait budget, total polling wait budget when loop_cmd is present, or -1 for no runtime timeout."},
-      "check_timeout_ms": {"type": "integer", "description": "Per-check timeout in polling mode."},
+      "timeout_ms": {"type": "integer", "description": "Foreground wait budget, or -1 for no runtime timeout."},
+      "loop_timeout_ms": {"type": "integer", "description": "Total polling wait budget when loop_cmd is present, or -1 for no runtime timeout."},
+      "once_timeout_ms": {"type": "integer", "description": "Per-check timeout in polling mode."},
       "interval_ms": {"type": "integer", "description": "Polling interval. Requires loop_cmd."},
       "background": {"type": "boolean", "description": "When true, return a job_id instead of blocking."},
       "mode": {"type": "string", "enum": ["foreground", "background"], "description": "Execution mode alias."}
