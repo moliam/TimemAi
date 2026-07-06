@@ -836,6 +836,7 @@ fn prompt_shrink_can_remove_visible_delta_by_delta_id() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_slice_id"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let long_input = format!("SLICE_ONE_ONLY{}", "a".repeat(13_000));
     let prompt = match core.begin_turn(&long_input, None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
