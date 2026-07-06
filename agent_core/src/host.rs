@@ -1274,7 +1274,7 @@ fn action_kind_from_topic_payload(value: &Value, fallback_action: &str) -> CoreA
     match value["kind"].as_str().unwrap_or_default() {
         "bash" => CoreActionKind::Bash {
             command: value["command"].as_str().unwrap_or_default().to_string(),
-            mode: value["mode"].as_str().unwrap_or("foreground").to_string(),
+            mode: value["mode"].as_str().unwrap_or("normal").to_string(),
             interval_ms: value["interval_ms"].as_u64(),
             timeout_ms: value["timeout_ms"].as_i64(),
             loop_timeout_ms: value["loop_timeout_ms"].as_i64(),
@@ -2066,7 +2066,7 @@ mod tests {
                 input: serde_json::json!({"cmd": "pwd"}),
                 kind: crate::CoreActionKind::Bash {
                     command: "pwd".to_string(),
-                    mode: "foreground".to_string(),
+                    mode: "normal".to_string(),
                     interval_ms: None,
                     timeout_ms: None,
                     loop_timeout_ms: None,
@@ -2150,7 +2150,7 @@ mod tests {
                     "kind": {
                         "kind": "bash",
                         "command": "pwd",
-                        "mode": "foreground",
+                        "mode": "normal",
                         "interval_ms": null,
                         "timeout_ms": null,
                         "loop_timeout_ms": null,
@@ -2169,7 +2169,7 @@ mod tests {
                 input: serde_json::json!({"cmd": "pwd"}),
                 kind: CoreActionKind::Bash {
                     command: "pwd".to_string(),
-                    mode: "foreground".to_string(),
+                    mode: "normal".to_string(),
                     interval_ms: None,
                     timeout_ms: None,
                     loop_timeout_ms: None,
@@ -2352,7 +2352,7 @@ mod tests {
             input: serde_json::json!({"cmd": "pwd"}),
             kind: CoreActionKind::Bash {
                 command: "pwd".to_string(),
-                mode: "foreground".to_string(),
+                mode: "normal".to_string(),
                 interval_ms: None,
                 timeout_ms: None,
                 loop_timeout_ms: None,
@@ -2383,13 +2383,13 @@ mod tests {
             (
                 CoreActionKind::Bash {
                     command: "pwd".to_string(),
-                    mode: "foreground".to_string(),
+                    mode: "normal".to_string(),
                     interval_ms: None,
                     timeout_ms: None,
                     loop_timeout_ms: None,
                     once_timeout_ms: None,
                 },
-                json!({"kind": "bash", "command": "pwd", "mode": "foreground", "interval_ms": null, "timeout_ms": null, "loop_timeout_ms": null, "once_timeout_ms": null}),
+                json!({"kind": "bash", "command": "pwd", "mode": "normal", "interval_ms": null, "timeout_ms": null, "loop_timeout_ms": null, "once_timeout_ms": null}),
             ),
             (
                 CoreActionKind::Bash {

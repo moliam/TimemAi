@@ -632,7 +632,7 @@ mod tests {
     fn bash_kind(command: &str) -> CoreActionKind {
         CoreActionKind::Bash {
             command: command.to_string(),
-            mode: "foreground".to_string(),
+            mode: "normal".to_string(),
             interval_ms: None,
             timeout_ms: None,
             loop_timeout_ms: None,

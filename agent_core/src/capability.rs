@@ -1928,7 +1928,7 @@ mod tests {
         assert!(!rendered.contains("large_readback"));
         assert!(!rendered.contains("check_timeout_ms"));
         assert!(rendered.contains("`background`:"));
-        assert!(rendered.contains("Foreground returns status and bounded output"));
+        assert!(rendered.contains("Normal returns status and bounded output"));
         assert!(rendered.contains("Use loop_cmd with interval_ms"));
         assert!(rendered.contains("`op`:"));
         assert!(rendered.contains("`kind`:"));
@@ -2220,6 +2220,25 @@ mod tests {
             )
             .unwrap_err()
             .contains("input.kind_required_when_op=inspect"));
+        assert!(registry
+            .validate_action_input(
+                "run_bash",
+                &json_object([
+                    ("cmd", Value::String("pwd".to_string())),
+                    ("mode", Value::String("normal".to_string())),
+                ])
+            )
+            .is_ok());
+        assert!(registry
+            .validate_action_input(
+                "run_bash",
+                &json_object([
+                    ("cmd", Value::String("pwd".to_string())),
+                    ("mode", Value::String("foreground".to_string())),
+                ])
+            )
+            .unwrap_err()
+            .contains("input.mode_unsupported:foreground"));
         assert!(registry
             .validate_action_input(
                 "run_bash",

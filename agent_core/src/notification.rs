@@ -137,7 +137,7 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
                 } else if action.background() {
                     "background".to_string()
                 } else {
-                    "foreground".to_string()
+                    "normal".to_string()
                 },
                 interval_ms,
                 timeout_ms: if interval_ms.is_some() {
@@ -227,7 +227,7 @@ mod tests {
                     }),
                     kind: CoreActionKind::Bash {
                         command: "pwd".to_string(),
-                        mode: "foreground".to_string(),
+                        mode: "normal".to_string(),
                         interval_ms: None,
                         timeout_ms: None,
                         loop_timeout_ms: None,

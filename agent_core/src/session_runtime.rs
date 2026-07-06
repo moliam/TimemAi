@@ -2746,7 +2746,7 @@ Markdown 协议动作已执行。"#,
                     && topic.kind
                         == CoreActionKind::Bash {
                             command: "printf markdown-ok".to_string(),
-                            mode: "foreground".to_string(),
+                            mode: "normal".to_string(),
                             interval_ms: None,
                             timeout_ms: Some(5000),
                             loop_timeout_ms: None,

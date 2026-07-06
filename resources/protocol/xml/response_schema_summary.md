@@ -6,14 +6,14 @@ inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
   complete and no more runtime interaction is needed for that request. Omit it
   or use `working` while work continues.
 - `<progress>`: optional progress report for multi-round tasks.
-- `<final_answer>`: final user-facing answer. Use only together with
-  `<status>ALL_FINISHED</status>`.
-- `<free_talk>`: optional casual reasoning, current plan, or context you want
-  kept visible to you in later prompt context.
-- `<working_still_action>`: runtime action section for work that still needs
+- `<final_answer>`: summary/answer of all pending tasks. Use only together with
+  `<status>ALL_FINISHED</status>`. Use structured markdown text by default.
+- `<free_talk>`: optional important reasoning, current plan, or context you want
+  kept visible to you in later prompt context. Or some explanation to user.
+- `<working_still_action>`: action section for work that still needs
   tool execution. Put one or more `<action_json><![CDATA[{...}]]></action_json>`
-  blocks inside it. The JSON content may be a single action object, an array of
-  action objects, or an array of action groups.
+  blocks inside it. The JSON content may be a single action object {}, a group of
+  action by array objects [{}{}], or multiple groups [{}{}][{}{}].
 - `<context_compact>`: optional context compaction block. Include `<delta_ids>`
   with comma-separated prompt delta ids and `<summary>` with the compacted
   state. Runtime hides those dynamic prompt deltas and appends the summary as a
@@ -29,5 +29,5 @@ Action object inside `<action_json>`:
 
 Action group object inside `<action_json>`:
 
-- `order`: `sequential` or `parallel`.
+- `order`: `sequential` or `parallel`. Groups are always executed sequentially.
 - `actions`: required array of action objects.

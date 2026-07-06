@@ -13,9 +13,7 @@ Required tag rules:
   concrete actions when runtime work is needed. Do not write `<final_answer>`
   while still working; use `<progress>` for user-visible ongoing reports.
 - If the task is complete, write `<status>ALL_FINISHED</status>` and provide
-  `<final_answer>`. `ALL_FINISHED` means the current user request is complete; it
-  does not close the Timem session or prevent the user from continuing. Do not
-  use `working` only to keep the chat session open.
+  `<final_answer>`. `ALL_FINISHED` means all pending user tasks are completed.
 - Any response containing `<final_answer>` must also contain
   `<status>ALL_FINISHED</status>`, including responses that also contain
   `<context_compact>`.

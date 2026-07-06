@@ -309,7 +309,7 @@ source /path/to/your/env
 
 ## Local Shell Jobs
 
-`run_bash` runs short commands in the foreground. For long builds, tests,
+`run_bash` runs short commands in normal mode. For long builds, tests,
 package installs, or video commands, the model can request:
 
 ```json
@@ -324,7 +324,7 @@ package installs, or video commands, the model can request:
 ```
 
 Runtime returns a `job_id`, output file, and status file. The model should poll
-with `shell_job_status` instead of retrying the same command after a foreground
+with `shell_job_status` instead of retrying the same command after a normal-mode
 timeout.
 
 `Ctrl+C` is always a cancellation key, not an exit key: while editing input it

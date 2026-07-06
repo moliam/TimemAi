@@ -50,12 +50,12 @@ The manifest is the human-maintained source for:
 - enum field constraints derived from property `enum` values
 - examples
 
-Foreground/background execution is part of the capability interface:
+Normal/background execution is part of the capability interface:
 
 - Built-in tools can own specialized lifecycle semantics when needed. `run_bash`
   keeps a dedicated path because it includes approval policy and local shell
   safety checks.
-- Command-bound registered tools run in the foreground by default. If their
+- Command-bound registered tools run in normal mode by default. If their
   YAML declares `background` or `mode=background` in `input_schema`, core may
   start the command as a background `tool_job`, persist its status under the
   runtime memory directory, and return a `job_id`.
@@ -65,13 +65,13 @@ Foreground/background execution is part of the capability interface:
   not manage those jobs. Core owns job ids, output/status files, process
   termination, polling, bounded readback, and action evidence.
 - External or remote status waiting should use `run_bash` polling mode, not a
-  foreground `sleep && check` command. When `interval_ms` is present,
+  normal `sleep && check` command. When `interval_ms` is present,
   `run_bash` repeatedly runs the command until it exits with code 0, the total
   `loop_timeout_ms` expires, or the active turn is cancelled. `once_timeout_ms`
   bounds each individual check command. The model owns the check command; core
   owns the fixed success condition, interval/timeout bounds, cancellation
   checks, bounded output, approval, audit, and the structured action result.
-- Foreground `run_bash` can use `timeout_ms=-1` when the user explicitly wants a
+- Normal `run_bash` can use `timeout_ms=-1` when the user explicitly wants a
   command to block without a runtime timeout. Core still owns the process and
   emits a structured host decision request after the long-command threshold, so
   a UI can let the user keep waiting or stop waiting. Stopping waiting becomes a

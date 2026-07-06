@@ -9,7 +9,7 @@ prompt_synopsis: |
   run_bash loop_cmd=<check_command> interval_ms=<n> loop_timeout_ms=<total_wait_ms|-1> [once_timeout_ms=<n>]
 description: |
   `run_bash` runs a shell command on the local machine and collects bounded
-  evidence from the command result. It supports foreground, background, and
+  evidence from the command result. It supports normal, background, and
   polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
   Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner.
   Use timeout_ms=-1 only when you explicitly want the command to block
@@ -24,11 +24,11 @@ prompt_input: |
   is run repeatedly until it exits with code 0 or loop_timeout_ms total wait budget
   is reached. once_timeout_ms is the per-check command timeout.
 prompt_result: |
-  Foreground returns status and bounded output. Background returns job_id; use
+  Normal returns status and bounded output. Background returns job_id; use
   shell_job_status with that job_id and your chosen timeout_ms to wait/check.
   Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts,
   elapsed_ms, last_status, and bounded last output.
-  If a foreground command with timeout_ms=-1 runs for a long time, the host may
+  If a normal command with timeout_ms=-1 runs for a long time, the host may
   ask the user whether to keep waiting. If the user stops waiting, the action
   returns cancelled_by_user and the runtime adds the user's cancellation as
   supplementary context for your next response.
@@ -38,12 +38,12 @@ input_schema: |
     "properties": {
       "cmd": {"type": "string", "description": "Shell command to execute."},
       "loop_cmd": {"type": "string", "description": "Polling check command. Runtime re-runs it until it exits with code 0."},
-      "timeout_ms": {"type": "integer", "description": "Foreground wait budget, or -1 for no runtime timeout."},
+      "timeout_ms": {"type": "integer", "description": "Normal command wait budget, or -1 for no runtime timeout."},
       "loop_timeout_ms": {"type": "integer", "description": "Total polling wait budget when loop_cmd is present, or -1 for no runtime timeout."},
       "once_timeout_ms": {"type": "integer", "description": "Per-check timeout in polling mode."},
       "interval_ms": {"type": "integer", "description": "Polling interval. Requires loop_cmd."},
-      "background": {"type": "boolean", "description": "When true, return a job_id instead of blocking."},
-      "mode": {"type": "string", "enum": ["foreground", "background"], "description": "Execution mode alias."}
+      "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a job_id for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."},
+      "mode": {"type": "string", "enum": ["normal", "background"], "description": "Execution mode alias."}
     },
     "x-required-any": [["cmd", "loop_cmd"]]
   }
@@ -57,14 +57,14 @@ output_schema: |
       "attempts": {"type": "integer", "description": "Polling attempts."},
       "elapsed_ms": {"type": "integer", "description": "Polling elapsed time."},
       "last_status": {"type": "integer", "description": "Last observed polling exit code."},
-      "status": {"type": "integer", "description": "Process exit code for foreground success."},
-      "output": {"type": "string", "description": "Bounded stdout/stderr text for foreground execution."},
+      "status": {"type": "integer", "description": "Process exit code for normal command success."},
+      "output": {"type": "string", "description": "Bounded stdout/stderr text for normal command execution."},
       "job_id": {"type": "string", "description": "Background job id when background=true."},
       "pid": {"type": "integer", "description": "Background process id."},
       "output_file": {"type": "string", "description": "Path where background output is stored."},
       "status_file": {"type": "string", "description": "Path where background exit status is stored."},
       "approval_status": {"type": "string", "enum": ["approved_by_user", "denied_by_user"], "description": "Approval result."},
-      "error": {"type": "string", "description": "command_required|command_too_long|cmd_and_loop_cmd_conflict|long_sleep_in_foreground_command|loop_cmd_required_for_polling|interval_ms_required_for_loop_cmd|poll_mode_cannot_be_background|timeout|command_failed|background_spawn_failed|cancelled_by_user"}
+      "error": {"type": "string", "description": "command_required|command_too_long|cmd_and_loop_cmd_conflict|long_sleep_in_normal_command|loop_cmd_required_for_polling|interval_ms_required_for_loop_cmd|poll_mode_cannot_be_background|timeout|command_failed|background_spawn_failed|cancelled_by_user"}
     }
   }
 example_json: |

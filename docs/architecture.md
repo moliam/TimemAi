@@ -975,7 +975,7 @@ Current local-command approval is configured at startup:
 The runtime validates structured action shape and command limits. It does not
 infer the user's semantic goal from the natural-language text.
 
-Foreground commands use `cmd`. A positive `timeout_ms` is the runtime wait
+Normal commands use `cmd`. A positive `timeout_ms` is the runtime wait
 budget. `timeout_ms=-1` means the command blocks without a runtime timeout; the
 same execution path remains cancel-aware so host/UI cancellation can stop the
 active command. If such a command is still running after the long-command
@@ -993,7 +993,7 @@ The model uses `loop_cmd` with `interval_ms`; core repeatedly runs that check
 command until its exit code is 0, the total `loop_timeout_ms` expires, or the
 active turn is cancelled. `once_timeout_ms` bounds each individual check
 command. The success condition is intentionally fixed at exit code 0 and is not
-a separate configurable action field. This keeps `sleep 90 && check` out of foreground Bash,
+a separate configurable action field. This keeps `sleep 90 && check` out of normal Bash,
 lets the UI render a Poll action through the existing `core.action` topic, and
 preserves the model/runtime boundary: the model defines the command, while core
 owns the fixed success condition, approval, wait bounds, audit, bounded output,

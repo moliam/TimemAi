@@ -5103,7 +5103,7 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
         action.kind,
         agent_core::CoreActionKind::Bash {
             command: "rg --files -g '*.rs'".to_string(),
-            mode: "foreground".to_string(),
+            mode: "normal".to_string(),
             interval_ms: None,
             timeout_ms: Some(5000),
             loop_timeout_ms: None,
@@ -5742,7 +5742,7 @@ input_schema: |
     "properties": {
       "text": {"type": "string"},
       "background": {"type": "boolean"},
-      "mode": {"type": "string", "enum": ["foreground", "background"]},
+      "mode": {"type": "string", "enum": ["normal", "background"]},
       "timeout_ms": {"type": "integer"}
     },
     "required": ["text"]

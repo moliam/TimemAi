@@ -196,24 +196,24 @@ If args do not match this tool spec, runtime asks you to repair the response bef
 `run_bash loop_cmd=<check_command> interval_ms=<n> loop_timeout_ms=<total_wait_ms|-1> [once_timeout_ms=<n>]`
 
 **Description**
-`run_bash` runs a shell command on the local machine and collects bounded evidence from the command result. It supports foreground, background, and polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment. Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner. Use timeout_ms=-1 only when you explicitly want the command to block without a runtime timeout. Do not put long sleeps in cmd. For waiting on external state, use loop_cmd with interval_ms. The loop command is re-run until it exits with code 0 or loop_timeout_ms total wait budget is reached. For long local work that should keep running across later turns, use background=true and shell_job_status.
+`run_bash` runs a shell command on the local machine and collects bounded evidence from the command result. It supports normal, background, and polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment. Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner. Use timeout_ms=-1 only when you explicitly want the command to block without a runtime timeout. Do not put long sleeps in cmd. For waiting on external state, use loop_cmd with interval_ms. The loop command is re-run until it exits with code 0 or loop_timeout_ms total wait budget is reached. For long local work that should keep running across later turns, use background=true and shell_job_status.
 
 **Usage**
 Use cmd for a shell command. Optional: timeout_ms, background=true or mode=background. Use loop_cmd with interval_ms for polling/waiting. loop_cmd is run repeatedly until it exits with code 0 or loop_timeout_ms total wait budget is reached. once_timeout_ms is the per-check command timeout.
 
 **Options**
-- `background`: When true, return a job_id instead of blocking.
+- `background`: When true, runtime continues interaction without blocking on the action, returning a job_id for future reference. Use it for persistent long-running commands that should keep running across interaction rounds.
 - `cmd`: Shell command to execute.
 - `interval_ms`: Polling interval. Requires loop_cmd.
 - `loop_cmd`: Polling check command. Runtime re-runs it until it exits with code 0.
 - `loop_timeout_ms`: Total polling wait budget when loop_cmd is present, or -1 for no runtime timeout.
-- `mode`: Execution mode alias. Allowed: `foreground`, `background`.
+- `mode`: Execution mode alias. Allowed: `normal`, `background`.
 - `once_timeout_ms`: Per-check timeout in polling mode.
-- `timeout_ms`: Foreground wait budget, or -1 for no runtime timeout.
+- `timeout_ms`: Normal command wait budget, or -1 for no runtime timeout.
 - Required one of: `cmd`, `loop_cmd`
 
 **Result**
-Foreground returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check. Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts, elapsed_ms, last_status, and bounded last output. If a foreground command with timeout_ms=-1 runs for a long time, the host may ask the user whether to keep waiting. If the user stops waiting, the action returns cancelled_by_user and the runtime adds the user's cancellation as supplementary context for your next response.
+Normal returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check. Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts, elapsed_ms, last_status, and bounded last output. If a normal command with timeout_ms=-1 runs for a long time, the host may ask the user whether to keep waiting. If the user stops waiting, the action returns cancelled_by_user and the runtime adds the user's cancellation as supplementary context for your next response.
 If args do not match this tool spec, runtime asks you to repair the response before executing the tool.
 
 #### `self_tool`
@@ -288,9 +288,7 @@ Required tag rules:
   concrete actions when runtime work is needed. Do not write `<final_answer>`
   while still working; use `<progress>` for user-visible ongoing reports.
 - If the task is complete, write `<status>ALL_FINISHED</status>` and provide
-  `<final_answer>`. `ALL_FINISHED` means the current user request is complete; it
-  does not close the Timem session or prevent the user from continuing. Do not
-  use `working` only to keep the chat session open.
+  `<final_answer>`. `ALL_FINISHED` means all pending user tasks are completed.
 - Any response containing `<final_answer>` must also contain
   `<status>ALL_FINISHED</status>`, including responses that also contain
   `<context_compact>`.
@@ -322,14 +320,14 @@ inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
   complete and no more runtime interaction is needed for that request. Omit it
   or use `working` while work continues.
 - `<progress>`: optional progress report for multi-round tasks.
-- `<final_answer>`: final user-facing answer. Use only together with
-  `<status>ALL_FINISHED</status>`.
-- `<free_talk>`: optional casual reasoning, current plan, or context you want
-  kept visible to you in later prompt context.
-- `<working_still_action>`: runtime action section for work that still needs
+- `<final_answer>`: summary/answer of all pending tasks. Use only together with
+  `<status>ALL_FINISHED</status>`. Use structured markdown text by default.
+- `<free_talk>`: optional important reasoning, current plan, or context you want
+  kept visible to you in later prompt context. Or some explanation to user.
+- `<working_still_action>`: action section for work that still needs
   tool execution. Put one or more `<action_json><![CDATA[{...}]]></action_json>`
-  blocks inside it. The JSON content may be a single action object, an array of
-  action objects, or an array of action groups.
+  blocks inside it. The JSON content may be a single action object {}, a group of
+  action by array objects [{}{}], or multiple groups [{}{}][{}{}].
 - `<context_compact>`: optional context compaction block. Include `<delta_ids>`
   with comma-separated prompt delta ids and `<summary>` with the compacted
   state. Runtime hides those dynamic prompt deltas and appends the summary as a
@@ -345,7 +343,7 @@ Action object inside `<action_json>`:
 
 Action group object inside `<action_json>`:
 
-- `order`: `sequential` or `parallel`.
+- `order`: `sequential` or `parallel`. Groups are always executed sequentially.
 - `actions`: required array of action objects.
 
 

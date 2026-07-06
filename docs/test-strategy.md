@@ -86,7 +86,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Durable memory | query/update/delete, expected version, SQL read surface | realistic multi-turn memory story | memory concurrency + realistic story groups |
 | Multi-CLI memory conflicts | mem guard cross-process and same-version conflict tests | realistic story exercises shared storage shape | memory concurrency group |
 | Chat history | persisted query, delete, SQL time-window, current prompt fallback | realistic story | full CI |
-| Bash actions | approval risk, foreground shell, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
+| Bash actions | approval risk, normal shell, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
 | Runtime self tool | `self_tool::tests::*`, manifest/registry/executor tests, sensitive/protected env denial tests | core action replay for env/path/about/process plus UI observation tests | full CI |
 | User scenario replay | focused core replay tests for coding, memory QA, self QA/env update, and file-writing output | `scenario_coding_inspects_project_and_reports_from_shell_evidence`, `scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering`, `scenario_self_qa_and_runtime_env_update_stays_bounded`, `scenario_file_writing_outputs_artifact_and_verifies_content` | full CI |
 | Background jobs | background start/poll/cancel/status timeout tests for bash and registered command tools | realistic story where applicable | shell/tool job groups |

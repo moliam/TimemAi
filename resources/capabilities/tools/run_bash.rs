@@ -350,10 +350,10 @@ pub(crate) fn execute_run_bash(
     if !background
         && timeout_ms >= 0
         && is_regular_command
-        && contains_long_foreground_sleep(command_to_run)
+        && contains_long_normal_sleep(command_to_run)
     {
         return ActionExecution::Completed(format!(
-            "Action result: run_bash\ncommand: {}\nerror: long_sleep_in_foreground_command\nmessage: Use run_bash with interval_ms for waiting on external status, or background=true for long local work.",
+            "Action result: run_bash\ncommand: {}\nerror: long_sleep_in_normal_command\nmessage: Use run_bash with interval_ms for waiting on external status, or background=true for long local work.",
             command_to_run
         ));
     }
@@ -562,7 +562,7 @@ fn command_from_action(action: &ParsedAction) -> String {
     action.input_str("cmd")
 }
 
-fn contains_long_foreground_sleep(command: &str) -> bool {
+fn contains_long_normal_sleep(command: &str) -> bool {
     let tokens = shell_words_for_sleep_scan(command);
     tokens.windows(2).any(|pair| {
         pair[0] == "sleep" && sleep_arg_seconds(&pair[1]).is_some_and(|seconds| seconds >= 30.0)
@@ -866,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_bash_reports_status_and_output() {
+    fn normal_bash_reports_status_and_output() {
         let mut runtime = NeverCancelRuntime;
         let result = execute_one_bash("printf shell_ok", 1000, &mut runtime);
         assert!(result.contains("Action result: run_bash"));
@@ -875,14 +875,14 @@ mod tests {
     }
 
     #[test]
-    fn foreground_bash_timeout_is_bounded() {
+    fn normal_bash_timeout_is_bounded() {
         let mut runtime = NeverCancelRuntime;
         let result = execute_one_bash("sleep 2", 1000, &mut runtime);
         assert!(result.contains("error: timeout"));
     }
 
     #[test]
-    fn foreground_bash_timeout_minus_one_waits_without_runtime_timeout() {
+    fn normal_bash_timeout_minus_one_waits_without_runtime_timeout() {
         let mut runtime = NeverCancelRuntime;
         let result = execute_one_bash("sleep 1; printf no_timeout_ok", -1, &mut runtime);
         assert!(result.contains("status: 0"), "{result}");
@@ -890,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_bash_timeout_minus_one_reports_long_running_status_to_runtime() {
+    fn normal_bash_timeout_minus_one_reports_long_running_status_to_runtime() {
         let _guard = set_long_running_command_prompt_after_for_tests(Duration::from_millis(50));
         let mut runtime = CancelAfterLongRunningPromptRuntime::default();
         let result = execute_one_bash("sleep 2; printf should_not_finish", -1, &mut runtime);
@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_run_bash_rejects_long_sleep_commands() {
+    fn normal_run_bash_rejects_long_sleep_commands() {
         let store = FileShellJobStore::new(&tmp_memory_dir("long_sleep_guard"));
         let result = execute_run_bash(
             "sleep 90 && printf done",
@@ -925,7 +925,7 @@ mod tests {
         );
         match result {
             ActionExecution::Completed(text) => {
-                assert!(text.contains("long_sleep_in_foreground_command"));
+                assert!(text.contains("long_sleep_in_normal_command"));
                 assert!(text.contains("interval_ms"));
             }
             ActionExecution::NeedsApproval(_) => {
@@ -935,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_run_bash_allows_short_sleep_commands() {
+    fn normal_run_bash_allows_short_sleep_commands() {
         let store = FileShellJobStore::new(&tmp_memory_dir("short_sleep_guard"));
         let result = execute_run_bash(
             "sleep 1; printf done",
