@@ -42,6 +42,8 @@ pub(crate) fn render_static_prompt(
         "{{RESPONSE_PROTOCOL_SECTION}}",
         &protocol_suite.protocol_prompt_section(),
     );
+    let with_protocol =
+        with_protocol.replace("{{CURRENT_PROTOCOL_LANG}}", protocol_suite.lang_format());
     // 2. Fill {{TOOL_CATALOG}} and {{SKILL_HEADERS}} from capabilities
     let with_caps = capabilities.enrich_static_prompt(&with_protocol);
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
@@ -113,7 +115,9 @@ pub(crate) fn render_delta_slices(delta: &PromptDelta) -> Vec<PromptSlice> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::response_protocol::json_suite::JsonSuiteV1;
     use crate::response_protocol::markdown_suite::MarkdownSuiteV1;
+    use crate::response_protocol::xml_suite::XmlSuiteV1;
 
     #[test]
     fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
@@ -158,5 +162,21 @@ mod tests {
         assert!(!rendered.contains("slice_id:"));
         assert!(!rendered.contains("prompt_type:"));
         assert!(!rendered.contains("HIDDEN"));
+    }
+
+    #[test]
+    fn prompt_renderer_replaces_current_protocol_language() {
+        let template = "Return {{CURRENT_PROTOCOL_LANG}}\n{{RESPONSE_PROTOCOL_SECTION}}";
+        let markdown =
+            render_static_prompt(template, &CapabilityRegistry::builtin(), &MarkdownSuiteV1);
+        let json = render_static_prompt(template, &CapabilityRegistry::builtin(), &JsonSuiteV1);
+        let xml = render_static_prompt(template, &CapabilityRegistry::builtin(), &XmlSuiteV1);
+
+        assert!(markdown.contains("Return Markdown"));
+        assert!(json.contains("Return JSON"));
+        assert!(xml.contains("Return XML"));
+        assert!(!markdown.contains("{{CURRENT_PROTOCOL_LANG}}"));
+        assert!(!json.contains("{{CURRENT_PROTOCOL_LANG}}"));
+        assert!(!xml.contains("{{CURRENT_PROTOCOL_LANG}}"));
     }
 }

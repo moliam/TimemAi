@@ -1413,6 +1413,85 @@ finished
     }
 
     #[test]
+    fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
+        let dir = tmp_dir("session_cache_plan_xml_protocol");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(
+            include_str!("../../resources/system_prompt/system_prompt.md"),
+            test_profile(),
+            &dir,
+        );
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        let mut config = test_config();
+        let mut ui = NoopTurnUi;
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"<response>
+<progress>查询 scratch 后继续。</progress>
+<intermediate_actions>
+<action_json><![CDATA[
+{
+  "action": "memmgr",
+  "intent": "List recent scratch notes.",
+  "args": {
+    "type": "scratch",
+    "op": "query",
+    "query": "",
+    "limit": 3
+  }
+}
+]]></action_json>
+</intermediate_actions>
+</response>"#,
+                5_000,
+                false,
+            )),
+            Ok(llm(
+                r#"<response>
+<status>finished</status>
+<final_answer>没有找到相关 scratch。</final_answer>
+</response>"#,
+                5_800,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "帮我看看最近 scratch 里有什么",
+                session: "cache_xml_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "没有找到相关 scratch。");
+        assert_eq!(model.prompts.len(), 2);
+        assert!(model.prompts[0].contains("The top-level response is XML, not JSON or Markdown."));
+        assert!(model.prompts[1].contains("The top-level response is XML, not JSON or Markdown."));
+
+        let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
+        assert!(second_parts
+            .static_prompt
+            .contains("The top-level response is XML, not JSON or Markdown."));
+        assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
+        assert!(second_parts.new_delta.contains("Action result: memmgr"));
+        let second_blocks = crate::plan_incremental_cache(second_parts);
+        assert_eq!(second_blocks.len(), 3);
+        assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);
+        assert!(second_blocks[1..]
+            .iter()
+            .all(|block| block.cache == crate::CacheControl::Ephemeral));
+    }
+
+    #[test]
     fn session_turn_uses_host_supplied_runtime_context() {
         let dir = tmp_dir("host_runtime_context");
         let audit = dir.join("audit.json");

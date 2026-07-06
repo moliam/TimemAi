@@ -852,6 +852,19 @@ mod tests {
         );
         assert!(markdown_body.get("response_format").is_none());
 
+        aliyun.response_protocol = ResponseProtocolKind::Xml;
+        assert_eq!(plan_structured_output(&aliyun), StructuredOutputHint::None);
+        let xml_body = build_provider_request(
+            &aliyun,
+            &[ProviderPromptBlock {
+                role: ProviderPromptRole::System,
+                text: "The top-level response is XML, not JSON or Markdown.".to_string(),
+                cache: ProviderCacheControl::None,
+            }],
+            plan_structured_output(&aliyun),
+        );
+        assert!(xml_body.get("response_format").is_none());
+
         let mut custom = config(ApiProtocol::OpenAiCompatible);
         custom.provider = "custom".to_string();
         custom.response_protocol = ResponseProtocolKind::Json;

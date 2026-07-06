@@ -73,6 +73,7 @@ required_patterns=(
   "performance_guard_large_context_prompt_render_is_bounded"
   "performance_guard_topic_generation_for_many_actions_is_bounded"
   "performance_guard_many_observation_events_render_bounded"
+  "session_turn_preserves_cache_plan_with_xml_response_protocol"
 )
 
 for pattern in "${required_patterns[@]}"; do
@@ -291,6 +292,7 @@ done
 static_prompt_snapshots=(
   "resources/protocol/markdown/expanded.md"
   "resources/protocol/json/expanded.md"
+  "resources/protocol/xml/expanded.md"
 )
 
 static_prompt_snapshot_common_required=(
@@ -310,6 +312,13 @@ static_prompt_snapshot_markdown_required=(
   "\`## Intermediate_Actions\`"
 )
 
+static_prompt_snapshot_xml_required=(
+  "XML response tags."
+  "The top-level response is XML."
+  "\`<response>\`"
+  "\`<intermediate_actions>\`"
+)
+
 for static_prompt_snapshot in "${static_prompt_snapshots[@]}"; do
   if [ ! -f "$static_prompt_snapshot" ]; then
     echo "missing expanded static prompt snapshot: $static_prompt_snapshot" >&2
@@ -326,6 +335,13 @@ done
 for pattern in "${static_prompt_snapshot_markdown_required[@]}"; do
   if ! search_fixed "$pattern" "resources/protocol/markdown/expanded.md"; then
     echo "missing required markdown static prompt snapshot item: $pattern" >&2
+    exit 1
+  fi
+done
+
+for pattern in "${static_prompt_snapshot_xml_required[@]}"; do
+  if ! search_fixed "$pattern" "resources/protocol/xml/expanded.md"; then
+    echo "missing required xml static prompt snapshot item: $pattern" >&2
     exit 1
   fi
 done

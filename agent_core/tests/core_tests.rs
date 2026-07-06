@@ -4707,6 +4707,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(template.contains("Answer based on collected evidence"));
     assert!(template.contains("Context maintenance"));
     assert!(template.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
+    assert!(template.contains("{{CURRENT_PROTOCOL_LANG}}"));
     assert!(template.contains("{{TOOL_CATALOG}}"));
     assert!(template.contains("{{SKILL_HEADERS}}"));
     assert!(template.contains("Do not expose internal mechanisms"));
@@ -4855,8 +4856,10 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
     assert!(markdown_prompt.contains("The top-level response is Markdown, not JSON."));
+    assert!(markdown_prompt.contains("protocol-compliant response in Markdown format"));
     assert!(markdown_prompt.contains("## Intermediate_Actions"));
     assert!(!markdown_prompt.contains("All your output things MUST BE enclosed"));
+    assert!(!markdown_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
     let mut json_core = AgentCore::new(
         template,
@@ -4869,6 +4872,23 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
     assert!(json_prompt.contains("All your output things MUST BE enclosed"));
+    assert!(json_prompt.contains("protocol-compliant response in JSON format"));
+    assert!(!json_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
+
+    let mut xml_core = AgentCore::new(
+        template,
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("response_protocol_xml"),
+    );
+    xml_core.set_response_protocol(ResponseProtocolKind::Xml);
+    let xml_prompt = match xml_core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(xml_prompt.contains("The top-level response is XML, not JSON or Markdown."));
+    assert!(xml_prompt.contains("protocol-compliant response in XML format"));
+    assert!(xml_prompt.contains("<intermediate_actions>"));
+    assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }
 
 #[test]

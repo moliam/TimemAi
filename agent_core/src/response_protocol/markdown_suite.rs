@@ -17,6 +17,9 @@ impl ResponseProtocolSuite for MarkdownSuiteV1 {
     fn name(&self) -> &str {
         "markdown_v1"
     }
+    fn lang_format(&self) -> &str {
+        "Markdown"
+    }
     fn protocol_schema(&self) -> &str {
         ""
     }

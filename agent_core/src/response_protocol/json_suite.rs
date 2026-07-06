@@ -18,6 +18,9 @@ impl ResponseProtocolSuite for JsonSuiteV1 {
     fn name(&self) -> &str {
         "json_v1"
     }
+    fn lang_format(&self) -> &str {
+        "JSON"
+    }
     fn protocol_schema(&self) -> &str {
         ""
     }

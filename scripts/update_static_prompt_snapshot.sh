@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 OUT_MARKDOWN="resources/protocol/markdown/expanded.md"
 OUT_JSON="resources/protocol/json/expanded.md"
+OUT_XML="resources/protocol/xml/expanded.md"
 TMP_DIR="$(mktemp -d)"
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -20,12 +21,14 @@ render_one() {
 
 TMP_MARKDOWN="$TMP_DIR/markdown.md"
 TMP_JSON="$TMP_DIR/json.md"
+TMP_XML="$TMP_DIR/xml.md"
 render_one markdown "$TMP_MARKDOWN"
 render_one json "$TMP_JSON"
+render_one xml "$TMP_XML"
 
 if [ "${1:-}" = "--check" ]; then
   failed=0
-  for pair in "$TMP_MARKDOWN:$OUT_MARKDOWN" "$TMP_JSON:$OUT_JSON"; do
+  for pair in "$TMP_MARKDOWN:$OUT_MARKDOWN" "$TMP_JSON:$OUT_JSON" "$TMP_XML:$OUT_XML"; do
     tmp="${pair%%:*}"
     out="${pair#*:}"
     if ! cmp -s "$tmp" "$out"; then
@@ -42,8 +45,10 @@ if [ "${1:-}" = "--check" ]; then
 else
   cp "$TMP_MARKDOWN" "$OUT_MARKDOWN"
   cp "$TMP_JSON" "$OUT_JSON"
+  cp "$TMP_XML" "$OUT_XML"
   trap - EXIT
   cleanup
   echo "updated $OUT_MARKDOWN"
   echo "updated $OUT_JSON"
+  echo "updated $OUT_XML"
 fi

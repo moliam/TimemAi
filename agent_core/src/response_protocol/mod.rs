@@ -1,5 +1,6 @@
 pub mod json_suite;
 pub mod markdown_suite;
+pub mod xml_suite;
 
 use serde_json::Value;
 
@@ -9,12 +10,14 @@ use crate::capability::CapabilityRegistry;
 pub enum ResponseProtocolKind {
     Markdown,
     Json,
+    Xml,
 }
 
 impl ResponseProtocolKind {
     pub fn from_name(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
             "json" | "json_v1" | "response_v1" => Self::Json,
+            "xml" | "xml_v1" => Self::Xml,
             _ => Self::Markdown,
         }
     }
@@ -23,6 +26,15 @@ impl ResponseProtocolKind {
         match self {
             Self::Markdown => "markdown",
             Self::Json => "json",
+            Self::Xml => "xml",
+        }
+    }
+
+    pub fn lang_format(&self) -> &'static str {
+        match self {
+            Self::Markdown => "Markdown",
+            Self::Json => "JSON",
+            Self::Xml => "XML",
         }
     }
 
@@ -30,6 +42,7 @@ impl ResponseProtocolKind {
         match self {
             Self::Markdown => &markdown_suite::MarkdownSuiteV1,
             Self::Json => &json_suite::JsonSuiteV1,
+            Self::Xml => &xml_suite::XmlSuiteV1,
         }
     }
 }
@@ -213,6 +226,7 @@ pub struct ParsedContextCompact {
 /// Trait for response protocol implementations.
 pub trait ResponseProtocolSuite {
     fn name(&self) -> &str;
+    fn lang_format(&self) -> &str;
     fn protocol_schema(&self) -> &str;
     fn protocol_examples(&self) -> &str;
     fn response_schema_summary(&self) -> &str;
@@ -304,100 +318,129 @@ mod tests {
         markdown_suite::parse_markdown_envelope(raw, &caps())
     }
 
-    fn assert_protocols_equivalent(json_raw: &str, markdown_raw: &str) {
+    fn parse_xml(raw: &str) -> ParsedEnvelope {
+        xml_suite::parse_xml_envelope(raw, &caps())
+    }
+
+    fn assert_protocols_equivalent(json_raw: &str, markdown_raw: &str, xml_raw: &str) {
         let json_env = parse_json(json_raw);
         let markdown_env = parse_markdown(markdown_raw);
+        let xml_env = parse_xml(xml_raw);
         assert_eq!(
             markdown_env.repair_issue, None,
             "markdown env: {markdown_env:?}"
         );
         assert_eq!(json_env.repair_issue, None, "json env: {json_env:?}");
+        assert_eq!(xml_env.repair_issue, None, "xml env: {xml_env:?}");
         assert_eq!(markdown_env.continue_work, json_env.continue_work);
+        assert_eq!(xml_env.continue_work, json_env.continue_work);
         assert_eq!(
             markdown_env.report_job_progress,
             json_env.report_job_progress
         );
+        assert_eq!(xml_env.report_job_progress, json_env.report_job_progress);
         assert_eq!(markdown_env.final_answer, json_env.final_answer);
+        assert_eq!(xml_env.final_answer, json_env.final_answer);
         assert_eq!(markdown_env.thought, json_env.thought);
+        assert_eq!(xml_env.thought, json_env.thought);
         assert_eq!(
             markdown_env.thought_keep_in_context,
             json_env.thought_keep_in_context
         );
+        assert_eq!(
+            xml_env.thought_keep_in_context,
+            json_env.thought_keep_in_context
+        );
         assert_eq!(markdown_env.next_actions, json_env.next_actions);
+        assert_eq!(xml_env.next_actions, json_env.next_actions);
         assert_eq!(markdown_env.context_compacts, json_env.context_compacts);
+        assert_eq!(xml_env.context_compacts, json_env.context_compacts);
     }
 
     #[test]
-    fn json_and_markdown_protocols_parse_same_final_answer() {
+    fn json_markdown_xml_protocols_parse_same_final_answer() {
         assert_protocols_equivalent(
             r#"{"status":"finished","final_answer":"done"}"#,
             "## Status\nfinished\n\n## Final_Answer\ndone",
+            "<response><status>finished</status><final_answer>done</final_answer></response>",
         );
     }
 
     #[test]
-    fn json_and_markdown_protocols_parse_same_working_actions() {
+    fn json_markdown_xml_protocols_parse_same_working_actions() {
         assert_protocols_equivalent(
             r#"{"report_job_progress":"checking","free_talk":"state","next_actions":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Progress\nchecking\n\n## Free_talk\nstate\n\n## Intermediate_Actions\n```action\n{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}\n```\n```action\n{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}\n```",
+            r#"<response><progress>checking</progress><free_talk>state</free_talk><intermediate_actions><action_json><![CDATA[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}}]]></action_json><action_json><![CDATA[{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json></intermediate_actions></response>"#,
         );
     }
 
     #[test]
-    fn json_and_markdown_protocols_parse_same_bare_action_array() {
+    fn json_markdown_xml_protocols_parse_same_bare_action_array() {
         assert_protocols_equivalent(
             r#"{"report_job_progress":"checking","next_actions":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Progress\nchecking\n\n## Intermediate_Actions\n[{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}},{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]",
+            r#"<response><progress>checking</progress><intermediate_actions><![CDATA[[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]]]></intermediate_actions></response>"#,
         );
     }
 
     #[test]
-    fn json_and_markdown_protocols_parse_same_context_compact() {
+    fn json_markdown_xml_protocols_parse_same_context_compact() {
         assert_protocols_equivalent(
             r#"{"report_job_progress":"compact","context_compact":{"delta_ids":["pd_a"],"summary":"keep state"},"next_actions":[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]}"#,
             "## Progress\ncompact\n\n## Context Compact\ndelta_ids: pd_a\nsummary:\nkeep state\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```",
+            r#"<response><progress>compact</progress><context_compact><delta_ids>pd_a</delta_ids><summary>keep state</summary></context_compact><intermediate_actions><action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]]></action_json></intermediate_actions></response>"#,
         );
     }
 
     #[test]
-    fn json_and_markdown_protocols_repair_same_finished_with_actions() {
+    fn json_markdown_xml_protocols_repair_same_finished_with_actions() {
         let json_env = parse_json(
             r#"{"status":"finished","final_answer":"done","next_actions":[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}]}"#,
         );
         let markdown_env = parse_markdown(
             "## Status\nfinished\n\n## Final_Answer\ndone\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Verify output.\",\"args\":{\"cmd\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```",
         );
+        let xml_env = parse_xml(
+            r#"<response><status>finished</status><final_answer>done</final_answer><intermediate_actions><action_json><![CDATA[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}]]></action_json></intermediate_actions></response>"#,
+        );
         assert_eq!(
             json_env.repair_issue.as_deref(),
             Some("status_finished_must_not_include_next_actions")
         );
         assert_eq!(markdown_env.repair_issue, json_env.repair_issue);
+        assert_eq!(xml_env.repair_issue, json_env.repair_issue);
     }
 
     #[test]
-    fn json_and_markdown_protocols_repair_same_final_answer_without_finished_status() {
+    fn json_markdown_xml_protocols_repair_same_final_answer_without_finished_status() {
         let json_env = parse_json(r#"{"final_answer":"done"}"#);
         let markdown_env = parse_markdown("## Final_Answer\ndone");
+        let xml_env = parse_xml("<response><final_answer>done</final_answer></response>");
         assert_eq!(
             json_env.repair_issue.as_deref(),
             Some("final_answer_requires_status_finished")
         );
         assert_eq!(markdown_env.repair_issue, json_env.repair_issue);
+        assert_eq!(xml_env.repair_issue, json_env.repair_issue);
     }
 
     #[test]
-    fn json_and_markdown_protocols_repair_same_working_without_actions() {
+    fn json_markdown_xml_protocols_repair_same_working_without_actions() {
         let json_env = parse_json(r#"{"status":"working","report_job_progress":"checking"}"#);
         let markdown_env = parse_markdown("## Status\nworking\n\n## Progress\nchecking");
+        let xml_env =
+            parse_xml("<response><status>working</status><progress>checking</progress></response>");
         assert_eq!(
             json_env.repair_issue.as_deref(),
             Some("next_actions_required_when_status_working")
         );
         assert_eq!(markdown_env.repair_issue, json_env.repair_issue);
+        assert_eq!(xml_env.repair_issue, json_env.repair_issue);
     }
 
     #[test]
-    fn json_and_markdown_protocols_share_action_input_shape() {
+    fn json_markdown_xml_protocols_share_action_input_shape() {
         let action = json!({
             "action": "run_bash",
             "intent": "Check files.",
@@ -408,8 +451,14 @@ mod tests {
             "## Intermediate_Actions\n```action\n{}\n```",
             action
         ));
+        let xml_env = parse_xml(&format!(
+            "<response><intermediate_actions><action_json><![CDATA[{}]]></action_json></intermediate_actions></response>",
+            action
+        ));
         assert_eq!(json_env.repair_issue, None);
         assert_eq!(markdown_env.repair_issue, None);
+        assert_eq!(xml_env.repair_issue, None);
         assert_eq!(json_env.next_actions, markdown_env.next_actions);
+        assert_eq!(json_env.next_actions, xml_env.next_actions);
     }
 }

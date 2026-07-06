@@ -190,8 +190,8 @@ and other providers use OpenAI-compatible chat completions. For a custom
 gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 
 `TIMEM_RESPONSE_PROTOCOL` chooses how the model must format its response for
-the local runtime parser. Supported values are `markdown` and `json`; the
-default is `markdown`.
+the local runtime parser. Supported values are `markdown`, `json`, and `xml`;
+the default is `markdown`.
 
 `TIMEM_WORK_INSTRUCTIONS` controls whether Timem loads `AGENTS.md` and
 `CLAUDE.md` from the current working directory into agent context. Supported

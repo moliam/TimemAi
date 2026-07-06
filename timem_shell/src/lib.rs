@@ -823,7 +823,7 @@ mod tests {
             "--api-protocol",
             "openai-compatible",
             "--response-protocol",
-            "json",
+            "xml",
             "--api-key",
             "cli-key",
             "--model",
@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(options.space.as_deref(), Some(".x"));
         assert_eq!(options.provider.as_deref(), Some("custom-claude-gateway"));
         assert_eq!(options.api_protocol.as_deref(), Some("openai-compatible"));
-        assert_eq!(options.response_protocol.as_deref(), Some("json"));
+        assert_eq!(options.response_protocol.as_deref(), Some("xml"));
         assert_eq!(options.api_key.as_deref(), Some("cli-key"));
         assert_eq!(options.model.as_deref(), Some("gpt-x"));
         assert_eq!(options.base_url.as_deref(), Some("http://local/v1"));

@@ -193,6 +193,8 @@ protocol prompt prose.
   injection, schema summary, and expanded prompt snapshot.
 - `resources/protocol/json/`: JSON response protocol prompt injection, schema
   summary, and expanded prompt snapshot.
+- `resources/protocol/xml/`: XML response protocol prompt injection, schema
+  summary, and expanded prompt snapshot.
 - `resources/capabilities/tools/*.yaml`: tool capability manifests. The same
   manifest data renders the model-facing tool catalog and validates parsed
   action arguments before execution.
@@ -216,7 +218,8 @@ resources/protocol/<suite>/
 agent_core/src/response_protocol/
 ├─ mod.rs                        protocol-independent ParsedEnvelope/ParsedAction
 ├─ markdown_suite.rs             Markdown response parser and repair policy
-└─ json_suite.rs                 JSON response parser and repair policy
+├─ json_suite.rs                 JSON response parser and repair policy
+└─ xml_suite.rs                  XML response parser and repair policy
 ```
 
 The `resources/protocol/<suite>` files are model-facing prompt resources and
@@ -226,10 +229,10 @@ define runtime behavior, repair boundaries, and tests; they must stay aligned
 with the resource text and generated expanded snapshots.
 
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
-`--response-protocol`. The default is `markdown`; `json` remains available.
-Both suites must produce the same internal `ParsedEnvelope` semantics for the
-same user-visible capability: status/final answer, progress, free_talk retention,
-actions, and `context_compact`.
+`--response-protocol`. The default is `markdown`; `json` and `xml` remain
+available. All suites must produce the same internal `ParsedEnvelope` semantics
+for the same user-visible capability: status/final answer, progress, free_talk
+retention, actions, and `context_compact`.
 
 The prompt must not tell the model that multiple suites exist. It should only
 show the currently selected response protocol. This keeps provider-facing text
@@ -684,8 +687,8 @@ Limitations:
 
 The model does not call Rust functions directly. It sends one response in the
 currently selected response protocol. `TIMEM_RESPONSE_PROTOCOL` selects the
-model response protocol (`markdown` by default, `json` optional). This is
-separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
+model response protocol (`markdown` by default; `json` and `xml` optional). This
+is separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
 
 Each response parses into the same runtime envelope: optional `status`, optional
 `report_job_progress`, optional `next_actions`, optional `context_compact`, and
@@ -720,12 +723,15 @@ Each protocol directory owns its model-facing schema summary and examples:
 
 - [`resources/protocol/markdown/response_protocol.md`](../resources/protocol/markdown/response_protocol.md)
 - [`resources/protocol/json/response_protocol.md`](../resources/protocol/json/response_protocol.md)
+- [`resources/protocol/xml/response_protocol.md`](../resources/protocol/xml/response_protocol.md)
 
 Keep protocol examples short; the runtime parser and capability registry are
 the authoritative executable boundary.
 
 In the JSON protocol, the envelope has this shape. In the Markdown protocol,
-the same fields are represented as sections.
+the same fields are represented as sections. In the XML protocol, the same
+fields are represented as tags under one `<response>` root; tool action payloads
+remain JSON objects inside `<action_json>` blocks.
 
 ```json
 {
