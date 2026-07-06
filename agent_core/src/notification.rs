@@ -17,6 +17,7 @@ pub enum CoreActionKind {
         command: String,
         mode: String,
         interval_ms: Option<u64>,
+        timeout_ms: Option<i64>,
     },
     ShellJob {
         job_id: String,
@@ -120,13 +121,11 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
     match action.action.as_str() {
         "run_bash" => {
             let interval_ms = action.input_u64("interval_ms");
-            let command = {
-                let command = action.input_str("command");
-                if command.is_empty() {
-                    action.input_str("cmd")
-                } else {
-                    command
-                }
+            let loop_command = action.input_str("loop_cmd");
+            let command = if loop_command.is_empty() {
+                action.input_str("cmd")
+            } else {
+                loop_command
             };
             CoreActionKind::Bash {
                 command,
@@ -138,6 +137,7 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
                     "foreground".to_string()
                 },
                 interval_ms,
+                timeout_ms: action.input_i64("timeout_ms"),
             }
         }
         "shell_job_status" => CoreActionKind::ShellJob {
@@ -174,7 +174,7 @@ mod tests {
     fn notification_events_are_protocol_independent_core_data() {
         let suite = ResponseProtocolKind::Json.suite();
         let envelope = suite.parse(
-            r#"{"status":"working","free_talk":"先说明一下我的判断。","report_job_progress":"正在检查。","next_actions":[{"action":"memmgr","intent":"查询项目记忆","args":{"type":"durable","op":"query","query":"project"}},{"action":"run_bash","intent":"查看文件","args":{"command":"pwd"}},{"action":"self_tool","intent":"读取运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","free_talk":"先说明一下我的判断。","report_job_progress":"正在检查。","next_actions":[{"action":"memmgr","intent":"查询项目记忆","args":{"type":"durable","op":"query","query":"project"}},{"action":"run_bash","intent":"查看文件","args":{"cmd":"pwd"}},{"action":"self_tool","intent":"读取运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
             &crate::capability::CapabilityRegistry::builtin(),
         );
         let events = notifications_from_envelope(&envelope);
@@ -207,12 +207,13 @@ mod tests {
                     intent: Some("查看文件".to_string()),
                     action: "run_bash".to_string(),
                     input: serde_json::json!({
-                        "command": "pwd"
+                        "cmd": "pwd"
                     }),
                     kind: CoreActionKind::Bash {
                         command: "pwd".to_string(),
                         mode: "foreground".to_string(),
                         interval_ms: None,
+                        timeout_ms: None,
                     },
                     active: true,
                     memory_activity: CoreMemoryActivity::None,

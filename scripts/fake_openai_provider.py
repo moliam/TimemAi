@@ -59,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
                             "自动换行和状态栏刷新不会乱框。"
                         ),
                         "args": {
-                            "command": (
+                            "cmd": (
                                 "printf 'STRESS_ACTION_DONE\\n'; "
                                 "sleep 1; "
                                 "printf '长输出-一二三四五六七八九十-abcdefghijklmnopqrstuvwxyz-1234567890-│└─\\n'"

@@ -317,7 +317,7 @@ package installs, or video commands, the model can request:
   "action": "run_bash",
   "intent": "Run a long local task.",
   "args": {
-    "command": "cargo test",
+    "cmd": "cargo test",
     "background": true
   }
 }

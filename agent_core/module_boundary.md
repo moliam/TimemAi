@@ -59,7 +59,9 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   background job ids, persisted status/output files, polling, cancellation,
   timeout handling, process termination, and action evidence for tool jobs.
   Hosts may render progress/status, but they must not own the lifecycle for
-  model-requested registered tool jobs.
+  model-requested registered tool jobs. Session-owned background shell jobs are
+  cleaned up by core when the session reaches a final answer or performs a
+  context compact.
 - Model-requested local tool execution, including `run_bash`, command approval
   application, process execution, command output/evidence shaping, and tool
   audit. Hosts may provide user decisions and cancellation signals, but the

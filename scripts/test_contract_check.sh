@@ -300,7 +300,7 @@ static_prompt_snapshot_common_required=(
   "**Usage**"
   "**Result**"
   '"args": {'
-  '"command": "'
+  '"cmd": "'
 )
 
 static_prompt_snapshot_markdown_required=(

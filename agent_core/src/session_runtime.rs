@@ -755,7 +755,7 @@ mod tests {
         let mut model = ReplayModel::new([
             Ok(llm(
                 format!(
-                    r#"{{"status":"working","report_job_progress":"等待 CI 完成。","next_actions":[{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"command":{},"interval_ms":1000,"timeout_ms":5000,"check_timeout_ms":1000}}}}]}}"#,
+                    r#"{{"status":"working","report_job_progress":"等待 CI 完成。","next_actions":[{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":1000,"timeout_ms":5000,"check_timeout_ms":1000}}}}]}}"#,
                     serde_json::to_string(&check_command).unwrap()
                 ),
                 1_000,
@@ -811,14 +811,14 @@ mod tests {
   {
     "order": "parallel",
     "actions": [
-      {"action":"run_bash","intent":"并行检查 A","args":{"command":"sleep 1; printf group_a","timeout_ms":3000}},
-      {"action":"run_bash","intent":"并行检查 B","args":{"command":"sleep 1; printf group_b","timeout_ms":3000}}
+      {"action":"run_bash","intent":"并行检查 A","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
+      {"action":"run_bash","intent":"并行检查 B","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
     ]
   },
   {
     "order": "sequential",
     "actions": [
-      {"action":"run_bash","intent":"前一组完成后再执行 C","args":{"command":"printf group_c","timeout_ms":3000}}
+      {"action":"run_bash","intent":"前一组完成后再执行 C","args":{"cmd":"printf group_c","timeout_ms":3000}}
     ]
   }
 ]
@@ -1431,7 +1431,7 @@ finished
         let mut model = ReplayModel::new([
             Ok(llm("{not valid json}", 5_000, false)),
             Ok(llm(
-                r#"next_actions: [{"action":"run_bash","args":{"command":"git commit"}}]"#,
+                r#"next_actions: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#,
                 5_100,
                 false,
             )),
@@ -2025,7 +2025,7 @@ finished
         let output_file = dir.join("approved.txt");
         let command = format!("printf approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write approved test output.","args":{{"command":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -2114,7 +2114,7 @@ finished
         let output_file = dir.join("cancelled.txt");
         let command = format!("printf cancelled > {}", output_file.display());
         let first_response = format!(
-            r#"{{"status":"working","report_job_progress":"需要审批。","next_actions":[{{"action":"run_bash","intent":"Write cancelled test output.","args":{{"command":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"status":"working","report_job_progress":"需要审批。","next_actions":[{{"action":"run_bash","intent":"Write cancelled test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -2173,7 +2173,7 @@ finished
         let output_file = dir.join("approved_by_default.txt");
         let command = format!("printf default-approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"status":"working","report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write default approved test output.","args":{{"command":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"status":"working","report_job_progress":"","next_actions":[{{"action":"run_bash","intent":"Write default approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -2231,7 +2231,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"finished","final_answer":"文件已生成并验证。","next_actions":[{"action":"run_bash","intent":"Verify output.","args":{"command":"true","timeout_ms":5000}}]}"#,
+                r#"{"status":"finished","final_answer":"文件已生成并验证。","next_actions":[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"true","timeout_ms":5000}}]}"#,
                 3_000,
                 false,
             )),
@@ -2376,7 +2376,7 @@ finished
   "action": "run_bash",
   "intent": "验证 shell 命令可执行",
   "args": {
-    "command": "printf markdown-ok",
+    "cmd": "printf markdown-ok",
     "timeout_ms": 5000
   }
 }
@@ -2431,6 +2431,7 @@ Markdown 协议动作已执行。"#,
                             command: "printf markdown-ok".to_string(),
                             mode: "foreground".to_string(),
                             interval_ms: None,
+                            timeout_ms: Some(5000),
                         }
             })
         }));

@@ -736,7 +736,7 @@ the same fields are represented as sections.
       "action": "run_bash",
       "intent": "Count Rust source lines",
       "args": {
-        "command": "rg --files -g '*.rs' | xargs wc -l",
+        "cmd": "rg --files -g '*.rs' | xargs wc -l",
         "timeout_ms": 5000
       }
     }
@@ -775,7 +775,7 @@ model response:
       "action": "run_bash",
       "intent": "Inspect the retry renderer.",
       "args": {
-        "command": "rg -n 'retry_notice|render_thinking' timem_shell/src",
+        "cmd": "rg -n 'retry_notice|render_thinking' timem_shell/src",
         "timeout_ms": 5000
       }
     }
@@ -969,19 +969,29 @@ Current local-command approval is configured at startup:
 The runtime validates structured action shape and command limits. It does not
 infer the user's semantic goal from the natural-language text.
 
-Short commands run in the foreground. Long-running commands should use
-`run_bash` with `background=true` or `mode=background`. Runtime returns a
-`job_id`, output file, and status file; the model then uses `shell_job_status`
-to poll the job instead of repeating the long command.
+Foreground commands use `cmd`. A positive `timeout_ms` is the runtime wait
+budget. `timeout_ms=-1` means the command blocks without a runtime timeout; the
+same execution path remains cancel-aware so host/UI cancellation can stop the
+active command. Long-running work that should survive later prompt deltas should
+use `background=true` or `mode=background`. Runtime returns a `job_id`, output
+file, and status file; the model then uses `shell_job_status` to poll the job
+instead of repeating the long command.
 
 Waiting on external state is a structured `run_bash` mode, not a separate tool.
-When `interval_ms` is present, core repeatedly runs the command until its exit
-code is 0, the total `timeout_ms` expires, or the active turn is cancelled. This
-keeps `sleep 90 && check` out of foreground Bash,
+The model uses `loop_cmd` with `interval_ms`; core repeatedly runs that check
+command until its exit code is 0, the total `timeout_ms` expires, or the active
+turn is cancelled. The success condition is intentionally fixed at exit code 0
+and is not a separate configurable action field. This keeps `sleep 90 && check`
+out of foreground Bash,
 lets the UI render a Poll action through the existing `core.action` topic, and
 preserves the model/runtime boundary: the model defines the command, while core
 owns the fixed success condition, approval, wait bounds, audit, bounded output,
 and cancellation.
+
+Background shell jobs are owned by the session that created them. When that
+session reaches a final answer or performs a context compact, core checks the
+session-owned background shell board and terminates unfinished jobs so stale
+processes do not outlive the session worker's active task context.
 
 ### Context Shrink Action
 

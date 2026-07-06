@@ -1877,7 +1877,7 @@ mod tests {
         assert!(registry
             .validate_action_input(
                 "run_bash",
-                &json_object([("command", Value::String("pwd".to_string()))])
+                &json_object([("cmd", Value::String("pwd".to_string()))])
             )
             .unwrap_err()
             .contains("unsupported_action:run_bash"));
@@ -1929,7 +1929,7 @@ mod tests {
         assert!(!rendered.contains("large_readback"));
         assert!(rendered.contains("`background`:"));
         assert!(rendered.contains("Foreground returns status and bounded output"));
-        assert!(rendered.contains("use interval_ms"));
+        assert!(rendered.contains("Use loop_cmd with interval_ms"));
         assert!(rendered.contains("`op`:"));
         assert!(rendered.contains("`kind`:"));
         assert!(rendered.contains("`id`:"));
@@ -2079,7 +2079,7 @@ mod tests {
         assert!(registry
             .validate_action_input("run_bash", &json_object([]))
             .unwrap_err()
-            .contains("input.any_required:command|cmd"));
+            .contains("input.any_required:cmd|loop_cmd"));
         assert!(registry
             .validate_action_input("self_tool", &json_object([]))
             .unwrap_err()
@@ -2115,7 +2115,7 @@ mod tests {
             .validate_action_input(
                 "run_bash",
                 &json_object([
-                    ("command", Value::String("pwd".to_string())),
+                    ("cmd", Value::String("pwd".to_string())),
                     (
                         "large_readback_opt_in",
                         Value::String("need full output".to_string())
@@ -2128,7 +2128,7 @@ mod tests {
             .validate_action_input(
                 "run_bash",
                 &json_object([
-                    ("command", Value::String("test -s output.txt".to_string())),
+                    ("cmd", Value::String("test -s output.txt".to_string())),
                     ("timeout_ms", Value::Number(5000.into())),
                 ])
             )
@@ -2218,7 +2218,7 @@ mod tests {
             .validate_action_input(
                 "run_bash",
                 &json_object([
-                    ("command", Value::String("pwd".to_string())),
+                    ("cmd", Value::String("pwd".to_string())),
                     ("mode", Value::String("daemon".to_string())),
                 ])
             )
@@ -2241,7 +2241,7 @@ mod tests {
     }
 
     #[test]
-    fn run_bash_idl_uses_command_without_removed_expect_fields() {
+    fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
         let registry = CapabilityRegistry::builtin();
         let catalog = registry.tool_catalog_value();
         let run_bash = catalog
@@ -2257,7 +2257,9 @@ mod tests {
             .and_then(Value::as_object)
             .expect("run_bash input schema properties");
 
-        assert!(input_properties.contains_key("command"));
+        assert!(input_properties.contains_key("cmd"));
+        assert!(input_properties.contains_key("loop_cmd"));
+        assert!(!input_properties.contains_key("command"));
         assert!(!input_properties.contains_key("read_back_command"));
         assert!(!input_properties.contains_key("large_readback_opt_in"));
         assert!(!input_properties.contains_key("expect"));
@@ -2270,12 +2272,13 @@ mod tests {
         assert!(required_any.iter().any(|group| {
             group
                 .as_array()
-                .map(|fields| fields.iter().any(|field| field == "command"))
+                .map(|fields| fields.iter().any(|field| field == "cmd"))
                 .unwrap_or(false)
         }));
 
         let prompt = registry.render_tool_catalog_markdown();
-        assert!(prompt.contains("run_bash command=<shell_command>"));
+        assert!(prompt.contains("run_bash cmd=<shell_command>"));
+        assert!(prompt.contains("run_bash loop_cmd=<check_command>"));
         assert!(!prompt.contains("`expect`:"));
         assert!(!prompt.contains("expect_timeout_ms"));
     }
@@ -2300,7 +2303,7 @@ mod tests {
         assert!(loaded_tool.contains("manual:"));
         assert!(loaded_tool.contains("#### `run_bash`"));
         assert!(loaded_tool.contains("**Options**"));
-        assert!(loaded_tool.contains("run_bash command=<shell_command>"));
+        assert!(loaded_tool.contains("run_bash cmd=<shell_command>"));
         assert!(!loaded_tool.contains("read_back_command"));
         assert!(!loaded_tool.contains("large_readback"));
         assert!(!loaded_tool.contains("expect_timeout_ms"));

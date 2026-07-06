@@ -821,7 +821,7 @@ finished
 
     #[test]
     fn parses_context_compact_section() {
-        let input = "## Progress\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"command\":\"pwd\"}}\n```";
+        let input = "## Progress\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -834,14 +834,14 @@ finished
 
     #[test]
     fn actions_section_json_fence_still_parses_action() {
-        let input = "## Progress\nchecking\n\n## Intermediate_Actions\n```json\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"command\":\"pwd\"}}\n```";
+        let input = "## Progress\nchecking\n\n## Intermediate_Actions\n```json\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
         assert!(env.continue_work);
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].action, "run_bash");
-        assert_eq!(env.next_actions[0].input_str("command"), "pwd");
+        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
     }
 
     #[test]
@@ -855,8 +855,8 @@ checking
   {
     "order": "parallel",
     "actions": [
-      {"action":"run_bash","intent":"Check A.","args":{"command":"printf a"}},
-      {"action":"run_bash","intent":"Check B.","args":{"command":"printf b"}}
+      {"action":"run_bash","intent":"Check A.","args":{"cmd":"printf a"}},
+      {"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b"}}
     ]
   },
   {
@@ -879,19 +879,19 @@ checking
 
     #[test]
     fn extracts_markdown_protocol_after_preface() {
-        let input = "我先说明一下处理计划。\n\n## Progress\nchecking\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"command\":\"pwd\"}}\n```";
+        let input = "我先说明一下处理计划。\n\n## Progress\nchecking\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
         assert_eq!(env.report_job_progress, "checking");
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].action, "run_bash");
-        assert_eq!(env.next_actions[0].input_str("command"), "pwd");
+        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
     }
 
     #[test]
     fn action_block_without_sections_is_working_protocol() {
-        let input = "```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"command\":\"pwd\"}}\n```";
+        let input = "```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -902,7 +902,7 @@ checking
 
     #[test]
     fn actions_section_accepts_bare_json_array() {
-        let input = "## Progress\nchecking\n\n## Intermediate_Actions\n[{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"command\":\"pwd\"}},{\"action\":\"memmgr\",\"intent\":\"Query durable memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}]";
+        let input = "## Progress\nchecking\n\n## Intermediate_Actions\n[{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}},{\"action\":\"memmgr\",\"intent\":\"Query durable memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}]";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());

@@ -122,6 +122,15 @@ impl ParsedAction {
             .unwrap_or(default_ms)
     }
 
+    pub fn timeout_ms_i64(&self, default_ms: i64) -> i64 {
+        self.input_i64("timeout_ms")
+            .or_else(|| {
+                self.input_i64("timeout_sec")
+                    .map(|seconds| seconds.saturating_mul(1000))
+            })
+            .unwrap_or(default_ms)
+    }
+
     pub fn shell_timeout_ms(&self) -> u64 {
         self.timeout_ms(5000).clamp(1000, 15000)
     }
@@ -329,34 +338,34 @@ mod tests {
     #[test]
     fn json_and_markdown_protocols_parse_same_working_actions() {
         assert_protocols_equivalent(
-            r#"{"report_job_progress":"checking","free_talk":"state","next_actions":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"command":"pwd","timeout_ms":5000}}]}"#,
-            "## Progress\nchecking\n\n## Free_talk\nstate\n\n## Intermediate_Actions\n```action\n{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}\n```\n```action\n{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"command\":\"pwd\",\"timeout_ms\":5000}}\n```",
+            r#"{"report_job_progress":"checking","free_talk":"state","next_actions":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
+            "## Progress\nchecking\n\n## Free_talk\nstate\n\n## Intermediate_Actions\n```action\n{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}\n```\n```action\n{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}\n```",
         );
     }
 
     #[test]
     fn json_and_markdown_protocols_parse_same_bare_action_array() {
         assert_protocols_equivalent(
-            r#"{"report_job_progress":"checking","next_actions":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"command":"pwd","timeout_ms":5000}}]}"#,
-            "## Progress\nchecking\n\n## Intermediate_Actions\n[{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}},{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"command\":\"pwd\",\"timeout_ms\":5000}}]",
+            r#"{"report_job_progress":"checking","next_actions":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"query","query":"project","limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
+            "## Progress\nchecking\n\n## Intermediate_Actions\n[{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}},{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]",
         );
     }
 
     #[test]
     fn json_and_markdown_protocols_parse_same_context_compact() {
         assert_protocols_equivalent(
-            r#"{"report_job_progress":"compact","context_compact":{"delta_ids":["pd_a"],"summary":"keep state"},"next_actions":[{"action":"run_bash","intent":"Check files.","args":{"command":"pwd"}}]}"#,
-            "## Progress\ncompact\n\n## Context Compact\ndelta_ids: pd_a\nsummary:\nkeep state\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"command\":\"pwd\"}}\n```",
+            r#"{"report_job_progress":"compact","context_compact":{"delta_ids":["pd_a"],"summary":"keep state"},"next_actions":[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]}"#,
+            "## Progress\ncompact\n\n## Context Compact\ndelta_ids: pd_a\nsummary:\nkeep state\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```",
         );
     }
 
     #[test]
     fn json_and_markdown_protocols_repair_same_finished_with_actions() {
         let json_env = parse_json(
-            r#"{"status":"finished","final_answer":"done","next_actions":[{"action":"run_bash","intent":"Verify output.","args":{"command":"test -s output.txt","timeout_ms":5000}}]}"#,
+            r#"{"status":"finished","final_answer":"done","next_actions":[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}]}"#,
         );
         let markdown_env = parse_markdown(
-            "## Status\nfinished\n\n## Final_Answer\ndone\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Verify output.\",\"args\":{\"command\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```",
+            "## Status\nfinished\n\n## Final_Answer\ndone\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"Verify output.\",\"args\":{\"cmd\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```",
         );
         assert_eq!(
             json_env.repair_issue.as_deref(),
@@ -392,7 +401,7 @@ mod tests {
         let action = json!({
             "action": "run_bash",
             "intent": "Check files.",
-            "args": {"command": "pwd", "timeout_ms": 5000}
+            "args": {"cmd": "pwd", "timeout_ms": 5000}
         });
         let json_env = parse_json(&json!({"next_actions":[action.clone()]}).to_string());
         let markdown_env = parse_markdown(&format!(

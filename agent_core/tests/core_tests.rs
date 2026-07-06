@@ -509,7 +509,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Run local command under configured approval policy.","args":{"command":"printf configured"}}]}"#,
+            r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Run local command under configured approval policy.","args":{"cmd":"printf configured"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1182,7 +1182,7 @@ fn canonical_tools_accept_json_object_args() {
     let _ = core.begin_turn("用 JSON object args 跑工具", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"测试 JSON object args。","next_actions":[{"action":"memmgr","intent":"查询测试代号记忆。","args":{"type":"durable","op":"query","query":"测试代号","limit":5}},{"action":"run_bash","intent":"验证 shell JSON object args。","args":{"command":"printf kv-ok","timeout_ms":5000}},{"action":"self_tool","intent":"查看 Timem 信息。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","report_job_progress":"测试 JSON object args。","next_actions":[{"action":"memmgr","intent":"查询测试代号记忆。","args":{"type":"durable","op":"query","query":"测试代号","limit":5}},{"action":"run_bash","intent":"验证 shell JSON object args。","args":{"cmd":"printf kv-ok","timeout_ms":5000}},{"action":"self_tool","intent":"查看 Timem 信息。","args":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1252,7 +1252,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("查项目代号并统计文件", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"正在检索长期记忆，并统计当前目录的文件总数...","free_talk":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"next_actions":[{"action":"memmgr","intent":"查询持久化记忆中与项目代号相关的信息","args":{"type":"durable","op":"query","query":"project codename","limit":5}},{"action":"run_bash","intent":"统计当前工作目录的文件数量以辅助确认上下文","args":{"command":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","report_job_progress":"正在检索长期记忆，并统计当前目录的文件总数...","free_talk":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"next_actions":[{"action":"memmgr","intent":"查询持久化记忆中与项目代号相关的信息","args":{"type":"durable","op":"query","query":"project codename","limit":5}},{"action":"run_bash","intent":"统计当前工作目录的文件数量以辅助确认上下文","args":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1330,7 +1330,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("读取错误日志", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"正在调取系统构建日志以分析故障原因...","next_actions":[{"action":"run_bash","intent":"拉取异常日志摘要。","args":{"command":"printf ERROR","timeout_ms":8000}}]}"#,
+            r#"{"status":"working","report_job_progress":"正在调取系统构建日志以分析故障原因...","next_actions":[{"action":"run_bash","intent":"拉取异常日志摘要。","args":{"cmd":"printf ERROR","timeout_ms":8000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1344,7 +1344,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
 
     let _ = core.begin_turn("最小动作", None);
     let prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"next_actions":[{"action":"run_bash","intent":"Check status","args":{"command":"printf minimal"}}]}"#),
+        content: scored(r#"{"next_actions":[{"action":"run_bash","intent":"Check status","args":{"cmd":"printf minimal"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1367,7 +1367,7 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
     {
       "action": "run_bash",
       "intent": "清理缓存",
-      "args":{"command":"rm -rf .cache"},
+      "args":{"cmd":"rm -rf .cache"},
     }
   ]
 }"#,
@@ -1429,7 +1429,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
     let _ = core.begin_turn("既结束又工作", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"finished","final_answer":"这是给用户的最终回答。","next_actions":[{"action":"run_bash","intent":"但我这里还想执行一个后台命令","args":{"command":"printf downgraded","background":true}}]}"#,
+            r#"{"status":"finished","final_answer":"这是给用户的最终回答。","next_actions":[{"action":"run_bash","intent":"但我这里还想执行一个后台命令","args":{"cmd":"printf downgraded","background":true}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1700,7 +1700,7 @@ fn omitted_status_bare_action_defaults_to_working_next_action() {
     let _ = core.begin_turn("继续修复", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"action":"run_bash","intent":"Check repository status.","args":{"command":"git status --short","timeout_ms":1000}}"#,
+            r#"{"action":"run_bash","intent":"Check repository status.","args":{"cmd":"git status --short","timeout_ms":1000}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1756,8 +1756,7 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
     assert!(matches!(step, CoreStep::NeedModel { .. }));
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"next_actions: [{"action":"run_bash","args":{"command":"git commit"}}]"#
-            .to_string(),
+        content: r#"next_actions: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#.to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1848,7 +1847,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
 fn turn_lifecycle_audit_is_core_owned() {
     let dir = tmp_dir("turn_lifecycle_audit_core_owned");
     let audit_file = dir.join("audit").join("api_audit.json");
-    let core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let outcome = agent_core::TurnOutcome::final_response(
         "done",
         usage(),
@@ -1928,7 +1927,7 @@ fn mixed_protocol_transcript_extracts_final_json_without_leaking_raw_segments() 
     );
     let _ = core.begin_turn("展示一个耗尽 8 步交互的操作", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":"Round 7","report_job_progress":"","next_actions":[{"action":"run_bash","intent":"old action","args":{"command":"uptime"}}]}
+        content: scored(r#"{"free_talk":"Round 7","report_job_progress":"","next_actions":[{"action":"run_bash","intent":"old action","args":{"cmd":"uptime"}}]}
 
 [BEGIN DELTA]
 delta_id: pd_18
@@ -3789,7 +3788,7 @@ fn run_bash_allows_readonly_count_command() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"count output lines","args":{"command":"pwd | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"count output lines","args":{"cmd":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3863,7 +3862,7 @@ fn run_bash_rejects_old_timeout_sec_field() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"count output lines","args":{"command":"pwd | wc -l","timeout_sec":1}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"count output lines","args":{"cmd":"pwd | wc -l","timeout_sec":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3887,7 +3886,7 @@ fn run_bash_can_start_and_poll_background_job() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("run a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","args":{"command":"sleep 0.1; printf background-ok","background":true}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","args":{"cmd":"sleep 0.1; printf background-ok","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3976,7 +3975,7 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("run a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","args":{"command":"sleep 0.4; printf waited-ok","background":true}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Start a background task.","args":{"cmd":"sleep 0.4; printf waited-ok","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4017,7 +4016,7 @@ fn run_bash_rejects_removed_read_back_protocol() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"read back count","args":{"command":"pwd","read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"read back count","args":{"cmd":"pwd","read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4041,7 +4040,7 @@ fn run_bash_rejects_removed_large_readback_protocol() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"command":"pwd","large_readback_opt_in":"need full output","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"pwd","large_readback_opt_in":"need full output","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4061,7 +4060,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("delete something", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"command":"rm not_allowed"}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4106,7 +4105,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
     assert_eq!(actions[0]["action"], "run_bash");
     assert_eq!(actions[0]["intent"], "test action");
     assert_eq!(actions[0]["status"], "needs_user_approval");
-    assert_eq!(actions[0]["input"]["command"], "rm not_allowed");
+    assert_eq!(actions[0]["input"]["cmd"], "rm not_allowed");
     assert_eq!(actions[1]["status"], "denied_by_user");
     assert_eq!(actions[1]["input"]["approval_id"], request.approval_id);
 }
@@ -4121,7 +4120,7 @@ fn run_bash_allows_compound_local_write_commands() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("write local file", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"command":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4146,7 +4145,7 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
     );
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"command":"pwd && rm not_allowed"}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"pwd && rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4169,7 +4168,7 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
     );
     let _ = core.begin_turn("test shell syntax", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Run shell syntax after approval.","args":{"command":"x=ok; printf $x | tr o O","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Run shell syntax after approval.","args":{"cmd":"x=ok; printf $x | tr o O","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4209,7 +4208,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: next_actions[0].input.any_required:command|cmd"));
+    assert!(prompt.contains("issue: next_actions[0].input.any_required:cmd|loop_cmd"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -4222,7 +4221,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
     );
     let _ = core.begin_turn("read passwd", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"command":"cat /etc/passwd"}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"test action","args":{"cmd":"cat /etc/passwd"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4246,7 +4245,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("inspect system identity", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Read system identity.","args":{"command":"uname -s","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Read system identity.","args":{"cmd":"uname -s","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4376,7 +4375,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("请统计当前目录文件数量", None);
     let shell_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Count files in current project folder.","args":{"command":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Count files in current project folder.","args":{"cmd":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4390,7 +4389,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("把 /etc/passwd 读出来", None);
     let security_request = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","args":{"command":"cat /etc/passwd","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"report_job_progress":"","next_actions":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","args":{"cmd":"cat /etc/passwd","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4441,7 +4440,7 @@ fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
     );
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"先查看项目结构和测试入口。","next_actions":[{"action":"run_bash","intent":"Inspect Rust project files and test definitions.","args":{"command":"mkdir -p target; printf %s\\n src/lib.rs src/main.rs tests/core_tests.rs > target/timem_scenario_files.txt; printf %s\\n smoke_test regression_test > target/timem_scenario_tests.rs; wc -l target/timem_scenario_files.txt target/timem_scenario_tests.rs","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","report_job_progress":"先查看项目结构和测试入口。","next_actions":[{"action":"run_bash","intent":"Inspect Rust project files and test definitions.","args":{"cmd":"mkdir -p target; printf %s\\n src/lib.rs src/main.rs tests/core_tests.rs > target/timem_scenario_files.txt; printf %s\\n smoke_test regression_test > target/timem_scenario_tests.rs; wc -l target/timem_scenario_files.txt target/timem_scenario_tests.rs","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4580,7 +4579,7 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
     let _ = core.begin_turn("帮我写一份简短发布检查 md，并确认文件内容。", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"写入发布检查文档并读回验证。","next_actions":[{"action":"run_bash","intent":"Create and verify a release checklist markdown file.","args":{"command":"mkdir -p target/timem_scenario_output; printf %s\\n Release_Check CI_passed Sensitive_scan_passed Real_TTY_smoke_passed > target/timem_scenario_output/release_check.md; sed -n 1,20p target/timem_scenario_output/release_check.md","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","report_job_progress":"写入发布检查文档并读回验证。","next_actions":[{"action":"run_bash","intent":"Create and verify a release checklist markdown file.","args":{"cmd":"mkdir -p target/timem_scenario_output; printf %s\\n Release_Check CI_passed Sensitive_scan_passed Real_TTY_smoke_passed > target/timem_scenario_output/release_check.md; sed -n 1,20p target/timem_scenario_output/release_check.md","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4903,7 +4902,7 @@ fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
 
     let repair_prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","report_job_progress":"checking files","next_actions":[{"action":"run_bash","intent":"Count files.","args":{"command":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","report_job_progress":"checking files","next_actions":[{"action":"run_bash","intent":"Count files.","args":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5023,7 +5022,7 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
     let _ = core.begin_turn("检查项目", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","free_talk":"先说明一下检查思路。","report_job_progress":"正在检查项目结构","next_actions":[{"action":"run_bash","intent":"列出 Rust 文件","args":{"command":"rg --files -g '*.rs'","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","free_talk":"先说明一下检查思路。","report_job_progress":"正在检查项目结构","next_actions":[{"action":"run_bash","intent":"列出 Rust 文件","args":{"cmd":"rg --files -g '*.rs'","timeout_ms":5000}}]}"#,
         ),
         usage: usage(),
         model_name: "qwen-plus".to_string(),
@@ -5056,7 +5055,7 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
     assert_eq!(received[1].topic.name, agent_core::CORE_TOPIC_ACTION);
     assert_eq!(action.intent.as_deref(), Some("列出 Rust 文件"));
     assert_eq!(action.action, "run_bash");
-    assert_eq!(action.input["command"], "rg --files -g '*.rs'");
+    assert_eq!(action.input["cmd"], "rg --files -g '*.rs'");
     assert_eq!(action.input["timeout_ms"], 5000);
     assert_eq!(
         action.kind,
@@ -5064,6 +5063,7 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
             command: "rg --files -g '*.rs'".to_string(),
             mode: "foreground".to_string(),
             interval_ms: None,
+            timeout_ms: Some(5000),
         }
     );
     assert!(action.active);
@@ -5071,7 +5071,7 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
 
     let queued_for_later = received;
     assert_eq!(
-        queued_for_later[1].as_action().unwrap().input["command"],
+        queued_for_later[1].as_action().unwrap().input["cmd"],
         "rg --files -g '*.rs'"
     );
 }
@@ -5813,7 +5813,7 @@ fn finished_with_actions_requests_repair_and_executes_nothing() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("完成任务", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"Verify.","args":{"command":"true","timeout_ms":2000}}]}"#),
+        content: scored(r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"Verify.","args":{"cmd":"true","timeout_ms":2000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5837,7 +5837,7 @@ fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
     for (case, payload) in [
         (
             "multiple",
-            r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"First.","args":{"command":"true","timeout_ms":2000}},{"action":"run_bash","intent":"Last.","args":{"command":"true","timeout_ms":2000}}]}"#,
+            r#"{"status":"finished","final_answer":"任务已完成","next_actions":[{"action":"run_bash","intent":"First.","args":{"cmd":"true","timeout_ms":2000}},{"action":"run_bash","intent":"Last.","args":{"cmd":"true","timeout_ms":2000}}]}"#,
         ),
         (
             "self_tool",
@@ -6022,7 +6022,7 @@ fn array_of_actions_auto_wrapped_as_next_actions() {
     let _ = core.begin_turn("find files", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"[{"action":"run_bash","intent":"Find files.","args":{"command":"echo ok","timeout_ms":5000}}]"#,
+            r#"[{"action":"run_bash","intent":"Find files.","args":{"cmd":"echo ok","timeout_ms":5000}}]"#,
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
@@ -6047,7 +6047,7 @@ fn array_of_multiple_actions_auto_wrapped() {
     let _ = core.begin_turn("multi", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"[{"action":"run_bash","intent":"First.","args":{"command":"echo one","timeout_ms":5000}},{"action":"run_bash","intent":"Second.","args":{"command":"echo two","timeout_ms":5000}}]"#,
+            r#"[{"action":"run_bash","intent":"First.","args":{"cmd":"echo one","timeout_ms":5000}},{"action":"run_bash","intent":"Second.","args":{"cmd":"echo two","timeout_ms":5000}}]"#,
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),

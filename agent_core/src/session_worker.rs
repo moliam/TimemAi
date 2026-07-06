@@ -804,7 +804,7 @@ mod tests {
   "action": "run_bash",
   "intent": "Run a command that requires approval.",
   "args": {
-    "command": "printf approval-worker-ok",
+    "cmd": "printf approval-worker-ok",
     "timeout_ms": 5000
   }
 }
@@ -1184,7 +1184,7 @@ mod tests {
             self.call_no += 1;
             let content = if self.call_no == 1 {
                 self.first_call_barrier.wait();
-                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"执行一个短命令。\",\"args\":{\"command\":\"printf worker-count-ok\",\"timeout_ms\":5000}}\n```"
+                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"执行一个短命令。\",\"args\":{\"cmd\":\"printf worker-count-ok\",\"timeout_ms\":5000}}\n```"
                     .to_string()
             } else {
                 "## Status\nfinished\n\n## Final_Answer\nWORKER_COUNT_DONE".to_string()
@@ -1445,7 +1445,7 @@ mod tests {
                 "run_bash",
                 format!("Run a short stress shell action for {marker}."),
                 serde_json::json!({
-                    "command": format!("printf {marker}"),
+                    "cmd": format!("printf {marker}"),
                     "timeout_ms": 5000,
                 }),
             ),
@@ -1453,7 +1453,7 @@ mod tests {
                 "run_bash",
                 format!("Exercise long command validation for {marker}."),
                 serde_json::json!({
-                    "command": format!("printf {marker}; # {}", "x".repeat(2_100)),
+                    "cmd": format!("printf {marker}; # {}", "x".repeat(2_100)),
                     "timeout_ms": 5000,
                 }),
             ),

@@ -1197,11 +1197,13 @@ fn action_kind_topic_payload(kind: &CoreActionKind) -> Value {
             command,
             mode,
             interval_ms,
+            timeout_ms,
         } => json!({
             "kind": "bash",
             "command": command,
             "mode": mode,
             "interval_ms": interval_ms,
+            "timeout_ms": timeout_ms,
         }),
         CoreActionKind::ShellJob { job_id } => json!({
             "kind": "shell_job",
@@ -1240,6 +1242,7 @@ fn action_kind_from_topic_payload(value: &Value, fallback_action: &str) -> CoreA
             command: value["command"].as_str().unwrap_or_default().to_string(),
             mode: value["mode"].as_str().unwrap_or("foreground").to_string(),
             interval_ms: value["interval_ms"].as_u64(),
+            timeout_ms: value["timeout_ms"].as_i64(),
         },
         "shell_job" => CoreActionKind::ShellJob {
             job_id: value["job_id"].as_str().unwrap_or_default().to_string(),
@@ -2002,11 +2005,12 @@ mod tests {
             CoreNotification::Action {
                 intent: Some("Inspect local files.".to_string()),
                 action: "run_bash".to_string(),
-                input: serde_json::json!({"command": "pwd"}),
+                input: serde_json::json!({"cmd": "pwd"}),
                 kind: crate::CoreActionKind::Bash {
                     command: "pwd".to_string(),
                     mode: "foreground".to_string(),
                     interval_ms: None,
+                    timeout_ms: None,
                 },
                 active: true,
                 memory_activity: crate::CoreMemoryActivity::None,
@@ -2081,13 +2085,14 @@ mod tests {
                     "intent": "Inspect local files.",
                     "action": "run_bash",
                     "input": {
-                        "command": "pwd",
+                        "cmd": "pwd",
                     },
                     "kind": {
                         "kind": "bash",
                         "command": "pwd",
                         "mode": "foreground",
                         "interval_ms": null,
+                        "timeout_ms": null,
                     },
                     "active": true,
                     "memory_activity": "none",
@@ -2099,11 +2104,12 @@ mod tests {
             Some(CoreActionTopic {
                 intent: Some("Inspect local files.".to_string()),
                 action: "run_bash".to_string(),
-                input: serde_json::json!({"command": "pwd"}),
+                input: serde_json::json!({"cmd": "pwd"}),
                 kind: CoreActionKind::Bash {
                     command: "pwd".to_string(),
                     mode: "foreground".to_string(),
                     interval_ms: None,
+                    timeout_ms: None,
                 },
                 active: true,
                 memory_activity: CoreMemoryActivity::None,
@@ -2114,7 +2120,7 @@ mod tests {
             Some(CoreTopicStatusHint {
                 intent: Some("Inspect local files.".to_string()),
                 action: "run_bash".to_string(),
-                input: serde_json::json!({"command": "pwd"}),
+                input: serde_json::json!({"cmd": "pwd"}),
                 memory_activity: CoreMemoryActivity::None,
             })
         );
@@ -2279,11 +2285,12 @@ mod tests {
         let notifications = vec![CoreNotification::Action {
             intent: Some("Inspect local files.".to_string()),
             action: "run_bash".to_string(),
-            input: serde_json::json!({"command": "pwd"}),
+            input: serde_json::json!({"cmd": "pwd"}),
             kind: CoreActionKind::Bash {
                 command: "pwd".to_string(),
                 mode: "foreground".to_string(),
                 interval_ms: None,
+                timeout_ms: None,
             },
             active: true,
             memory_activity: CoreMemoryActivity::None,
@@ -2301,7 +2308,7 @@ mod tests {
 
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].session_id, "session_a");
-        assert_eq!(queued[0].as_action().unwrap().input["command"], "pwd");
+        assert_eq!(queued[0].as_action().unwrap().input["cmd"], "pwd");
     }
 
     #[test]
@@ -2312,16 +2319,18 @@ mod tests {
                     command: "pwd".to_string(),
                     mode: "foreground".to_string(),
                     interval_ms: None,
+                    timeout_ms: None,
                 },
-                json!({"kind": "bash", "command": "pwd", "mode": "foreground", "interval_ms": null}),
+                json!({"kind": "bash", "command": "pwd", "mode": "foreground", "interval_ms": null, "timeout_ms": null}),
             ),
             (
                 CoreActionKind::Bash {
                     command: "gh run list".to_string(),
                     mode: "poll".to_string(),
                     interval_ms: Some(5000),
+                    timeout_ms: None,
                 },
-                json!({"kind": "bash", "command": "gh run list", "mode": "poll", "interval_ms": 5000}),
+                json!({"kind": "bash", "command": "gh run list", "mode": "poll", "interval_ms": 5000, "timeout_ms": null}),
             ),
             (
                 CoreActionKind::ShellJob {

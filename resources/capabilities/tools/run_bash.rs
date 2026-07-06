@@ -22,6 +22,10 @@ static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct ShellJobRecord {
     pub id: String,
     pub created_at_ms: i64,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub turn_id: String,
     pub pid: u32,
     pub command: String,
     pub output_file: String,
@@ -46,7 +50,7 @@ impl FileShellJobStore {
         }
     }
 
-    pub fn spawn(&self, command: &str) -> String {
+    pub fn spawn(&self, command: &str, session_id: &str, turn_id: &str) -> String {
         let clean = command.trim();
         if clean.is_empty() {
             return "Action result: run_bash\nerror: command_required".to_string();
@@ -85,6 +89,8 @@ impl FileShellJobStore {
         let record = ShellJobRecord {
             id: id.clone(),
             created_at_ms: now_ms(),
+            session_id: session_id.trim().to_string(),
+            turn_id: turn_id.trim().to_string(),
             pid: child.id(),
             command: clean.to_string(),
             output_file: output_file.to_string_lossy().to_string(),
@@ -95,6 +101,27 @@ impl FileShellJobStore {
             "Action result: run_bash\ncommand: {}\nstatus: background_started\njob_id: {}\npid: {}\noutput_file: {}\nstatus_file: {}\nnext_action: shell_job_status",
             clean, record.id, record.pid, record.output_file, record.status_file
         )
+    }
+
+    pub fn cancel_unfinished_for_session(&self, session_id: &str) -> Vec<String> {
+        let clean_session = session_id.trim();
+        if clean_session.is_empty() {
+            return Vec::new();
+        }
+        let records = self
+            .guard
+            .with_read(|| self.records_unlocked())
+            .unwrap_or_default();
+        let mut cancelled = Vec::new();
+        for record in records {
+            if record.session_id != clean_session || self.record_finished(&record) {
+                continue;
+            }
+            terminate_process(record.pid);
+            let _ = fs::write(&record.status_file, "cancelled");
+            cancelled.push(record.id);
+        }
+        cancelled
     }
 
     pub fn status(&self, job_id: &str, wait_ms: u64) -> String {
@@ -212,17 +239,31 @@ impl FileShellJobStore {
     }
 
     fn find_unlocked(&self, job_id: &str) -> Option<ShellJobRecord> {
-        let file = OpenOptions::new().read(true).open(&self.index_file).ok()?;
-        let mut found = None;
+        self.records_unlocked()
+            .into_iter()
+            .filter(|record| record.id == job_id)
+            .last()
+    }
+
+    fn records_unlocked(&self) -> Vec<ShellJobRecord> {
+        let Ok(file) = OpenOptions::new().read(true).open(&self.index_file) else {
+            return Vec::new();
+        };
+        let mut records = Vec::new();
         for line in BufReader::new(file).lines().map_while(Result::ok) {
             let Ok(record) = serde_json::from_str::<ShellJobRecord>(&line) else {
                 continue;
             };
-            if record.id == job_id {
-                found = Some(record);
-            }
+            records.push(record);
         }
-        found
+        records
+    }
+
+    fn record_finished(&self, record: &ShellJobRecord) -> bool {
+        fs::read_to_string(&record.status_file)
+            .ok()
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -241,16 +282,33 @@ pub(crate) fn execute_run_bash_action(
     core: &mut AgentCore,
     action: &ParsedAction,
 ) -> ActionExecution {
-    let command_to_run = command_from_action(action);
+    let loop_command = action.input_str("loop_cmd");
+    if !loop_command.is_empty() && !action.input_str("cmd").is_empty() {
+        return ActionExecution::Completed(
+            "Action result: run_bash\nerror: cmd_and_loop_cmd_conflict".to_string(),
+        );
+    }
+    let command_to_run = if loop_command.is_empty() {
+        command_from_action(action)
+    } else {
+        loop_command
+    };
+    let interval_ms = action.input_u64("interval_ms");
+    let timeout_ms = action.timeout_ms_i64(5000);
+    let session_id = core.current_session_id();
+    let turn_id = core.current_action_turn_id();
     execute_run_bash(
         &command_to_run,
         action.background(),
-        action.timeout_ms(5000),
-        action.input_u64("interval_ms"),
+        timeout_ms,
+        interval_ms,
         action.input_u64("check_timeout_ms").unwrap_or(5000),
         core.bash_approval_mode,
         &action.intent,
         &core.shell_jobs,
+        &session_id,
+        &turn_id,
+        action.input_str("loop_cmd").is_empty(),
         &mut || false,
     )
 }
@@ -258,12 +316,15 @@ pub(crate) fn execute_run_bash_action(
 pub(crate) fn execute_run_bash(
     command: &str,
     background: bool,
-    timeout_ms: u64,
+    timeout_ms: i64,
     interval_ms: Option<u64>,
     check_timeout_ms: u64,
     approval_mode: BashApprovalMode,
     intent: &str,
     shell_jobs: &FileShellJobStore,
+    session_id: &str,
+    turn_id: &str,
+    is_regular_command: bool,
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> ActionExecution {
     let command_to_run = command.trim();
@@ -278,7 +339,11 @@ pub(crate) fn execute_run_bash(
             command_to_run, reason
         ));
     }
-    if !background && contains_long_foreground_sleep(command_to_run) {
+    if !background
+        && timeout_ms >= 0
+        && is_regular_command
+        && contains_long_foreground_sleep(command_to_run)
+    {
         return ActionExecution::Completed(format!(
             "Action result: run_bash\ncommand: {}\nerror: long_sleep_in_foreground_command\nmessage: Use run_bash with interval_ms for waiting on external status, or background=true for long local work.",
             command_to_run
@@ -287,6 +352,18 @@ pub(crate) fn execute_run_bash(
     if background && interval_ms.is_some() {
         return ActionExecution::Completed(format!(
             "Action result: run_bash\ncommand: {}\nerror: poll_mode_cannot_be_background",
+            command_to_run
+        ));
+    }
+    if interval_ms.is_some() && is_regular_command {
+        return ActionExecution::Completed(format!(
+            "Action result: run_bash\ncommand: {}\nerror: loop_cmd_required_for_polling",
+            command_to_run
+        ));
+    }
+    if interval_ms.is_none() && !is_regular_command {
+        return ActionExecution::Completed(format!(
+            "Action result: run_bash\ncommand: {}\nerror: interval_ms_required_for_loop_cmd",
             command_to_run
         ));
     }
@@ -306,12 +383,14 @@ pub(crate) fn execute_run_bash(
                 timeout_ms,
                 interval_ms,
                 check_timeout_ms,
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
             },
             intent: intent.to_string(),
         });
     }
     if background {
-        return ActionExecution::Completed(shell_jobs.spawn(command_to_run));
+        return ActionExecution::Completed(shell_jobs.spawn(command_to_run, session_id, turn_id));
     }
     if let Some(interval_ms) = interval_ms {
         return ActionExecution::Completed(execute_polling_bash(
@@ -322,24 +401,24 @@ pub(crate) fn execute_run_bash(
             should_cancel,
         ));
     }
-    ActionExecution::Completed(execute_one_bash(
-        command_to_run,
-        timeout_ms.clamp(1000, 15000),
-    ))
+    ActionExecution::Completed(execute_one_bash(command_to_run, timeout_ms, should_cancel))
 }
 
 pub(crate) fn execute_approved_bash(
     command: &str,
     background: bool,
-    timeout_ms: u64,
+    timeout_ms: i64,
     interval_ms: Option<u64>,
     check_timeout_ms: u64,
+    session_id: &str,
+    turn_id: &str,
+    _is_regular_command: bool,
     request: &ApprovalRequest,
     shell_jobs: &FileShellJobStore,
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> String {
     let mut result = if background {
-        shell_jobs.spawn(command.trim())
+        shell_jobs.spawn(command.trim(), session_id, turn_id)
     } else if let Some(interval_ms) = interval_ms {
         execute_polling_bash(
             command.trim(),
@@ -349,7 +428,7 @@ pub(crate) fn execute_approved_bash(
             should_cancel,
         )
     } else {
-        execute_one_bash(command.trim(), timeout_ms.clamp(1000, 15000))
+        execute_one_bash(command.trim(), timeout_ms, should_cancel)
     };
     result.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
@@ -358,19 +437,24 @@ pub(crate) fn execute_approved_bash(
     result
 }
 
-pub fn execute_one_bash(command: &str, timeout_ms: u64) -> String {
-    execute_one_bash_structured(command, timeout_ms).to_action_result("run_bash")
+pub fn execute_one_bash(
+    command: &str,
+    timeout_ms: i64,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> String {
+    execute_one_bash_structured(command, timeout_ms, should_cancel).to_action_result("run_bash")
 }
 
 pub(crate) fn execute_polling_bash(
     command: &str,
     interval_ms: u64,
-    timeout_ms: u64,
+    timeout_ms: i64,
     check_timeout_ms: u64,
     mut cancelled: impl FnMut() -> bool,
 ) -> String {
     let interval = Duration::from_millis(interval_ms.clamp(1000, 60_000));
-    let max_wait = Duration::from_millis(timeout_ms.clamp(1000, 900_000));
+    let max_wait =
+        (timeout_ms >= 0).then(|| Duration::from_millis((timeout_ms as u64).clamp(1000, 900_000)));
     let check_timeout_ms = check_timeout_ms.clamp(1000, 15_000);
     let started = Instant::now();
     let mut attempts = 0_u64;
@@ -392,7 +476,7 @@ pub(crate) fn execute_polling_bash(
         }
 
         attempts = attempts.saturating_add(1);
-        let result = execute_one_bash_structured(command, check_timeout_ms);
+        let result = execute_one_bash_structured(command, check_timeout_ms as i64, &mut cancelled);
         last_status = result.status;
         last_output = result.output;
         last_error = result.error;
@@ -411,7 +495,7 @@ pub(crate) fn execute_polling_bash(
             }
         }
 
-        if started.elapsed() >= max_wait {
+        if max_wait.is_some_and(|max_wait| started.elapsed() >= max_wait) {
             return polling_result(
                 command,
                 "timeout",
@@ -423,8 +507,9 @@ pub(crate) fn execute_polling_bash(
             );
         }
 
-        let remaining = max_wait.saturating_sub(started.elapsed());
-        let wait = interval.min(remaining);
+        let wait = max_wait
+            .map(|max_wait| interval.min(max_wait.saturating_sub(started.elapsed())))
+            .unwrap_or(interval);
         sleep_cancelable(wait, &mut cancelled);
     }
 }
@@ -470,12 +555,7 @@ fn sleep_cancelable(duration: Duration, cancelled: &mut impl FnMut() -> bool) {
 }
 
 fn command_from_action(action: &ParsedAction) -> String {
-    let command = action.input_str("command");
-    if command.is_empty() {
-        action.input_str("cmd")
-    } else {
-        command
-    }
+    action.input_str("cmd")
 }
 
 fn contains_long_foreground_sleep(command: &str) -> bool {
@@ -548,7 +628,11 @@ impl BashCommandOutput {
     }
 }
 
-pub fn execute_one_bash_structured(command: &str, timeout_ms: u64) -> BashCommandOutput {
+pub fn execute_one_bash_structured(
+    command: &str,
+    timeout_ms: i64,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> BashCommandOutput {
     let spawn = Command::new("/bin/sh")
         .arg("-lc")
         .arg(command)
@@ -560,11 +644,17 @@ pub fn execute_one_bash_structured(command: &str, timeout_ms: u64) -> BashComman
         Err(_) => return bash_error(command, "command_failed"),
     };
     let started = Instant::now();
-    let timeout = Duration::from_millis(timeout_ms.clamp(1000, 15000));
+    let timeout =
+        (timeout_ms >= 0).then(|| Duration::from_millis((timeout_ms as u64).clamp(1000, 15000)));
     loop {
+        if should_cancel() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return bash_error(command, "cancelled");
+        }
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() >= timeout => {
+            Ok(None) if timeout.is_some_and(|timeout| started.elapsed() >= timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return bash_error(command, "timeout");
@@ -669,7 +759,7 @@ mod tests {
 
     #[test]
     fn foreground_bash_reports_status_and_output() {
-        let result = execute_one_bash("printf shell_ok", 1000);
+        let result = execute_one_bash("printf shell_ok", 1000, &mut || false);
         assert!(result.contains("Action result: run_bash"));
         assert!(result.contains("status: 0"));
         assert!(result.contains("shell_ok"));
@@ -677,8 +767,15 @@ mod tests {
 
     #[test]
     fn foreground_bash_timeout_is_bounded() {
-        let result = execute_one_bash("sleep 2", 1000);
+        let result = execute_one_bash("sleep 2", 1000, &mut || false);
         assert!(result.contains("error: timeout"));
+    }
+
+    #[test]
+    fn foreground_bash_timeout_minus_one_waits_without_runtime_timeout() {
+        let result = execute_one_bash("sleep 1; printf no_timeout_ok", -1, &mut || false);
+        assert!(result.contains("status: 0"), "{result}");
+        assert!(result.contains("no_timeout_ok"), "{result}");
     }
 
     #[test]
@@ -693,6 +790,9 @@ mod tests {
             BashApprovalMode::Approve,
             "Wait then check.",
             &store,
+            "session_a",
+            "turn_a",
+            true,
             &mut || false,
         );
         match result {
@@ -718,6 +818,9 @@ mod tests {
             BashApprovalMode::Approve,
             "Short wait.",
             &store,
+            "session_a",
+            "turn_a",
+            true,
             &mut || false,
         );
         match result {
@@ -777,6 +880,9 @@ mod tests {
             BashApprovalMode::Ask,
             "等待外部状态完成",
             &store,
+            "session_a",
+            "turn_a",
+            false,
             &mut || false,
         );
         match result {
@@ -790,10 +896,56 @@ mod tests {
     }
 
     #[test]
+    fn run_bash_polling_requires_loop_cmd_and_interval_pair() {
+        let store = FileShellJobStore::new(&tmp_memory_dir("poll_pairing"));
+        let cmd_with_interval = execute_run_bash(
+            "test -f /tmp/timem_poll_marker",
+            false,
+            5000,
+            Some(1000),
+            1000,
+            BashApprovalMode::Approve,
+            "等待外部状态完成",
+            &store,
+            "session_a",
+            "turn_a",
+            true,
+            &mut || false,
+        );
+        match cmd_with_interval {
+            ActionExecution::Completed(text) => {
+                assert!(text.contains("loop_cmd_required_for_polling"), "{text}");
+            }
+            other => panic!("expected pairing error, got {other:?}"),
+        }
+
+        let loop_without_interval = execute_run_bash(
+            "test -f /tmp/timem_poll_marker",
+            false,
+            5000,
+            None,
+            1000,
+            BashApprovalMode::Approve,
+            "等待外部状态完成",
+            &store,
+            "session_a",
+            "turn_a",
+            false,
+            &mut || false,
+        );
+        match loop_without_interval {
+            ActionExecution::Completed(text) => {
+                assert!(text.contains("interval_ms_required_for_loop_cmd"), "{text}");
+            }
+            other => panic!("expected pairing error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn background_job_can_be_polled_until_finished() {
         let dir = tmp_memory_dir("background_job");
         let store = FileShellJobStore::new(&dir);
-        let started = store.spawn("printf background_ok");
+        let started = store.spawn("printf background_ok", "session_a", "turn_a");
         assert!(started.contains("status: background_started"));
         let job_id = started
             .lines()
@@ -822,7 +974,11 @@ mod tests {
         let dir = tmp_memory_dir("background_cancel");
         let store = FileShellJobStore::new(&dir);
 
-        let started = store.spawn("printf started; sleep 10; printf done");
+        let started = store.spawn(
+            "printf started; sleep 10; printf done",
+            "session_a",
+            "turn_a",
+        );
         let job_id = started
             .lines()
             .find_map(|line| line.strip_prefix("job_id: "))
@@ -836,6 +992,30 @@ mod tests {
         assert!(cancelled.contains("state: cancelled"), "{cancelled}");
         let status = store.status(job_id, 0);
         assert!(status.contains("state: cancelled"), "{status}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_jobs_can_be_cancelled_by_session_owner() {
+        let dir = tmp_memory_dir("background_cancel_session");
+        let store = FileShellJobStore::new(&dir);
+
+        let owned = store.spawn("sleep 10", "session_owned", "turn_a");
+        let other = store.spawn("sleep 10", "session_other", "turn_a");
+        let owned_job = owned
+            .lines()
+            .find_map(|line| line.strip_prefix("job_id: "))
+            .expect("owned job");
+        let other_job = other
+            .lines()
+            .find_map(|line| line.strip_prefix("job_id: "))
+            .expect("other job");
+
+        let cancelled = store.cancel_unfinished_for_session("session_owned");
+        assert_eq!(cancelled, vec![owned_job.to_string()]);
+        assert!(store.status(owned_job, 0).contains("state: cancelled"));
+        assert!(store.status(other_job, 0).contains("state: running"));
+        let _ = store.cancel(other_job);
         let _ = fs::remove_dir_all(&dir);
     }
 

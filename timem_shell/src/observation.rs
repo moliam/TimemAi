@@ -630,6 +630,7 @@ mod tests {
             command: command.to_string(),
             mode: "foreground".to_string(),
             interval_ms: None,
+            timeout_ms: None,
         }
     }
 
@@ -638,6 +639,7 @@ mod tests {
             command: command.to_string(),
             mode: "poll".to_string(),
             interval_ms: Some(5000),
+            timeout_ms: None,
         }
     }
 

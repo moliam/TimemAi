@@ -190,24 +190,24 @@ If args do not match this tool spec, runtime asks you to repair the response bef
 `run_bash` - Run local shell commands.
 
 **Synopsis**
-`run_bash command=<shell_command> [timeout_ms=<n>] [background=true|mode=background]`
-`run_bash command=<check_command> interval_ms=<n> [timeout_ms=<total_wait_ms>] [check_timeout_ms=<n>]`
+`run_bash cmd=<shell_command> [timeout_ms=<n|-1>] [background=true|mode=background]`
+`run_bash loop_cmd=<check_command> interval_ms=<n> timeout_ms=<total_wait_ms|-1> [check_timeout_ms=<n>]`
 
 **Description**
-`run_bash` runs a shell command on the local machine and collects bounded evidence from the command result. It supports foreground, background, and polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment. Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner. Do not put long sleeps in foreground commands. For waiting on external state, use interval_ms. For long local work, use background=true and shell_job_status.
+`run_bash` runs a shell command on the local machine and collects bounded evidence from the command result. It supports foreground, background, and polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment. Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner. Use timeout_ms=-1 only when the user explicitly wants the command to block without a runtime timeout. Do not put long sleeps in cmd. For waiting on external state, use loop_cmd with interval_ms. The loop command is re-run until it exits with code 0 or timeout_ms total wait budget is reached. For long local work that should keep running across later turns, use background=true and shell_job_status.
 
 **Usage**
-Use command for the shell command. Optional: timeout_ms, background=true or mode=background. If interval_ms is present, run_bash enters polling mode: command is run repeatedly until it exits with code 0 or timeout_ms total wait budget is reached. check_timeout_ms is the per-check command timeout.
+Use cmd for a shell command. Optional: timeout_ms, background=true or mode=background. Use loop_cmd with interval_ms for polling/waiting. loop_cmd is run repeatedly until it exits with code 0 or timeout_ms total wait budget is reached. check_timeout_ms is the per-check command timeout.
 
 **Options**
 - `background`: When true, return a job_id instead of blocking.
 - `check_timeout_ms`: Per-check timeout in polling mode.
-- `cmd`: Alias for command.
-- `command`: Shell command to execute.
-- `interval_ms`: Polling interval. When present, command is re-run until it exits with code 0.
+- `cmd`: Shell command to execute.
+- `interval_ms`: Polling interval. Requires loop_cmd.
+- `loop_cmd`: Polling check command. Runtime re-runs it until it exits with code 0.
 - `mode`: Execution mode alias. Allowed: `foreground`, `background`.
-- `timeout_ms`: Foreground wait budget, or total polling wait budget when interval_ms is present.
-- Required one of: `command`, `cmd`
+- `timeout_ms`: Foreground wait budget, total polling wait budget when loop_cmd is present, or -1 for no runtime timeout.
+- Required one of: `cmd`, `loop_cmd`
 
 **Result**
 Foreground returns status and bounded output. Background returns job_id; use shell_job_status with that job_id and your chosen timeout_ms to wait/check. Polling mode returns mode=poll, state=finished|timeout|cancelled, attempts, elapsed_ms, last_status, and bounded last output.
@@ -384,7 +384,7 @@ finished
   "action": "run_bash",
   "intent": "Run the requested local check.",
   "args": {
-    "command": "printf '%s\\n' example",
+    "cmd": "printf '%s\\n' example",
     "timeout_ms": 5000
   }
 }
@@ -401,7 +401,7 @@ finished
   "action": "run_bash",
   "intent": "浏览当前目录的文件",
   "args": {
-    "command": "ls -al",
+    "cmd": "ls -al",
     "timeout_ms": 1000
   }
 }
@@ -439,7 +439,7 @@ This is the summary....
         "action": "run_bash",
         "intent": "检查当前分支",
         "args": {
-          "command": "git branch --show-current",
+          "cmd": "git branch --show-current",
           "timeout_ms": 3000
         }
       },
@@ -447,7 +447,7 @@ This is the summary....
         "action": "run_bash",
         "intent": "检查工作区状态",
         "args": {
-          "command": "git status --short",
+          "cmd": "git status --short",
           "timeout_ms": 3000
         }
       }
@@ -460,7 +460,7 @@ This is the summary....
         "action": "run_bash",
         "intent": "等待 CI 完成",
         "args": {
-          "command": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
+          "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
           "interval_ms": 10000,
           "timeout_ms": 600000,
           "check_timeout_ms": 5000

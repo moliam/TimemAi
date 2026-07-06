@@ -348,9 +348,11 @@ pub(crate) enum PendingApprovedAction {
     RunBash {
         command: String,
         background: bool,
-        timeout_ms: u64,
+        timeout_ms: i64,
         interval_ms: Option<u64>,
         check_timeout_ms: u64,
+        session_id: String,
+        turn_id: String,
     },
 }
 
@@ -369,12 +371,16 @@ impl PendingApprovedAction {
                 timeout_ms,
                 interval_ms,
                 check_timeout_ms,
+                session_id,
+                turn_id,
             } => json!({
                 "command": command,
                 "background": background,
                 "timeout_ms": timeout_ms,
                 "interval_ms": interval_ms,
                 "check_timeout_ms": check_timeout_ms,
+                "session_id": session_id,
+                "turn_id": turn_id,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -687,6 +693,7 @@ pub struct AgentCore {
     pending_approval: Option<PendingApproval>,
     pub(crate) bash_approval_mode: BashApprovalMode,
     current_action_turn_id: Option<String>,
+    current_session_id: Option<String>,
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
@@ -737,6 +744,7 @@ impl AgentCore {
             pending_approval: None,
             bash_approval_mode: BashApprovalMode::Ask,
             current_action_turn_id: None,
+            current_session_id: None,
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
@@ -745,6 +753,39 @@ impl AgentCore {
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
         self.bash_approval_mode = mode;
     }
+
+    pub(crate) fn current_session_id(&self) -> String {
+        self.current_session_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    pub(crate) fn current_action_turn_id(&self) -> String {
+        self.current_action_turn_id
+            .clone()
+            .unwrap_or_else(|| "unknown_turn".to_string())
+    }
+
+    pub(crate) fn cleanup_background_jobs_for_current_session(
+        &mut self,
+        reason: &str,
+    ) -> Vec<String> {
+        let session_id = self.current_session_id();
+        let cancelled = self.shell_jobs.cancel_unfinished_for_session(&session_id);
+        if !cancelled.is_empty() {
+            self.append_delta(vec![(
+                "result_of_llm_action".to_string(),
+                format!(
+                    "Action result: run_bash_background_cleanup\nreason: {}\nsession_id: {}\nterminated_jobs: {}",
+                    reason,
+                    session_id,
+                    cancelled.join(",")
+                ),
+            )]);
+        }
+        cancelled
+    }
+
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
         self.max_llm_input_tokens = max_llm_input_tokens.max(3_000);
     }
@@ -907,6 +948,7 @@ impl AgentCore {
         self.last_repair_issue = None;
         self.pending_approval = None;
         self.current_action_turn_id = None;
+        self.current_session_id = None;
         self.current_action_user_question.clear();
         self.last_notifications.clear();
         self.loaded_work_instruction_fingerprints.clear();
@@ -1091,6 +1133,7 @@ impl AgentCore {
                     llm_final_answer_slice_text(&final_text),
                 ));
                 self.append_delta(slices);
+                self.cleanup_background_jobs_for_current_session("final_answer");
                 return CoreStep::Final(TurnFinal {
                     final_answer: final_text,
                     stats: self.current_stats.clone(),
@@ -1122,6 +1165,7 @@ impl AgentCore {
                 llm_final_answer_slice_text(&final_text),
             ));
             self.append_delta(slices);
+            self.cleanup_background_jobs_for_current_session("protocol_repair_final_answer");
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
                 stats: self.current_stats.clone(),
@@ -1171,6 +1215,7 @@ impl AgentCore {
                 llm_final_answer_slice_text(&final_text),
             ));
             self.append_delta(slices);
+            self.cleanup_background_jobs_for_current_session("final_answer");
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
                 stats: self.current_stats.clone(),
@@ -1228,6 +1273,7 @@ impl AgentCore {
         }
         if !parsed.context_compacts.is_empty() {
             self.append_delta(slices);
+            self.cleanup_background_jobs_for_current_session("context_compact");
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
                 return CoreStep::RoundLimitReached {
@@ -1256,6 +1302,7 @@ impl AgentCore {
             llm_final_answer_slice_text(&final_text),
         ));
         self.append_delta(slices);
+        self.cleanup_background_jobs_for_current_session("final_answer");
         CoreStep::Final(TurnFinal {
             final_answer: final_text,
             stats: self.current_stats.clone(),
@@ -1321,12 +1368,13 @@ impl AgentCore {
     }
 
     pub fn record_turn_start_audit(
-        &self,
+        &mut self,
         audit_file: &Path,
         session: &str,
         turn_id: &str,
         user_input: &str,
     ) {
+        self.current_session_id = Some(session.to_string());
         let _ = append_audit_event(
             audit_file,
             &turn_start_audit_event(session, turn_id, user_input),
@@ -1401,12 +1449,17 @@ impl AgentCore {
                     timeout_ms,
                     interval_ms,
                     check_timeout_ms,
+                    session_id,
+                    turn_id,
                 } => shell_exec::execute_approved_bash(
                     command,
                     *background,
                     *timeout_ms,
                     *interval_ms,
                     *check_timeout_ms,
+                    session_id,
+                    turn_id,
+                    interval_ms.is_none(),
                     &pending.request,
                     &self.shell_jobs,
                     should_cancel,
@@ -1833,27 +1886,38 @@ impl AgentCore {
         for action in actions {
             let action_for_audit = action.clone();
             let shell_jobs = self.shell_jobs.clone();
+            let session_id = self.current_session_id();
+            let turn_id = self.current_action_turn_id();
             self.current_stats.tool_calls += 1;
             handles.push(thread::spawn(move || {
-                let command = {
-                    let command = action.input_str("command");
-                    if command.is_empty() {
-                        action.input_str("cmd")
-                    } else {
-                        command
-                    }
+                let loop_command = action.input_str("loop_cmd");
+                let is_regular_command = loop_command.is_empty();
+                let cmd_command = action.input_str("cmd");
+                let command = if is_regular_command {
+                    cmd_command.clone()
+                } else {
+                    loop_command.clone()
                 };
-                let result = shell_exec::execute_run_bash(
-                    &command,
-                    action.background(),
-                    action.timeout_ms(5000),
-                    action.input_u64("interval_ms"),
-                    action.input_u64("check_timeout_ms").unwrap_or(5000),
-                    BashApprovalMode::Approve,
-                    &action.intent,
-                    &shell_jobs,
-                    &mut || false,
-                );
+                let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
+                    ActionExecution::Completed(
+                        "Action result: run_bash\nerror: cmd_and_loop_cmd_conflict".to_string(),
+                    )
+                } else {
+                    shell_exec::execute_run_bash(
+                        &command,
+                        action.background(),
+                        action.timeout_ms_i64(5000),
+                        action.input_u64("interval_ms"),
+                        action.input_u64("check_timeout_ms").unwrap_or(5000),
+                        BashApprovalMode::Approve,
+                        &action.intent,
+                        &shell_jobs,
+                        &session_id,
+                        &turn_id,
+                        is_regular_command,
+                        &mut || false,
+                    )
+                };
                 let result = match result {
                     ActionExecution::Completed(result) => result,
                     ActionExecution::NeedsApproval(_) => format!(

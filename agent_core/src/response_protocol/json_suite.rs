@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn parses_context_compact_field() {
         let env = parse_envelope(
-            r#"{"report_job_progress":"整理上下文","context_compact":{"delta_ids":["pd_a"],"summary":"keep important state"},"next_actions":[{"action":"run_bash","intent":"Check files.","args":{"command":"pwd"}}]}"#,
+            r#"{"report_job_progress":"整理上下文","context_compact":{"delta_ids":["pd_a"],"summary":"keep important state"},"next_actions":[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]}"#,
             &caps(),
         );
 
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn parses_action_groups_and_flattens_actions_for_notifications() {
         let env = parse_envelope(
-            r#"{"report_job_progress":"checking","action_groups":[{"order":"parallel","actions":[{"action":"run_bash","intent":"Check A.","args":{"command":"printf a"}},{"action":"run_bash","intent":"Check B.","args":{"command":"printf b"}}]},{"order":"sequential","actions":[{"action":"run_bash","intent":"Check C.","args":{"command":"printf c"}}]}]}"#,
+            r#"{"report_job_progress":"checking","action_groups":[{"order":"parallel","actions":[{"action":"run_bash","intent":"Check A.","args":{"cmd":"printf a"}},{"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b"}}]},{"order":"sequential","actions":[{"action":"run_bash","intent":"Check C.","args":{"cmd":"printf c"}}]}]}"#,
             &caps(),
         );
 
@@ -532,7 +532,7 @@ mod tests {
                 "unexpected_top_level_field:debug",
             ),
             (
-                r#"{"status":"working","report_job_progress":"checking","next_actions":{"action":"run_bash","intent":"List.","args":{"command":"ls"}}}"#,
+                r#"{"status":"working","report_job_progress":"checking","next_actions":{"action":"run_bash","intent":"List.","args":{"cmd":"ls"}}}"#,
                 "next_actions_must_be_array",
             ),
             (
@@ -540,7 +540,7 @@ mod tests {
                 "next_actions[0].args_required",
             ),
             (
-                r#"{"status":"working","report_job_progress":"checking","next_actions":[{"action":"run_bash","args":{"command":"ls"}}]}"#,
+                r#"{"status":"working","report_job_progress":"checking","next_actions":[{"action":"run_bash","args":{"cmd":"ls"}}]}"#,
                 "next_actions[0].intent_required",
             ),
             (

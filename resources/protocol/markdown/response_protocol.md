@@ -68,7 +68,7 @@ finished
   "action": "run_bash",
   "intent": "Run the requested local check.",
   "args": {
-    "command": "printf '%s\\n' example",
+    "cmd": "printf '%s\\n' example",
     "timeout_ms": 5000
   }
 }
@@ -85,7 +85,7 @@ finished
   "action": "run_bash",
   "intent": "浏览当前目录的文件",
   "args": {
-    "command": "ls -al",
+    "cmd": "ls -al",
     "timeout_ms": 1000
   }
 }
@@ -123,7 +123,7 @@ This is the summary....
         "action": "run_bash",
         "intent": "检查当前分支",
         "args": {
-          "command": "git branch --show-current",
+          "cmd": "git branch --show-current",
           "timeout_ms": 3000
         }
       },
@@ -131,7 +131,7 @@ This is the summary....
         "action": "run_bash",
         "intent": "检查工作区状态",
         "args": {
-          "command": "git status --short",
+          "cmd": "git status --short",
           "timeout_ms": 3000
         }
       }
@@ -144,7 +144,7 @@ This is the summary....
         "action": "run_bash",
         "intent": "等待 CI 完成",
         "args": {
-          "command": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
+          "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
           "interval_ms": 10000,
           "timeout_ms": 600000,
           "check_timeout_ms": 5000

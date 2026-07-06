@@ -133,7 +133,8 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Registered tool job lifecycle management, including background job ids,
   status files, output files, polling/cancel semantics, process termination,
   and timeout policy. Shell may display the resulting core topics or action
-  evidence, but must not manage those jobs itself.
+  evidence, but must not manage those jobs itself. Final-answer/context-compact
+  cleanup is also a core responsibility.
 - Memory conflict logic, context shrink/compact algorithms, provider cache
   planning, or retry policy.
 - Runtime configuration validation or reusable configuration side effects, such
