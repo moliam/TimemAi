@@ -50,8 +50,6 @@ pub mod shell_exec;
 pub mod shell_job_status;
 pub mod status_summary;
 pub mod status_view;
-#[path = "../../resources/capabilities/tools/tool_job_status.rs"]
-pub mod tool_job_status;
 pub mod tool_jobs;
 #[path = "../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;

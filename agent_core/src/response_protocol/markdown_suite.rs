@@ -353,6 +353,10 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         return super::json_suite::parse_envelope(content, capabilities);
     }
 
+    if looks_like_external_tool_call_protocol(trimmed) {
+        return malformed_markdown_response("external_tool_call_protocol");
+    }
+
     // Fenced-JSON extraction for legacy full-response JSON. Do not treat JSON
     // examples inside a Markdown-section response as the response envelope.
     if let Some(fenced) = extract_fenced_json(trimmed) {
@@ -577,6 +581,14 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     }
 }
 
+fn looks_like_external_tool_call_protocol(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<tool_call")
+        || lower.contains("</tool_call>")
+        || lower.contains("<function_call")
+        || lower.contains("</function_call>")
+}
+
 fn parse_context_compact_section(
     body: &str,
     repair_issue: &mut Option<String>,
@@ -653,6 +665,9 @@ pub fn md_repair_instruction(issue: &str) -> &'static str {
         "next_actions_required_when_status_working" => {
             "检查到刚刚的输出格式有点问题：请继续使用 Markdown response protocol。`## Status` working 表示还需要 runtime 继续执行动作，因此必须提供 `## Progress` 和 `## Intermediate_Actions`。如果当前用户请求已经完成，请改用 `## Status` finished 和 `## Final_Answer`；finished 不会关闭 Timem session。"
         }
+        "external_tool_call_protocol" => {
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 Markdown response protocol：需要动作时写 `## Progress` 和 `## Intermediate_Actions`，动作放在 action JSON block 中；完成时写 `## Status` finished 和 `## Final_Answer`。"
+        }
         _ => {
             "Use the Markdown response protocol. If work still needs runtime action, write `## Progress` and concrete `## Intermediate_Actions`. If the current user request is complete, write `## Status` with `finished` and provide `## Final_Answer`; this does not close the Timem session. Do not switch to a top-level JSON response."
         }
@@ -686,6 +701,21 @@ mod tests {
         assert_eq!(env.final_answer, "Hello world");
         assert!(!env.continue_work);
         assert!(env.repair_issue.is_none());
+    }
+
+    #[test]
+    fn external_tool_call_protocol_requests_repair_instead_of_plain_answer() {
+        let input = r#"<tool_call>
+{"name": "run_bash", "arguments": {"cmd": "gh run list", "timeout_ms": 5000}}
+</tool_call>"#;
+        let env = parse_markdown_envelope(input, &caps());
+
+        assert_eq!(
+            env.repair_issue.as_deref(),
+            Some("external_tool_call_protocol")
+        );
+        assert!(env.final_answer.is_empty());
+        assert!(env.next_actions.is_empty());
     }
 
     #[test]

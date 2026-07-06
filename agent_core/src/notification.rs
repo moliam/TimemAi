@@ -72,6 +72,7 @@ fn action_memory_activity(action: &ParsedAction) -> CoreMemoryActivity {
 
 fn action_active(action: &ParsedAction) -> bool {
     matches!(action.action.as_str(), "run_bash" | "shell_job_status")
+        || (action.action == "capmgr" && action.input_lower("op") == "job_status")
 }
 
 fn memmgr_memory_activity(action: &ParsedAction) -> CoreMemoryActivity {
@@ -150,7 +151,14 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
         "capmgr" => CoreActionKind::Capability {
             op: action.input_str("op"),
             kind: action.input_str("kind"),
-            id: action.input_str("id"),
+            id: if matches!(
+                action.input_lower("op").as_str(),
+                "job_status" | "job_cancel"
+            ) {
+                action.input_str("job_id")
+            } else {
+                action.input_str("id")
+            },
         },
         "self_tool" => CoreActionKind::SelfTool {
             self_type: action.input_str("type"),
@@ -234,5 +242,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn capmgr_job_status_notification_uses_job_id_as_capability_id() {
+        let suite = ResponseProtocolKind::Json.suite();
+        let envelope = suite.parse(
+            r#"{"report_job_progress":"检查后台工具任务。","next_actions":[{"action":"capmgr","intent":"等待后台工具任务","args":{"op":"job_status","job_id":"tool_job_42","timeout_ms":1000}}]}"#,
+            &crate::capability::CapabilityRegistry::builtin(),
+        );
+        let events = notifications_from_envelope(&envelope);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                CoreNotification::Action {
+                    kind: CoreActionKind::Capability { op, id, .. },
+                    active: true,
+                    ..
+                } if op == "job_status" && id == "tool_job_42"
+            )
+        }));
     }
 }

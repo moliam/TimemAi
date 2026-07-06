@@ -8,11 +8,18 @@ description: |
   op=list only when the user asks about available capabilities, or when you need
   to discover optional skills/tool details not already visible in the catalog.
   Use op=load when a specific listed skill body or tool detail is needed.
+  Use op=job_status or op=job_cancel for background jobs started by registered
+  command-bound tools. Do not use these for run_bash background jobs; use
+  shell_job_status for those.
 prompt_input: |
   Requires op. For op=load or op=inspect, also provide kind=tool|skill and id.
+  For op=job_status or op=job_cancel, provide job_id. For job_status,
+  timeout_ms is chosen by you; 0 means immediate check, max 15000.
 prompt_result: |
   `list` returns available capability headers. `load` returns a skill body or tool
-  detail when you need more than the static catalog.
+  detail when you need more than the static catalog. `job_status` returns
+  running with partial output, finished with exit code and bounded output, or
+  cancelled. `job_cancel` returns cancelled, already_completed, or job_not_found.
 input_schema: |
   {
     "type": "object",
@@ -20,7 +27,7 @@ input_schema: |
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["list", "load", "inspect"],
+        "enum": ["list", "load", "inspect", "job_status", "job_cancel"],
         "description": "Capability manager operation."
       },
       "kind": {
@@ -31,10 +38,19 @@ input_schema: |
       "id": {
         "type": "string",
         "description": "Capability id; required for load/inspect."
+      },
+      "job_id": {
+        "type": "string",
+        "description": "Background job id returned by a registered command-bound tool."
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "description": "Wait budget for job_status; 0 means immediate check, max 15000."
       }
     },
     "x-required-when": [
-      {"field": "op", "values": ["load", "inspect"], "required": ["kind", "id"]}
+      {"field": "op", "values": ["load", "inspect"], "required": ["kind", "id"]},
+      {"field": "op", "values": ["job_status", "job_cancel"], "required": ["job_id"]}
     ]
   }
 output_schema: |
@@ -46,9 +62,15 @@ output_schema: |
       "results": {"type": "string", "description": "List text for list operations."},
       "description": {"type": "string", "description": "Tool description for loaded tools."},
       "input": {"type": "object", "description": "Input schema summary for loaded tools."},
-      "output": {"type": "object", "description": "Output schema summary for loaded tools."},
+      "output": {"type": "object", "description": "Output schema summary for loaded tools, or bounded final job output text for job_status."},
       "body": {"type": "string", "description": "Skill body for loaded skills."},
-      "error": {"type": "string", "description": "not_found|unsupported_kind|unsupported_op"}
+      "job_id": {"type": "string", "description": "Echoed registered tool background job id."},
+      "state": {"type": "string", "description": "Job state: running|finished|cancelled."},
+      "exit_code": {"type": "integer", "description": "Process exit code when finished."},
+      "waited_ms": {"type": "integer", "description": "Actual wait time."},
+      "output_file": {"type": "string", "description": "Path where background output is stored."},
+      "partial_output": {"type": "string", "description": "Bounded output while still running."},
+      "error": {"type": "string", "description": "not_found|unsupported_kind|unsupported_op|job_id_required|job_not_found"}
     }
   }
 example_json: |

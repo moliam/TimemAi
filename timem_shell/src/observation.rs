@@ -389,6 +389,10 @@ fn capmgr_action_detail(op: &str, kind: &str, id: &str) -> String {
         ("inspect", kind, id) if !kind.is_empty() && !id.is_empty() => {
             format!("能力: 查看 {kind}/{id}")
         }
+        ("job_status", _, id) if !id.is_empty() => format!("后台工具任务: {}", id.trim()),
+        ("job_status", _, _) => "后台工具任务: 查询".to_string(),
+        ("job_cancel", _, id) if !id.is_empty() => format!("后台工具任务: 取消 {}", id.trim()),
+        ("job_cancel", _, _) => "后台工具任务: 取消".to_string(),
         _ => "能力: 管理".to_string(),
     }
 }

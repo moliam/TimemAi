@@ -5104,6 +5104,40 @@ fn protocol_repair_does_not_publish_invalid_model_response_topic() {
 }
 
 #[test]
+fn external_tool_call_protocol_repairs_without_showing_raw_tool_call() {
+    let mut core = core_with_builtin_capabilities("external_tool_call_repair");
+    let _ = core.begin_turn("推送远端并检查 CI", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"<tool_call>
+{"name": "run_bash", "arguments": {"cmd": "gh run list --limit 1", "timeout_ms": 5000}}
+</tool_call>"#,
+        ),
+        usage: usage(),
+        model_name: "qwen-plus".to_string(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected repair NeedModel, got {other:?}"),
+    };
+    assert!(prompt.contains("external_tool_call_protocol"));
+    assert!(prompt.contains("Timem 不能执行这种格式"));
+
+    let mut received = Vec::new();
+    core.notify_last_topic_events(
+        "session_a",
+        &mut |events: &[agent_core::CoreTopicEvent]| {
+            received.extend_from_slice(events);
+        },
+    );
+    assert!(
+        received.is_empty(),
+        "external tool_call repair must not publish raw model response topics: {received:?}"
+    );
+}
+
+#[test]
 fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
     let mut core = AgentCore::new(
         include_str!("../../resources/system_prompt/system_prompt.md"),
@@ -5641,7 +5675,7 @@ example_json: |
 }
 
 #[test]
-fn overlay_command_background_job_uses_core_tool_job_status() {
+fn overlay_command_background_job_uses_capmgr_job_status() {
     let memory_dir = tmp_dir("overlay_command_background_memory");
     let overlay_dir = tmp_dir("overlay_command_background_capabilities");
     let tools_dir = overlay_dir.join("tools");
@@ -5700,7 +5734,7 @@ example_json: |
     };
     assert!(prompt.contains("Action result: echo_payload"));
     assert!(prompt.contains("status: background_started"));
-    assert!(prompt.contains("next_action: tool_job_status"));
+    assert!(prompt.contains("next_action: capmgr op=job_status"));
     let job_id = prompt
         .lines()
         .find_map(|line| line.strip_prefix("job_id: "))
@@ -5710,7 +5744,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"检查后台工具任务。","next_actions":[{{"action":"tool_job_status","intent":"Wait for registered background tool.","args":{{"job_id":"{}","timeout_ms":3000}}}}]}}"#,
+            r#"{{"report_job_progress":"检查后台工具任务。","next_actions":[{{"action":"capmgr","intent":"Wait for registered background tool.","args":{{"op":"job_status","job_id":"{}","timeout_ms":3000}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -5720,14 +5754,15 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected tool job status result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: tool_job_status"));
+    assert!(prompt.contains("Action result: capmgr"));
+    assert!(prompt.contains("op: job_status"));
     assert!(prompt.contains("action: echo_payload"));
     assert!(prompt.contains("state: finished"));
     assert!(prompt.contains("registered_background_ok"));
 }
 
 #[test]
-fn overlay_command_background_job_can_be_cancelled_through_core_tool_status() {
+fn overlay_command_background_job_can_be_cancelled_through_capmgr() {
     let memory_dir = tmp_dir("overlay_command_cancel_memory");
     let overlay_dir = tmp_dir("overlay_command_cancel_capabilities");
     let tools_dir = overlay_dir.join("tools");
@@ -5790,7 +5825,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"report_job_progress":"取消后台工具任务。","next_actions":[{{"action":"tool_job_status","intent":"Cancel registered background tool.","args":{{"op":"cancel","job_id":"{}"}}}}]}}"#,
+            r#"{{"report_job_progress":"取消后台工具任务。","next_actions":[{{"action":"capmgr","intent":"Cancel registered background tool.","args":{{"op":"job_cancel","job_id":"{}"}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -5800,7 +5835,8 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected tool job cancel result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: tool_job_status"));
+    assert!(prompt.contains("Action result: capmgr"));
+    assert!(prompt.contains("op: job_cancel"));
     assert!(prompt.contains("action: slow_payload"));
     assert!(prompt.contains("state: cancelled"));
 }

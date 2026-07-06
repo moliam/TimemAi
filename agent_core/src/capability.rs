@@ -10,8 +10,6 @@ const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/c
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
 const SHELL_JOB_STATUS_MANIFEST: &str =
     include_str!("../../resources/capabilities/tools/shell_job_status.yaml");
-const TOOL_JOB_STATUS_MANIFEST: &str =
-    include_str!("../../resources/capabilities/tools/tool_job_status.yaml");
 const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,7 +191,6 @@ impl CapabilityRegistry {
                 CAPMGR_MANIFEST,
                 RUN_BASH_MANIFEST,
                 SHELL_JOB_STATUS_MANIFEST,
-                TOOL_JOB_STATUS_MANIFEST,
                 SELF_TOOL_MANIFEST,
             ],
             &[],
@@ -1856,8 +1853,8 @@ mod tests {
         assert!(registry.contains_tool("capmgr"));
         assert!(registry.contains_tool("run_bash"));
         assert!(registry.contains_tool("shell_job_status"));
-        assert!(registry.contains_tool("tool_job_status"));
         assert!(registry.contains_tool("self_tool"));
+        assert!(!registry.contains_tool("tool_job_status"));
         assert!(!registry.contains_tool("query_memory"));
     }
 
@@ -1896,7 +1893,7 @@ mod tests {
 
         assert!(registry.contains_tool("run_bash"));
         assert!(registry.contains_tool("shell_job_status"));
-        assert!(registry.contains_tool("tool_job_status"));
+        assert!(!registry.contains_tool("tool_job_status"));
         assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
     }
 
@@ -1909,7 +1906,7 @@ mod tests {
         assert!(rendered.contains("#### `capmgr`"));
         assert!(rendered.contains("#### `run_bash`"));
         assert!(rendered.contains("#### `shell_job_status`"));
-        assert!(rendered.contains("#### `tool_job_status`"));
+        assert!(!rendered.contains("#### `tool_job_status`"));
         assert!(rendered.contains("#### `self_tool`"));
         assert!(rendered.contains("interval_ms"));
         assert!(rendered.contains("exits with code 0"));
@@ -1951,10 +1948,7 @@ mod tests {
             registry.binding_name("shell_job_status"),
             Some("shell_job_status")
         );
-        assert_eq!(
-            registry.binding_name("tool_job_status"),
-            Some("tool_job_status")
-        );
+        assert_eq!(registry.binding_name("tool_job_status"), None);
         assert_eq!(registry.binding_name("self_tool"), Some("self_tool"));
         assert_eq!(registry.binding_name("future_tool"), None);
     }
@@ -2053,8 +2047,11 @@ mod tests {
             .is_ok());
         assert!(registry
             .validate_action_input(
-                "tool_job_status",
-                &json_object([("job_id", Value::String("tool_job_1".to_string()))])
+                "capmgr",
+                &json_object([
+                    ("op", Value::String("job_cancel".to_string())),
+                    ("job_id", Value::String("tool_job_1".to_string())),
+                ])
             )
             .is_ok());
         assert!(registry
@@ -2068,14 +2065,20 @@ mod tests {
             .is_ok());
         assert!(registry
             .validate_action_input(
-                "tool_job_status",
+                "capmgr",
                 &json_object([
+                    ("op", Value::String("job_status".to_string())),
                     ("job_id", Value::String("tool_job_1".to_string())),
-                    ("op", Value::String("pause".to_string())),
                 ])
             )
+            .is_ok());
+        assert!(registry
+            .validate_action_input(
+                "tool_job_status",
+                &json_object([("job_id", Value::String("tool_job_1".to_string()))])
+            )
             .unwrap_err()
-            .contains("input.op_unsupported:pause"));
+            .contains("unsupported_action:tool_job_status"));
         assert!(registry
             .validate_action_input("run_bash", &json_object([]))
             .unwrap_err()

@@ -12,7 +12,7 @@ description: |
   evidence from the command result. It supports foreground, background, and
   polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
   Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner.
-  Use timeout_ms=-1 only when the user explicitly wants the command to block
+  Use timeout_ms=-1 only when you explicitly want the command to block
   without a runtime timeout. Do not put long sleeps in cmd. For waiting on
   external state, use loop_cmd with interval_ms. The loop command is re-run
   until it exits with code 0 or timeout_ms total wait budget is reached. For

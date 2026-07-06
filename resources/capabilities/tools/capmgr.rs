@@ -11,7 +11,7 @@ pub struct CapmgrActionInput<'a> {
 
 pub fn execute(registry: &CapabilityRegistry, input: CapmgrActionInput<'_>) -> String {
     if input.op.trim().is_empty() {
-        return "Action result: capmgr\nerror: invalid_input\nmessage: Missing `op`. Use list, load, or inspect.".to_string();
+        return "Action result: capmgr\nerror: invalid_input\nmessage: Missing `op`. Use list, load, inspect, job_status, or job_cancel.".to_string();
     }
     match input.op {
         "list" => registry.list_text(input.kind.trim()),
@@ -35,10 +35,19 @@ pub fn execute(registry: &CapabilityRegistry, input: CapmgrActionInput<'_>) -> S
 }
 
 pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> String {
+    let op = action.input_lower("op");
+    if op == "job_status" {
+        return core
+            .tool_jobs
+            .status(&action.input_str("job_id"), action.status_timeout_ms());
+    }
+    if op == "job_cancel" {
+        return core.tool_jobs.cancel(&action.input_str("job_id"));
+    }
     execute(
         &core.capabilities,
         CapmgrActionInput {
-            op: &action.input_lower("op"),
+            op: &op,
             kind: &action.input_str("kind"),
             id: &action.input_str("id"),
         },

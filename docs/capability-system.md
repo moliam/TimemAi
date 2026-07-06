@@ -60,10 +60,10 @@ Foreground/background execution is part of the capability interface:
   start the command as a background `tool_job`, persist its status under the
   runtime memory directory, and return a `job_id`.
 - Background command-bound tools are checked or cancelled through
-  `tool_job_status`; background `run_bash` jobs use `shell_job_status` for the
-  same status/cancel lifecycle. The shell UI does not manage those jobs. Core
-  owns job ids, output/status files, process termination, polling, bounded
-  readback, and action evidence.
+  `capmgr op=job_status|job_cancel`; background `run_bash` jobs use
+  `shell_job_status` for the same status/cancel lifecycle. The shell UI does
+  not manage those jobs. Core owns job ids, output/status files, process
+  termination, polling, bounded readback, and action evidence.
 - External or remote status waiting should use `run_bash` polling mode, not a
   foreground `sleep && check` command. When `interval_ms` is present,
   `run_bash` repeatedly runs the command until it exits with code 0, the total
