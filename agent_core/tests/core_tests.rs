@@ -742,7 +742,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
     };
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("测试代号是 ALPHA-42"));
-    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("response is not protocol compliant"));
 }
 
 #[test]
@@ -1535,7 +1535,7 @@ fn action_input_field_is_rejected_instead_of_compatibly_executed() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("## SYSTEM"));
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("actions[0].args_required"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
@@ -1726,7 +1726,7 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
             other => panic!("{name}: expected response repair, got {other:?}"),
         };
         assert!(
-            prompt.contains("## SYSTEM") && prompt.contains("Protocol repair request"),
+            prompt.contains("## SYSTEM") && prompt.contains("response is not protocol compliant"),
             "{name}: missing repair system block"
         );
         assert!(
@@ -1756,7 +1756,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected repair, got {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("status_finished_must_not_include_next_actions"));
     assert!(!prompt.contains("job_id:"));
     assert!(!prompt.contains("Action result: run_bash"));
@@ -1775,7 +1775,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
         other => panic!("expected string args to request protocol repair, got {other:?}"),
     };
     assert!(prompt.contains("## SYSTEM"));
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("actions[0].args_must_be_object"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
@@ -1889,7 +1889,9 @@ fn fields_wrapped_finished_answer_is_accepted_without_repair() {
     };
     assert_eq!(final_turn.final_answer, "你好。");
     assert_eq!(core.current_stats().repair_calls, 0);
-    assert!(!core.render_prompt().contains("Protocol repair request"));
+    assert!(!core
+        .render_prompt()
+        .contains("response is not protocol compliant"));
 }
 
 #[test]
@@ -1912,13 +1914,11 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
     assert!(prompt.contains("## SYSTEM"));
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("shrink_priority: discard_first"));
-    assert!(prompt.contains("issue: final_answer_requires_status_finished"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("final_answer_requires_status_finished"));
     assert!(prompt.contains("没有明确完成状态"));
     assert!(prompt.contains("请写 `## Status` 为 `finished`"));
     assert!(prompt.contains("并写 `## Final_Answer`"));
-    assert!(prompt.contains("Previous model response to repair:"));
     assert!(prompt.contains(r#"{"final_answer":"这是最终结论。"}"#));
     assert_eq!(core.current_stats().repair_calls, 1);
 }
@@ -1943,9 +1943,8 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
     assert!(prompt.contains("## SYSTEM"));
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("shrink_priority: discard_first"));
-    assert!(prompt.contains("issue: final_answer_required_when_status_finished"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("final_answer_required_when_status_finished"));
     assert!(prompt.contains("缺少 `## Final_Answer`"));
     assert!(prompt.contains("同时提供 `## Status` 和 `## Final_Answer`"));
     assert!(prompt.contains(r#"{"status":"ALL_FINISHED","progress":"完成了"}"#));
@@ -1976,14 +1975,147 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
     assert!(prompt.contains("## SYSTEM"));
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("[BEGIN PREVIOUS_LLM_RESPONSE]"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("[FOCUSED previous response: chars"));
     assert!(prompt.contains("BAD_JSON_FOCUS"));
     assert!(prompt.contains("TAIL_NEAR_FOCUS"));
     assert!(!prompt.contains("BEGIN_SHOULD_NOT_APPEAR"));
     assert!(!prompt.contains("END_SHOULD_NOT_APPEAR"));
-    assert!(prompt.contains("[END PREVIOUS_LLM_RESPONSE]"));
+}
+
+#[test]
+fn protocol_repair_delta_separates_previous_output_from_system_error() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("repair_delta_roles"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("继续", None);
+    let raw_response = r#"{"final_answer":"缺少完成状态"}"#;
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(raw_response),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel repair, got {other:?}"),
+    };
+
+    let assistant_pos = prompt
+        .find("## TIMEM_ASSISTANT")
+        .expect("missing assistant repair slice");
+    let raw_pos = prompt
+        .find(raw_response)
+        .expect("missing previous model output");
+    let system_pos = prompt
+        .find("## SYSTEM")
+        .expect("missing system repair slice");
+    let issue_pos = prompt
+        .find("final_answer_requires_status_finished")
+        .expect("missing repair issue");
+
+    assert!(assistant_pos < raw_pos);
+    assert!(raw_pos < system_pos);
+    assert!(system_pos < issue_pos);
+    assert!(prompt.contains("TIMEM_ASSISTANT's previous response is not protocol compliant."));
+    assert!(prompt.contains("error: final_answer_requires_status_finished"));
+    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("shrink_priority"));
+    assert!(!prompt.contains("reason:"));
+    assert!(!prompt.contains("Previous model response to repair"));
+    assert!(!core.render_prompt().contains(raw_response));
+    assert!(!core
+        .render_prompt()
+        .contains("response is not protocol compliant"));
+}
+
+#[test]
+fn successful_protocol_repair_does_not_persist_repair_delta() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("successful_repair_is_temporary"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("继续", None);
+    let wrong_response = r#"{"final_answer":"缺少完成状态"}"#;
+    let repair_step = core.apply_model_response(LlmResponse {
+        content: scored(wrong_response),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let repair_prompt = match repair_step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected repair prompt, got {other:?}"),
+    };
+    assert!(repair_prompt.contains(wrong_response));
+    assert!(repair_prompt.contains("temp_repair_"));
+    assert!(!core.render_prompt().contains(wrong_response));
+
+    let final_step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"修复后的正确回复"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match final_step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected final after repair, got {other:?}"),
+    };
+    assert_eq!(final_turn.final_answer, "修复后的正确回复");
+
+    let next_prompt = core.begin_turn("下一个问题", None);
+    let next_prompt = match next_prompt {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected next prompt, got {other:?}"),
+    };
+    assert!(next_prompt.contains("修复后的正确回复"));
+    assert!(!next_prompt.contains(wrong_response));
+    assert!(!next_prompt.contains("temp_repair_"));
+    assert!(!next_prompt.contains("response is not protocol compliant"));
+}
+
+#[test]
+fn protocol_repair_can_retry_multiple_times_before_failing() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("protocol_repair_multiple_attempts"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("继续", None);
+
+    for attempt in 1..=5 {
+        let step = core.apply_model_response(LlmResponse {
+            content: format!("{{ malformed attempt {attempt}"),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        let prompt = match step {
+            CoreStep::NeedModel { prompt, .. } if attempt < 5 => prompt,
+            CoreStep::NeedModel { prompt, .. } if attempt == 5 => prompt,
+            other => panic!("attempt {attempt}: expected repair prompt, got {other:?}"),
+        };
+        assert!(prompt.contains("temp_repair_"));
+        assert!(prompt.contains("response is not protocol compliant"));
+    }
+
+    let final_step = core.apply_model_response(LlmResponse {
+        content: "{ still malformed after limit".to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_turn = match final_step {
+        CoreStep::Final(turn) => turn,
+        other => panic!("expected repair failure after max attempts, got {other:?}"),
+    };
+    assert_eq!(final_turn.repair_issue.as_deref(), Some("invalid_json"));
 }
 
 #[test]
@@ -2054,8 +2186,8 @@ fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
         other => panic!("expected protocol repair, got {other:?}"),
     };
     assert!(prompt.contains("## SYSTEM"));
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("final_answer_must_not_start_with_runtime_progress_marker"));
 }
 
@@ -2077,9 +2209,25 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
     });
     assert!(matches!(step, CoreStep::NeedModel { .. }));
 
-    let step = core.apply_model_response(LlmResponse {
+    let mut step = core.apply_model_response(LlmResponse {
         content: r#"working_still_action: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#
             .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    for idx in 3..=5 {
+        step = core.apply_model_response(LlmResponse {
+            content: format!("{{still invalid repair attempt {idx}"),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        assert!(matches!(step, CoreStep::NeedModel { .. }));
+    }
+    step = core.apply_model_response(LlmResponse {
+        content: "{still invalid after max repairs".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2125,8 +2273,8 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("## SYSTEM"));
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("truncated_model_output"));
     assert!(prompt.contains("max output token"));
     assert!(prompt.contains("Markdown response protocol"));
@@ -2215,8 +2363,24 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
     });
     assert!(matches!(step, CoreStep::NeedModel { .. }));
 
-    let step = core.apply_model_response(LlmResponse {
+    let mut step = core.apply_model_response(LlmResponse {
         content: "{\"progress\":\"still partial".to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: true,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    for idx in 3..=5 {
+        step = core.apply_model_response(LlmResponse {
+            content: format!("{{\"progress\":\"still partial repair {idx}"),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: true,
+        });
+        assert!(matches!(step, CoreStep::NeedModel { .. }));
+    }
+    step = core.apply_model_response(LlmResponse {
+        content: "{\"progress\":\"still partial after max".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: true,
@@ -2475,10 +2639,26 @@ fn malformed_complex_protocol_is_blocked_without_raw_leak() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
 
-    let step = core.apply_model_response(LlmResponse {
+    let mut step = core.apply_model_response(LlmResponse {
         content: "still ``` not { valid \\ json".to_string(),
+        model_name: "aws-claude-sonnet-4-6".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    for idx in 3..=5 {
+        step = core.apply_model_response(LlmResponse {
+            content: format!("still ``` not {{ valid repair {idx}"),
+            model_name: "aws-claude-sonnet-4-6".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        assert!(matches!(step, CoreStep::NeedModel { .. }));
+    }
+    step = core.apply_model_response(LlmResponse {
+        content: "still ``` not { valid after max".to_string(),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
@@ -2534,7 +2714,7 @@ fn memmgr_durable_sql_lists_recent_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("type: durable"));
     assert!(prompt.contains("op: sql"));
@@ -2586,7 +2766,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("第二条 durable 记录"));
     assert!(prompt.contains("第一条 durable 记录"));
@@ -2636,7 +2816,7 @@ fn next_action_without_intent_uses_action_name_fallback() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("response is not protocol compliant"));
     assert!(!prompt.contains("intent_required"));
     assert!(prompt.contains("Action result: memmgr"));
 }
@@ -2796,8 +2976,8 @@ fn memmgr_missing_op_requests_protocol_repair_from_manifest_idl() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.op_required"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.op_required"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -2825,7 +3005,8 @@ fn memmgr_legacy_query_op_is_not_executed_after_sql_search_split() {
     };
 
     assert!(
-        prompt.contains("Protocol repair request") || prompt.contains("unsupported_type_or_op")
+        prompt.contains("response is not protocol compliant")
+            || prompt.contains("unsupported_type_or_op")
     );
     assert!(!prompt.contains("Action result: memmgr"));
     assert!(!prompt.contains("LEGACY-QUERY-SHOULD-NOT-READ"));
@@ -2883,8 +3064,8 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.type_required"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.type_required"));
     assert!(!prompt.contains("Action result: memmgr"));
     assert!(!core.scratch_file().exists());
 
@@ -2899,8 +3080,8 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.label_required_when_op=write,type=scratch"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.label_required_when_op=write,type=scratch"));
     assert!(!prompt.contains("Action result: memmgr"));
 
     let _ = core.begin_turn("读取一条没有 id 的草稿", None);
@@ -2914,8 +3095,8 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.id_required_when_op=read,type=scratch"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.id_required_when_op=read,type=scratch"));
     assert!(!prompt.contains("Action result: memmgr"));
 
     let _ = core.begin_turn("删除一条没有 id 的草稿", None);
@@ -2929,8 +3110,8 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.id_required_when_op=delete,type=scratch"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.id_required_when_op=delete,type=scratch"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -3069,7 +3250,7 @@ fn scratch_context_offload_requires_prompt_refs_in_protocol() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("input.any_required_when_delta_ids"));
 }
 
@@ -3091,8 +3272,8 @@ fn memory_write_action_requires_content_or_query() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.content_required_when_op=insert,type=durable"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.content_required_when_op=insert,type=durable"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -3216,6 +3397,33 @@ fn sql_read_action_returns_rows() {
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("content=测试代号是 ALPHA-42"));
     assert!(prompt.contains("created_at_ms=11"));
+}
+
+#[test]
+fn durable_sql_empty_filter_reports_total_rows() {
+    let dir = tmp_dir("sql_empty_filter_total_rows");
+    fs::write(
+        dir.join("memory.jsonl"),
+        r#"{"id":"user_name","created_at_ms":11,"updated_at_ms":11,"version":1,"content":"用户的名字是测试用户"}
+{"id":"m2","created_at_ms":22,"updated_at_ms":22,"version":1,"content":"测试项目纪念日是 2099-06-12"}
+"#,
+    )
+    .unwrap();
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let _ = core.begin_turn("我叫什么名字", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%姓名%"],"limit":5}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("results: none"));
+    assert!(prompt.contains("durable_memory_total_rows: 2"));
 }
 
 #[test]
@@ -3457,8 +3665,8 @@ fn sql_read_action_requires_sql_for_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.sql_required_when_op=sql,type=durable"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.sql_required_when_op=sql,type=durable"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -3483,7 +3691,7 @@ fn memory_sql_query_requires_params_for_placeholders() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("SQL placeholder count does not match `params`"));
     assert!(!prompt.contains("sql_query_failed"));
 }
@@ -3509,7 +3717,7 @@ fn memory_sql_query_rejects_extra_params_for_placeholders() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("SQL placeholder count does not match `params`"));
     assert!(!prompt.contains("sql_query_failed"));
 }
@@ -3535,7 +3743,7 @@ fn memory_sql_prepare_error_exposes_sqlite_reason_to_model() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("sql_prepare_failed"));
     assert!(prompt.contains("no such column: key"));
@@ -4211,8 +4419,8 @@ fn memory_update_requires_protocol_fields() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.id_required_when_op=update,type=durable"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.id_required_when_op=update,type=durable"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -4309,8 +4517,8 @@ fn run_bash_rejects_old_timeout_sec_field() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.timeout_sec_unsupported"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.timeout_sec_unsupported"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -4629,7 +4837,7 @@ fn removed_shell_job_status_action_is_rejected_as_unsupported() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("unsupported_action:shell_job_status"));
 }
 
@@ -4698,8 +4906,8 @@ fn run_bash_rejects_removed_read_back_protocol() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.read_back_command_unsupported"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.read_back_command_unsupported"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -4722,8 +4930,8 @@ fn run_bash_rejects_removed_large_readback_protocol() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.large_readback_opt_in_unsupported"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.large_readback_opt_in_unsupported"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -4880,8 +5088,8 @@ fn run_bash_missing_command_returns_tool_input_error() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.any_required:cmd|loop_cmd"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.any_required:cmd|loop_cmd"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -5636,7 +5844,7 @@ fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected repair NeedModel, got {other:?}"),
     };
-    assert!(repair_prompt.contains("Protocol repair request"));
+    assert!(repair_prompt.contains("response is not protocol compliant"));
     assert!(repair_prompt.contains("unsupported_action:run_bash"));
     assert!(!repair_prompt.contains("Exit code: 0"));
     assert!(!repair_prompt.contains("output:\n"));
@@ -5988,7 +6196,7 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("type: durable"));
     assert!(prompt.contains("op: sql"));
-    assert!(!prompt.contains("Protocol repair request"));
+    assert!(!prompt.contains("response is not protocol compliant"));
 }
 
 #[test]
@@ -6018,7 +6226,7 @@ fn legacy_actions_are_not_visible_or_executable() {
         other => panic!("expected protocol repair, got {other:?}"),
     };
 
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("unsupported_action:query_memory"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
@@ -6275,8 +6483,8 @@ fn capmgr_load_missing_kind_requests_protocol_repair_from_manifest_idl() {
         other => panic!("expected repair prompt, got {other:?}"),
     };
 
-    assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.kind_required_when_op=load"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("actions[0].input.kind_required_when_op=load"));
     assert!(!prompt.contains("Action result: capmgr"));
 }
 
@@ -6286,12 +6494,12 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
         (
             "bad_op",
             r#"{"progress":"检查 capability。","working_still_action":[{"action":"capmgr","intent":"Use an unsupported capability operation.","args":{"op":"remove","kind":"skill","id":"release_quality_gate"}}]}"#,
-            "issue: actions[0].input.op_unsupported:remove",
+            "actions[0].input.op_unsupported:remove",
         ),
         (
             "bad_kind",
             r#"{"progress":"检查 capability。","working_still_action":[{"action":"capmgr","intent":"Use an unsupported capability kind.","args":{"op":"load","kind":"resource","id":"release_quality_gate"}}]}"#,
-            "issue: actions[0].input.kind_unsupported:resource",
+            "actions[0].input.kind_unsupported:resource",
         ),
     ] {
         let mut core = AgentCore::new(
@@ -6311,7 +6519,7 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
             other => panic!("expected repair prompt for {case}, got {other:?}"),
         };
 
-        assert!(prompt.contains("Protocol repair request"));
+        assert!(prompt.contains("response is not protocol compliant"));
         assert!(!prompt.contains("Action result: capmgr"));
         assert!(prompt.contains(expected_issue));
     }
@@ -6424,7 +6632,7 @@ example_json: |
         other => panic!("expected manifest repair prompt, got {other:?}"),
     };
 
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("actions[0].input.background_unsupported"));
     assert!(!prompt.contains("background_started"));
 }
@@ -6613,7 +6821,7 @@ fn finished_with_actions_requests_repair_and_executes_nothing() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected protocol repair, got {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair request"));
+    assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("status_finished_must_not_include_next_actions"));
     assert!(prompt.contains("不能同时包含"));
     assert!(!prompt.contains("Action result: run_bash"));
@@ -6648,7 +6856,7 @@ fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
             CoreStep::NeedModel { prompt, .. } => prompt,
             other => panic!("expected protocol repair for {case}, got {other:?}"),
         };
-        assert!(prompt.contains("Protocol repair request"));
+        assert!(prompt.contains("response is not protocol compliant"));
         assert!(prompt.contains("status_finished_must_not_include_next_actions"));
         assert!(!prompt.contains("Action result: run_bash"));
         assert!(!prompt.contains("Action result: self_tool"));
@@ -6870,7 +7078,7 @@ fn array_without_action_key_still_rejected() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel (repair), got: {other:?}"),
     };
-    assert!(prompt.contains("Protocol repair"));
+    assert!(prompt.contains("response is not protocol compliant"));
 }
 
 fn perf_guard_enabled() -> bool {

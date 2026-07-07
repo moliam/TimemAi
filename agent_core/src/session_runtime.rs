@@ -1993,7 +1993,7 @@ finished
             Some("invalid_json_plain_text_fallback")
         );
         assert_eq!(model.prompts.len(), 2);
-        assert!(model.prompts[1].contains("Protocol repair request"));
+        assert!(model.prompts[1].contains("response is not protocol compliant"));
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "turn_final"), 1);
         let repair = audit_event(&events, "model_repair_request").unwrap();
@@ -2020,14 +2020,13 @@ finished
         core.set_response_protocol(crate::ResponseProtocolKind::Json);
         let mut config = test_config();
         let mut ui = NoopTurnUi;
-        let mut model = ReplayModel::new([
-            Ok(llm("{not valid json}", 5_000, false)),
+        let mut model = ReplayModel::new((0..6).map(|idx| {
             Ok(llm(
-                r#"working_still_action: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#,
-                5_100,
+                &format!("{{not valid json repair attempt {idx}"),
+                5_000 + idx as u32,
                 false,
-            )),
-        ]);
+            ))
+        }));
 
         let outcome = run_session_turn_with_model_client(
             &mut core,
@@ -2060,6 +2059,7 @@ finished
             })
         );
         let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 5);
         let final_event = audit_event(&events, "turn_final").unwrap();
         assert_eq!(final_event["assistant_output"], "");
         assert_eq!(final_event["repair_issue"], "invalid_json");
@@ -2123,7 +2123,7 @@ finished
         assert_eq!(model.prompts.len(), 2);
         let repair_prompt = &model.prompts[1];
         assert!(repair_prompt.contains("## SYSTEM"));
-        assert!(repair_prompt.contains("Protocol repair request"));
+        assert!(repair_prompt.contains("response is not protocol compliant"));
         assert!(repair_prompt.contains("Markdown response protocol"));
         assert!(repair_prompt.contains("## Progress"));
         assert!(repair_prompt.contains("## Working_Still_Action"));
@@ -3067,7 +3067,7 @@ Markdown 协议动作已执行。"#,
                 )),
                 2 => Ok(llm("{这不是合法 JSON，但应该走协议修复}", 2_100, false)),
                 3 => {
-                    assert!(prompt.contains("Protocol repair request"));
+                    assert!(prompt.contains("response is not protocol compliant"));
                     Ok(llm("畸形回复已恢复为用户可读文本。", 2_200, false))
                 }
                 4 => Ok(llm(
@@ -3206,7 +3206,7 @@ Markdown 协议动作已执行。"#,
             model
                 .prompts
                 .iter()
-                .any(|prompt| prompt.contains("Protocol repair request")),
+                .any(|prompt| prompt.contains("response is not protocol compliant")),
             "story should exercise malformed model response repair"
         );
         assert!(

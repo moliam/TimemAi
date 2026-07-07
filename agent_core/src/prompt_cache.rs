@@ -122,7 +122,9 @@ pub fn plan_incremental_cache(parts: PromptParts) -> Vec<PromptBlock> {
     let segments = split_prompt_segments(&dynamic);
     let cache_indexes = cache_tail_indexes(&segments);
     blocks.extend(segments.into_iter().enumerate().map(|(idx, segment)| {
-        let cache = if cache_indexes.contains(&idx) {
+        let cache = if is_temporary_prompt_segment(&segment) {
+            CacheControl::None
+        } else if cache_indexes.contains(&idx) {
             CacheControl::Ephemeral
         } else {
             CacheControl::None
@@ -134,6 +136,12 @@ pub fn plan_incremental_cache(parts: PromptParts) -> Vec<PromptBlock> {
         }
     }));
     blocks
+}
+
+fn is_temporary_prompt_segment(segment: &PromptSegment) -> bool {
+    segment_delta_id(&segment.text)
+        .as_deref()
+        .is_some_and(|id| id.starts_with("temp_"))
 }
 
 pub fn plan_prompt_cache(rendered_prompt: &str) -> Vec<PromptBlock> {
@@ -296,6 +304,22 @@ mod tests {
             "Follow the system prompt, give your XML formatted response:"
         );
         assert_eq!(blocks[2].cache, CacheControl::None);
+    }
+
+    #[test]
+    fn temporary_repair_delta_is_not_cache_controlled() {
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## SYSTEM\nrepair\n[END DELTA]\n\n{}",
+            crate::prompt_render::formatted_response_trailer("XML")
+        );
+
+        let blocks = plan_prompt_cache(&prompt);
+        let repair_block = blocks
+            .iter()
+            .find(|block| block.text.contains("temp_repair_123_1"))
+            .expect("missing temporary repair block");
+
+        assert_eq!(repair_block.cache, CacheControl::None);
     }
 
     #[derive(Debug, Default)]

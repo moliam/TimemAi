@@ -470,6 +470,7 @@ impl PendingApprovedAction {
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
 const DEFAULT_ROUND_BUDGET: u32 = 50;
+const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 5;
 const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
 const MEM_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
 const MEM_GUARD_STALE_AFTER: Duration = Duration::from_secs(60 * 60 * 6);
@@ -811,6 +812,7 @@ pub struct AgentCore {
     current_round: u32,
     pub(crate) current_stats: UsageStats,
     repair_attempted: bool,
+    repair_attempts: u32,
     last_repair_issue: Option<String>,
     pending_approval: Option<PendingApproval>,
     pub(crate) bash_approval_mode: BashApprovalMode,
@@ -867,6 +869,7 @@ impl AgentCore {
             current_round: 0,
             current_stats: UsageStats::zero(),
             repair_attempted: false,
+            repair_attempts: 0,
             last_repair_issue: None,
             pending_approval: None,
             bash_approval_mode: BashApprovalMode::Ask,
@@ -1185,6 +1188,7 @@ impl AgentCore {
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
+        self.repair_attempts = 0;
         self.last_repair_issue = None;
         self.pending_approval = None;
         self.current_action_turn_id = None;
@@ -1245,6 +1249,7 @@ impl AgentCore {
         self.round_budget = self.configured_round_budget;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
+        self.repair_attempts = 0;
         self.last_repair_issue = None;
         self.pending_approval = None;
         self.last_notifications.clear();
@@ -1371,7 +1376,7 @@ impl AgentCore {
         self.last_observed_prompt_tokens = self
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
-        if response.truncated && !self.repair_attempted {
+        if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
             let protocol_suite = self.response_protocol.suite();
             return self.request_protocol_repair(
                 "truncated_model_output",
@@ -1386,7 +1391,7 @@ impl AgentCore {
             slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
         }
         if let Some(issue) = parsed.repair_issue.clone() {
-            if !self.repair_attempted {
+            if self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
                 return self.request_protocol_repair(
                     &issue,
                     protocol_suite.repair_instruction(&issue),
@@ -2145,24 +2150,73 @@ impl AgentCore {
         raw_response: &str,
     ) -> CoreStep {
         self.repair_attempted = true;
+        self.repair_attempts = self.repair_attempts.saturating_add(1);
         self.last_repair_issue = Some(issue.to_string());
         self.current_stats.repair_calls = self.current_stats.repair_calls.saturating_add(1);
-        self.append_delta(vec![(
-            "response_repair".to_string(),
-            format!(
-                "Protocol repair request\nshrink_priority: discard_first\nissue: {}\nreason: {}\ninstruction:\n{}\n\nPrevious model response to repair:\n[BEGIN PREVIOUS_LLM_RESPONSE]\n{}\n[END PREVIOUS_LLM_RESPONSE]",
-                issue,
-                self.response_protocol.suite().repair_reason(issue),
-                instruction,
-                self.response_protocol
-                    .suite()
-                    .focused_repair_text(issue, raw_response),
-            ),
-        )]);
+        let focused_response = self
+            .response_protocol
+            .suite()
+            .focused_repair_text(issue, raw_response);
+        let repair_note = format!(
+            "{}'s previous response is not protocol compliant.\nerror: {}\n\n{}",
+            self.assistant_speaker_name, issue, instruction
+        );
+        let prompt = self.render_prompt_with_temporary_delta(vec![
+            ("llm_response".to_string(), focused_response),
+            ("response_repair".to_string(), repair_note),
+        ]);
         CoreStep::NeedModel {
-            prompt: self.render_prompt(),
+            prompt,
             rounds_remaining: self.remaining_rounds(),
         }
+    }
+
+    fn render_prompt_with_temporary_delta(&self, slice_texts: Vec<(String, String)>) -> String {
+        let time_ms = now_ms();
+        let delta_id = format!("temp_repair_{}_{}", time_ms, self.repair_attempts);
+        let chunks = slice_texts
+            .into_iter()
+            .flat_map(|(prompt_type, text)| {
+                split_text_for_prompt_slices(&text, PROMPT_SLICE_TEXT_LIMIT)
+                    .into_iter()
+                    .map(move |chunk| (prompt_type.clone(), chunk))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let slice_count = chunks.len();
+        let slices = chunks
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (prompt_type, text))| {
+                let slice_index = idx + 1;
+                PromptSlice {
+                    delta_id: delta_id.clone(),
+                    slice_id: format!(
+                        "ps_{}_s{:03}",
+                        delta_id.trim_start_matches("pd_"),
+                        slice_index
+                    ),
+                    prompt_type,
+                    time_ms,
+                    text,
+                    slice_index,
+                    slice_count,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut deltas = self.deltas.clone();
+        deltas.push(PromptDelta {
+            delta_id,
+            time_ms,
+            slices,
+            hidden_slice_ids: Vec::new(),
+        });
+        prompt_render::render_prompt_with_rendered_static(
+            &self.rendered_static_prompt,
+            &deltas,
+            &self.assistant_speaker_name,
+            self.response_protocol.lang_format(),
+        )
     }
 
     fn append_in_turn_shrink_review_if_needed(&mut self) {
@@ -3213,6 +3267,11 @@ impl FileMemoryStore {
             .map_err(std::io::Error::other)?
     }
 
+    fn count(&self) -> std::io::Result<usize> {
+        self.guard
+            .with_read(|| self.read_all_unlocked().map(|rows| rows.len()))
+            .map_err(std::io::Error::other)?
+    }
     fn update(
         &self,
         operation: &str,
