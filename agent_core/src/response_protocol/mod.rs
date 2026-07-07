@@ -362,6 +362,8 @@ mod tests {
         );
         assert_eq!(markdown_env.next_actions, json_env.next_actions);
         assert_eq!(xml_env.next_actions, json_env.next_actions);
+        assert_eq!(markdown_env.action_groups, json_env.action_groups);
+        assert_eq!(xml_env.action_groups, json_env.action_groups);
         assert_eq!(markdown_env.context_compacts, json_env.context_compacts);
         assert_eq!(xml_env.context_compacts, json_env.context_compacts);
     }
