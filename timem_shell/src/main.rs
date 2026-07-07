@@ -10,6 +10,7 @@ use reedline::{
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -388,11 +389,39 @@ fn shell_runtime_info_entries(core: &AgentCore) -> Vec<String> {
     } else {
         "shell"
     };
-    let mut entries = vec![format!("ui: {ui}")];
+    let mut entries = vec![
+        format!("ui: {ui}"),
+        format!("os: {}", host_os_type()),
+        format!("arch: {}", std::env::consts::ARCH),
+        format!("os_version: {}", host_os_version()),
+    ];
     if core.capability_contains_tool("run_bash") {
         entries.push("run_bash: available; executes on user_local_machine".to_string());
     }
     entries
+}
+
+fn host_os_type() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unknown"
+    }
+}
+
+fn host_os_version() -> String {
+    let mut uts = unsafe { std::mem::zeroed::<libc::utsname>() };
+    if unsafe { libc::uname(&mut uts) } != 0 {
+        return "unknown".to_string();
+    }
+    unsafe { CStr::from_ptr(uts.release.as_ptr()) }
+        .to_string_lossy()
+        .trim()
+        .to_string()
 }
 
 fn absolute_path(path: PathBuf) -> PathBuf {
@@ -5520,6 +5549,14 @@ mod static_prompt_tests {
         let joined = entries.join("\n");
 
         assert!(joined.contains("ui:"));
+        assert!(
+            joined.contains("os: macos")
+                || joined.contains("os: linux")
+                || joined.contains("os: windows")
+                || joined.contains("os: unknown")
+        );
+        assert!(joined.contains("arch: "));
+        assert!(joined.contains("os_version: "));
         assert!(joined.contains("run_bash: available"));
         assert!(!joined.contains("cwd:"));
         assert!(!joined.contains("/Users/"));
