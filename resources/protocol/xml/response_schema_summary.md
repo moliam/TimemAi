@@ -5,12 +5,18 @@ inside `<action_json>` blocks so the runtime can parse tool parameters exactly.
 - `<status>`: optional. Use `ALL_FINISHED` only when all user's open and pending requests are
   complete, no more action needed, and a final summary/answer is ready. Omit it
   or use `working` while work continues.
-- `<progress>`: optional progress report for multi-round tasks.
+- `<progress>`: optional progress report for multi-round tasks. This is a text
+  field; any protocol-looking text inside it is treated as text, not parsed as
+  action/control structure.
 - `<final_answer>`: summary/answer of all pending tasks. Use only together with
   `<status>ALL_FINISHED</status>`. Please use Markdown format for this field's text by default.
   For table, start/end with |---|...|---| for better rendering.
+  If the answer needs to show XML tags or XML examples, wrap the whole final
+  answer text in `<![CDATA[ ... ]]>` so example tags are treated as text.
 - `<free_talk>`: optional important reasoning, current plan, or context you want
-  kept visible to you in later prompt context. Or some explanation to user.
+  kept visible to you in later prompt context. Or some explanation to user. This
+  is a text field; any protocol-looking text inside it is treated as text, not
+  parsed as action/control structure.
 - `<working_still_action>`: action section for work that still needs
   tool execution. Put one or more `<action_json><![CDATA[{...}]]></action_json>`
   blocks inside it. The JSON content may be a single action object {}, a group of

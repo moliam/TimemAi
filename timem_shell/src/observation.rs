@@ -542,6 +542,17 @@ pub fn observation_events_from_core_topic_events(
             }
             continue;
         }
+        if let Some(repair) = event.as_model_repair() {
+            active_parent_intent = None;
+            last_child_index_for_active_parent = None;
+            let attempt = repair.attempt.max(1);
+            let max_attempts = repair.max_attempts.max(attempt);
+            observations.push(ObservationEvent::Persistent(format!(
+                "⚠️ 模型回复偏离协议，重试 ({attempt}/{max_attempts})..."
+            )));
+            observations.push(ObservationEvent::EnsureTransient("思考中...".to_string()));
+            continue;
+        }
         if event.as_work_instruction_load().is_some() {
             active_parent_intent = None;
             last_child_index_for_active_parent = None;
@@ -976,7 +987,7 @@ mod tests {
     use super::*;
     use agent_core::{
         CoreMemoryActivity, CoreSessionState, CoreTopic, CORE_TOPIC_ACTION,
-        CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+        CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -1145,6 +1156,24 @@ mod tests {
                 "global": {
                     "working_worker_count": working_worker_count,
                 },
+            }),
+        )
+    }
+
+    fn model_repair_topic(issue: &str, attempt: u32, max_attempts: u32) -> CoreTopicEvent {
+        CoreTopicEvent::new(
+            "session_test",
+            CoreTopic::new(
+                CORE_TOPIC_MODEL_REPAIR,
+                json!({
+                    "name": CORE_TOPIC_MODEL_REPAIR,
+                }),
+            ),
+            CoreSessionState::WaitingModel,
+            json!({
+                "issue": issue,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
             }),
         )
     }
@@ -1321,6 +1350,26 @@ mod tests {
                 ObservationEvent::Persistent("⚙️ 正在检查项目状态。".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn repair_topic_renders_warning_and_keeps_thinking() {
+        let events =
+            observation_events_from_core_topic_events(&[model_repair_topic("invalid_xml", 2, 5)]);
+        assert_eq!(
+            events,
+            vec![
+                ObservationEvent::Persistent("⚠️ 模型回复偏离协议，重试 (2/5)...".to_string()),
+                ObservationEvent::EnsureTransient("思考中...".to_string()),
+            ]
+        );
+
+        let mut panel = ObservationPanel::new(8, 72);
+        panel.apply_all(events);
+        let rendered = render_observation_panel(&panel);
+        assert!(rendered.contains("模型回复偏离协议"));
+        assert!(rendered.contains("(2/5)"));
+        assert!(rendered.contains("思考中..."));
     }
 
     #[test]

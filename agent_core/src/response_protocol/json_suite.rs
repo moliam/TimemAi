@@ -574,6 +574,180 @@ mod tests {
     }
 
     #[test]
+    fn text_fields_with_protocol_language_are_not_parsed_as_actions_or_control() {
+        let text_cases = [
+            (
+                "final_answer contains json action object",
+                json!({
+                    "status": "ALL_FINISHED",
+                    "final_answer": "Example only: {\"working_still_action\":{\"action\":\"run_bash\",\"args\":{}}}"
+                }),
+            ),
+            (
+                "final_answer contains xml action tags",
+                json!({
+                    "status": "ALL_FINISHED",
+                    "final_answer": "<working_still_action><action_json>{\"action\":\"run_bash\",\"args\":{}}</action_json></working_still_action>"
+                }),
+            ),
+            (
+                "final_answer contains markdown action fence",
+                json!({
+                    "status": "ALL_FINISHED",
+                    "final_answer": "```action\n{\"action\":\"run_bash\",\"args\":{}}\n```"
+                }),
+            ),
+            (
+                "free_talk contains malformed action object but real action is valid",
+                json!({
+                    "free_talk": "Bad example only: {\"action\":\"run_bash\",\"args\":{}}",
+                    "progress": "checking",
+                    "working_still_action": {
+                        "action": "run_bash",
+                        "intent": "Check cwd.",
+                        "args": {"cmd": "pwd", "timeout_ms": 5000}
+                    }
+                }),
+            ),
+            (
+                "progress contains status and final answer words but real action is valid",
+                json!({
+                    "progress": "Example only: {\"status\":\"ALL_FINISHED\",\"final_answer\":\"not real\"}",
+                    "working_still_action": {
+                        "action": "run_bash",
+                        "intent": "Check cwd.",
+                        "args": {"cmd": "pwd", "timeout_ms": 5000}
+                    }
+                }),
+            ),
+        ];
+
+        for (label, value) in text_cases {
+            let env = parse_envelope(&value.to_string(), &caps());
+            assert_eq!(env.repair_issue, None, "{label}: {env:?}");
+            if value.get("status").and_then(Value::as_str) == Some("ALL_FINISHED") {
+                assert!(!env.continue_work, "{label}");
+                assert!(env.next_actions.is_empty(), "{label}");
+                assert!(env.action_groups.is_empty(), "{label}");
+            } else {
+                assert!(env.continue_work, "{label}");
+                assert_eq!(env.next_actions.len(), 1, "{label}");
+                assert_eq!(env.next_actions[0].input_str("cmd"), "pwd", "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn diverse_confusing_json_responses_keep_strict_execution_boundary() {
+        let valid_cases = [
+            (
+                "mixed groups and standalone actions preserve order",
+                json!({
+                    "progress": "checking",
+                    "working_still_action": [
+                        {"order": "parallel", "intent": "Group A.", "actions": [
+                            {"action": "run_bash", "args": {"cmd": "printf a", "timeout_ms": 5000}},
+                            {"action": "run_bash", "intent": "B.", "args": {"cmd": "printf b", "timeout_ms": 5000}}
+                        ]},
+                        {"action": "memmgr", "intent": "Read schema.", "args": {"type": "durable", "op": "schema"}},
+                        {"order": "sequential", "actions": [
+                            {"action": "run_bash", "intent": "C.", "args": {"cmd": "printf c", "timeout_ms": 5000}}
+                        ]}
+                    ]
+                }),
+                vec!["run_bash", "run_bash", "memmgr", "run_bash"],
+            ),
+            (
+                "context compact plus action",
+                json!({
+                    "free_talk": "compact before continuing",
+                    "progress": "compacting",
+                    "context_compact": {"delta_ids": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
+                    "working_still_action": {"action": "run_bash", "intent": "Check files.", "args": {"cmd": "pwd"}}
+                }),
+                vec!["run_bash"],
+            ),
+            (
+                "raw chat sql with punctuation params",
+                json!({
+                    "progress": "searching",
+                    "working_still_action": {"action": "memmgr", "intent": "Search chat.", "args": {"type": "raw_chat", "op": "sql", "sql": "SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5", "params": ["%{\"action\":\"run_bash\"}%"]}}
+                }),
+                vec!["memmgr"],
+            ),
+            (
+                "polling bash action",
+                json!({
+                    "progress": "waiting",
+                    "working_still_action": {"action": "run_bash", "intent": "Wait for marker.", "args": {"loop_cmd": "test -f /tmp/timem_marker", "interval_ms": 1000, "loop_timeout_ms": 15000, "once_timeout_ms": 5000}}
+                }),
+                vec!["run_bash"],
+            ),
+            (
+                "self tool read",
+                json!({
+                    "progress": "checking self",
+                    "working_still_action": {"action": "self_tool", "intent": "Read about Timem.", "args": {"type": "about_me", "op": "read"}}
+                }),
+                vec!["self_tool"],
+            ),
+        ];
+        for (label, value, expected_actions) in valid_cases {
+            let env = parse_envelope(&value.to_string(), &caps());
+            assert_eq!(env.repair_issue, None, "{label}: {env:?}");
+            assert_eq!(
+                env.next_actions
+                    .iter()
+                    .map(|action| action.action.as_str())
+                    .collect::<Vec<_>>(),
+                expected_actions,
+                "{label}"
+            );
+        }
+
+        let invalid_cases = [
+            (
+                "object args required",
+                json!({"progress":"bad","working_still_action":{"action":"run_bash","intent":"Bad args.","args":"cmd=pwd"}}),
+                "actions[0].args_must_be_object",
+            ),
+            (
+                "group actions required",
+                json!({"progress":"bad","working_still_action":[{"order":"parallel","intent":"bad group"}]}),
+                "actions[0].actions_required",
+            ),
+            (
+                "unknown tool rejected",
+                json!({"progress":"bad","working_still_action":{"action":"fetch_web","intent":"No such tool.","args":{"url":"https://example.test"}}}),
+                "unsupported_action:fetch_web",
+            ),
+            (
+                "durable sql required",
+                json!({"progress":"bad","working_still_action":{"action":"memmgr","intent":"Bad mem query.","args":{"type":"durable","op":"sql"}}}),
+                "actions[0].input.sql_required_when_op=sql,type=durable",
+            ),
+            (
+                "finished cannot include action",
+                json!({"status":"ALL_FINISHED","final_answer":"done","working_still_action":{"action":"run_bash","intent":"Should not run.","args":{"cmd":"pwd"}}}),
+                "status_finished_must_not_include_next_actions",
+            ),
+        ];
+        for (label, value, expected_issue) in invalid_cases {
+            let env = parse_envelope(&value.to_string(), &caps());
+            assert_eq!(
+                env.repair_issue.as_deref(),
+                Some(expected_issue),
+                "{label}: {env:?}"
+            );
+            assert!(
+                env.next_actions.is_empty()
+                    || expected_issue == "status_finished_must_not_include_next_actions",
+                "{label}: invalid payload must not be treated as executable success"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_response_variants_return_repair_issues_without_panic() {
         let cases = [
             (

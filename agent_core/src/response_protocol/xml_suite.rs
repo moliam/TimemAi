@@ -81,7 +81,8 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         };
     };
 
-    let status_raw = tag_text(response_body, "status").to_ascii_lowercase();
+    let control_body = strip_display_tag_blocks(response_body);
+    let status_raw = tag_text(&control_body, "status").to_ascii_lowercase();
     let report_job_progress = first_non_empty_tag_text(
         response_body,
         &["progress", "report", "report_job_progress"],
@@ -95,7 +96,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         "all_finished" => false,
         "working" | "in_progress" | "in progress" => true,
         "" => {
-            if has_actions(response_body) {
+            if has_actions(&control_body) {
                 true
             } else if !final_answer.trim().is_empty() {
                 false
@@ -109,9 +110,9 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         }
     };
 
-    let context_compacts = parse_context_compacts(response_body, &mut repair_issue);
+    let context_compacts = parse_context_compacts(&control_body, &mut repair_issue);
     let (next_actions, action_groups) =
-        parse_actions(response_body, capabilities, &mut repair_issue);
+        parse_actions(&control_body, capabilities, &mut repair_issue);
 
     if repair_issue.is_none() && !continue_work && final_answer.trim().is_empty() {
         repair_issue = Some("final_answer_required_when_status_finished".to_string());
@@ -178,7 +179,7 @@ fn looks_like_external_tool_call_protocol(text: &str) -> bool {
 fn extract_response_body(text: &str) -> Option<&str> {
     let start = text.find("<response")?;
     let after_tag = text[start..].find('>')? + start + 1;
-    let end = text[after_tag..].find("</response>")? + after_tag;
+    let end = find_xml_close_outside_cdata(&text[after_tag..], "</response>")? + after_tag;
     Some(text[after_tag..end].trim())
 }
 
@@ -193,7 +194,7 @@ fn extract_tags<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
             break;
         };
         let body_start = after_open_start + open_end_rel + 1;
-        let Some(close_idx_rel) = rest[body_start..].find(&close) else {
+        let Some(close_idx_rel) = find_xml_close_outside_cdata(&rest[body_start..], &close) else {
             break;
         };
         let body_end = body_start + close_idx_rel;
@@ -201,6 +202,68 @@ fn extract_tags<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
         rest = &rest[body_end + close.len()..];
     }
     result
+}
+
+fn strip_display_tag_blocks(text: &str) -> String {
+    strip_xml_tag_blocks(
+        text,
+        &[
+            "final_answer",
+            "free_talk",
+            "free-talk",
+            "freetalk",
+            "progress",
+            "report",
+            "report_job_progress",
+        ],
+    )
+}
+
+fn strip_xml_tag_blocks(text: &str, tags: &[&str]) -> String {
+    tags.iter().fold(text.to_string(), |current, tag| {
+        strip_xml_tag_blocks_for_tag(&current, tag)
+    })
+}
+
+fn strip_xml_tag_blocks_for_tag(text: &str, tag: &str) -> String {
+    let mut result = String::new();
+    let mut rest = text;
+    let open_prefix = format!("<{tag}");
+    let close = format!("</{tag}>");
+    while let Some(open_idx) = rest.find(&open_prefix) {
+        let after_open_start = open_idx + open_prefix.len();
+        let Some(open_end_rel) = rest[after_open_start..].find('>') else {
+            break;
+        };
+        let body_start = after_open_start + open_end_rel + 1;
+        let Some(close_idx_rel) = find_xml_close_outside_cdata(&rest[body_start..], &close) else {
+            break;
+        };
+        let body_end = body_start + close_idx_rel;
+        result.push_str(&rest[..open_idx]);
+        rest = &rest[body_end + close.len()..];
+    }
+    result.push_str(rest);
+    result
+}
+
+fn find_xml_close_outside_cdata(text: &str, close: &str) -> Option<usize> {
+    let mut idx = 0;
+    while idx < text.len() {
+        let rest = &text[idx..];
+        if rest.starts_with("<![CDATA[") {
+            if let Some(end_rel) = rest.find("]]>") {
+                idx += end_rel + 3;
+                continue;
+            }
+            return None;
+        }
+        if rest.starts_with(close) {
+            return Some(idx);
+        }
+        idx += rest.chars().next()?.len_utf8();
+    }
+    None
 }
 
 fn tag_text(text: &str, tag: &str) -> String {
@@ -330,7 +393,7 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "检查到刚刚的输出格式有点问题：你给了 <final_answer>，但没有明确 <status>ALL_FINISHED</status>。如果当前用户请求已经完成，请同时提供 <status>ALL_FINISHED</status> 和 <final_answer>；如果仍需 runtime 继续工作，请不要写 <final_answer>，改写 <progress> 和 <working_still_action>。"
         }
         "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你写了 <status>ALL_FINISHED</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果仍需 runtime 继续工作，请不要写 ALL_FINISHED，并提供 <progress> 和需要的 <working_still_action>。"
+            "检查到刚刚的输出格式有点问题：你写了 <status>ALL_FINISHED</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果 final_answer 里需要展示 XML 标签或 XML 示例，请把整个 final_answer 文本包进 <![CDATA[ ... ]]>，避免示例标签被当作协议标签解析。如果仍需 runtime 继续工作，请不要写 ALL_FINISHED，并提供 <progress> 和需要的 <working_still_action>。"
         }
         "status_finished_must_not_include_next_actions" => {
             "检查到刚刚的输出格式有点问题：<status>ALL_FINISHED</status> 表示当前用户请求已完成，因此不能同时包含 <working_still_action>。如果还需要 runtime 执行动作，请保持 working，用 <progress> 和 <working_still_action> 继续；拿到 action result 后再写 ALL_FINISHED 和 <final_answer>。"
@@ -373,6 +436,85 @@ mod tests {
         assert!(env.repair_issue.is_none());
         assert!(!env.continue_work);
         assert_eq!(env.final_answer, "done");
+    }
+
+    #[test]
+    fn parses_final_answer_cdata_with_xml_examples() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <status>ALL_FINISHED</status>
+  <final_answer><![CDATA[
+Example response delta:
+
+<response>
+  <status>ALL_FINISHED</status>
+  <final_answer>done</final_answer>
+</response>
+
+[END DELTA]
+  ]]></final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env.final_answer.contains("<response>"));
+        assert!(env.final_answer.contains("</final_answer>"));
+        assert!(env.final_answer.contains("[END DELTA]"));
+    }
+
+    #[test]
+    fn final_answer_xml_action_examples_are_not_parsed_as_real_actions() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <status>ALL_FINISHED</status>
+  <final_answer><![CDATA[
+This is only a user-facing example:
+
+<working_still_action>
+  <action_json>{
+    "action": "run_bash",
+    "args": {} // missing cmd in the example on purpose
+  }</action_json>
+</working_still_action>
+  ]]></final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+        assert!(env.final_answer.contains("<working_still_action>"));
+        assert!(env.final_answer.contains("\"args\": {}"));
+    }
+
+    #[test]
+    fn free_talk_xml_action_examples_do_not_hide_real_actions() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<progress>checking</progress>
+<free_talk><![CDATA[
+Example text only:
+<working_still_action>
+  <action_json>{"action":"run_bash","args":{}}</action_json>
+</working_still_action>
+]]></free_talk>
+<working_still_action>
+<action_json><![CDATA[{"action":"run_bash","intent":"Check cwd.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(env.continue_work);
+        assert_eq!(env.next_actions.len(), 1);
+        assert_eq!(env.next_actions[0].intent, "Check cwd.");
+        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+        assert!(env.thought.contains("<working_still_action>"));
     }
 
     #[test]

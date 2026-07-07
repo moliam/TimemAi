@@ -174,7 +174,9 @@ fn prompt_is_append_only_and_segmented() {
     };
     assert!(second.contains("[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]"));
     assert!(second.contains("## TIMEM_ASSISTANT"));
-    assert!(second.contains("All previous pending open tasks are completed.  Final Answer:\n你好"));
+    assert!(second.contains(
+        "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n你好"
+    ));
     assert!(second.contains("## USER\n\n继续"));
 }
 
@@ -650,7 +652,9 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids.len(), 2);
     assert!(prompt.contains("## TIMEM_ASSISTANT"));
     assert!(prompt.contains("先分析"));
-    assert!(prompt.contains("All previous pending open tasks are completed.  Final Answer:\n结论"));
+    assert!(prompt.contains(
+        "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n结论"
+    ));
 }
 
 #[test]

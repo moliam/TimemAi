@@ -70,7 +70,10 @@ fn split_sections(text: &str) -> Vec<MdSection> {
             continue;
         }
 
-        if !in_code_block && trimmed.starts_with("## ") {
+        if !in_code_block
+            && trimmed.starts_with("## ")
+            && !is_terminal_text_heading(&current_heading)
+        {
             if !current_heading.is_empty() || !current_body.trim().is_empty() {
                 sections.push(MdSection {
                     heading: current_heading.clone(),
@@ -93,6 +96,13 @@ fn split_sections(text: &str) -> Vec<MdSection> {
     }
 
     sections
+}
+
+fn is_terminal_text_heading(heading: &str) -> bool {
+    matches!(
+        heading.trim().to_ascii_lowercase().as_str(),
+        "answer" | "final_answer" | "final answer"
+    )
 }
 
 fn extract_action_blocks(body: &str) -> Vec<String> {
@@ -784,6 +794,31 @@ finished
         assert!(!env.continue_work);
         assert!(env.final_answer.contains("\"status\": 400"));
         assert!(env.next_actions.is_empty());
+    }
+
+    #[test]
+    fn final_answer_section_with_protocol_headings_stays_final_answer() {
+        let input = r#"## Status
+finished
+
+## Final_Answer
+Example only:
+
+## Working_Still_Action
+```action
+{"action":"run_bash","args":{}}
+```
+
+## Progress
+not a real progress section
+"#;
+        let env = parse_markdown_envelope(input, &caps());
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env.next_actions.is_empty());
+        assert!(env.final_answer.contains("## Working_Still_Action"));
+        assert!(env.final_answer.contains("not a real progress section"));
     }
 
     #[test]

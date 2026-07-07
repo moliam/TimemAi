@@ -342,6 +342,7 @@ pub struct CoreTopicEvent {
 }
 
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
+pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
@@ -360,6 +361,13 @@ pub struct CoreModelResponseTopic {
     pub final_answer: String,
     pub continue_work: bool,
     pub global: CoreGlobalWorkerStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreModelRepairTopic {
+    pub issue: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -614,6 +622,32 @@ impl CoreTopicEvent {
         })
     }
 
+    pub fn as_model_repair(&self) -> Option<CoreModelRepairTopic> {
+        if self.topic.name != CORE_TOPIC_MODEL_REPAIR {
+            return None;
+        }
+        Some(CoreModelRepairTopic {
+            issue: self
+                .payload
+                .get("issue")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            attempt: self
+                .payload
+                .get("attempt")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0),
+            max_attempts: self
+                .payload
+                .get("max_attempts")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0),
+        })
+    }
+
     pub fn with_global_worker_status(mut self, status: CoreGlobalWorkerStatus) -> Self {
         self.payload["global"] = global_worker_status_payload(status);
         self
@@ -726,6 +760,30 @@ impl CoreTopicEvent {
             error: self.payload["error"].as_str().map(str::to_string),
         })
     }
+}
+
+pub fn model_repair_topic_event(
+    session_id: impl Into<String>,
+    issue: impl Into<String>,
+    attempt: u32,
+    max_attempts: u32,
+) -> CoreTopicEvent {
+    let issue = issue.into();
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MODEL_REPAIR,
+            json!({
+                "name": CORE_TOPIC_MODEL_REPAIR,
+            }),
+        ),
+        CoreSessionState::WaitingModel,
+        json!({
+            "issue": issue,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+        }),
+    )
 }
 
 pub fn core_initialized_topic_event(
@@ -2227,6 +2285,46 @@ mod tests {
                 action: "run_bash".to_string(),
                 input: serde_json::json!({"cmd": "pwd"}),
                 memory_activity: CoreMemoryActivity::None,
+            })
+        );
+    }
+
+    #[test]
+    fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
+        let event = model_repair_topic_event("session_a", "invalid_xml", 2, 5);
+
+        assert_eq!(event.session_id, "session_a");
+        assert_eq!(event.topic.name, CORE_TOPIC_MODEL_REPAIR);
+        assert_eq!(event.topic.attributes["name"], CORE_TOPIC_MODEL_REPAIR);
+        assert_eq!(event.state, CoreSessionState::WaitingModel);
+        assert!(!event.expects_reply());
+        assert!(!event.is_blocking_request());
+        assert_eq!(
+            event.as_model_repair(),
+            Some(CoreModelRepairTopic {
+                issue: "invalid_xml".to_string(),
+                attempt: 2,
+                max_attempts: 5,
+            })
+        );
+        assert_eq!(
+            event.wire_payload(),
+            json!({
+                "session_id": "session_a",
+                "topic": {
+                    "name": CORE_TOPIC_MODEL_REPAIR,
+                    "attributes": {
+                        "name": CORE_TOPIC_MODEL_REPAIR,
+                    },
+                },
+                "state": {
+                    "name": "waiting_model",
+                },
+                "payload": {
+                    "issue": "invalid_xml",
+                    "attempt": 2,
+                    "max_attempts": 5,
+                },
             })
         );
     }

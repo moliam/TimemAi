@@ -86,15 +86,15 @@ pub use host::{
     normalize_user_supplements, resolve_topic_reply, session_worker_default_display_name,
     topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
     CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
-    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelResponseTopic, CoreSessionState,
-    CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic, CoreTopicEvent,
-    CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic, HostDecision,
-    HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest, NoopTurnUi,
-    OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
+    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
+    CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
+    CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic,
+    HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
+    NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
     RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
     TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, CORE_TOPIC_ACTION,
-    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
+    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
     CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_USER_APPROVAL_REQUEST,
     CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
@@ -253,7 +253,9 @@ pub struct TurnFinal {
 }
 
 fn llm_final_answer_slice_text(final_answer: &str) -> String {
-    format!("All previous pending open tasks are completed.  Final Answer:\n{final_answer}")
+    format!(
+        "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n{final_answer}"
+    )
 }
 
 fn normalize_assistant_speaker_name(name: &str) -> String {
@@ -1382,6 +1384,7 @@ impl AgentCore {
                 "truncated_model_output",
                 protocol_suite.repair_instruction("truncated_model_output"),
                 &response.content,
+                runtime,
             );
         }
         let protocol_suite = self.response_protocol.suite();
@@ -1396,6 +1399,7 @@ impl AgentCore {
                     &issue,
                     protocol_suite.repair_instruction(&issue),
                     &response.content,
+                    runtime,
                 );
             }
             if issue == "invalid_json"
@@ -2148,11 +2152,18 @@ impl AgentCore {
         issue: &str,
         instruction: &str,
         raw_response: &str,
+        runtime: &mut dyn ActionRuntime,
     ) -> CoreStep {
         self.repair_attempted = true;
         self.repair_attempts = self.repair_attempts.saturating_add(1);
         self.last_repair_issue = Some(issue.to_string());
         self.current_stats.repair_calls = self.current_stats.repair_calls.saturating_add(1);
+        runtime.on_core_topic_events(&[host::model_repair_topic_event(
+            self.current_session_id(),
+            issue,
+            self.repair_attempts,
+            MAX_PROTOCOL_REPAIR_ATTEMPTS,
+        )]);
         let focused_response = self
             .response_protocol
             .suite()
@@ -4630,7 +4641,7 @@ mod prompt_component_tests {
                 ),
                 (
                     "llm_response".to_string(),
-                    "All previous pending open tasks are completed.  Final Answer:\nprevious final"
+                    "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\nprevious final"
                         .to_string(),
                 ),
             ],

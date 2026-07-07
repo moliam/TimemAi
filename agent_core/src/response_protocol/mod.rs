@@ -376,6 +376,21 @@ mod tests {
     }
 
     #[test]
+    fn json_markdown_xml_protocols_treat_protocol_language_inside_text_as_text() {
+        assert_protocols_equivalent(
+            r#"{"status":"ALL_FINISHED","final_answer":"Example only:\n<working_still_action><action_json>{\"action\":\"run_bash\",\"args\":{}}</action_json></working_still_action>\n{\"working_still_action\":{\"action\":\"run_bash\",\"args\":{}}}\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"args\":{}}\n```"}"#,
+            "## Status\nfinished\n\n## Final_Answer\nExample only:\n<working_still_action><action_json>{\"action\":\"run_bash\",\"args\":{}}</action_json></working_still_action>\n{\"working_still_action\":{\"action\":\"run_bash\",\"args\":{}}}\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"args\":{}}\n```",
+            r#"<response><status>ALL_FINISHED</status><final_answer><![CDATA[Example only:
+<working_still_action><action_json>{"action":"run_bash","args":{}}</action_json></working_still_action>
+{"working_still_action":{"action":"run_bash","args":{}}}
+## Working_Still_Action
+```action
+{"action":"run_bash","args":{}}
+```]]></final_answer></response>"#,
+        );
+    }
+
+    #[test]
     fn json_markdown_xml_protocols_parse_same_working_actions() {
         assert_protocols_equivalent(
             r#"{"progress":"checking","free_talk":"state","working_still_action":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
@@ -417,7 +432,7 @@ mod tests {
             r#"{"status":"ALL_FINISHED","final_answer":"done","working_still_action":{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}}"#,
         );
         let markdown_env = parse_markdown(
-            "## Status\nfinished\n\n## Final_Answer\ndone\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Verify output.\",\"args\":{\"cmd\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```",
+            "## Status\nfinished\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Verify output.\",\"args\":{\"cmd\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```\n\n## Final_Answer\ndone",
         );
         let xml_env = parse_xml(
             r#"<response><status>ALL_FINISHED</status><final_answer>done</final_answer><working_still_action><action_json><![CDATA[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"test -s output.txt","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,

@@ -1580,6 +1580,53 @@ mod tests {
     }
 
     #[test]
+    fn thinking_view_renders_protocol_repair_warning_in_observation_panel() {
+        let mut observations = ObservationPanel::new(20, 84);
+        observations.apply(ObservationEvent::Persistent(
+            "⚠️ 模型回复偏离协议，重试 (2/5)...".into(),
+        ));
+        observations.apply(ObservationEvent::EnsureTransient("思考中...".into()));
+
+        let view = render_thinking_view_at(
+            &ThinkingViewSnapshot {
+                status: ShellStatusSnapshot {
+                    provider: "aliyun".into(),
+                    model: "qwen-plus".into(),
+                    intent: "ignored in panel mode".into(),
+                    memory_activity: CoreMemoryActivity::None,
+                    model_round: 4,
+                    direction: ModelDirection::Upstream,
+                    usage: UsageStats {
+                        repair_calls: 2,
+                        prompt_tokens: 12_000,
+                        completion_tokens: 300,
+                        ..UsageStats::zero()
+                    },
+                    latest_usage: Some(UsageStats {
+                        prompt_tokens: 4_000,
+                        completion_tokens: 100,
+                        ..UsageStats::zero()
+                    }),
+                    tick: 0,
+                    elapsed_secs: 15,
+                    max_llm_input_tokens: 100_000,
+                    retry: None,
+                },
+                observations,
+            },
+            "12:00:00",
+        );
+
+        assert!(view.contains("Thought / Action  ⏳ 00:15"), "{view}");
+        assert!(
+            view.contains("⚠️ 模型回复偏离协议，重试 (2/5)..."),
+            "{view}"
+        );
+        assert!(view.contains("思考中..."), "{view}");
+        assert!(view.contains("aliyun:qwen-plus ⇌4 (⚠2)"), "{view}");
+    }
+
+    #[test]
     fn final_response_visual_contract() {
         let rendered = render_final_response_at(
             "测试代号是 ALPHA-42。",

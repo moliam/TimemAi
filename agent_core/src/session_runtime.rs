@@ -657,9 +657,14 @@ mod tests {
     #[derive(Default)]
     struct RetryRecordingUi {
         retries: Vec<(u32, u32, Duration, String)>,
+        events: Vec<CoreTopicEvent>,
     }
 
     impl TurnUi for RetryRecordingUi {
+        fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+            self.events.extend_from_slice(events);
+        }
+
         fn on_model_retry(
             &mut self,
             attempt: u32,
@@ -845,6 +850,14 @@ mod tests {
         assert!(model.prompts[1].contains("temp_repair_"));
         assert!(model.prompts[1].contains("response is not protocol compliant"));
         assert!(ui.retries.is_empty());
+        let repair_topics = ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .collect::<Vec<_>>();
+        assert_eq!(repair_topics.len(), 1);
+        assert_eq!(repair_topics[0].attempt, 1);
+        assert_eq!(repair_topics[0].max_attempts, 5);
         assert_eq!(outcome.repair_issue, None);
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "model_retry"), 0);
@@ -890,10 +903,177 @@ mod tests {
         assert!(model.prompts[1].contains("plain text that does not match protocol"));
         assert!(model.prompts[1].contains("response is not protocol compliant"));
         assert!(ui.retries.is_empty());
+        let repair_topics = ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .collect::<Vec<_>>();
+        assert_eq!(repair_topics.len(), 1);
+        assert_eq!(repair_topics[0].issue, "invalid_json");
+        assert_eq!(repair_topics[0].attempt, 1);
         assert_eq!(outcome.stop_reason, None);
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "model_retry"), 0);
         assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_xml_final_answer_with_protocol_examples_does_not_repair_or_execute() {
+        let dir = tmp_dir("xml_final_answer_protocol_examples");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Xml;
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([Ok(llm(
+            r#"<response>
+<status>ALL_FINISHED</status>
+<final_answer><![CDATA[
+This is an answer, not an executable action:
+<working_still_action>
+  <action_json>{"action":"run_bash","args":{}}</action_json>
+</working_still_action>
+{"working_still_action":{"action":"run_bash","args":{}}}
+]]></final_answer>
+</response>"#,
+            1_000,
+            false,
+        ))]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "show a repair delta example",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(model.prompts.len(), 1);
+        assert!(outcome.repair_issue.is_none());
+        assert!(outcome.text.contains("<working_still_action>"));
+        assert_eq!(outcome.stats.tool_calls, 0);
+        assert!(ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .next()
+            .is_none());
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_json_final_answer_with_protocol_examples_does_not_repair_or_execute() {
+        let dir = tmp_dir("json_final_answer_protocol_examples");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Json;
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([Ok(llm(
+            serde_json::json!({
+                "status": "ALL_FINISHED",
+                "final_answer": "This is answer text only:\n<working_still_action><action_json>{\"action\":\"run_bash\",\"args\":{}}</action_json></working_still_action>\n{\"working_still_action\":{\"action\":\"run_bash\",\"args\":{}}}"
+            })
+            .to_string(),
+            1_000,
+            false,
+        ))]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "show a repair delta example",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(model.prompts.len(), 1);
+        assert!(outcome.repair_issue.is_none());
+        assert!(outcome.text.contains("<working_still_action>"));
+        assert_eq!(outcome.stats.tool_calls, 0);
+        assert!(ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .next()
+            .is_none());
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_emits_repair_topic_for_each_protocol_repair_attempt() {
+        let dir = tmp_dir("repair_topics_multiple_attempts");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
+        let mut config = test_config();
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([
+            Ok(llm("first malformed response", 1_000, false)),
+            Ok(llm("second malformed response", 1_100, false)),
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"第二次 repair 后成功。"}"#,
+                1_200,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "hello",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "第二次 repair 后成功。");
+        assert_eq!(model.prompts.len(), 3);
+        let repair_topics = ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .collect::<Vec<_>>();
+        assert_eq!(repair_topics.len(), 2);
+        assert_eq!(repair_topics[0].attempt, 1);
+        assert_eq!(repair_topics[0].max_attempts, 5);
+        assert_eq!(repair_topics[1].attempt, 2);
+        assert_eq!(repair_topics[1].max_attempts, 5);
+        assert!(repair_topics
+            .iter()
+            .all(|topic| topic.issue == "invalid_json"));
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 
