@@ -552,7 +552,11 @@ pub fn observation_events_from_core_topic_events(
             if action.event == "finish" {
                 observations.push(ObservationEvent::UpdateActionStatus {
                     active_text: detail_text,
-                    status_text: action_status_detail_for_shell(&action.kind, &action.status),
+                    status_text: action_status_detail_for_shell(
+                        &action.kind,
+                        &action.status,
+                        action.pid,
+                    ),
                 });
                 active_parent_intent = None;
                 last_child_index_for_active_parent = None;
@@ -688,10 +692,10 @@ fn action_detail_for_shell(kind: &CoreActionKind) -> (String, Option<ActionTimer
     }
 }
 
-fn action_status_detail_for_shell(kind: &CoreActionKind, status: &str) -> String {
+fn action_status_detail_for_shell(kind: &CoreActionKind, status: &str, pid: Option<u32>) -> String {
     match kind {
         CoreActionKind::Bash { command, mode, .. } => {
-            let label = action_status_label(status);
+            let label = action_status_label(status, pid);
             if mode == "poll" {
                 format!("`[{label}] {}`", command.trim())
             } else if status == "background_running" || mode == "background" {
@@ -718,14 +722,19 @@ fn action_status_detail_for_shell(kind: &CoreActionKind, status: &str) -> String
     }
 }
 
-fn action_status_label(status: &str) -> &'static str {
+fn action_status_label(status: &str, pid: Option<u32>) -> String {
     match status {
-        "completed" => "✔",
-        "timeout" => "超时",
-        "cancelled" => "已取消",
-        "failed" => "失败",
-        "background_running" => "后台执行",
-        _ => "已结束",
+        "completed" => "✔".to_string(),
+        "timeout" => pid
+            .map(|pid| format!("超时 pid={pid} 仍在运行"))
+            .unwrap_or_else(|| "超时".to_string()),
+        "cancelled" => "已取消".to_string(),
+        "failed" => "失败".to_string(),
+        "background_running" => pid
+            .map(|pid| format!("后台执行 pid={pid}"))
+            .unwrap_or_else(|| "后台执行".to_string()),
+        "background_finished" => "后台完成".to_string(),
+        _ => "已结束".to_string(),
     }
 }
 
@@ -1022,6 +1031,28 @@ mod tests {
         event: &str,
         status: &str,
     ) -> CoreTopicEvent {
+        action_topic_with_status_and_pid(
+            action,
+            intent,
+            parent_intent,
+            kind,
+            active,
+            event,
+            status,
+            None,
+        )
+    }
+
+    fn action_topic_with_status_and_pid(
+        action: &str,
+        intent: Option<&str>,
+        parent_intent: Option<&str>,
+        kind: CoreActionKind,
+        active: bool,
+        event: &str,
+        status: &str,
+        pid: Option<u32>,
+    ) -> CoreTopicEvent {
         CoreTopicEvent::new(
             "session_test",
             CoreTopic::new(
@@ -1043,6 +1074,7 @@ mod tests {
                 "active": active,
                 "event": event,
                 "status": status,
+                "pid": pid,
                 "memory_activity": CoreMemoryActivity::None,
             }),
         )
@@ -1480,11 +1512,16 @@ mod tests {
         assert!(rendered.contains(ANSI_BOLD) || rendered.contains("\x1b["));
 
         let finished = observation_events_from_core_topic_events(&[action_topic_with_status(
-            "shell_job_status",
+            "run_bash",
             None,
             None,
-            CoreActionKind::ShellJob {
-                job_id: "job_42".to_string(),
+            CoreActionKind::Bash {
+                command: "sleep 30".to_string(),
+                mode: "background".to_string(),
+                interval_ms: None,
+                timeout_ms: None,
+                loop_timeout_ms: None,
+                once_timeout_ms: None,
             },
             false,
             "finish",
@@ -1493,7 +1530,46 @@ mod tests {
         panel.apply_all(finished);
         let rendered = render_observation_panel(&panel);
         let plain = strip_ansi(&rendered);
-        assert!(plain.contains("后台命令退出: job_42"), "{plain}");
+        assert!(plain.contains("(后台执行) [后台完成] sleep 30"), "{plain}");
+    }
+
+    #[test]
+    fn timed_out_bash_finish_renders_still_running_pid() {
+        let kind = CoreActionKind::Bash {
+            command: "sleep 18".to_string(),
+            mode: "normal".to_string(),
+            interval_ms: None,
+            timeout_ms: Some(10000),
+            loop_timeout_ms: None,
+            once_timeout_ms: None,
+        };
+        let start = observation_events_from_core_topic_events(&[action_topic(
+            "run_bash",
+            Some("运行 sleep 并等待 timeout"),
+            kind.clone(),
+            true,
+        )]);
+        let finish =
+            observation_events_from_core_topic_events(&[action_topic_with_status_and_pid(
+                "run_bash",
+                Some("运行 sleep 并等待 timeout"),
+                None,
+                kind,
+                false,
+                "finish",
+                "timeout",
+                Some(49189),
+            )]);
+
+        let mut panel = ObservationPanel::new(8, 100);
+        panel.apply_all(start);
+        panel.apply_all(finish);
+        let plain = strip_ansi(&render_observation_panel(&panel));
+        assert!(
+            plain.contains("[超时 pid=49189 仍在运行] sleep 18"),
+            "{plain}"
+        );
+        assert_eq!(plain.matches("sleep 18").count(), 1, "{plain}");
     }
 
     #[test]

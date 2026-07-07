@@ -71,19 +71,21 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Local tool execution abstractions that return structured action evidence.
 - Registered command-tool foreground/background execution semantics. Core owns
   background job ids, persisted status/output files, polling, cancellation,
-  timeout handling, process termination, and action evidence for tool jobs.
-  Hosts may render progress/status, but they must not own the lifecycle for
-  model-requested registered tool jobs. Session-owned background shell jobs are
-  cleaned up by core when the session reaches a final answer or performs a
-  context compact.
+  timeout handling, process termination, and action evidence for command-bound
+  tool jobs. For `run_bash`, core owns the session running-pid set for
+  background jobs and timed-out normal commands. `run_bash` prompt evidence
+  shows the running transition once, core injects one-time job-exit updates on
+  status transition, and core injects a full running-job snapshot only after
+  large context shrink/compact. Hosts may render progress/status, but they must
+  not own the lifecycle for model-requested jobs.
 - Model-requested local tool execution, including `run_bash`, command approval
   application, process execution, command output/evidence shaping, and tool
   audit. Hosts may provide user decisions and cancellation signals, but the
   executor remains a core responsibility.
 - Long foreground command lifecycle for positive model-provided `timeout_ms`:
-  core owns process waiting, long-running decision requests, cancellation,
-  action result shaping, and user-supplement insertion after host/user
-  cancellation.
+  core owns process waiting, long-running decision requests, timeout transition
+  into the session running-pid set, action result shaping, and user-supplement
+  insertion after host/user cancellation.
 - Structured reports, requests, stop reasons, status snapshots, and topic events
   for any host UI to render.
 - Optional per-session worker lifecycle. Core may provide a worker that owns one

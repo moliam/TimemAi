@@ -11,7 +11,6 @@ fn main() {
         "../resources/capabilities/tools/memmgr.yaml",
         "../resources/capabilities/tools/run_bash.yaml",
         "../resources/capabilities/tools/self_tool.yaml",
-        "../resources/capabilities/tools/shell_job_status.yaml",
     ];
 
     for resource in resources {

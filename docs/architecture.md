@@ -570,7 +570,7 @@ Runtime shrink review and context maintenance should use `delta_id`:
   compact before continuing: summarize useful dynamic prompt deltas to about
   10%-20% of their current token footprint, discard stale details, put important
   but lengthy state into scratch memory, and then use `memmgr type=context
-  op=shrink` on covered `delta_id` ranges.
+  op=discard` on covered `delta_id` ranges.
 
 Prompt deltas are append-only in normal operation. Later provider requests
 render the same static prefix plus all retained dynamic deltas, so the
@@ -831,9 +831,9 @@ Each `next_actions` item is a structured command:
 
 Fields:
 
-- `action`: canonical tool name, such as `memmgr`, `run_bash`, or
-  `shell_job_status`. `memmgr` is the single model-facing interface for durable
-  memory, raw chat history, scratch memory, and dynamic context shrink.
+- `action`: canonical tool name, such as `memmgr`, `run_bash`, `capmgr`, or
+  `self_tool`. `memmgr` is the single model-facing interface for durable
+  memory, raw chat history, scratch memory, and dynamic context discard.
 - `intent`: concise human-readable reason. It is required because shell UI uses
   it as action status.
 - `args`: action-specific arguments as a JSON object. Put each parameter in its
@@ -913,7 +913,7 @@ flowchart TB
     Memmgr --> Chat["raw_chat query/sql/delete\nUI-visible chat records"]
     Memmgr --> Memory["durable schema/sql/write/delete\nlong-lived facts"]
     Memmgr --> Scratch["scratch query/write/read/delete\ntyped notes and context offload"]
-    Memmgr --> Shrink["context shrink\nremove delta context"]
+    Memmgr --> Shrink["context discard\nremove delta context"]
     Core --> SelfTool["self_tool\nTimem runtime self-info"]
     Core --> Bash["run_bash\nlocal command"]
 ```
@@ -1004,10 +1004,16 @@ structured host decision request with elapsed/remaining time asking whether to
 keep waiting. If the host/user stops waiting, core terminates the active process
 and adds a `user_supplement` delta that tells the model the user cancelled the
 command and may request a status check or a new action if still necessary.
-Long-running work that should survive later prompt deltas should use
-`background=true` or `mode=background`. Runtime returns a `job_id`, output file,
-and status file; the model then uses `shell_job_status` to poll the job instead
-of repeating the long command.
+Long-running shell work that should survive later prompt deltas should use
+`background=true` or `mode=background`, or a normal command with a positive
+`timeout_ms`. Runtime returns a process id and tracks it in the session
+running-pid set. The start/timeout transition is present in the action result
+once; later exits are injected once as `RUNNING_JOB_UPDATE`. When
+discard/offload/compact references prompt deltas whose SYSTEM section recorded
+a still-running job pid, runtime refreshes those jobs at prompt-build time and
+adds a `RUNNING JOB LIST` snapshot only for pids that are still running. The
+model inspects or stops those jobs through ordinary `run_bash` commands such as
+`ps -p <pid>` or `kill <pid>`.
 
 Waiting on external state is a structured `run_bash` mode, not a separate tool.
 The model uses `loop_cmd` with `interval_ms`; core repeatedly runs that check
@@ -1020,14 +1026,15 @@ preserves the model/runtime boundary: the model defines the command, while core
 owns the fixed success condition, approval, wait bounds, audit, bounded output,
 and cancellation.
 
-Background shell jobs are owned by the session that created them. When that
-session reaches a final answer or performs a context compact, core checks the
-session-owned background shell board and terminates unfinished jobs so stale
-processes do not outlive the session worker's active task context.
+Background and timed-out shell jobs are owned by the session that created them.
+Core tracks their pid lifecycle and injects status changes as prompt evidence.
+It does not automatically terminate them on normal timeout, final answer, or
+context compact; the model/user must explicitly inspect or stop a still-running
+pid when cleanup is desired.
 
-### Context Shrink Action
+### Context Discard Action
 
-`memmgr` with `type=context, op=shrink` is the structured action that actually
+`memmgr` with `type=context, op=discard` is the structured action that actually
 removes dynamic prompt context. It accepts ids that came from rendered prompt
 slices:
 
@@ -1037,7 +1044,7 @@ slices:
   "intent": "Remove stale context by id.",
   "args": {
     "type": "context",
-    "op": "shrink",
+    "op": "discard",
     "delta_ids": ["pd_1782200000000_2"]
   }
 }
@@ -1053,8 +1060,9 @@ Rules:
 Forced compaction uses the same response envelope and action protocol; it does
 not introduce a separate `compressed_delta` schema. The model decides what
 should be offloaded and supplies ids; runtime owns validation and copies actual
-prompt delta content into scratch. A typical forced shrink response first
-asks runtime to offload covered prompt context, then shrinks those dynamic ids:
+prompt delta content into scratch. A typical forced context reduction response
+first asks runtime to offload covered prompt context, then discards those dynamic
+ids:
 
 ```json
 {
@@ -1064,7 +1072,7 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
   "next_actions": [
     {
       "action": "memmgr",
-      "intent": "Offload dynamic prompt context before shrinking.",
+      "intent": "Offload dynamic prompt context before discarding it.",
       "args": {
         "type": "scratch",
         "op": "write",
@@ -1078,7 +1086,7 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
       "intent": "Remove dynamic prompt deltas covered by the compact summary.",
       "args": {
         "type": "context",
-        "op": "shrink",
+        "op": "discard",
         "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
       }
     }

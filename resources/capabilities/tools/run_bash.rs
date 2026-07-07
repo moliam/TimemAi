@@ -5,13 +5,15 @@ use crate::{
     LongRunningCommandDecision, LongRunningCommandStatus, PendingApproval, PendingApprovedAction,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +30,8 @@ static LONG_RUNNING_COMMAND_PROMPT_AFTER_LOCK: Mutex<()> = Mutex::new(());
 pub struct ShellJobRecord {
     pub id: String,
     pub created_at_ms: i64,
+    #[serde(default = "default_shell_job_kind")]
+    pub kind: String,
     #[serde(default)]
     pub session_id: String,
     #[serde(default)]
@@ -38,11 +42,55 @@ pub struct ShellJobRecord {
     pub status_file: String,
 }
 
+fn default_shell_job_kind() -> String {
+    "background".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningShellJob {
+    pub pid: u32,
+    pub kind: String,
+    pub command: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellJobExitUpdate {
+    pub pid: u32,
+    pub kind: String,
+    pub command: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub created_at_ms: i64,
+    pub elapsed_ms: i64,
+}
+
+impl ShellJobExitUpdate {
+    pub fn description(&self) -> &'static str {
+        match self.kind.as_str() {
+            "timeout" => "old timeout job",
+            _ => "background job",
+        }
+    }
+}
+
+impl RunningShellJob {
+    pub fn description(&self) -> &'static str {
+        match self.kind.as_str() {
+            "timeout" => "old job timeout",
+            _ => "background job",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileShellJobStore {
     dir: PathBuf,
     index_file: PathBuf,
     guard: MemGuard,
+    children: Arc<Mutex<HashMap<u32, Child>>>,
 }
 
 impl FileShellJobStore {
@@ -53,10 +101,11 @@ impl FileShellJobStore {
             index_file: dir.join("jobs.jsonl"),
             dir,
             guard: MemGuard::for_memory_dir(memory_dir),
+            children: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn spawn(&self, command: &str, session_id: &str, turn_id: &str) -> String {
+    pub fn spawn_background(&self, command: &str, session_id: &str, turn_id: &str) -> String {
         let clean = command.trim();
         if clean.is_empty() {
             return bash_action_not_executed(
@@ -64,7 +113,30 @@ impl FileShellJobStore {
                 "The background command was not started because no shell command was provided.",
             );
         }
-        let _ = fs::create_dir_all(&self.dir);
+        let record = match self.spawn_record(clean, "background", session_id, turn_id) {
+            Ok(record) => record,
+            Err(_) => {
+                return bash_action_not_executed(
+                    Some(clean),
+                    "The background command could not be started by the local shell.",
+                )
+            }
+        };
+        let _ = self.append(&record);
+        format!(
+            "Action result: run_bash\npid={}, now keeps running in background\nCommand: {}",
+            record.pid, clean
+        )
+    }
+
+    fn spawn_record(
+        &self,
+        clean: &str,
+        kind: &str,
+        session_id: &str,
+        turn_id: &str,
+    ) -> std::io::Result<ShellJobRecord> {
+        fs::create_dir_all(&self.dir)?;
         let id = unique_shell_id("job");
         let output_file = self.dir.join(format!("{id}.out"));
         let status_file = self.dir.join(format!("{id}.status"));
@@ -85,31 +157,97 @@ impl FileShellJobStore {
         {
             command.process_group(0);
         }
-        let spawn = command.spawn();
-        let child = match spawn {
-            Ok(child) => child,
-            Err(_) => {
-                return bash_action_not_executed(
-                    Some(clean),
-                    "The background command could not be started by the local shell.",
-                )
-            }
-        };
-        let record = ShellJobRecord {
-            id: id.clone(),
+        let child = command.spawn()?;
+        let pid = child.id();
+        if let Ok(mut children) = self.children.lock() {
+            children.insert(pid, child);
+        }
+        Ok(ShellJobRecord {
+            id,
             created_at_ms: now_ms(),
+            kind: kind.to_string(),
             session_id: session_id.trim().to_string(),
             turn_id: turn_id.trim().to_string(),
-            pid: child.id(),
+            pid,
             command: clean.to_string(),
             output_file: output_file.to_string_lossy().to_string(),
             status_file: status_file.to_string_lossy().to_string(),
+        })
+    }
+
+    pub fn run_with_timeout(
+        &self,
+        command: &str,
+        timeout_ms: i64,
+        session_id: &str,
+        turn_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> String {
+        let result =
+            self.run_with_timeout_structured(command, timeout_ms, session_id, turn_id, runtime);
+        result.to_action_result("run_bash")
+    }
+
+    pub fn run_with_timeout_structured(
+        &self,
+        command: &str,
+        timeout_ms: i64,
+        session_id: &str,
+        turn_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> BashCommandOutput {
+        let clean = command.trim();
+        if timeout_ms <= 0 {
+            return bash_error(clean, "invalid_timeout");
+        }
+        let Ok(record) = self.spawn_record(clean, "timeout", session_id, turn_id) else {
+            return bash_error(clean, "command_failed");
         };
-        let _ = self.append(&record);
-        format!(
-            "Action result: run_bash\nThe background command has started.\nCommand: {}\nJob id for shell_job_status: {}\nProcess id: {}\nOutput file: {}\nStatus file: {}",
-            clean, record.id, record.pid, record.output_file, record.status_file
-        )
+        let started = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms as u64);
+        let mut next_long_running_check = long_running_command_prompt_after();
+        loop {
+            if runtime.should_cancel() {
+                terminate_process(record.pid);
+                let _ = fs::write(&record.status_file, "cancelled");
+                return bash_error(clean, "cancelled");
+            }
+            if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
+                let status = LongRunningCommandStatus {
+                    action: "run_bash".to_string(),
+                    command: clean.to_string(),
+                    elapsed: started.elapsed(),
+                    timeout_ms: Some(timeout_ms),
+                };
+                if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
+                    terminate_process(record.pid);
+                    let _ = fs::write(&record.status_file, "cancelled");
+                    return bash_error(clean, "cancelled_by_user");
+                }
+                next_long_running_check =
+                    next_long_running_check.saturating_add(long_running_command_prompt_after());
+            }
+            if let Some(code) = read_status_code(&record.status_file) {
+                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                return BashCommandOutput {
+                    command: clean.to_string(),
+                    status: Some(code),
+                    output: normalized_shell_output(&output),
+                    error: None,
+                };
+            }
+            if started.elapsed() >= timeout {
+                let _ = self.append(&record);
+                let partial = fs::read_to_string(&record.output_file).unwrap_or_default();
+                return BashCommandOutput {
+                    command: clean.to_string(),
+                    status: None,
+                    output: compact_text(&partial, 2000),
+                    error: Some(format!("timeout_still_running:{}", record.pid)),
+                };
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     pub fn cancel_unfinished_for_session(&self, session_id: &str) -> Vec<String> {
@@ -133,96 +271,54 @@ impl FileShellJobStore {
         cancelled
     }
 
-    pub fn status(&self, job_id: &str, wait_ms: u64) -> String {
-        let clean_id = job_id.trim();
-        if clean_id.is_empty() {
-            return "Action result: shell_job_status\nThe job status was not checked because no job_id was provided. Use the job id returned when the background command was started.".to_string();
-        }
-        let Some(record) = self.find(clean_id) else {
-            return format!(
-                "Action result: shell_job_status\nJob id: {}\nNo background job with this id was found in the current shell job store.",
-                clean_id
-            );
-        };
-        let wait = Duration::from_millis(wait_ms.min(15000));
-        let started = Instant::now();
-        loop {
-            if let Some(code) = fs::read_to_string(&record.status_file)
-                .ok()
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty())
-            {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-                if code == "cancelled" {
-                    return format!(
-                        "Action result: shell_job_status\nThe background job was cancelled.\nJob id: {}\nState: cancelled\nWaited: {} ms\nOutput file: {}\nPartial output:\n{}",
-                        record.id,
-                        started.elapsed().as_millis(),
-                        record.output_file,
-                        compact_text(&output, 2000)
-                    );
-                }
-                return format!(
-                    "Action result: shell_job_status\nThe background job has finished.\nJob id: {}\nState: finished\nExit code: {}\nWaited: {} ms\nOutput file: {}\nOutput:\n{}",
-                    record.id,
-                    code,
-                    started.elapsed().as_millis(),
-                    record.output_file,
-                    compact_text(&output, 4000)
-                );
-            }
-            if started.elapsed() >= wait {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-                return format!(
-                    "Action result: shell_job_status\nThe background job is still running.\nJob id: {}\nState: running\nProcess id: {}\nWaited: {} ms\nOutput file: {}\nPartial output:\n{}",
-                    record.id,
-                    record.pid,
-                    started.elapsed().as_millis(),
-                    record.output_file,
-                    compact_text(&output, 2000)
-                );
-            }
-            thread::sleep(Duration::from_millis(200));
-        }
+    pub fn running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
+        let (running, _) = self.refresh_for_session(session_id);
+        running
     }
 
-    pub fn cancel(&self, job_id: &str) -> String {
-        let clean_id = job_id.trim();
-        if clean_id.is_empty() {
-            return "Action result: shell_job_status\nThe background job was not cancelled because no job_id was provided.".to_string();
+    pub fn refresh_for_session(
+        &self,
+        session_id: &str,
+    ) -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>) {
+        let clean_session = session_id.trim();
+        if clean_session.is_empty() {
+            return (Vec::new(), Vec::new());
         }
-        let Some(record) = self.find(clean_id) else {
-            return format!(
-                "Action result: shell_job_status\nJob id: {}\nNo background job with this id was found, so there was nothing to cancel.",
-                clean_id
-            );
-        };
-        if let Some(code) = fs::read_to_string(&record.status_file)
-            .ok()
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty())
-        {
-            let state = if code == "cancelled" {
-                "cancelled"
-            } else {
-                "finished"
-            };
-            return format!(
-                "Action result: shell_job_status\nThe background job was already completed.\nJob id: {}\nState: {}",
-                record.id, state
-            );
-        }
+        self.guard
+            .with_write(|| {
+                let mut running = Vec::new();
+                let mut exited = Vec::new();
+                for record in self
+                    .records_unlocked()
+                    .into_iter()
+                    .filter(|record| record.session_id == clean_session)
+                {
+                    match self.refresh_record_unlocked(record) {
+                        ShellJobRefresh::Running(job) => running.push(job),
+                        ShellJobRefresh::Exited(update) => exited.push(update),
+                        ShellJobRefresh::Finished => {}
+                    }
+                }
+                (running, exited)
+            })
+            .unwrap_or_default()
+    }
 
-        terminate_process(record.pid);
-        let _ = fs::write(&record.status_file, "cancelled");
-        let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-        format!(
-            "Action result: shell_job_status\nThe background job has been cancelled.\nJob id: {}\nState: cancelled\nProcess id: {}\nOutput file: {}\nPartial output:\n{}",
-            record.id,
-            record.pid,
-            record.output_file,
-            compact_text(&output, 2000)
-        )
+    pub fn running_job_list_context(&self, session_id: &str) -> Option<String> {
+        let jobs = self.running_for_session(session_id);
+        if jobs.is_empty() {
+            return None;
+        }
+        let mut out = String::from("RUNNING JOB LIST:");
+        for job in jobs {
+            out.push_str(&format!(
+                "\npid={}, {}, cmd={}, still running",
+                job.pid,
+                job.description(),
+                compact_text(&job.command, 500)
+            ));
+        }
+        Some(out)
     }
 
     fn append(&self, record: &ShellJobRecord) -> std::io::Result<()> {
@@ -241,17 +337,6 @@ impl FileShellJobStore {
             "{}",
             serde_json::to_string(record).unwrap_or_default()
         )
-    }
-
-    fn find(&self, job_id: &str) -> Option<ShellJobRecord> {
-        self.guard.with_read(|| self.find_unlocked(job_id)).ok()?
-    }
-
-    fn find_unlocked(&self, job_id: &str) -> Option<ShellJobRecord> {
-        self.records_unlocked()
-            .into_iter()
-            .filter(|record| record.id == job_id)
-            .last()
     }
 
     fn records_unlocked(&self) -> Vec<ShellJobRecord> {
@@ -274,6 +359,75 @@ impl FileShellJobStore {
             .map(|text| !text.trim().is_empty())
             .unwrap_or(false)
     }
+
+    fn refresh_record_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
+        if let Some(refresh) = self.refresh_child_handle_unlocked(&record) {
+            return refresh;
+        }
+        if self.record_finished(&record) {
+            return self.exit_update_once_unlocked(record);
+        }
+        if !process_running(record.pid) {
+            let _ = fs::write(&record.status_file, "exited");
+            return self.exit_update_once_unlocked(record);
+        }
+        ShellJobRefresh::Running(RunningShellJob {
+            pid: record.pid,
+            kind: record.kind,
+            command: record.command,
+            session_id: record.session_id,
+            turn_id: record.turn_id,
+            created_at_ms: record.created_at_ms,
+        })
+    }
+
+    fn exit_update_once_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
+        let notified_file = format!("{}.notified", record.status_file);
+        if Path::new(&notified_file).exists() {
+            return ShellJobRefresh::Finished;
+        }
+        let _ = fs::write(&notified_file, now_ms().to_string());
+        ShellJobRefresh::Exited(ShellJobExitUpdate {
+            pid: record.pid,
+            kind: record.kind,
+            command: record.command,
+            session_id: record.session_id,
+            turn_id: record.turn_id,
+            created_at_ms: record.created_at_ms,
+            elapsed_ms: now_ms().saturating_sub(record.created_at_ms),
+        })
+    }
+
+    fn refresh_child_handle_unlocked(&self, record: &ShellJobRecord) -> Option<ShellJobRefresh> {
+        let mut children = self.children.lock().ok()?;
+        let child = children.get_mut(&record.pid)?;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let code = status.code().unwrap_or(-1).to_string();
+                let _ = fs::write(&record.status_file, code);
+                children.remove(&record.pid);
+                Some(self.exit_update_once_unlocked(record.clone()))
+            }
+            Ok(None) => Some(ShellJobRefresh::Running(RunningShellJob {
+                pid: record.pid,
+                kind: record.kind.clone(),
+                command: record.command.clone(),
+                session_id: record.session_id.clone(),
+                turn_id: record.turn_id.clone(),
+                created_at_ms: record.created_at_ms,
+            })),
+            Err(_) => {
+                children.remove(&record.pid);
+                None
+            }
+        }
+    }
+}
+
+enum ShellJobRefresh {
+    Running(RunningShellJob),
+    Exited(ShellJobExitUpdate),
+    Finished,
 }
 
 pub fn validate_bash_request(command: &str) -> Result<(), String> {
@@ -416,7 +570,11 @@ pub(crate) fn execute_run_bash(
         });
     }
     if background {
-        return ActionExecution::Completed(shell_jobs.spawn(command_to_run, session_id, turn_id));
+        return ActionExecution::Completed(shell_jobs.spawn_background(
+            command_to_run,
+            session_id,
+            turn_id,
+        ));
     }
     if let Some(interval_ms) = interval_ms {
         return ActionExecution::Completed(execute_polling_bash(
@@ -427,7 +585,13 @@ pub(crate) fn execute_run_bash(
             runtime,
         ));
     }
-    ActionExecution::Completed(execute_one_bash(command_to_run, timeout_ms, runtime))
+    ActionExecution::Completed(shell_jobs.run_with_timeout(
+        command_to_run,
+        timeout_ms,
+        session_id,
+        turn_id,
+        runtime,
+    ))
 }
 
 pub(crate) fn execute_approved_bash(
@@ -444,7 +608,7 @@ pub(crate) fn execute_approved_bash(
     runtime: &mut dyn ActionRuntime,
 ) -> String {
     let mut result = if background {
-        shell_jobs.spawn(command.trim(), session_id, turn_id)
+        shell_jobs.spawn_background(command.trim(), session_id, turn_id)
     } else if let Some(interval_ms) = interval_ms {
         execute_polling_bash(
             command.trim(),
@@ -454,7 +618,7 @@ pub(crate) fn execute_approved_bash(
             runtime,
         )
     } else {
-        execute_one_bash(command.trim(), timeout_ms, runtime)
+        shell_jobs.run_with_timeout(command.trim(), timeout_ms, session_id, turn_id, runtime)
     };
     result.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
@@ -670,6 +834,17 @@ pub struct BashCommandOutput {
 impl BashCommandOutput {
     pub fn to_action_result(&self, action_name: &str) -> String {
         if let Some(error) = &self.error {
+            if let Some(pid) = error.strip_prefix("timeout_still_running:") {
+                let mut out = format!(
+                    "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.\nCommand: {}",
+                    action_name, pid, self.command
+                );
+                if !self.output.trim().is_empty() {
+                    out.push_str("\nPartial output:\n");
+                    out.push_str(&compact_text(&self.output, 2000));
+                }
+                return out;
+            }
             return format!(
                 "Action result: {}\nCommand: {}\n{}",
                 action_name,
@@ -860,7 +1035,7 @@ fn bash_validation_message(reason: &str) -> &'static str {
 fn bash_runtime_error_message(error: &str) -> &'static str {
     match error {
         "timeout" => {
-            "The command was stopped because it exceeded the configured timeout. For long local work, use background=true; for waiting on external state, use loop_cmd with interval_ms."
+            "Timem stopped waiting because the configured timeout was reached. This message does not by itself mean the process was killed. For long local work, use background=true; for waiting on external state, use loop_cmd with interval_ms."
         }
         "cancelled" | "cancelled_by_user" => {
             "The command was cancelled before it completed."
@@ -875,6 +1050,34 @@ fn bash_runtime_error_message(error: &str) -> &'static str {
     }
 }
 
+fn read_status_code(status_file: &str) -> Option<i32> {
+    fs::read_to_string(status_file)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .and_then(|text| text.parse::<i32>().ok())
+}
+
+fn normalized_shell_output(output: &str) -> String {
+    let clean = output.trim_end();
+    if clean.trim().is_empty() {
+        "<no output>".to_string()
+    } else {
+        clean.to_string()
+    }
+}
+
+fn process_running(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .is_some_and(|status| status.success())
+}
+
 fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
@@ -884,15 +1087,42 @@ fn terminate_process(pid: u32) {
     #[cfg(unix)]
     {
         let group = format!("-{}", pid);
-        let status = Command::new("/bin/kill").arg("-TERM").arg(&group).status();
+        let status = Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(&group)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         if status.as_ref().is_ok_and(|s| s.success()) {
+            thread::sleep(Duration::from_millis(100));
+            if process_running(pid) {
+                let _ = Command::new("/bin/kill")
+                    .arg("-KILL")
+                    .arg(&group)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
             return;
         }
     }
-    let _ = Command::new("/bin/kill")
+    let status = Command::new("/bin/kill")
         .arg("-TERM")
         .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
+    if status.as_ref().is_ok_and(|s| s.success()) {
+        thread::sleep(Duration::from_millis(100));
+        if process_running(pid) {
+            let _ = Command::new("/bin/kill")
+                .arg("-KILL")
+                .arg(pid.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
 }
 
 pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
@@ -982,8 +1212,9 @@ mod tests {
     fn normal_bash_timeout_is_bounded() {
         let mut runtime = NeverCancelRuntime;
         let result = execute_one_bash("sleep 2", 1000, &mut runtime);
+        assert!(result.contains("Timem stopped waiting"), "{result}");
         assert!(
-            result.contains("exceeded the configured timeout"),
+            result.contains("does not by itself mean the process was killed"),
             "{result}"
         );
     }
@@ -1228,80 +1459,100 @@ mod tests {
     }
 
     #[test]
-    fn background_job_can_be_polled_until_finished() {
+    fn background_job_reports_pid_and_running_list_until_exit() {
         let dir = tmp_memory_dir("background_job");
         let store = FileShellJobStore::new(&dir);
-        let started = store.spawn("printf background_ok", "session_a", "turn_a");
-        assert!(started.contains("background command has started"));
-        let job_id = started
+        let started =
+            store.spawn_background("sleep 1; printf background_ok", "session_a", "turn_a");
+        assert!(
+            started.contains("now keeps running in background"),
+            "{started}"
+        );
+        let pid = started
             .lines()
-            .find_map(|line| line.strip_prefix("Job id for shell_job_status: "))
-            .unwrap()
-            .to_string();
-        let status = store.status(&job_id, 1000);
-        assert!(status.contains("State: finished"), "{status}");
-        assert!(status.contains("background_ok"), "{status}");
+            .find_map(|line| line.strip_prefix("pid="))
+            .and_then(|rest| rest.split(',').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .unwrap();
+        let running = store.running_for_session("session_a");
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].pid, pid);
+        assert_eq!(running[0].kind, "background");
+
+        thread::sleep(Duration::from_millis(1300));
+        let (running, updates) = store.refresh_for_session("session_a");
+        assert!(running.is_empty());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].pid, pid);
+        assert_eq!(updates[0].description(), "background job");
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn background_status_requires_known_job_id() {
-        let dir = tmp_memory_dir("missing_job");
+    fn timeout_job_reports_pid_and_later_exit_update() {
+        let dir = tmp_memory_dir("timeout_job");
         let store = FileShellJobStore::new(&dir);
-        let missing = store.status("missing", 0);
-        assert!(missing.contains("No background job with this id was found"));
-        let empty = store.status("", 0);
-        assert!(empty.contains("no job_id was provided"));
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn background_job_can_be_cancelled() {
-        let dir = tmp_memory_dir("background_cancel");
-        let store = FileShellJobStore::new(&dir);
-
-        let started = store.spawn(
-            "printf started; sleep 10; printf done",
+        let mut runtime = NeverCancelRuntime;
+        let result = store.run_with_timeout(
+            "printf started; sleep 1; printf done",
+            100,
             "session_a",
             "turn_a",
+            &mut runtime,
         );
-        let job_id = started
+        assert!(result.contains("timeout, but is still running"), "{result}");
+        assert!(result.contains("process was not killed"), "{result}");
+        assert!(result.contains("no final exit code yet"), "{result}");
+        let pid = result
             .lines()
-            .find_map(|line| line.strip_prefix("Job id for shell_job_status: "))
-            .expect("job id");
-        let cancelled = store.cancel(job_id);
+            .find_map(|line| line.strip_prefix("pid="))
+            .and_then(|rest| rest.split(',').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .expect("pid");
 
-        assert!(
-            cancelled.contains("Action result: shell_job_status"),
-            "{cancelled}"
-        );
-        assert!(cancelled.contains("State: cancelled"), "{cancelled}");
-        let status = store.status(job_id, 0);
-        assert!(status.contains("State: cancelled"), "{status}");
+        let running = store.running_for_session("session_a");
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].pid, pid);
+        assert_eq!(running[0].kind, "timeout");
+
+        let mut running = Vec::new();
+        let mut updates = Vec::new();
+        let wait_started = Instant::now();
+        while wait_started.elapsed() < Duration::from_secs(3) {
+            (running, updates) = store.refresh_for_session("session_a");
+            if running.is_empty() && !updates.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(running.is_empty(), "timed-out job should eventually exit");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].pid, pid);
+        assert_eq!(updates[0].description(), "old timeout job");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn background_jobs_can_be_cancelled_by_session_owner() {
-        let dir = tmp_memory_dir("background_cancel_session");
+    fn running_job_list_context_uses_pid_kind_and_command() {
+        let dir = tmp_memory_dir("running_context");
         let store = FileShellJobStore::new(&dir);
 
-        let owned = store.spawn("sleep 10", "session_owned", "turn_a");
-        let other = store.spawn("sleep 10", "session_other", "turn_a");
-        let owned_job = owned
-            .lines()
-            .find_map(|line| line.strip_prefix("Job id for shell_job_status: "))
-            .expect("owned job");
-        let other_job = other
-            .lines()
-            .find_map(|line| line.strip_prefix("Job id for shell_job_status: "))
-            .expect("other job");
+        let _ = store.spawn_background("sleep 10", "session_owned", "turn_a");
+        let _ = store.spawn_background("sleep 10", "session_other", "turn_a");
+        let context = store
+            .running_job_list_context("session_owned")
+            .expect("running context");
 
-        let cancelled = store.cancel_unfinished_for_session("session_owned");
-        assert_eq!(cancelled, vec![owned_job.to_string()]);
-        assert!(store.status(owned_job, 0).contains("State: cancelled"));
-        assert!(store.status(other_job, 0).contains("State: running"));
-        let _ = store.cancel(other_job);
+        assert!(context.starts_with("RUNNING JOB LIST:"), "{context}");
+        assert!(context.contains("background job"), "{context}");
+        assert!(context.contains("cmd=sleep 10"), "{context}");
+        assert!(!context.contains("session_other"), "{context}");
+        for job in store.running_for_session("session_owned") {
+            terminate_process(job.pid);
+        }
+        for job in store.running_for_session("session_other") {
+            terminate_process(job.pid);
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

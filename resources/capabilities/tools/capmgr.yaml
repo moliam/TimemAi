@@ -9,8 +9,8 @@ description: |
   to discover optional skills/tool details not already visible in the catalog.
   Use op=load when a specific listed skill body or tool detail is needed.
   Use op=job_status or op=job_cancel for background jobs started by registered
-  command-bound tools. Do not use these for run_bash background jobs; use
-  shell_job_status for those.
+  command-bound tools. Do not use these for run_bash jobs; run_bash returns pid
+  and the runtime injects running job updates.
 prompt_input: |
   Requires op. For op=load or op=inspect, also provide kind=tool|skill and id.
   For op=job_status or op=job_cancel, provide job_id. For job_status,

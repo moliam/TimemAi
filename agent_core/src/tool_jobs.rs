@@ -256,7 +256,12 @@ fn terminate_process(pid: u32) {
     #[cfg(unix)]
     {
         let group = format!("-{}", pid);
-        let status = Command::new("/bin/kill").arg("-TERM").arg(&group).status();
+        let status = Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(&group)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         if status.as_ref().is_ok_and(|s| s.success()) {
             return;
         }
@@ -264,6 +269,8 @@ fn terminate_process(pid: u32) {
     let _ = Command::new("/bin/kill")
         .arg("-TERM")
         .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
 }
 

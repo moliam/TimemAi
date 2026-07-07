@@ -66,6 +66,9 @@ interface.
 ## SYSTEM
 runtime's active injection, feedback, etc, such as response repair, context compaction notes, work
 instructions, pending work, runtime action results, etc.
+SYSTEM action results are runtime evidence. If they conflict with previous
+assistant free_talk or assumptions, trust the SYSTEM action results and correct
+your next response.
 
 The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
 

@@ -47,8 +47,6 @@ pub mod session_runtime;
 pub mod session_worker;
 #[path = "../../resources/capabilities/tools/run_bash.rs"]
 pub mod shell_exec;
-#[path = "../../resources/capabilities/tools/shell_job_status.rs"]
-pub mod shell_job_status;
 pub mod status_summary;
 pub mod status_view;
 pub mod tool_jobs;
@@ -151,6 +149,7 @@ pub use session_worker::{
 };
 use shell_exec::FileShellJobStore;
 pub use shell_exec::ShellJobRecord;
+pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
 pub use status_summary::{
     context_bar_filled, context_percent, meaningful_latest_usage, runtime_token_status_view,
     token_status_summary, RuntimeTokenStatusView, TokenStatusSummary, TokenUsageBreakdown,
@@ -283,6 +282,42 @@ fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> Prom
             PromptComponentRole::assistant(assistant_speaker_name.to_string())
         }
         _ => PromptComponentRole::system(),
+    }
+}
+
+fn context_reduction_delta_ids_from_action_groups(groups: &[ParsedActionGroup]) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    for action in groups.iter().flat_map(|group| &group.actions) {
+        if action.action != "memmgr" {
+            continue;
+        }
+        let mem_type = action.input_lower("type");
+        let op = action.input_lower("op");
+        let scratch_kind = action.input_lower("kind");
+        let reduces_context = (mem_type == "context" && op == "discard")
+            || (mem_type == "scratch" && op == "write" && scratch_kind == "context_offload");
+        if reduces_context {
+            for id in action.input_list("delta_ids") {
+                let id = id.trim();
+                if !id.is_empty() {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    ids.into_iter().collect()
+}
+
+fn extract_pid_after_marker(text: &str, marker: &str) -> Option<u32> {
+    let start = text.find(marker)? + marker.len();
+    let digits = text[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u32>().ok()
     }
 }
 
@@ -870,24 +905,121 @@ impl AgentCore {
             .unwrap_or_else(|| "unknown_turn".to_string())
     }
 
-    pub(crate) fn cleanup_background_jobs_for_current_session(
+    pub fn running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
+        self.shell_jobs.running_for_session(session_id)
+    }
+
+    pub fn refresh_running_shell_jobs_for_session(
         &mut self,
-        reason: &str,
-    ) -> Vec<String> {
-        let session_id = self.current_session_id();
-        let cancelled = self.shell_jobs.cancel_unfinished_for_session(&session_id);
-        if !cancelled.is_empty() {
-            self.append_delta(vec![(
-                "result_of_llm_action".to_string(),
-                format!(
-                    "Action result: run_bash_background_cleanup\nreason: {}\nsession_id: {}\nterminated_jobs: {}",
-                    reason,
-                    session_id,
-                    cancelled.join(",")
-                ),
-            )]);
+        session_id: &str,
+    ) -> Vec<RunningShellJob> {
+        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates(updates);
+        running
+    }
+
+    fn submit_running_job_updates_for_session(&mut self, session_id: &str) {
+        let (_, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates(updates);
+    }
+
+    fn submit_running_job_updates(&mut self, updates: Vec<ShellJobExitUpdate>) {
+        if updates.is_empty() {
+            return;
         }
-        cancelled
+        let text = updates
+            .into_iter()
+            .map(|update| {
+                format!(
+                    "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms",
+                    update.pid,
+                    update.description(),
+                    compact_text(&update.command, 500),
+                    update.elapsed_ms,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "running_job_update",
+            text,
+            "runtime",
+        );
+    }
+
+    fn submit_running_job_list_if_any(&mut self, session_id: &str) {
+        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates(updates);
+        if running.is_empty() {
+            return;
+        }
+        let mut text = String::from("RUNNING JOB LIST:");
+        for job in running {
+            text.push_str(&format!(
+                "\npid={}, {}, cmd={}, still running",
+                job.pid,
+                job.description(),
+                compact_text(&job.command, 500),
+            ));
+        }
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "running_job_list",
+            text,
+            "runtime",
+        );
+    }
+
+    fn referenced_system_slices_running_pids(&self, delta_ids: &[String]) -> BTreeSet<u32> {
+        let target_delta_ids = delta_ids
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>();
+        if target_delta_ids.is_empty() {
+            return BTreeSet::new();
+        }
+
+        let mut pids = BTreeSet::new();
+        for delta in &self.deltas {
+            if !target_delta_ids.contains(&delta.delta_id) {
+                continue;
+            }
+            for slice in prompt_render::render_delta_slices(delta) {
+                if role_for_prompt_type(&slice.prompt_type, &self.assistant_speaker_name)
+                    != PromptComponentRole::system()
+                {
+                    continue;
+                }
+                for line in slice.text.lines() {
+                    let lower = line.to_ascii_lowercase();
+                    let is_running_line = lower.contains("still running")
+                        || lower.contains("keeps running")
+                        || lower.contains("is still running");
+                    if is_running_line {
+                        if let Some(pid) = extract_pid_after_marker(line, "pid=") {
+                            pids.insert(pid);
+                        }
+                    }
+                }
+            }
+        }
+        pids
+    }
+
+    fn referenced_deltas_have_current_running_jobs(
+        &mut self,
+        session_id: &str,
+        delta_ids: &[String],
+    ) -> bool {
+        let referenced_pids = self.referenced_system_slices_running_pids(delta_ids);
+        if referenced_pids.is_empty() {
+            return false;
+        }
+        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates(updates);
+        running.iter().any(|job| referenced_pids.contains(&job.pid))
     }
 
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
@@ -1270,7 +1402,6 @@ impl AgentCore {
                     llm_final_answer_slice_text(&final_text),
                 ));
                 self.defer_next_turn_slices(slices);
-                self.cleanup_background_jobs_for_current_session("final_answer");
                 return CoreStep::Final(TurnFinal {
                     final_answer: final_text,
                     stats: self.current_stats.clone(),
@@ -1302,7 +1433,6 @@ impl AgentCore {
                 llm_final_answer_slice_text(&final_text),
             ));
             self.defer_next_turn_slices(slices);
-            self.cleanup_background_jobs_for_current_session("protocol_repair_final_answer");
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
                 stats: self.current_stats.clone(),
@@ -1319,6 +1449,15 @@ impl AgentCore {
             );
             runtime.on_core_topic_events(&events);
         }
+        let compact_delta_ids = parsed
+            .context_compacts
+            .iter()
+            .flat_map(|compact| compact.delta_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        let compact_refs_current_running_jobs = self.referenced_deltas_have_current_running_jobs(
+            &self.current_session_id(),
+            &compact_delta_ids,
+        );
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
@@ -1359,7 +1498,6 @@ impl AgentCore {
                 llm_final_answer_slice_text(&final_text),
             ));
             self.defer_next_turn_slices(slices);
-            self.cleanup_background_jobs_for_current_session("final_answer");
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
                 stats: self.current_stats.clone(),
@@ -1381,6 +1519,12 @@ impl AgentCore {
         }
 
         if !parsed.action_groups.is_empty() {
+            let context_reduction_delta_ids =
+                context_reduction_delta_ids_from_action_groups(&parsed.action_groups);
+            let should_snapshot_running_jobs = self.referenced_deltas_have_current_running_jobs(
+                &self.current_session_id(),
+                &context_reduction_delta_ids,
+            );
             let result_lines = match self.execute_action_groups(parsed.action_groups, runtime) {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
@@ -1402,6 +1546,11 @@ impl AgentCore {
                     result_lines.join("\n\n"),
                 ));
             }
+            if should_snapshot_running_jobs {
+                self.submit_running_job_list_if_any(&self.current_session_id());
+            } else {
+                self.submit_running_job_updates_for_session(&self.current_session_id());
+            }
             self.append_delta(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
@@ -1415,8 +1564,12 @@ impl AgentCore {
             };
         }
         if !parsed.context_compacts.is_empty() {
+            if compact_refs_current_running_jobs {
+                self.submit_running_job_list_if_any(&self.current_session_id());
+            } else {
+                self.submit_running_job_updates_for_session(&self.current_session_id());
+            }
             self.append_delta(slices);
-            self.cleanup_background_jobs_for_current_session("context_compact");
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
                 return CoreStep::RoundLimitReached {
@@ -1445,7 +1598,6 @@ impl AgentCore {
             llm_final_answer_slice_text(&final_text),
         ));
         self.defer_next_turn_slices(slices);
-        self.cleanup_background_jobs_for_current_session("final_answer");
         CoreStep::Final(TurnFinal {
             final_answer: final_text,
             stats: self.current_stats.clone(),
@@ -2214,7 +2366,7 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use memmgr type=scratch op=write kind=context_offload for important but lengthy existing deltas or kind=notes for compact checkpoints, then use memmgr type=context op=shrink on covered delta_id ranges. Do not target prompt_0.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use memmgr type=scratch op=write kind=context_offload for important but lengthy existing deltas or kind=notes for compact checkpoints, then use memmgr type=context op=discard on covered delta_id ranges. Do not target prompt_0.";
         Some(format!(
             "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{instruction}",
             self.max_llm_input_tokens
@@ -2639,6 +2791,9 @@ impl AgentCore {
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
         event.payload["status"] = json!(Self::action_finish_status(action, result));
+        if let Some(pid) = action_result_pid(result) {
+            event.payload["pid"] = json!(pid);
+        }
         runtime.on_core_topic_events(&[event]);
     }
 
@@ -2660,9 +2815,7 @@ impl AgentCore {
         if action.action == "run_bash" && action.background() {
             return "background_running";
         }
-        if action.action == "shell_job_status"
-            || (action.action == "capmgr" && action.input_lower("op") == "job_status")
-        {
+        if action.action == "capmgr" && action.input_lower("op") == "job_status" {
             if lower.contains("state: finished") || lower.contains("has finished") {
                 return "background_finished";
             }
@@ -2959,6 +3112,17 @@ impl AgentCore {
         missing.dedup();
         missing
     }
+}
+
+fn action_result_pid(result: &str) -> Option<u32> {
+    result.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("pid=")?;
+        let pid = rest
+            .split(|ch: char| !ch.is_ascii_digit())
+            .next()
+            .unwrap_or_default();
+        pid.parse::<u32>().ok()
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -3287,7 +3451,7 @@ impl FileMemoryStore {
 
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|sql|delete\n- scratch: search|write|read|delete\n- context: shrink\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}.",
+            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|sql|delete\n- scratch: search|write|read|delete\n- context: discard\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -4436,5 +4600,11 @@ mod prompt_component_tests {
         let user = prompt.find("next user input").unwrap();
         assert!(free_talk < user);
         assert!(final_answer < user);
+    }
+
+    #[test]
+    fn action_result_pid_extracts_timeout_pid_for_action_topic_metadata() {
+        let result = "Action result: run_bash\npid=49189, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.\nCommand: sleep 18";
+        assert_eq!(super::action_result_pid(result), Some(49189));
     }
 }

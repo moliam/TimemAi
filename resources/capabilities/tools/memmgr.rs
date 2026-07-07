@@ -236,8 +236,8 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 err
             ),
         },
-        ("context", "shrink") => core.apply_prompt_shrink(
-            "Action result: memmgr\ntype: context\nop: shrink",
+        ("context", "discard") => core.apply_prompt_shrink(
+            "Action result: memmgr\ntype: context\nop: discard",
             &delta_ids,
             &[],
         ),

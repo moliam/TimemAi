@@ -1,14 +1,8 @@
 use crate::response_protocol::ParsedAction;
-use crate::{capmgr, memmgr, self_tool, shell_exec, shell_job_status};
+use crate::{capmgr, memmgr, self_tool, shell_exec};
 use crate::{ActionExecution, ActionRuntime, AgentCore};
 
-pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
-    "memmgr",
-    "capmgr",
-    "run_bash",
-    "shell_job_status",
-    "self_tool",
-];
+pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &["memmgr", "capmgr", "run_bash", "self_tool"];
 
 type BuiltinToolCallback =
     fn(&mut AgentCore, &ParsedAction, &mut dyn ActionRuntime) -> ActionExecution;
@@ -27,7 +21,6 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
         "capmgr" => Some(execute_capmgr),
         "memmgr" => Some(execute_memmgr),
         "self_tool" => Some(execute_self_tool),
-        "shell_job_status" => Some(execute_shell_job_status),
         "run_bash" => Some(execute_run_bash),
         _ => None,
     }
@@ -55,14 +48,6 @@ fn execute_self_tool(
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(self_tool::execute_action(core, action))
-}
-
-fn execute_shell_job_status(
-    core: &mut AgentCore,
-    action: &ParsedAction,
-    _runtime: &mut dyn ActionRuntime,
-) -> ActionExecution {
-    ActionExecution::Completed(shell_job_status::execute_action(core, action))
 }
 
 fn execute_run_bash(

@@ -74,7 +74,7 @@ fn action_memory_activity(action: &ParsedAction) -> CoreMemoryActivity {
 }
 
 fn action_active(action: &ParsedAction) -> bool {
-    matches!(action.action.as_str(), "run_bash" | "shell_job_status")
+    action.action == "run_bash"
         || (action.action == "capmgr" && action.input_lower("op") == "job_status")
 }
 
@@ -157,9 +157,6 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
                 once_timeout_ms: interval_ms.and_then(|_| action.input_u64("once_timeout_ms")),
             }
         }
-        "shell_job_status" => CoreActionKind::ShellJob {
-            job_id: action.input_str("job_id"),
-        },
         "memmgr" => CoreActionKind::Memory {
             surface: action.input_str("type"),
             operation: action.input_str("op"),

@@ -58,7 +58,7 @@ checks. If a dimension is not applicable, record that residual decision in
   real `AgentCore`, real action execution, real audit writes, and UI decisions.
 - Replay story tests: scripted multi-turn user/model conversations that exercise
   normal replies, malformed model recovery, memory retrieve, scratch offload,
-  context shrink, audit writes, and observation rendering in one end-to-end
+  context discard, audit writes, and observation rendering in one end-to-end
   path.
 - Real TTY smoke: compiled release binary driven through a pseudo terminal for
   input/editor/menu behavior.
@@ -89,7 +89,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Bash actions | approval risk, normal shell, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
 | Runtime self tool | `self_tool::tests::*`, manifest/registry/executor tests, sensitive/protected env denial tests | core action replay for env/path/about/process plus UI observation tests | full CI |
 | User scenario replay | focused core replay tests for coding, memory QA, self QA/env update, and file-writing output | `scenario_coding_inspects_project_and_reports_from_shell_evidence`, `scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering`, `scenario_self_qa_and_runtime_env_update_stays_bounded`, `scenario_file_writing_outputs_artifact_and_verifies_content` | full CI |
-| Background jobs | background start/poll/cancel/status timeout tests for bash and registered command tools | realistic story where applicable | shell/tool job groups |
+| Background jobs | `run_bash` pid start, timeout-to-running, exit update, shrink-time running list, and registered command-tool job tests | realistic story where applicable | shell/tool job groups |
 | Multi-turn replay story | protocol parsing, memory/scratch/shrink primitives | `session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering` | full CI |
 | Session worker lifecycle | lifecycle topic/accessor, worker channel tests | `session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement`, `session_worker_rename_emits_updated_identity_topic`, `session_worker_shutdown_cancels_pending_host_decision`, `core_lifecycle_topic_round_trips_worker_identity_workspace_and_context` | full CI |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |

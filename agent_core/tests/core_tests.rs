@@ -761,7 +761,7 @@ fn prompt_rendering_does_not_expose_durable_ctx_score() {
 }
 
 #[test]
-fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
+fn prompt_discard_can_remove_whole_delta_by_delta_id() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -776,7 +776,7 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -808,11 +808,11 @@ fn prompt_shrink_can_remove_whole_delta_by_delta_id() {
 }
 
 #[test]
-fn memmgr_context_shrink_removes_whole_delta_by_delta_id() {
+fn memmgr_context_discard_removes_whole_delta_by_delta_id() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("memmgr_context_shrink"),
+        tmp_dir("memmgr_context_discard"),
     );
     let prompt = match core.begin_turn("REMOVE_THIS_MEMMGR_DELTA", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -823,7 +823,7 @@ fn memmgr_context_shrink_removes_whole_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -836,7 +836,7 @@ fn memmgr_context_shrink_removes_whole_delta_by_delta_id() {
     };
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("type: context"));
-    assert!(prompt.contains("op: shrink"));
+    assert!(prompt.contains("op: discard"));
     assert!(prompt.contains("removed_delta_count: 1"));
     assert!(!prompt.contains("REMOVE_THIS_MEMMGR_DELTA"));
 }
@@ -876,7 +876,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
 }
 
 #[test]
-fn prompt_shrink_can_remove_visible_delta_by_delta_id() {
+fn prompt_discard_can_remove_visible_delta_by_delta_id() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -894,7 +894,7 @@ fn prompt_shrink_can_remove_visible_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Hide one rendered prompt delta.","args":{{"type":"context","op":"shrink","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Hide one rendered prompt delta.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -1096,7 +1096,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     assert!(prompt.contains("high-level work principles"));
     assert!(prompt.contains("memmgr type=scratch op=write kind=context_offload"));
     assert!(prompt.contains("kind=notes"));
-    assert!(prompt.contains("memmgr type=context op=shrink"));
+    assert!(prompt.contains("memmgr type=context op=discard"));
     assert!(!prompt.contains("use scratch_write"));
     assert!(!prompt.contains("use prompt_shrink"));
     assert!(!prompt.contains("shrink_review_threshold_tokens"));
@@ -1133,7 +1133,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!delta_ids.is_empty());
 
     let shrink_response = format!(
-        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
+        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
         serde_json::to_string(&delta_ids).unwrap()
     );
     let step = core.apply_model_response(LlmResponse {
@@ -1149,7 +1149,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
 
     assert!(next_prompt.contains("Action result: memmgr"));
     assert!(next_prompt.contains("type: context"));
-    assert!(next_prompt.contains("op: shrink"));
+    assert!(next_prompt.contains("op: discard"));
     assert!(!next_prompt.contains("mode=force_shrink_required"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -1486,21 +1486,18 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
     assert!(prompt.contains("Action result: run_bash"));
     assert!(prompt.contains("builtin-normal"));
     assert!(prompt.contains("Polling state: finished"));
-    assert!(prompt.contains("background command has started"));
-
-    let job_id = action_result_field(&prompt, "Job id for shell_job_status");
-    assert!(job_id.starts_with("job_"));
+    assert!(prompt.contains("now keeps running in background"));
+    assert!(prompt.contains("pid="));
     std::thread::sleep(std::time::Duration::from_millis(250));
 
     let second_response = json!({
         "status": "working",
-        "progress": "检查后台命令。",
+        "progress": "继续普通检查并接收后台任务状态更新。",
         "working_still_action": {
-            "action": "shell_job_status",
-            "intent": "等待后台命令完成。",
+            "action": "run_bash",
+            "intent": "继续普通检查。",
             "args": {
-                "op": "status",
-                "job_id": job_id,
+                "cmd": "printf checked",
                 "timeout_ms": 1000
             }
         }
@@ -1512,12 +1509,13 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
         truncated: false,
     }) {
         CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected shell_job_status result, got {other:?}"),
+        other => panic!("expected run_bash result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: shell_job_status"));
-    assert!(prompt.contains("State: finished"));
-    assert!(prompt.contains("Exit code: 0"));
-    assert!(prompt.contains("builtin-bg"));
+    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("checked"));
+    assert!(prompt.contains("RUNNING_JOB_UPDATE"));
+    assert!(prompt.contains("background job"));
+    assert!(prompt.contains("now exits"));
 }
 
 #[test]
@@ -1634,7 +1632,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("上下文收缩", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"为了保证响应效率，正在对历史冗余上下文进行清理和暂存...","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"working_still_action":[{"action":"memmgr","intent":"将过期的 Prompt Delta 离线暂存到临时便签中","args":{"type":"scratch","op":"write","kind":"context_offload","label":"test offload","delta_ids":"pd_001,pd_002"}},{"action":"memmgr","intent":"从当前活跃 Prompt Context 中裁剪掉已暂存的 delta_ids","args":{"type":"context","op":"shrink","delta_ids":"pd_001,pd_002"}}]}"#,
+            r#"{"status":"working","progress":"为了保证响应效率，正在对历史冗余上下文进行清理和暂存...","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"working_still_action":[{"action":"memmgr","intent":"将过期的 Prompt Delta 离线暂存到临时便签中","args":{"type":"scratch","op":"write","kind":"context_offload","label":"test offload","delta_ids":"pd_001,pd_002"}},{"action":"memmgr","intent":"从当前活跃 Prompt Context 中裁剪掉已暂存的 delta_ids","args":{"type":"context","op":"discard","delta_ids":"pd_001,pd_002"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4317,7 +4315,7 @@ fn run_bash_rejects_old_timeout_sec_field() {
 }
 
 #[test]
-fn run_bash_can_start_and_poll_background_job() {
+fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -4335,15 +4333,71 @@ fn run_bash_can_start_and_poll_background_job() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("background command has started"));
-    let job_id = action_result_field(&prompt, "Job id for shell_job_status");
-    assert!(job_id.starts_with("job_"));
+    assert!(prompt.contains("now keeps running in background"));
+    assert!(prompt.contains("pid="));
+    assert!(!prompt.contains("RUNNING JOB LIST:"));
 
     std::thread::sleep(std::time::Duration::from_millis(250));
     let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Continue after background task.","args":{"cmd":"printf next","timeout_ms":1000}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
+    assert!(prompt.contains("background job"), "{prompt}");
+    assert!(prompt.contains("now exits"), "{prompt}");
+}
+
+#[test]
+fn running_job_list_is_injected_when_discard_references_running_job_delta() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_running_list_on_shrink"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let prompt = match core.begin_turn("start a background task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let user_delta_id = first_field_value(&prompt, "delta_id");
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a still-running background task.","args":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains("now keeps running in background"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("RUNNING JOB LIST:"), "{prompt}");
+    let running_delta_id = field_values(&prompt, "delta_id")
+        .into_iter()
+        .last()
+        .expect("running delta id");
+    assert_ne!(running_delta_id, user_delta_id);
+    let pid = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|rest| rest.split(',').next())
+        .expect("pid")
+        .to_string();
+
+    let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"shell_job_status","intent":"Poll background task.","args":{{"job_id":"{}","timeout_ms":1000}}}}]}}"#,
-            job_id
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Compact old prompt context.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4353,14 +4407,212 @@ fn run_bash_can_start_and_poll_background_job() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: shell_job_status"));
-    assert!(prompt.contains("State: finished"));
-    assert!(prompt.contains("Exit code: 0"));
-    assert!(prompt.contains("background-ok"));
+    assert!(prompt.contains("Action result: memmgr"), "{prompt}");
+    assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
+    assert!(prompt.contains("background job"), "{prompt}");
+    assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
+
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "kill -TERM {pid} 2>/dev/null || true; pkill -TERM -P {pid} 2>/dev/null || true"
+            ))
+            .status();
+    }
 }
 
 #[test]
-fn shell_job_status_missing_job_id_returns_tool_input_error() {
+fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_running_list_unrelated_discard"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let prompt = match core.begin_turn("start a background task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let user_delta_id = first_field_value(&prompt, "delta_id");
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a still-running background task.","args":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains("now keeps running in background"),
+        "{prompt}"
+    );
+    let pid = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|rest| rest.split(',').next())
+        .expect("pid")
+        .to_string();
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Discard unrelated user-only prompt context.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            user_delta_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Action result: memmgr"), "{prompt}");
+    assert!(!prompt.contains("RUNNING JOB LIST:"), "{prompt}");
+
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "kill -TERM {pid} 2>/dev/null || true; pkill -TERM -P {pid} 2>/dev/null || true"
+            ))
+            .status();
+    }
+}
+
+#[test]
+fn running_job_list_is_injected_when_offload_references_running_job_delta() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_running_list_on_offload"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    match core.begin_turn("start a background task", None) {
+        CoreStep::NeedModel { .. } => {}
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a still-running background task.","args":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let running_delta_id = field_values(&prompt, "delta_id")
+        .into_iter()
+        .last()
+        .expect("running delta id");
+    let pid = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|rest| rest.split(',').next())
+        .expect("pid")
+        .to_string();
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Offload old prompt context.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"running job context","delta_ids":["{}"]}}}}]}}"#,
+            running_delta_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("type: context_offload"), "{prompt}");
+    assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
+    assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
+
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "kill -TERM {pid} 2>/dev/null || true; pkill -TERM -P {pid} 2>/dev/null || true"
+            ))
+            .status();
+    }
+}
+
+#[test]
+fn running_job_list_is_injected_when_compact_references_running_job_delta() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_running_list_on_compact"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    match core.begin_turn("start a background task", None) {
+        CoreStep::NeedModel { .. } => {}
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a still-running background task.","args":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let running_delta_id = field_values(&prompt, "delta_id")
+        .into_iter()
+        .last()
+        .expect("running delta id");
+    let pid = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|rest| rest.split(',').next())
+        .expect("pid")
+        .to_string();
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            "## Progress\n压缩旧上下文。\n\n## Context Compact\ndelta_ids: {running_delta_id}\nsummary:\n后台任务仍在运行，需要保留运行状态。"
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains("Action result: context_compact"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
+    assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
+
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "kill -TERM {pid} 2>/dev/null || true; pkill -TERM -P {pid} 2>/dev/null || true"
+            ))
+            .status();
+    }
+}
+
+#[test]
+fn removed_shell_job_status_action_is_rejected_as_unsupported() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -4378,44 +4630,20 @@ fn shell_job_status_missing_job_id_returns_tool_input_error() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("issue: actions[0].input.job_id_required"));
-    assert!(!prompt.contains("Action result: shell_job_status"));
+    assert!(prompt.contains("unsupported_action:shell_job_status"));
 }
 
 #[test]
-fn shell_job_status_missing_timeout_uses_immediate_check() {
+fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_background_timeout_optional"),
-    );
-    let _ = core.begin_turn("poll a long task", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"shell_job_status","intent":"Poll background task.","args":{"job_id":"job_1"}}]}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(!prompt.contains("Protocol repair request"));
-    assert!(prompt.contains("Action result: shell_job_status"));
-    assert!(prompt.contains("No background job with this id was found"));
-}
-
-#[test]
-fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
-    let mut core = AgentCore::new(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_background_wait"),
+        tmp_dir("bash_timeout_kill"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let _ = core.begin_turn("run a long task", None);
+    let _ = core.begin_turn("poll a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a background task.","args":{"cmd":"sleep 0.4; printf waited-ok","background":true}}]}"#),
+        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Run a command with a short timeout.","args":{"cmd":"sleep 10; printf late","timeout_ms":100}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4424,13 +4652,18 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let job_id = action_result_field(&prompt, "Job id for shell_job_status");
-    assert!(job_id.starts_with("job_"));
+    assert!(prompt.contains("timeout, but is still running"), "{prompt}");
+    let pid = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|rest| rest.split(',').next())
+        .expect("pid")
+        .to_string();
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"shell_job_status","intent":"Wait for background task.","args":{{"job_id":"{}","timeout_ms":1500}}}}]}}"#,
-            job_id
+            r#"{{"progress":"","working_still_action":[{{"action":"run_bash","intent":"Stop the timed out process by pid.","args":{{"cmd":"kill {}","timeout_ms":1000}}}}]}}"#,
+            pid
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4440,10 +4673,10 @@ fn shell_job_status_waits_for_model_chosen_timeout_before_running_result() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: shell_job_status"));
-    assert!(prompt.contains("State: finished"));
-    assert!(prompt.contains("waited-ok"));
-    assert!(prompt.contains("Waited:"));
+    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
+    assert!(prompt.contains("old timeout job"), "{prompt}");
+    assert!(prompt.contains("now exits"), "{prompt}");
 }
 
 #[test]
@@ -5644,6 +5877,8 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
     };
 
     assert!(prompt.contains("Examples below are format examples ONLY"));
+    assert!(prompt.contains("SYSTEM action results are runtime evidence"));
+    assert!(prompt.contains("trust the SYSTEM action results"));
     for leaked_example_task in [
         "project codename",
         "Get the OS version",
@@ -5699,9 +5934,11 @@ fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
     assert!(prompt.contains("#### `memmgr`"));
     assert!(prompt.contains("#### `capmgr`"));
     assert!(prompt.contains("#### `run_bash`"));
-    assert!(prompt.contains("#### `shell_job_status`"));
+    assert!(!prompt.contains("#### `shell_job_status`"));
     assert!(!prompt.contains("\"release_quality_gate\""));
     assert!(prompt.contains("Unified local memory manager"));
+    assert!(prompt.contains("`timeout_ms` is only how long Timem waits"));
+    assert!(prompt.contains("It is not a kill deadline"));
 }
 
 #[test]

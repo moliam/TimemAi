@@ -34,6 +34,7 @@ pub struct TurnOutcome {
     pub repair_issue: Option<String>,
     pub stop_reason: Option<TurnStopReason>,
     pub stop_summary: Option<TurnStopSummary>,
+    pub running_jobs: Vec<crate::RunningShellJob>,
 }
 
 impl TurnOutcome {
@@ -52,6 +53,7 @@ impl TurnOutcome {
             repair_issue,
             stop_reason: None,
             stop_summary: None,
+            running_jobs: Vec::new(),
         }
     }
 
@@ -64,7 +66,13 @@ impl TurnOutcome {
             repair_issue: stopped.repair_issue,
             stop_reason: Some(stopped.stop_reason),
             stop_summary: Some(stopped.stop_summary),
+            running_jobs: Vec::new(),
         }
+    }
+
+    pub fn with_running_jobs(mut self, running_jobs: Vec<crate::RunningShellJob>) -> Self {
+        self.running_jobs = running_jobs;
+        self
     }
 }
 
@@ -393,6 +401,7 @@ pub struct CoreActionTopic {
     pub active: bool,
     pub event: String,
     pub status: String,
+    pub pid: Option<u32>,
     pub memory_activity: CoreMemoryActivity,
 }
 
@@ -643,6 +652,9 @@ impl CoreTopicEvent {
                 .as_str()
                 .unwrap_or("running")
                 .to_string(),
+            pid: self.payload["pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok()),
             memory_activity: memory_activity_from_topic_payload(&self.payload["memory_activity"]),
         })
     }
@@ -2204,6 +2216,7 @@ mod tests {
                 active: true,
                 event: "start".to_string(),
                 status: "running".to_string(),
+                pid: None,
                 memory_activity: CoreMemoryActivity::None,
             })
         );

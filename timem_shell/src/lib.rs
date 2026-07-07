@@ -28,19 +28,20 @@ pub use agent_core::{
     CoreTopicEvent, HostDecision, HostDecisionDefault, HostDecisionRequest, HostStatusLevel,
     HostStatusMessage, LocalLLMKeyFile, LongRunningCommandContinueRequest, ModelDirection,
     ModelProfile, NoopTurnUi, OutputExpansionRequest, ProviderConfig, RoundLimitDecisionRequest,
-    RuntimeConfigApplyError, RuntimeConfigApplyMessage, RuntimeConfigApplyMessageKind,
-    RuntimeConfigApplyReport, RuntimeConfigEffect, RuntimeConfigField, RuntimeConfigMenuItem,
-    RuntimeConfigMenuReport, RuntimeConfigReport, RuntimeConfigReportInput,
-    RuntimeConfigReportItem, RuntimeConfigReportRow, RuntimeConfigRowKind, RuntimeConfigSection,
-    RuntimeProfiler, RuntimeRetryStatus, RuntimeRetryStatusView, RuntimeTokenStatusView,
-    StaleContextDecisionRequest, StorageProfile, SupportingContextInput, TokenUsageBreakdown,
-    TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
-    TurnStopSummary, TurnUi, WorkInstructionLoadMessage, WorkInstructionLoadMessageKind,
-    WorkInstructionLoadMode, WorkInstructionLoadReport, WorkInstructionLoadRequest,
-    WorkInstructionLoadStatus, WorkspaceChange, WorkspaceCommand, WorkspaceCommandMessage,
-    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
-    WorkspaceMenuReport, WorkspaceState, WorkspaceUnchangedReason, CORE_TOPIC_ACTION,
-    CORE_TOPIC_MODEL_RESPONSE, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, DEFAULT_STALE_CONTEXT_IDLE,
+    RunningShellJob, RuntimeConfigApplyError, RuntimeConfigApplyMessage,
+    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigEffect,
+    RuntimeConfigField, RuntimeConfigMenuItem, RuntimeConfigMenuReport, RuntimeConfigReport,
+    RuntimeConfigReportInput, RuntimeConfigReportItem, RuntimeConfigReportRow,
+    RuntimeConfigRowKind, RuntimeConfigSection, RuntimeProfiler, RuntimeRetryStatus,
+    RuntimeRetryStatusView, RuntimeTokenStatusView, StaleContextDecisionRequest, StorageProfile,
+    SupportingContextInput, TokenUsageBreakdown, TopicReply, TopicReplyError, TurnInput,
+    TurnOutcome, TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi,
+    WorkInstructionLoadMessage, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
+    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
+    WorkspaceChange, WorkspaceCommand, WorkspaceCommandMessage, WorkspaceCommandMessageKind,
+    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, WorkspaceState,
+    WorkspaceUnchangedReason, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_RESPONSE,
+    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, DEFAULT_STALE_CONTEXT_IDLE,
     DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
 };
 pub use agent_core::{cancelled_turn_result, run_session_turn};
@@ -259,11 +260,31 @@ pub fn render_final_response_at(
 }
 
 pub fn render_turn_outcome_text(outcome: &TurnOutcome) -> String {
-    outcome
+    let mut text = outcome
         .stop_summary
         .as_ref()
         .map(render_turn_stop_summary)
-        .unwrap_or_else(|| outcome.text.clone())
+        .unwrap_or_else(|| outcome.text.clone());
+    if !outcome.running_jobs.is_empty() {
+        if !text.trim().is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&render_running_jobs_for_user(&outcome.running_jobs));
+    }
+    text
+}
+
+pub fn render_running_jobs_for_user(jobs: &[RunningShellJob]) -> String {
+    let mut out = String::from("RUNNING JOB LIST:\n");
+    for job in jobs {
+        out.push_str(&format!(
+            "- pid={}, {}, cmd={}, still running\n",
+            job.pid,
+            job.description(),
+            job.command
+        ));
+    }
+    out.trim_end().to_string()
 }
 
 pub fn render_turn_stop_summary(stop: &TurnStopSummary) -> String {
@@ -1003,6 +1024,30 @@ mod tests {
             render_turn_outcome_text(&outcome),
             "模型调用失败：provider_http_400"
         );
+    }
+
+    #[test]
+    fn shell_appends_running_job_list_after_final_answer() {
+        let outcome = TurnOutcome::final_response(
+            "任务完成。",
+            UsageStats::zero(),
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .with_running_jobs(vec![RunningShellJob {
+            pid: 12345,
+            kind: "timeout".to_string(),
+            command: "sleep 30".to_string(),
+            session_id: "session_a".to_string(),
+            turn_id: "turn_a".to_string(),
+            created_at_ms: 1000,
+        }]);
+
+        let rendered = render_turn_outcome_text(&outcome);
+        assert!(rendered.starts_with("任务完成。"));
+        assert!(rendered.contains("RUNNING JOB LIST:"));
+        assert!(rendered.contains("pid=12345, old job timeout, cmd=sleep 30, still running"));
     }
 
     #[test]

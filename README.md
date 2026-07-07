@@ -246,9 +246,8 @@ capabilities/
 ```
 
 Runtime tool manifests may add or override canonical tool names only when they
-bind to an existing builtin executor such as `run_bash`, `memmgr`,
-`shell_job_status`, or `capmgr`, or to a command script inside the overlay
-directory.
+bind to an existing builtin executor such as `run_bash`, `memmgr`, `self_tool`,
+or `capmgr`, or to a command script inside the overlay directory.
 
 Command-bound tools use this manifest shape:
 
@@ -323,9 +322,13 @@ package installs, or video commands, the model can request:
 }
 ```
 
-Runtime returns a `job_id`, output file, and status file. The model should poll
-with `shell_job_status` instead of retrying the same command after a normal-mode
-timeout.
+Runtime returns a process id such as `pid=12345, now keeps running in
+background`. If a normal command reaches its `timeout_ms`, runtime returns
+`pid=12345, timeout, but is still running` and keeps tracking that process.
+When a tracked job exits, runtime adds a one-time `RUNNING_JOB_UPDATE` to the
+next prompt delta. After large context compaction, runtime can also add a
+`RUNNING JOB LIST` snapshot. The model can inspect or stop those jobs with
+ordinary `run_bash` commands such as `ps -p <pid>` or `kill <pid>`.
 
 `Ctrl+C` is always a cancellation key, not an exit key: while editing input it
 cancels the current line, inside menus it cancels the current selection, and

@@ -8,8 +8,6 @@ use crate::prompt_spec::replace_markdown_placeholder_with_text;
 const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
 const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
-const SHELL_JOB_STATUS_MANIFEST: &str =
-    include_str!("../../resources/capabilities/tools/shell_job_status.yaml");
 const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +188,6 @@ impl CapabilityRegistry {
                 MEMMGR_MANIFEST,
                 CAPMGR_MANIFEST,
                 RUN_BASH_MANIFEST,
-                SHELL_JOB_STATUS_MANIFEST,
                 SELF_TOOL_MANIFEST,
             ],
             &[],
@@ -1852,7 +1849,7 @@ mod tests {
         assert!(registry.contains_tool("memmgr"));
         assert!(registry.contains_tool("capmgr"));
         assert!(registry.contains_tool("run_bash"));
-        assert!(registry.contains_tool("shell_job_status"));
+        assert!(!registry.contains_tool("shell_job_status"));
         assert!(registry.contains_tool("self_tool"));
         assert!(!registry.contains_tool("tool_job_status"));
         assert!(!registry.contains_tool("query_memory"));
@@ -1892,7 +1889,7 @@ mod tests {
         );
 
         assert!(registry.contains_tool("run_bash"));
-        assert!(registry.contains_tool("shell_job_status"));
+        assert!(!registry.contains_tool("shell_job_status"));
         assert!(!registry.contains_tool("tool_job_status"));
         assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
     }
@@ -1905,7 +1902,7 @@ mod tests {
         assert!(rendered.contains("#### `memmgr`"));
         assert!(rendered.contains("#### `capmgr`"));
         assert!(rendered.contains("#### `run_bash`"));
-        assert!(rendered.contains("#### `shell_job_status`"));
+        assert!(!rendered.contains("#### `shell_job_status`"));
         assert!(!rendered.contains("#### `tool_job_status`"));
         assert!(rendered.contains("#### `self_tool`"));
         assert!(rendered.contains("interval_ms"));
@@ -1921,7 +1918,7 @@ mod tests {
         assert!(!rendered.contains("durable: query|schema"));
         assert!(!rendered.contains("empty is allowed for durable/raw_chat/scratch recent listing"));
         assert!(rendered.contains("Conditional one of:"));
-        assert!(rendered.contains("(type=context, op=shrink) requires one of delta_ids"));
+        assert!(rendered.contains("(type=context, op=discard) requires one of delta_ids"));
         assert!(!rendered.contains("when `` is"));
         assert!(rendered.contains("**Result**"));
         assert!(!rendered.contains("```"));
@@ -1931,6 +1928,10 @@ mod tests {
         assert!(!rendered.contains("check_timeout_ms"));
         assert!(rendered.contains("`background`:"));
         assert!(rendered.contains("Normal/Polling returns status and bounded output"));
+        assert!(rendered.contains("Background returns"));
+        assert!(rendered.contains("Timeout command won't be killed automatically"));
+        assert!(rendered.contains("`timeout_ms` is only how long Timem waits"));
+        assert!(rendered.contains("It is not a kill deadline"));
         assert!(rendered.contains("Use loop_cmd with interval_ms"));
         assert!(rendered.contains("`op`:"));
         assert!(rendered.contains("`kind`:"));
@@ -1949,10 +1950,7 @@ mod tests {
         assert_eq!(registry.binding_name("memmgr"), Some("memmgr"));
         assert_eq!(registry.binding_name("capmgr"), Some("capmgr"));
         assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
-        assert_eq!(
-            registry.binding_name("shell_job_status"),
-            Some("shell_job_status")
-        );
+        assert_eq!(registry.binding_name("shell_job_status"), None);
         assert_eq!(registry.binding_name("tool_job_status"), None);
         assert_eq!(registry.binding_name("self_tool"), Some("self_tool"));
         assert_eq!(registry.binding_name("future_tool"), None);
@@ -2039,17 +2037,18 @@ mod tests {
                 "memmgr",
                 &json_object([
                     ("type", Value::String("context".to_string())),
-                    ("op", Value::String("shrink".to_string())),
+                    ("op", Value::String("discard".to_string())),
                 ])
             )
             .unwrap_err()
-            .contains("input.any_required_when_delta_ids_when_op=shrink,type=context"));
+            .contains("input.any_required_when_delta_ids_when_op=discard,type=context"));
         assert!(registry
             .validate_action_input(
                 "shell_job_status",
                 &json_object([("job_id", Value::String("job_1".to_string()))])
             )
-            .is_ok());
+            .unwrap_err()
+            .contains("unsupported_action:shell_job_status"));
         assert!(registry
             .validate_action_input(
                 "capmgr",
@@ -2067,7 +2066,8 @@ mod tests {
                     ("op", Value::String("cancel".to_string())),
                 ])
             )
-            .is_ok());
+            .unwrap_err()
+            .contains("unsupported_action:shell_job_status"));
         assert!(registry
             .validate_action_input(
                 "capmgr",

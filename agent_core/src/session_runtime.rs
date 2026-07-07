@@ -272,13 +272,15 @@ pub fn run_session_turn_with_model_client(
     };
 
     let elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
-    let outcome = match (stopped, final_parts) {
+    let mut outcome = match (stopped, final_parts) {
         (Some(stopped), None) => TurnOutcome::stopped(text, stopped, elapsed),
         (None, Some((stats, latest_usage, repair_issue))) => {
             TurnOutcome::final_response(text, stats, latest_usage, repair_issue, elapsed)
         }
         _ => unreachable!("session turn loop must produce exactly one outcome kind"),
     };
+    outcome =
+        outcome.with_running_jobs(core.refresh_running_shell_jobs_for_session(request.session));
     if let Some(profiler) = profiler.as_deref_mut() {
         profiler.record_turn(elapsed, model_wait_this_turn);
     }
@@ -1886,7 +1888,7 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
+                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 13_253, false));
@@ -1894,7 +1896,7 @@ finished
             assert_eq!(self.prompts.len(), 2);
             assert!(prompt.contains("Action result: memmgr"));
             assert!(prompt.contains("type: context"));
-            assert!(prompt.contains("op: shrink"));
+            assert!(prompt.contains("op: discard"));
             assert!(!prompt.contains("mode=force_shrink_required"));
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
@@ -3107,7 +3109,7 @@ Markdown 协议动作已执行。"#,
                     delta_ids.dedup();
                     assert!(
                         !delta_ids.is_empty(),
-                        "forced shrink prompt should expose delta ids"
+                        "forced discard prompt should expose delta ids"
                     );
                     let content = format!(
                         r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}]}}"#,
@@ -3126,10 +3128,10 @@ Markdown 协议动作已执行。"#,
                     delta_ids.dedup();
                     assert!(
                         !delta_ids.is_empty(),
-                        "post-scratch forced shrink prompt should expose delta ids"
+                        "post-scratch forced discard prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","args":{{"type":"context","op":"shrink","delta_ids":{}}}}}]}}"#,
+                        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_700, false))
@@ -3137,7 +3139,7 @@ Markdown 协议动作已执行。"#,
                 10 => {
                     assert!(prompt.contains("Action result: memmgr"));
                     assert!(prompt.contains("type: context"));
-                    assert!(prompt.contains("op: shrink"));
+                    assert!(prompt.contains("op: discard"));
                     assert!(!prompt.contains("mode=force_shrink_required"));
                     Ok(llm(
                         r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
@@ -3214,7 +3216,7 @@ Markdown 协议动作已执行。"#,
                 .filter(|prompt| prompt.contains("mode=force_shrink_required"))
                 .count()
                 >= 2,
-            "story should force shrink through scratch offload then context shrink"
+            "story should force shrink through scratch offload then context discard"
         );
 
         let memory_text = std::fs::read_to_string(dir.join("memory.jsonl")).unwrap();
@@ -3257,7 +3259,7 @@ Markdown 协议动作已执行。"#,
                 && topic.kind
                     == CoreActionKind::Memory {
                         surface: "context".to_string(),
-                        operation: "shrink".to_string(),
+                        operation: "discard".to_string(),
                     }
         }));
 
