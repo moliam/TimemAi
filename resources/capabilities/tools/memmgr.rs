@@ -43,10 +43,18 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 .sql_read(&core.chat_history, &sql, &params, limit)
             {
                 Ok(rows) if rows.is_empty() => {
-                    format!(
-                        "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults: none",
-                        mem_type, sql
-                    )
+                    if mem_type == "durable" {
+                        let total_rows = core.memory.count().unwrap_or_default();
+                        format!(
+                            "Action result: memmgr\ntype: durable\nop: sql\nsql: {}\nresults: none\ndurable_memory_total_rows: {}",
+                            sql, total_rows
+                        )
+                    } else {
+                        format!(
+                            "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults: none",
+                            mem_type, sql
+                        )
+                    }
                 }
                 Ok(rows) => {
                     let lines = rows
