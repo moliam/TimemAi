@@ -768,6 +768,7 @@ mod tests {
         let dir = tmp_dir("retry_transient_provider_error");
         let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
         let mut config = test_config();
         let mut ui = RetryRecordingUi::default();
         let mut model = ReplayModel::new([
@@ -805,6 +806,95 @@ mod tests {
         assert!(ui.retries[0].3.contains("provider_http_500"));
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "model_retry"), 2);
+    }
+
+    #[test]
+    fn session_turn_repairs_empty_model_content() {
+        let dir = tmp_dir("repair_empty_model_content");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut config = test_config();
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([
+            Ok(llm("", 1_000, false)),
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"空回复修复后成功。"}"#,
+                1_100,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "hello",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "空回复修复后成功。");
+        assert_eq!(model.prompts.len(), 2);
+        assert!(model.prompts[1].contains("temp_repair_"));
+        assert!(model.prompts[1].contains("response is not protocol compliant"));
+        assert!(ui.retries.is_empty());
+        assert_eq!(outcome.repair_issue, None);
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_retry"), 0);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_repairs_any_non_protocol_model_content() {
+        let dir = tmp_dir("repair_non_protocol_model_content");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
+        let mut config = test_config();
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([
+            Ok(llm("plain text that does not match protocol", 1_000, false)),
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"非协议回复修复后成功。"}"#,
+                1_100,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "hello",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "非协议回复修复后成功。");
+        assert_eq!(model.prompts.len(), 2);
+        assert!(model.prompts[1].contains("plain text that does not match protocol"));
+        assert!(model.prompts[1].contains("response is not protocol compliant"));
+        assert!(ui.retries.is_empty());
+        assert_eq!(outcome.stop_reason, None);
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_retry"), 0);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

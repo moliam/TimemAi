@@ -80,25 +80,6 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     let value: Value = match parse_json_value_from_model_text(content) {
         Ok(value) => value,
         Err(_) => {
-            let tc = content.trim();
-            let has_brace = tc.contains('{');
-            let looks_json =
-                tc.starts_with('{') || tc.starts_with('[') || tc.starts_with("```") || has_brace;
-            if !looks_json && !tc.is_empty() {
-                return ParsedEnvelope {
-                    report_job_progress: String::new(),
-                    final_answer: tc.to_string(),
-                    continue_work: false,
-                    thought: String::new(),
-                    thought_keep_in_context: false,
-                    next_actions: vec![],
-                    action_groups: vec![],
-                    context_compacts: vec![],
-                    memory_candidates: vec![],
-                    runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
-                    repair_issue: None,
-                };
-            }
             return ParsedEnvelope {
                 report_job_progress: String::new(),
                 final_answer: String::new(),

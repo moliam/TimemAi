@@ -570,9 +570,6 @@ pub fn parse_provider_response(
             )
         }
     };
-    if content.trim().is_empty() {
-        return Err("empty_model_content".to_string());
-    }
     Ok(LlmResponse {
         content,
         model_name: config.model.clone(),
@@ -587,7 +584,9 @@ pub fn interpret_provider_http_response(
     body_text: &str,
     stderr_text: &str,
 ) -> ProviderHttpResponseInterpretation {
+    let mut parsed_json = true;
     let raw_json: Value = serde_json::from_str(body_text).unwrap_or_else(|_| {
+        parsed_json = false;
         json!({
             "raw_text": body_text,
             "stderr": stderr_text,
@@ -595,6 +594,13 @@ pub fn interpret_provider_http_response(
     });
     let result = if !(200..300).contains(&status) {
         Err(provider_http_error_message(status, &raw_json))
+    } else if !parsed_json {
+        Ok(LlmResponse {
+            content: body_text.to_string(),
+            model_name: config.model.clone(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
     } else {
         parse_provider_response(config, &raw_json)
     };
@@ -1146,7 +1152,7 @@ mod tests {
             interpret_provider_http_response(&config, 200, "not json", "curl stderr detail");
         assert_eq!(interpreted.raw_json["raw_text"], "not json");
         assert_eq!(interpreted.raw_json["stderr"], "curl stderr detail");
-        assert_eq!(interpreted.result.unwrap_err(), "empty_model_content");
+        assert_eq!(interpreted.result.unwrap().content, "not json");
     }
 
     #[test]
@@ -1218,6 +1224,19 @@ mod tests {
 
     #[test]
     fn openai_compatible_response_reads_cache_and_truncation() {
+        let empty = parse_provider_response(
+            &config(ApiProtocol::OpenAiCompatible),
+            &json!({
+                "choices":[{"finish_reason":"stop","message":{"content":"","role":"assistant"}}],
+                "usage":{"prompt_tokens":15707,"completion_tokens":2,"total_tokens":15709}
+            }),
+        )
+        .unwrap();
+        assert_eq!(empty.content, "");
+        assert_eq!(empty.usage.prompt_tokens, 15707);
+        assert_eq!(empty.usage.completion_tokens, 2);
+        assert!(!empty.truncated);
+
         let response = parse_provider_response(
             &config(ApiProtocol::OpenAiCompatible),
             &json!({
