@@ -186,7 +186,6 @@ string_args_hits="$(
     agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
     | grep -v 'allow_string_args_negative_test' \
     | grep -v 'response_schema_summary.json' \
-    | grep -v -E 'resources/protocol/.*/expanded.md' \
     || true
 )"
 if [ -n "$string_args_hits" ]; then
@@ -289,89 +288,10 @@ for pattern in "${changelog_required[@]}"; do
   fi
 done
 
-static_prompt_snapshots=(
-  "resources/protocol/markdown/expanded.md"
-  "resources/protocol/json/expanded.md"
-  "resources/protocol/xml/expanded.md"
-)
-
-static_prompt_snapshot_common_required=(
-  "[BEGIN SYSTEM PROMPT]"
-  "#### \`run_bash\`"
-  "#### \`memmgr\`"
-  "**Usage**"
-  "**Result**"
-  '"args": {'
-  '"cmd": "'
-)
-
-static_prompt_snapshot_markdown_required=(
-  "Markdown response sections."
-  "The top-level response is Markdown, not JSON."
-  "\`## Status\`"
-  "\`## Working_Still_Action\`"
-)
-
-static_prompt_snapshot_xml_required=(
-  "XML response tags."
-  "The top-level response is XML."
-  "\`<response>\`"
-  "<status>ALL_FINISHED</status>"
-  "\`<working_still_action>\`"
-)
-
-for static_prompt_snapshot in "${static_prompt_snapshots[@]}"; do
-  if [ ! -f "$static_prompt_snapshot" ]; then
-    echo "missing expanded static prompt snapshot: $static_prompt_snapshot" >&2
-    exit 1
-  fi
-  for pattern in "${static_prompt_snapshot_common_required[@]}"; do
-    if ! search_fixed "$pattern" "$static_prompt_snapshot"; then
-      echo "missing required static prompt snapshot item in $static_prompt_snapshot: $pattern" >&2
-      exit 1
-    fi
-  done
-done
-
-for pattern in "${static_prompt_snapshot_markdown_required[@]}"; do
-  if ! search_fixed "$pattern" "resources/protocol/markdown/expanded.md"; then
-    echo "missing required markdown static prompt snapshot item: $pattern" >&2
-    exit 1
-  fi
-done
-
-for pattern in "${static_prompt_snapshot_xml_required[@]}"; do
-  if ! search_fixed "$pattern" "resources/protocol/xml/expanded.md"; then
-    echo "missing required xml static prompt snapshot item: $pattern" >&2
-    exit 1
-  fi
-done
-
-static_prompt_snapshot_forbidden=(
-  "\"output\": {"
-  "Background job id when background=true."
-  "\"output_file\""
-  "\"status_file\""
-  "\"approval_status\""
-  "\"static_prefix_policy\""
-  "static prefix is immutable global guidance"
-  "\"ui_status\""
-  "ui_label"
-  "ui_visible"
-  "\"tool_policy\""
-  "\"sql_tables\""
-  "\"bash_safety\""
-  '"$id"'
-)
-
-for static_prompt_snapshot in "${static_prompt_snapshots[@]}"; do
-  for pattern in "${static_prompt_snapshot_forbidden[@]}"; do
-    if search_fixed "$pattern" "$static_prompt_snapshot"; then
-      echo "forbidden verbose schema dump in $static_prompt_snapshot: $pattern" >&2
-      exit 1
-    fi
-  done
-done
+if ! search_fixed "scripts/update_static_prompt_snapshot.sh --check" scripts/ci.sh; then
+  echo "static prompt expansion generator must remain a CI gate" >&2
+  exit 1
+fi
 
 workflow=".github/workflows/ci.yml"
 if [ ! -f "$workflow" ]; then

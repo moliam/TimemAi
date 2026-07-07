@@ -190,11 +190,14 @@ protocol prompt prose.
   It is the stable model-visible outer contract and contains placeholders for
   protocol and capability injection.
 - `resources/protocol/markdown/`: Markdown response protocol prompt
-  injection, schema summary, and expanded prompt snapshot.
+  injection and schema summary.
 - `resources/protocol/json/`: JSON response protocol prompt injection, schema
-  summary, and expanded prompt snapshot.
+  summary.
 - `resources/protocol/xml/`: XML response protocol prompt injection, schema
-  summary, and expanded prompt snapshot.
+  summary.
+- `scripts/update_static_prompt_snapshot.sh`: one-shot expanded prompt generator
+  for human review. Generated files are written under `target/` by default and
+  are not checked into the repository.
 - `resources/capabilities/tools/*.yaml`: tool capability manifests. The same
   manifest data renders the model-facing tool catalog and validates parsed
   action arguments before execution.
@@ -212,8 +215,7 @@ Timem separates model-facing protocol instructions from runtime parsing:
 ```text
 resources/protocol/<suite>/
 ├─ response_protocol.md          model-facing instructions injected into prompt_0
-├─ response_schema_summary.*     compact schema summary injected by prompt render
-└─ expanded.md                   generated read-only snapshot for review
+└─ response_schema_summary.*     compact schema summary injected by prompt render
 
 agent_core/src/response_protocol/
 ├─ mod.rs                        protocol-independent ParsedEnvelope/ParsedAction
@@ -226,7 +228,8 @@ The `resources/protocol/<suite>` files are model-facing prompt resources and
 review snapshots. The Rust modules under `agent_core/src/response_protocol/`
 are executable parser suites. They intentionally live in code because they
 define runtime behavior, repair boundaries, and tests; they must stay aligned
-with the resource text and generated expanded snapshots.
+with the resource text and generated expanded prompt output from
+`scripts/update_static_prompt_snapshot.sh`.
 
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
 `--response-protocol`. The default is `xml`; `markdown` and `json` remain

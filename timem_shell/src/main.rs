@@ -29,9 +29,9 @@ use timem_shell::{
     observation_panel_width_for_terminal, parse_cli_args, provider_config_from_env,
     render_final_response_at, render_prof_report_data, render_shell_status_bar,
     render_thinking_view_at, render_turn_outcome_text, run_session_turn,
-    runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
-    stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_load_topic_event,
+    runtime_active_elapsed_secs, runtime_info_context, runtime_profile_report,
+    shell_status_message_from_core_topic, stale_context_decision_request, topic_event_status_hint,
+    work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
     work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
     CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
     LongRunningCommandContinueRequest, ModelDirection, NoopTurnUi, ObservationEvent,
@@ -136,11 +136,13 @@ fn main() {
         }
     }
     core.configure_runtime_from_host(&config, bash_approval_mode);
+    let session_runtime_info = runtime_info_context(&shell_runtime_info_entries(&core));
     let session = session_id();
     let mut workspace_pending = !load_workspace_dirs_from_path(&workspace_config).is_empty();
 
     if let Some(input) = options.once_json_input.as_deref() {
         let context = combine_additional_contexts([
+            session_runtime_info.as_deref(),
             work_instruction_context.as_deref(),
             options.supporting_context.as_deref(),
         ]);
@@ -343,6 +345,7 @@ fn main() {
             &mut turn_ui,
         );
         let turn_additional_context = combine_additional_contexts([
+            session_runtime_info.as_deref(),
             turn_work_instruction_context.as_deref(),
             workspace_ctx.as_deref(),
         ]);
@@ -377,6 +380,19 @@ fn main() {
 
 fn consume_turn_cancel_request() -> bool {
     TURN_CANCEL_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+fn shell_runtime_info_entries(core: &AgentCore) -> Vec<String> {
+    let ui = if std::env::var("ITERM_SESSION_ID").is_ok() {
+        "iterm2"
+    } else {
+        "shell"
+    };
+    let mut entries = vec![format!("ui: {ui}")];
+    if core.capability_contains_tool("run_bash") {
+        entries.push("run_bash: available; executes on user_local_machine".to_string());
+    }
+    entries
 }
 
 fn absolute_path(path: PathBuf) -> PathBuf {
@@ -3542,8 +3558,8 @@ mod static_prompt_tests {
         render_work_instructions_load_choices, render_work_instructions_load_prompt,
         render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
         rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
-        runtime_help_text, sanitize_user_input, startup_control_hint, strip_ansi,
-        strip_paste_markers, submitted_input_rows, thinking_supplement_terminal_mode,
+        runtime_help_text, sanitize_user_input, shell_runtime_info_entries, startup_control_hint,
+        strip_ansi, strip_paste_markers, submitted_input_rows, thinking_supplement_terminal_mode,
         timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
         workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
         ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey,
@@ -5487,5 +5503,25 @@ mod static_prompt_tests {
                 .map(|line| wrapped_terminal_rows(display_width(line), 40))
                 .sum::<usize>()
         );
+    }
+
+    #[test]
+    fn shell_runtime_info_is_host_supplied_and_has_no_cwd() {
+        let core = AgentCore::new(
+            STATIC_PROMPT,
+            CoreProfile {
+                name: "test".into(),
+                provider: "aliyun".into(),
+                model: "qwen-plus".into(),
+            },
+            std::env::temp_dir().join(format!("timem_shell_runtime_info_{}", epoch_millis())),
+        );
+        let entries = shell_runtime_info_entries(&core);
+        let joined = entries.join("\n");
+
+        assert!(joined.contains("ui:"));
+        assert!(joined.contains("run_bash: available"));
+        assert!(!joined.contains("cwd:"));
+        assert!(!joined.contains("/Users/"));
     }
 }

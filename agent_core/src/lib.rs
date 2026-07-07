@@ -137,8 +137,8 @@ pub use retry_policy::{
     DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
 };
 pub use runtime_context::{
-    format_supporting_context, local_time_label, runtime_time_context, supporting_context,
-    turn_supporting_context, LocalTimeParts, SupportingContextInput,
+    format_supporting_context, local_time_label, runtime_info_context, runtime_time_context,
+    supporting_context, turn_supporting_context, LocalTimeParts, SupportingContextInput,
 };
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
@@ -979,6 +979,9 @@ impl AgentCore {
     }
     pub fn capability_tool_count(&self) -> usize {
         self.capabilities.tool_count()
+    }
+    pub fn capability_contains_tool(&self, action: &str) -> bool {
+        self.capabilities.contains_tool(action)
     }
     pub fn capability_skill_count(&self) -> usize {
         self.capabilities.skill_count()

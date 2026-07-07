@@ -227,6 +227,31 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
 }
 
 #[test]
+fn runtime_info_is_dynamic_context_not_static_prompt() {
+    let mut core = AgentCore::new(
+        include_str!("../../resources/system_prompt/system_prompt.md"),
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("runtime_info_dynamic_context"),
+    );
+    let runtime_info = agent_core::runtime_info_context(&[
+        "ui: shell",
+        "run_bash: available; executes on user_local_machine",
+    ])
+    .unwrap();
+
+    let prompt = match core.begin_turn("你好", Some(&runtime_info)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert!(prompt.contains("runtime_info:\n- ui: shell"));
+    assert!(prompt.contains("- run_bash: available; executes on user_local_machine"));
+    assert!(!prompt.contains("{{RT_ENV}}"));
+    assert!(!prompt.contains("Runtime info:"));
+    assert!(!prompt.contains("cwd:"));
+}
+
+#[test]
 fn default_max_rounds_is_fifty() {
     let mut core = AgentCore::new(
         "STATIC",
