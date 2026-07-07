@@ -106,15 +106,16 @@ checks. If a dimension is not applicable, record that residual decision in
 `scripts/ci.sh` must run:
 
 1. shell script syntax checks
-2. install logic tests
-3. sensitive scan over tracked files
-4. `cargo fmt --check`
-5. `cargo test --workspace`
-6. performance guard via `scripts/performance_guard.sh`
-7. repeated edge regression via `scripts/edge_regression.sh`
-8. release build
-9. real TTY smoke through `expect`
-10. whitespace check
+2. module boundary check via `scripts/module_boundary_check.sh`
+3. install logic tests
+4. sensitive scan over tracked files
+5. `cargo fmt --check`
+6. `cargo test --workspace`
+7. performance guard via `scripts/performance_guard.sh`
+8. repeated edge regression via `scripts/edge_regression.sh`
+9. release build
+10. real TTY smoke through `expect`
+11. whitespace check
 
 `scripts/edge_regression.sh` defaults to two iterations. Increase pressure with:
 
