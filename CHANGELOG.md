@@ -59,6 +59,11 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Startup config tables now keep long env keys such as
   `TIMEM_WORK_INSTRUCTIONS` on one row instead of splitting a trailing
   character into a separate line.
+- XML response parsing now ignores protocol-looking tags inside CDATA action
+  strings, so valid action args containing examples such as `<status>` or
+  `<working_still_action>` are kept as data instead of parsed as control tags.
+- Cross-protocol response tests now assert full action-group structure, not
+  only flattened action order, for complex valid JSON/Markdown/XML responses.
 
 ## [0.8.1] - 2026-07-03
 

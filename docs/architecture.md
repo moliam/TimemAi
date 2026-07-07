@@ -891,18 +891,23 @@ Provider output is untrusted. The runtime validates:
 - Every action has `action`, `intent`, and valid `args`.
 - SQL and bash actions pass their own safety checks.
 
-If validation fails, the runtime appends one `## SYSTEM` repair block in the
-current dynamic delta:
+If validation fails, the runtime builds a temporary, non-cache-controlled repair
+delta containing the malformed assistant response and a `## SYSTEM` block with
+the concrete protocol error:
 
 ```text
+## <CURRENT_ASSISTANT_NAME>
+<the malformed model response>
+
 ## SYSTEM
-Protocol repair request
-issue: next_actions[0].intent_required
-Return exactly one valid JSON object with report_job_progress.
+<CURRENT_ASSISTANT_NAME>'s previous response is not protocol compliant.
+error: actions[0].intent_required
 ```
 
-Only one repair round is allowed per model response failure. If the repair also
-fails, the shell blocks raw model text and shows a safe fallback instead.
+Repair is retried a bounded number of times for one model response failure. Each
+repair attempt emits a structured repair topic for hosts to render, and each
+attempt is audited. If all repair attempts fail, the shell blocks raw model text
+and shows a safe fallback instead.
 
 ## Tool Surface
 
