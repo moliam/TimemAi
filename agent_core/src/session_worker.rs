@@ -2153,8 +2153,9 @@ mod tests {
                 format!("Query durable memory marker {marker}."),
                 serde_json::json!({
                     "type": "durable",
-                    "op": "query",
-                    "query": marker,
+                    "op": "sql",
+                    "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1",
+                    "params": [format!("%{marker}%")],
                     "limit": 1,
                 }),
             ),

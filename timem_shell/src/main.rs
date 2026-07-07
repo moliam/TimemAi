@@ -3582,7 +3582,7 @@ mod static_prompt_tests {
 
     #[test]
     fn static_prompt_uses_full_shared_v1_resource() {
-        assert!(STATIC_PROMPT.contains("# Timem Static Prompt"));
+        assert!(STATIC_PROMPT.contains("# Timem System Prompt"));
         assert!(STATIC_PROMPT.contains("## Role"));
         assert!(STATIC_PROMPT.contains("## Memory"));
         assert!(STATIC_PROMPT.contains("## Tools And Skills"));
@@ -3599,6 +3599,7 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("persisted user/assistant chat records"));
         assert!(!STATIC_PROMPT.contains("\"durable|raw_chat|scratch|context\""));
         assert!(!STATIC_PROMPT.contains("\"durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink\""));
+        assert!(!STATIC_PROMPT.contains("\"query\": {\"type\": \"string\""));
         assert!(!STATIC_PROMPT.contains("\"tool_policy\""));
         assert!(!STATIC_PROMPT.contains("\"query_memory\""));
         assert!(!STATIC_PROMPT.contains("\"memory_schema\""));
@@ -3617,7 +3618,7 @@ mod static_prompt_tests {
         assert!(!STATIC_PROMPT.contains("Every model response must score"));
         assert!(STATIC_PROMPT.contains("Context maintenance"));
         assert!(STATIC_PROMPT.contains("`memmgr` actions"));
-        assert!(STATIC_PROMPT.contains("never targets this system prompt"));
+        assert!(STATIC_PROMPT.contains("do not target this system prompt"));
         assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
         assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));
         assert!(!STATIC_PROMPT.contains("\"action_result_guard\""));

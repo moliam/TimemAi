@@ -1159,7 +1159,7 @@ finished
     "order": "parallel",
     "actions": [
       {"action":"run_bash","intent":"First bash.","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
-      {"action":"memmgr","intent":"Builtin memory query.","args":{"type":"durable","op":"query","query":"project","limit":1}},
+      {"action":"memmgr","intent":"Builtin memory read.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
       {"action":"run_bash","intent":"Second bash.","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
     ]
   }
@@ -1236,7 +1236,7 @@ finished
     "order": "parallel",
     "actions": [
       {"action":"run_bash","intent":"First approved bash.","args":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},
-      {"action":"memmgr","intent":"Builtin memory query.","args":{"type":"durable","op":"query","query":"project","limit":1}},
+      {"action":"memmgr","intent":"Builtin memory read.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
       {"action":"run_bash","intent":"Second approved bash.","args":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}
     ]
   }
@@ -1287,7 +1287,7 @@ finished
             .unwrap();
         let builtin = second_parts
             .new_delta
-            .find("intent: Builtin memory query.")
+            .find("intent: Builtin memory read.")
             .unwrap();
         let second_bash = second_parts
             .new_delta
@@ -1427,7 +1427,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}}"#,
+                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}}"#,
                 5_000,
                 false,
             )),
@@ -1495,7 +1495,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#,
+                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#,
                 5_000,
                 false,
             )),
@@ -1565,8 +1565,8 @@ finished
   "intent": "List recent scratch notes.",
   "args": {
     "type": "scratch",
-    "op": "query",
-    "query": "",
+    "op": "search",
+    "search_text": "",
     "limit": 3
   }
 }
@@ -1643,8 +1643,8 @@ finished
   "intent": "List recent scratch notes.",
   "args": {
     "type": "scratch",
-    "op": "query",
-    "query": "",
+    "op": "search",
+    "search_text": "",
     "limit": 3
   }
 }
@@ -1819,7 +1819,7 @@ finished
         second_usage.cached_tokens = 6_500;
         let mut model = ReplayModel::new([
             Ok(LlmResponse {
-                content: r#"{"status":"working","progress":"先查询 scratch。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"query","query":"","limit":3}}]}"#.to_string(),
+                content: r#"{"status":"working","progress":"先查询 scratch。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#.to_string(),
                 model_name: "test-model".to_string(),
                 usage: first_usage.clone(),
                 truncated: false,
@@ -2436,7 +2436,7 @@ finished
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence before answering.","args":{"type":"durable","op":"query","query":"round limit e2e","limit":5}}]}"#,
+                r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence before answering.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit e2e%"],"limit":5}}]}"#,
                 4_000,
                 false,
             )),
@@ -2492,7 +2492,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"query","query":"round limit noop","limit":5}}]}"#,
+                r#"{"status":"working","progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit noop%"],"limit":5}}]}"#,
                 4_000,
                 false,
             )),
@@ -2557,7 +2557,7 @@ finished
             continue_requests: 0,
         };
         let mut model = ReplayModel::new([Ok(llm(
-            r#"{"status":"working","progress":"先查证据。","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"query","query":"round limit stop","limit":5}}]}"#,
+            r#"{"status":"working","progress":"先查证据。","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit stop%"],"limit":5}}]}"#,
             4_000,
             false,
         ))]);
@@ -3085,14 +3085,14 @@ Markdown 协议动作已执行。"#,
                     ))
                 }
                 6 => Ok(llm(
-                    r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询测试项目代号记忆。","args":{"type":"durable","op":"query","query":"测试项目代号","limit":5}}]}"#,
+                    r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询测试项目代号记忆。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
                     2_500,
                     false,
                 )),
                 7 => {
                     assert!(prompt.contains("Action result: memmgr"));
                     assert!(prompt.contains("type: durable"));
-                    assert!(prompt.contains("op: query"));
+                    assert!(prompt.contains("op: sql"));
                     assert!(prompt.contains("测试项目代号是 OMEGA-7"));
                     Ok(llm(
                         r#"{"status":"ALL_FINISHED","final_answer":"测试项目代号是 OMEGA-7。"}"#,
@@ -3241,7 +3241,7 @@ Markdown 协议动作已执行。"#,
                 && topic.kind
                     == CoreActionKind::Memory {
                         surface: "durable".to_string(),
-                        operation: "query".to_string(),
+                        operation: "sql".to_string(),
                     }
         }));
         assert!(action_topics.iter().any(|topic| {

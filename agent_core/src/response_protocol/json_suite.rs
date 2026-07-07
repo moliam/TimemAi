@@ -1039,7 +1039,7 @@ fn repair_known_string_field_quotes(input: &str) -> Option<String> {
         "report_job_progress",
         "free_talk",
         "intent",
-        "query",
+        "search_text",
         "content",
         "command",
         "sql",

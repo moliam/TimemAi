@@ -75,7 +75,7 @@ Examples below are format examples ONLY:
         },
         {
           "action": "memmgr",
-          "args": { "type": "durable", "op": "query", "query": "...", "limit": 5 }
+          "args": { "type": "durable", "op": "sql", "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5", "params": ["%...%"], "limit": 5 }
         }
       ]
     },

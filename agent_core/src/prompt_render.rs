@@ -54,10 +54,15 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
     }
 }
 
+fn is_action_result_prompt_type(prompt_type: &str) -> bool {
+    prompt_type == "result_of_llm_action"
+}
+
 pub(crate) fn render_static_prompt(
     static_prompt: &str,
     capabilities: &CapabilityRegistry,
     protocol_suite: &dyn ResponseProtocolSuite,
+    assistant_heading: &str,
 ) -> String {
     // 1. Fill {{RESPONSE_PROTOCOL_SECTION}} from protocol suite
     let with_protocol = static_prompt.replace(
@@ -66,6 +71,9 @@ pub(crate) fn render_static_prompt(
     );
     let with_protocol =
         with_protocol.replace("{{CURRENT_PROTOCOL_LANG}}", protocol_suite.lang_format());
+    let assistant_heading = assistant_heading.trim();
+    let with_protocol = with_protocol.replace("{{CURRENT_ASSISTANT_NAME}}", assistant_heading);
+    let with_protocol = with_protocol.replace("CURRENT_ASSISTANT_NAME", assistant_heading);
     // 2. Fill {{TOOL_CATALOG}} and {{SKILL_HEADERS}} from capabilities
     let with_caps = capabilities.enrich_static_prompt(&with_protocol);
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
@@ -100,16 +108,27 @@ pub(crate) fn render_prompt_with_rendered_static(
             delta.delta_id, delta.time_ms
         ));
         let mut last_role = None;
+        let mut last_was_action_result = false;
         for slice in slices {
             let role = visible_role(&slice.prompt_type);
             if last_role != Some(role) {
                 out.push('\n');
                 out.push_str(&format!("## {}\n", role.heading(assistant_heading)));
                 last_role = Some(role);
+                last_was_action_result = false;
+            }
+            let is_action_result = is_action_result_prompt_type(&slice.prompt_type);
+            if is_action_result && !last_was_action_result {
+                out.push('\n');
+                out.push_str(&format!(
+                    "The following are results of {} newly initiated actions:\n",
+                    assistant_heading
+                ));
             }
             out.push('\n');
             out.push_str(slice.text.trim());
             out.push('\n');
+            last_was_action_result = is_action_result;
         }
         out.push_str("\n[END DELTA]");
     }
@@ -184,6 +203,7 @@ mod tests {
 {{SKILL_HEADERS}}",
             &CapabilityRegistry::builtin(),
             &MarkdownSuiteV1,
+            "TIMEM_ASSISTANT",
         );
         let rendered = render_prompt_with_rendered_static(
             &rendered_static,
@@ -198,6 +218,8 @@ mod tests {
         assert!(rendered.contains("## USER"));
         assert!(rendered.contains("## SYSTEM"));
         assert!(!rendered.contains("## ACTIONS"));
+        assert!(rendered
+            .contains("The following are results of TIMEM_ASSISTANT newly initiated actions:"));
         assert!(rendered.contains("Action result: run_bash"));
         assert!(!rendered.contains("slice_id:"));
         assert!(!rendered.contains("prompt_type:"));
@@ -222,10 +244,20 @@ mod tests {
     #[test]
     fn prompt_renderer_replaces_current_protocol_language() {
         let template = "Return {{CURRENT_PROTOCOL_LANG}}\n{{RESPONSE_PROTOCOL_SECTION}}";
-        let markdown =
-            render_static_prompt(template, &CapabilityRegistry::builtin(), &MarkdownSuiteV1);
-        let json = render_static_prompt(template, &CapabilityRegistry::builtin(), &JsonSuiteV1);
-        let xml = render_static_prompt(template, &CapabilityRegistry::builtin(), &XmlSuiteV1);
+        let markdown = render_static_prompt(
+            template,
+            &CapabilityRegistry::builtin(),
+            &MarkdownSuiteV1,
+            "Ai7",
+        );
+        let json = render_static_prompt(
+            template,
+            &CapabilityRegistry::builtin(),
+            &JsonSuiteV1,
+            "Ai7",
+        );
+        let xml =
+            render_static_prompt(template, &CapabilityRegistry::builtin(), &XmlSuiteV1, "Ai7");
 
         assert!(markdown.contains("Return Markdown"));
         assert!(json.contains("Return JSON"));
@@ -233,5 +265,19 @@ mod tests {
         assert!(!markdown.contains("{{CURRENT_PROTOCOL_LANG}}"));
         assert!(!json.contains("{{CURRENT_PROTOCOL_LANG}}"));
         assert!(!xml.contains("{{CURRENT_PROTOCOL_LANG}}"));
+    }
+
+    #[test]
+    fn prompt_renderer_replaces_current_assistant_name() {
+        let rendered = render_static_prompt(
+            "YOUR ID is: {{CURRENT_ASSISTANT_NAME}}\n## CURRENT_ASSISTANT_NAME",
+            &CapabilityRegistry::builtin(),
+            &MarkdownSuiteV1,
+            "Ai7",
+        );
+        assert!(rendered.contains("YOUR ID is: Ai7"));
+        assert!(rendered.contains("## Ai7"));
+        assert!(!rendered.contains("{{CURRENT_ASSISTANT_NAME}}"));
+        assert!(!rendered.contains("CURRENT_ASSISTANT_NAME"));
     }
 }

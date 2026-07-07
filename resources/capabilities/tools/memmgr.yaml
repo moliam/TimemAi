@@ -8,22 +8,24 @@ description: |
   type=raw_chat for UI-visible chat transcript, type=scratch for notes/context
   offload, and type=context for dynamic prompt context maintenance.
 prompt_synopsis: |
-  memmgr type=durable op=<query|schema|sql|insert|update|upsert|delete> ...
-  memmgr type=raw_chat op=<query|sql|delete> ...
-  memmgr type=scratch op=<query|write|read|delete> ...
+  memmgr type=durable op=<schema|sql|insert|update|upsert|delete> ...
+  memmgr type=raw_chat op=<search|sql|delete> ...
+  memmgr type=scratch op=<search|write|read|delete> ...
   memmgr type=context op=shrink delta_ids=<list>
 prompt_input: |
   Always include type and op. Choose one synopsis line above and fill only the
   arguments needed for that operation as fields in the args object. Use arrays
-  for delta_ids and params. Use query for query ops, sql and optional
-  params for sql ops, content for durable writes and scratch notes, id for
-  read/update/delete, and expected_version from a previous durable query/sql
-  result before updating or deleting an existing durable row. SQL ops are
-  read-only and limited to memories/chat_messages table inspection/query.
+  for delta_ids and params. Use sql for durable reads. Use search_text for
+  raw_chat and scratch search ops. Use sql and optional params for sql ops,
+  content for durable writes and scratch notes, id for read/update/delete, and
+  expected_version from a previous durable sql result before updating or
+  deleting an existing durable row. SQL ops are read-only and limited to
+  memories/chat_messages table inspection/search.
 prompt_result: |
   Returns matching records, ids/versions for writes, conflict/error strings for
   unsafe writes, scratch ids for notes/offload, or shrink counts for context.
-  memory_conflict means the durable row version changed; usually re-query
+  memory_conflict means the durable row version changed; usually read the row
+  again with durable sql
   before deciding whether to retry, merge, or report the conflict.
 input_schema: |
   {
@@ -37,13 +39,13 @@ input_schema: |
       },
       "op": {
         "type": "string",
-        "description": "Operation. durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink."
+        "description": "Operation. durable: schema|sql|insert|update|upsert|delete; raw_chat: search|sql|delete; scratch: search|write|read|delete; context: shrink."
       },
-      "query": {"type": "string", "description": "Search query; empty is allowed for raw_chat/scratch recent listing."},
+      "search_text": {"type": "string", "description": "Search text; empty is allowed for raw_chat/scratch recent listing."},
       "sql": {"type": "string", "description": "SELECT/WITH SELECT/PRAGMA table_info(memories|chat_messages) only."},
       "params": {"type": "array", "description": "Array matching SQL ? placeholders exactly."},
       "id": {"type": "string", "description": "Memory id, chat turn_id, or scratch id depending on type/op."},
-      "expected_version": {"type": "integer", "description": "Durable row version from query/sql results; required when modifying/deleting an existing durable row."},
+      "expected_version": {"type": "integer", "description": "Durable row version from sql results; required when modifying/deleting an existing durable row."},
       "content": {"type": "string", "description": "Required for durable insert/update/upsert and scratch kind=notes."},
       "kind": {"type": "string", "enum": ["notes", "context_offload"], "description": "Scratch write mode."},
       "label": {"type": "string", "description": "Short retrieval label for scratch write."},
@@ -53,7 +55,6 @@ input_schema: |
       "limit": {"type": "integer", "description": "Result cap."}
     },
     "x-required-when": [
-      {"when": {"type": "durable", "op": "query"}, "required": ["query"]},
       {"when": {"type": "durable", "op": "sql"}, "required": ["sql"]},
       {"when": {"type": "raw_chat", "op": "sql"}, "required": ["sql"]},
       {"when": {"type": "durable", "op": ["insert", "upsert"]}, "required": ["content"]},
@@ -64,7 +65,7 @@ input_schema: |
       {"when": {"type": "scratch", "op": ["read", "delete"]}, "required": ["id"]}
     ],
     "x-required-any-when": [
-      {"when": {"type": "raw_chat", "op": "delete"}, "required": ["id", "query"]},
+      {"when": {"type": "raw_chat", "op": "delete"}, "required": ["id", "search_text"]},
       {"when": {"type": "scratch", "kind": "context_offload"}, "required": ["delta_ids"]},
       {"when": {"type": "context", "op": "shrink"}, "required": ["delta_ids"]}
     ]
@@ -75,7 +76,7 @@ output_schema: |
     "properties": {
       "type": {"type": "string", "description": "Echoed memory type."},
       "op": {"type": "string", "description": "Echoed operation when relevant."},
-      "results": {"type": "string", "description": "Query/sql rows or none."},
+      "results": {"type": "string", "description": "Search/sql rows or none."},
       "id": {"type": "string", "description": "Durable memory id, chat turn id, or scratch id."},
       "version": {"type": "integer", "description": "Durable memory version after write/update/delete."},
       "deleted": {"type": "boolean", "description": "Delete result."},
@@ -90,8 +91,9 @@ example_json: |
     "intent": "Find confirmed durable memory before answering.",
     "args": {
       "type": "durable",
-      "op": "query",
-      "query": "project codename",
+      "op": "sql",
+      "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
+      "params": ["%project codename%"],
       "limit": 5
     }
   }

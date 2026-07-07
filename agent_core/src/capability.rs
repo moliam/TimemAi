@@ -1917,7 +1917,9 @@ mod tests {
         assert!(rendered.contains("Unified local memory manager"));
         assert!(rendered.contains("Use when the user asks about Timem itself"));
         assert!(rendered.contains("Conditional:"));
-        assert!(rendered.contains("(type=durable, op=query) requires query"));
+        assert!(rendered.contains("Use sql for durable reads"));
+        assert!(!rendered.contains("durable: query|schema"));
+        assert!(!rendered.contains("empty is allowed for durable/raw_chat/scratch recent listing"));
         assert!(rendered.contains("Conditional one of:"));
         assert!(rendered.contains("(type=context, op=shrink) requires one of delta_ids"));
         assert!(!rendered.contains("when `` is"));
@@ -1976,11 +1978,11 @@ mod tests {
                 "memmgr",
                 &json_object([
                     ("type", Value::String("durable".to_string())),
-                    ("op", Value::String("query".to_string())),
+                    ("op", Value::String("sql".to_string())),
                 ])
             )
             .unwrap_err()
-            .contains("input.query_required_when_op=query,type=durable"));
+            .contains("input.sql_required_when_op=sql,type=durable"));
         assert!(registry
             .validate_action_input(
                 "memmgr",

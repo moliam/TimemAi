@@ -488,7 +488,7 @@ The guard has two responsibilities:
   multiple CLI processes.
 - Semantic conflict detection: durable memory rows carry `version` and
   `updated_at_ms`. Updating or deleting an existing row requires
-  `expected_version`, obtained from `memmgr type=durable op=query|sql`. If
+  `expected_version`, obtained from `memmgr type=durable op=sql`. If
   another CLI changes the row first, runtime returns a `memory_conflict` action
   result and leaves the current row untouched.
 
@@ -529,16 +529,15 @@ time: 1782200000000
 ## USER
 new user input or mid-turn supplement
 
-## TIMEM_ASSISTANT
+## {{CURRENT_ASSISTANT_NAME}}
 free_talk or final_answer already recorded for continuity
 
-## ACTIONS
-You initiated actions. The results are:
+## SYSTEM
+The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
 
 Action result: run_bash
 ...
 
-## SYSTEM
 runtime notes such as response repair, compaction result, or work instructions
 
 [END DELTA]
@@ -586,8 +585,8 @@ logical prompt stream
 
 Delta blocks make the rendered boundary explicit:
 
-- The model can audit evidence because action results are visible in rendered
-  `## ACTIONS` blocks.
+- The model can audit evidence because runtime action results are visible in
+  rendered `## SYSTEM` blocks.
 - The runtime can keep provider cache behavior stable by isolating `prompt_0`.
 - Debug logs can identify which event introduced a piece of context.
 - Protocol repair can be represented as another runtime delta instead of a
@@ -619,8 +618,9 @@ Important invariants:
   `[BEGIN DELTA]` blocks.
 - Every rendered dynamic delta has `delta_id` so runtime shrink review can refer
   to exact logical deltas.
-- Valid model-visible role blocks are `## USER`, `## TIMEM_ASSISTANT`, `## ACTIONS`, and
-  `## SYSTEM`.
+- Valid model-visible role blocks are `## USER`, the current assistant/session-worker
+  heading represented as `## {{CURRENT_ASSISTANT_NAME}}` in prompt examples, and
+  `## SYSTEM`. Runtime replaces it with the actual worker role, such as `## ID0`.
 - The static prefix is sent through provider system-role/system-field support
   when available. Dynamic deltas go in the user message.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
@@ -847,11 +847,11 @@ cross-host tooling independent from the model-facing response style.
 The runtime does not execute hidden compatibility aliases. Unknown action names
 produce a protocol repair slice instead of being bridged to an old tool.
 
-### Action Result Slice
+### Action Result Prompt Component
 
 After an action runs, `agent_core` appends the action result into the current
-runtime increment's prompt delta. The rendered `## ACTIONS` block from that
-delta is the only evidence the model may claim it has seen.
+runtime increment's prompt delta as a `## SYSTEM` block. That system evidence is
+the only action-result evidence the model may claim it has seen.
 
 Example:
 
@@ -860,7 +860,9 @@ Example:
 delta_id: pd_1782200001000_4
 time: 1782200001000
 
-## ACTIONS
+## SYSTEM
+The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
+
 Action result: memmgr
 type: raw_chat
 op: sql
@@ -906,7 +908,7 @@ flowchart TB
     Model["Model envelope"] --> Core["agent_core validator"]
     Core --> Memmgr["memmgr\ntype=durable/raw_chat/scratch/context"]
     Memmgr --> Chat["raw_chat query/sql/delete\nUI-visible chat records"]
-    Memmgr --> Memory["durable query/schema/sql/write/delete\nlong-lived facts"]
+    Memmgr --> Memory["durable schema/sql/write/delete\nlong-lived facts"]
     Memmgr --> Scratch["scratch query/write/read/delete\ntyped notes and context offload"]
     Memmgr --> Shrink["context shrink\nremove delta context"]
     Core --> SelfTool["self_tool\nTimem runtime self-info"]
@@ -926,17 +928,18 @@ durable memory does not prove that a visible chat transcript exists.
 
 Current implemented surface:
 
-- Chat history search: `memmgr` with `type=raw_chat, op=query|sql` over
+- Chat history search: `memmgr` with `type=raw_chat, op=search|sql` over
   `chat_messages`.
 - Chat history deletion: `memmgr` with `type=raw_chat, op=delete`. The SQL surface remains
   read-only and cannot delete `chat_messages`.
-- Durable memory search: `memmgr` with `type=durable, op=query|schema|sql`.
+- Durable memory search: `memmgr` with `type=durable, op=sql`; schema inspection
+  uses `type=durable, op=schema`.
 - Durable memory insert/update/delete: `memmgr` with
   `type=durable, op=insert|update|upsert|delete`. Existing-row
   update/delete requires `expected_version` to avoid stale multi-CLI writes.
 - Durable memory versioning: durable writes snapshot `memory.jsonl` in a local
   git repository under the selected memory directory when git is available.
-- Scratch memory: `memmgr` with `type=scratch, op=query|write|read|delete` over
+- Scratch memory: `memmgr` with `type=scratch, op=search|write|read|delete` over
   `scratch_notes.jsonl`.
 
 ### Timem Self Tool

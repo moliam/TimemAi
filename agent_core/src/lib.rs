@@ -804,10 +804,12 @@ impl AgentCore {
         let static_prompt = static_prompt.into();
         let capabilities = CapabilityRegistry::builtin();
         let response_protocol = ResponseProtocolKind::default();
+        let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
         let rendered_static_prompt = prompt_render::render_static_prompt(
             &static_prompt,
             &capabilities,
             response_protocol.suite(),
+            &assistant_speaker_name,
         );
         Self {
             static_prompt,
@@ -840,12 +842,13 @@ impl AgentCore {
             loaded_work_instruction_fingerprints: HashSet::new(),
             pending_prompt_components: Vec::new(),
             prompt_component_sequence: 0,
-            assistant_speaker_name: "TIMEM_ASSISTANT".to_string(),
+            assistant_speaker_name,
         }
     }
 
     pub fn set_assistant_speaker_name(&mut self, name: impl AsRef<str>) {
         self.assistant_speaker_name = normalize_assistant_speaker_name(name.as_ref());
+        self.refresh_rendered_static_prompt();
     }
 
     pub fn assistant_speaker_name(&self) -> &str {
@@ -936,6 +939,7 @@ impl AgentCore {
             &self.static_prompt,
             &self.capabilities,
             self.response_protocol.suite(),
+            &self.assistant_speaker_name,
         );
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
@@ -3280,7 +3284,7 @@ impl FileMemoryStore {
 
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: query|schema|sql|insert|update|upsert|delete\n- raw_chat: query|sql|delete\n- scratch: query|write|read|delete\n- context: shrink\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat query lists recent chat records. loaded_chat_records={}.",
+            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|sql|delete\n- scratch: search|write|read|delete\n- context: shrink\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -3372,7 +3376,7 @@ impl FileMemoryStore {
         }
         let mut stmt = conn
             .prepare(sql)
-            .map_err(|_| "sql_prepare_failed".to_string())?;
+            .map_err(|err| format!("sql_prepare_failed: {err}"))?;
         let column_names = stmt
             .column_names()
             .into_iter()
@@ -3381,15 +3385,18 @@ impl FileMemoryStore {
         let column_count = column_names.len();
         let mut rows = stmt
             .query(params_from_iter(params.iter().map(String::as_str)))
-            .map_err(|_| "sql_query_failed".to_string())?;
+            .map_err(|err| format!("sql_query_failed: {err}"))?;
         let mut out = Vec::new();
-        while let Some(row) = rows.next().map_err(|_| "sql_row_failed".to_string())? {
+        while let Some(row) = rows
+            .next()
+            .map_err(|err| format!("sql_row_failed: {err}"))?
+        {
             let mut cells = Vec::new();
             #[allow(clippy::needless_range_loop)]
             for idx in 0..column_count {
                 let value = match row
                     .get_ref(idx)
-                    .map_err(|_| "sql_value_failed".to_string())?
+                    .map_err(|err| format!("sql_value_failed: {err}"))?
                 {
                     ValueRef::Null => "NULL".to_string(),
                     ValueRef::Integer(v) => v.to_string(),
@@ -4001,7 +4008,7 @@ fn memory_missing_expected_version_result(
     current_content: &str,
 ) -> String {
     format!(
-        "missing_expected_version id={} current_version={} current_content={} hint=query with memmgr type=durable op=query or op=sql first, then retry memmgr type=durable op=update with expected_version=current_version",
+        "missing_expected_version id={} current_version={} current_content={} hint=read the current row with memmgr type=durable op=sql first, then retry memmgr type=durable op=update with expected_version=current_version",
         id,
         current_version,
         compact_text(current_content, 240)
@@ -4365,12 +4372,17 @@ mod prompt_component_tests {
         );
 
         let prompt = core.build_next_prompt();
-        let system_first = prompt.find("## SYSTEM\n\nAction result: run_bash").unwrap();
+        let system_first = prompt
+            .find("## SYSTEM\n\nThe following are results of Ai4 newly initiated actions:")
+            .unwrap();
+        let action_result = prompt.find("Action result: run_bash").unwrap();
         let user = prompt.find("## USER\n\nnew input").unwrap();
         let system_second = prompt.find("## SYSTEM\n\nfound something new").unwrap();
         let assistant = prompt.find("## Ai4\n\nassistant note").unwrap();
 
         assert!(system_first < user);
+        assert!(system_first < action_result);
+        assert!(action_result < user);
         assert!(user < system_second);
         assert!(system_second < assistant);
         assert_eq!(prompt.matches("## SYSTEM").count(), 2);

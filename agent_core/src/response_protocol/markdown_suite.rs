@@ -907,7 +907,7 @@ checking
   {
     "order": "sequential",
     "actions": [
-      {"action":"memmgr","intent":"Query durable memory.","args":{"type":"durable","op":"query","query":"project","limit":5}}
+      {"action":"memmgr","intent":"Query durable memory.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}}
     ]
   }
 ]
@@ -1043,7 +1043,7 @@ checking
 
     #[test]
     fn actions_section_accepts_bare_json_array() {
-        let input = "## Progress\nchecking\n\n## Working_Still_Action\n[{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}},{\"action\":\"memmgr\",\"intent\":\"Query durable memory.\",\"args\":{\"type\":\"durable\",\"op\":\"query\",\"query\":\"project\",\"limit\":5}}]";
+        let input = "## Progress\nchecking\n\n## Working_Still_Action\n[{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}},{\"action\":\"memmgr\",\"intent\":\"Query durable memory.\",\"args\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}}]";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -1051,7 +1051,7 @@ checking
         assert_eq!(env.next_actions.len(), 2);
         assert_eq!(env.next_actions[0].action, "run_bash");
         assert_eq!(env.next_actions[1].action, "memmgr");
-        assert_eq!(env.next_actions[1].input_str("query"), "project");
+        assert_eq!(env.next_actions[1].input_str("op"), "sql");
     }
 
     #[test]

@@ -12,7 +12,7 @@ Action object inside `## Working_Still_Action`:
 
 - `action`: required tool name exactly as listed in the Available tool capabilities catalog. Do not invent names.
 - `intent`: required concise user-visible reason for the action.
-- `args`: required object. Put every tool parameter as a JSON field inside `args`, for example `{"type":"durable","op":"query","query":"<search text>","limit":5}`.
+- `args`: required object. Put every tool parameter as a JSON field inside `args`, for example `{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%<search text>%"],"limit":5}`.
 
 Action group object inside `## Working_Still_Action`:
 

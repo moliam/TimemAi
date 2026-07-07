@@ -82,7 +82,7 @@ fn memmgr_memory_activity(action: &ParsedAction) -> CoreMemoryActivity {
     let mem_type = action.input_str("type");
     let op = action.input_str("op");
     match (mem_type.as_str(), op.as_str()) {
-        ("durable", "query" | "schema" | "sql") => CoreMemoryActivity::Read,
+        ("durable", "schema" | "sql") => CoreMemoryActivity::Read,
         ("durable", _) => CoreMemoryActivity::Write,
         _ => CoreMemoryActivity::None,
     }
@@ -198,7 +198,7 @@ mod tests {
     fn notification_events_are_protocol_independent_core_data() {
         let suite = ResponseProtocolKind::Json.suite();
         let envelope = suite.parse(
-            r#"{"status":"working","free_talk":"先说明一下我的判断。","report_job_progress":"正在检查。","next_actions":[{"action":"memmgr","intent":"查询项目记忆","args":{"type":"durable","op":"query","query":"project"}},{"action":"run_bash","intent":"查看文件","args":{"cmd":"pwd"}},{"action":"self_tool","intent":"读取运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","free_talk":"先说明一下我的判断。","report_job_progress":"正在检查。","next_actions":[{"action":"memmgr","intent":"查询项目记忆","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"action":"run_bash","intent":"查看文件","args":{"cmd":"pwd"}},{"action":"self_tool","intent":"读取运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
             &crate::capability::CapabilityRegistry::builtin(),
         );
         let events = notifications_from_envelope(&envelope);
@@ -218,12 +218,14 @@ mod tests {
                     action: "memmgr".to_string(),
                     input: serde_json::json!({
                         "type": "durable",
-                        "op": "query",
-                        "query": "project"
+                        "op": "sql",
+                        "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
+                        "params": ["%project%"],
+                        "limit": 5
                     }),
                     kind: CoreActionKind::Memory {
                         surface: "durable".to_string(),
-                        operation: "query".to_string(),
+                        operation: "sql".to_string(),
                     },
                     active: false,
                     memory_activity: CoreMemoryActivity::Read,
