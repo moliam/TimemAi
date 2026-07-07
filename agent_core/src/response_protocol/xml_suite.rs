@@ -188,7 +188,7 @@ fn extract_tags<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
     let mut rest = text;
     let open_prefix = format!("<{tag}");
     let close = format!("</{tag}>");
-    while let Some(open_idx) = rest.find(&open_prefix) {
+    while let Some(open_idx) = find_xml_open_outside_cdata(rest, &open_prefix) {
         let after_open_start = open_idx + open_prefix.len();
         let Some(open_end_rel) = rest[after_open_start..].find('>') else {
             break;
@@ -230,7 +230,7 @@ fn strip_xml_tag_blocks_for_tag(text: &str, tag: &str) -> String {
     let mut rest = text;
     let open_prefix = format!("<{tag}");
     let close = format!("</{tag}>");
-    while let Some(open_idx) = rest.find(&open_prefix) {
+    while let Some(open_idx) = find_xml_open_outside_cdata(rest, &open_prefix) {
         let after_open_start = open_idx + open_prefix.len();
         let Some(open_end_rel) = rest[after_open_start..].find('>') else {
             break;
@@ -259,6 +259,25 @@ fn find_xml_close_outside_cdata(text: &str, close: &str) -> Option<usize> {
             return None;
         }
         if rest.starts_with(close) {
+            return Some(idx);
+        }
+        idx += rest.chars().next()?.len_utf8();
+    }
+    None
+}
+
+fn find_xml_open_outside_cdata(text: &str, open_prefix: &str) -> Option<usize> {
+    let mut idx = 0;
+    while idx < text.len() {
+        let rest = &text[idx..];
+        if rest.starts_with("<![CDATA[") {
+            if let Some(end_rel) = rest.find("]]>") {
+                idx += end_rel + 3;
+                continue;
+            }
+            return None;
+        }
+        if rest.starts_with(open_prefix) {
             return Some(idx);
         }
         idx += rest.chars().next()?.len_utf8();
