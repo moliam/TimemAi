@@ -189,10 +189,15 @@ protocol prompt prose.
 - `resources/system_prompt/system_prompt.md`: Markdown static prompt shell.
   It is the stable model-visible outer contract and contains placeholders for
   protocol and capability injection.
-- `resources/protocol/markdown/`: default model response protocol prompt
-  injection, schema summary, and expanded prompt snapshot.
+- `resources/protocol/markdown/`: Markdown response protocol prompt
+  injection and schema summary.
 - `resources/protocol/json/`: JSON response protocol prompt injection, schema
-  summary, and expanded prompt snapshot.
+  summary.
+- `resources/protocol/xml/`: XML response protocol prompt injection, schema
+  summary.
+- `scripts/update_static_prompt_snapshot.sh`: one-shot expanded prompt generator
+  for human review. Generated files are written under `target/` by default and
+  are not checked into the repository.
 - `resources/capabilities/tools/*.yaml`: tool capability manifests. The same
   manifest data renders the model-facing tool catalog and validates parsed
   action arguments before execution.
@@ -210,26 +215,27 @@ Timem separates model-facing protocol instructions from runtime parsing:
 ```text
 resources/protocol/<suite>/
 ├─ response_protocol.md          model-facing instructions injected into prompt_0
-├─ response_schema_summary.*     compact schema summary injected by prompt render
-└─ expanded.md                   generated read-only snapshot for review
+└─ response_schema_summary.*     compact schema summary injected by prompt render
 
 agent_core/src/response_protocol/
 ├─ mod.rs                        protocol-independent ParsedEnvelope/ParsedAction
 ├─ markdown_suite.rs             Markdown response parser and repair policy
-└─ json_suite.rs                 JSON response parser and repair policy
+├─ json_suite.rs                 JSON response parser and repair policy
+└─ xml_suite.rs                  XML response parser and repair policy
 ```
 
 The `resources/protocol/<suite>` files are model-facing prompt resources and
 review snapshots. The Rust modules under `agent_core/src/response_protocol/`
 are executable parser suites. They intentionally live in code because they
 define runtime behavior, repair boundaries, and tests; they must stay aligned
-with the resource text and generated expanded snapshots.
+with the resource text and generated expanded prompt output from
+`scripts/update_static_prompt_snapshot.sh`.
 
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
-`--response-protocol`. The default is `markdown`; `json` remains available.
-Both suites must produce the same internal `ParsedEnvelope` semantics for the
-same user-visible capability: status/final answer, progress, free_talk retention,
-actions, and `context_compact`.
+`--response-protocol`. The default is `xml`; `markdown` and `json` remain
+available. All suites must produce the same internal `ParsedEnvelope` semantics
+for the same user-visible capability: status/final answer, progress, free_talk
+retention, actions, and `context_compact`.
 
 The prompt must not tell the model that multiple suites exist. It should only
 show the currently selected response protocol. This keeps provider-facing text
@@ -240,7 +246,7 @@ Markdown protocol recovery is intentionally bounded:
 - If the model emits a natural-language preface before a valid Markdown
   protocol section, the parser may recover from the first recognized protocol
   heading such as `## Status`, `## Progress`, `## Final_Answer`,
-  `## Intermediate_Actions`, or `## Context Compact`.
+  `## Working_Still_Action`, or `## Context Compact`.
 - A standalone fenced `action` block is treated as working protocol output.
 - Ordinary Markdown headings such as `## Notes` are not protocol. They remain a
   plain final answer unless they contain JSON/action-looking syntax that should
@@ -385,10 +391,19 @@ thread. It emits the same `CoreTopicEvent` values and `TurnOutcome` structures
 as the synchronous path. Hosts should not share one mutable `AgentCore` across
 multiple sessions or recreate a terminal-specific model/action loop.
 
+`CoreSessionWorkerManager` is the core-side multi-session owner. It allocates
+worker identities from ordinal 0, creates `ID0` as the default worker when a
+host asks for the default session, keeps a registry of workers by session id,
+exposes handles/status snapshots, polls worker events without forcing a
+terminal-specific event loop, and requests or joins shutdown across all workers.
+Workers created by one manager share one `CoreSessionWorkerRuntime`, so global
+working-worker counts published in model-response topics reflect all active
+sessions managed by that host.
+
 A session worker has a stable identity and a workspace description. Identity is
 core/UI protocol data, not a shell label: `session_id`, display name, ordinal,
 and optional parent session id. If no display name is supplied, workers use
-`[Ai1]`, `[Ai2]`, ... by ordinal. A parent agent or host may create a worker
+`ID0`, `ID1`, ... by ordinal. A parent agent or host may create a worker
 with a more specific name, and the name can later be changed through the worker
 handle; the update is emitted as a lifecycle topic. Workspace data describes
 where the worker is operating: current directory when known, data directory,
@@ -476,7 +491,7 @@ The guard has two responsibilities:
   multiple CLI processes.
 - Semantic conflict detection: durable memory rows carry `version` and
   `updated_at_ms`. Updating or deleting an existing row requires
-  `expected_version`, obtained from `memmgr type=durable op=query|sql`. If
+  `expected_version`, obtained from `memmgr type=durable op=sql`. If
   another CLI changes the row first, runtime returns a `memory_conflict` action
   result and leaves the current row untouched.
 
@@ -517,16 +532,15 @@ time: 1782200000000
 ## USER
 new user input or mid-turn supplement
 
-## TIMEM_ASSISTANT
+## {{CURRENT_ASSISTANT_NAME}}
 free_talk or final_answer already recorded for continuity
 
-## ACTIONS
-You initiated actions. The results are:
+## SYSTEM
+The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
 
 Action result: run_bash
 ...
 
-## SYSTEM
 runtime notes such as response repair, compaction result, or work instructions
 
 [END DELTA]
@@ -556,7 +570,7 @@ Runtime shrink review and context maintenance should use `delta_id`:
   compact before continuing: summarize useful dynamic prompt deltas to about
   10%-20% of their current token footprint, discard stale details, put important
   but lengthy state into scratch memory, and then use `memmgr type=context
-  op=shrink` on covered `delta_id` ranges.
+  op=discard` on covered `delta_id` ranges.
 
 Prompt deltas are append-only in normal operation. Later provider requests
 render the same static prefix plus all retained dynamic deltas, so the
@@ -574,8 +588,8 @@ logical prompt stream
 
 Delta blocks make the rendered boundary explicit:
 
-- The model can audit evidence because action results are visible in rendered
-  `## ACTIONS` blocks.
+- The model can audit evidence because runtime action results are visible in
+  rendered `## SYSTEM` blocks.
 - The runtime can keep provider cache behavior stable by isolating `prompt_0`.
 - Debug logs can identify which event introduced a piece of context.
 - Protocol repair can be represented as another runtime delta instead of a
@@ -607,8 +621,9 @@ Important invariants:
   `[BEGIN DELTA]` blocks.
 - Every rendered dynamic delta has `delta_id` so runtime shrink review can refer
   to exact logical deltas.
-- Valid model-visible role blocks are `## USER`, `## TIMEM_ASSISTANT`, `## ACTIONS`, and
-  `## SYSTEM`.
+- Valid model-visible role blocks are `## USER`, the current assistant/session-worker
+  heading represented as `## {{CURRENT_ASSISTANT_NAME}}` in prompt examples, and
+  `## SYSTEM`. Runtime replaces it with the actual worker role, such as `## ID0`.
 - The static prefix is sent through provider system-role/system-field support
   when available. Dynamic deltas go in the user message.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
@@ -638,6 +653,12 @@ Algorithm:
    exact slice boundaries.
 4. Mark the latest `DYNAMIC_TAIL_CACHE_BLOCKS = 3` dynamic blocks cacheable.
 5. Leave older dynamic blocks unmarked.
+6. Append the temporary
+   `Follow the system prompt, give your <protocol> formatted response:` trailer
+   as the final user block without cache control, for example
+   `Follow the system prompt, give your XML formatted response:`. This trailer
+   is not a prompt delta and must not be merged into the latest delta cache
+   block.
 
 This is a tail-checkpoint strategy, not an old-deltas strategy. It deliberately
 marks the newest prompt tail cacheable. For append-only conversations, the
@@ -684,8 +705,8 @@ Limitations:
 
 The model does not call Rust functions directly. It sends one response in the
 currently selected response protocol. `TIMEM_RESPONSE_PROTOCOL` selects the
-model response protocol (`markdown` by default, `json` optional). This is
-separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
+model response protocol (`xml` by default; `markdown` and `json` optional). This
+is separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
 
 Each response parses into the same runtime envelope: optional `status`, optional
 `report_job_progress`, optional `next_actions`, optional `context_compact`, and
@@ -720,12 +741,15 @@ Each protocol directory owns its model-facing schema summary and examples:
 
 - [`resources/protocol/markdown/response_protocol.md`](../resources/protocol/markdown/response_protocol.md)
 - [`resources/protocol/json/response_protocol.md`](../resources/protocol/json/response_protocol.md)
+- [`resources/protocol/xml/response_protocol.md`](../resources/protocol/xml/response_protocol.md)
 
 Keep protocol examples short; the runtime parser and capability registry are
 the authoritative executable boundary.
 
 In the JSON protocol, the envelope has this shape. In the Markdown protocol,
-the same fields are represented as sections.
+the same fields are represented as sections. In the XML protocol, the same
+fields are represented as tags under one `<response>` root; tool action payloads
+remain JSON objects inside `<action_json>` blocks.
 
 ```json
 {
@@ -736,7 +760,7 @@ the same fields are represented as sections.
       "action": "run_bash",
       "intent": "Count Rust source lines",
       "args": {
-        "command": "rg --files -g '*.rs' | xargs wc -l",
+        "cmd": "rg --files -g '*.rs' | xargs wc -l",
         "timeout_ms": 5000
       }
     }
@@ -775,7 +799,7 @@ model response:
       "action": "run_bash",
       "intent": "Inspect the retry renderer.",
       "args": {
-        "command": "rg -n 'retry_notice|render_thinking' timem_shell/src",
+        "cmd": "rg -n 'retry_notice|render_thinking' timem_shell/src",
         "timeout_ms": 5000
       }
     }
@@ -807,9 +831,9 @@ Each `next_actions` item is a structured command:
 
 Fields:
 
-- `action`: canonical tool name, such as `memmgr`, `run_bash`, or
-  `shell_job_status`. `memmgr` is the single model-facing interface for durable
-  memory, raw chat history, scratch memory, and dynamic context shrink.
+- `action`: canonical tool name, such as `memmgr`, `run_bash`, `capmgr`, or
+  `self_tool`. `memmgr` is the single model-facing interface for durable
+  memory, raw chat history, scratch memory, and dynamic context discard.
 - `intent`: concise human-readable reason. It is required because shell UI uses
   it as action status.
 - `args`: action-specific arguments as a JSON object. Put each parameter in its
@@ -826,11 +850,11 @@ cross-host tooling independent from the model-facing response style.
 The runtime does not execute hidden compatibility aliases. Unknown action names
 produce a protocol repair slice instead of being bridged to an old tool.
 
-### Action Result Slice
+### Action Result Prompt Component
 
 After an action runs, `agent_core` appends the action result into the current
-runtime increment's prompt delta. The rendered `## ACTIONS` block from that
-delta is the only evidence the model may claim it has seen.
+runtime increment's prompt delta as a `## SYSTEM` block. That system evidence is
+the only action-result evidence the model may claim it has seen.
 
 Example:
 
@@ -839,7 +863,9 @@ Example:
 delta_id: pd_1782200001000_4
 time: 1782200001000
 
-## ACTIONS
+## SYSTEM
+The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
+
 Action result: memmgr
 type: raw_chat
 op: sql
@@ -865,18 +891,23 @@ Provider output is untrusted. The runtime validates:
 - Every action has `action`, `intent`, and valid `args`.
 - SQL and bash actions pass their own safety checks.
 
-If validation fails, the runtime appends one `## SYSTEM` repair block in the
-current dynamic delta:
+If validation fails, the runtime builds a temporary, non-cache-controlled repair
+delta containing the malformed assistant response and a `## SYSTEM` block with
+the concrete protocol error:
 
 ```text
+## <CURRENT_ASSISTANT_NAME>
+<the malformed model response>
+
 ## SYSTEM
-Protocol repair request
-issue: next_actions[0].intent_required
-Return exactly one valid JSON object with report_job_progress.
+<CURRENT_ASSISTANT_NAME>'s previous response is not protocol compliant.
+error: actions[0].intent_required
 ```
 
-Only one repair round is allowed per model response failure. If the repair also
-fails, the shell blocks raw model text and shows a safe fallback instead.
+Repair is retried a bounded number of times for one model response failure. Each
+repair attempt emits a structured repair topic for hosts to render, and each
+attempt is audited. If all repair attempts fail, the shell blocks raw model text
+and shows a safe fallback instead.
 
 ## Tool Surface
 
@@ -885,9 +916,9 @@ flowchart TB
     Model["Model envelope"] --> Core["agent_core validator"]
     Core --> Memmgr["memmgr\ntype=durable/raw_chat/scratch/context"]
     Memmgr --> Chat["raw_chat query/sql/delete\nUI-visible chat records"]
-    Memmgr --> Memory["durable query/schema/sql/write/delete\nlong-lived facts"]
+    Memmgr --> Memory["durable schema/sql/write/delete\nlong-lived facts"]
     Memmgr --> Scratch["scratch query/write/read/delete\ntyped notes and context offload"]
-    Memmgr --> Shrink["context shrink\nremove delta context"]
+    Memmgr --> Shrink["context discard\nremove delta context"]
     Core --> SelfTool["self_tool\nTimem runtime self-info"]
     Core --> Bash["run_bash\nlocal command"]
 ```
@@ -905,17 +936,18 @@ durable memory does not prove that a visible chat transcript exists.
 
 Current implemented surface:
 
-- Chat history search: `memmgr` with `type=raw_chat, op=query|sql` over
+- Chat history search: `memmgr` with `type=raw_chat, op=search|sql` over
   `chat_messages`.
 - Chat history deletion: `memmgr` with `type=raw_chat, op=delete`. The SQL surface remains
   read-only and cannot delete `chat_messages`.
-- Durable memory search: `memmgr` with `type=durable, op=query|schema|sql`.
+- Durable memory search: `memmgr` with `type=durable, op=sql`; schema inspection
+  uses `type=durable, op=schema`.
 - Durable memory insert/update/delete: `memmgr` with
   `type=durable, op=insert|update|upsert|delete`. Existing-row
   update/delete requires `expected_version` to avoid stale multi-CLI writes.
 - Durable memory versioning: durable writes snapshot `memory.jsonl` in a local
   git repository under the selected memory directory when git is available.
-- Scratch memory: `memmgr` with `type=scratch, op=query|write|read|delete` over
+- Scratch memory: `memmgr` with `type=scratch, op=search|write|read|delete` over
   `scratch_notes.jsonl`.
 
 ### Timem Self Tool
@@ -969,14 +1001,45 @@ Current local-command approval is configured at startup:
 The runtime validates structured action shape and command limits. It does not
 infer the user's semantic goal from the natural-language text.
 
-Short commands run in the foreground. Long-running commands should use
-`run_bash` with `background=true` or `mode=background`. Runtime returns a
-`job_id`, output file, and status file; the model then uses `shell_job_status`
-to poll the job instead of repeating the long command.
+Normal commands use `cmd`. A positive model-provided `timeout_ms` is the
+runtime wait budget and is not upper-clamped by core. The execution path remains
+cancel-aware so host/UI cancellation can stop the active command. If such a
+command is still running after the long-command threshold, core emits a
+structured host decision request with elapsed/remaining time asking whether to
+keep waiting. If the host/user stops waiting, core terminates the active process
+and adds a `user_supplement` delta that tells the model the user cancelled the
+command and may request a status check or a new action if still necessary.
+Long-running shell work that should survive later prompt deltas should use
+`background=true` or `mode=background`, or a normal command with a positive
+`timeout_ms`. Runtime returns a process id and tracks it in the session
+running-pid set. The start/timeout transition is present in the action result
+once; later exits are injected once as `RUNNING_JOB_UPDATE`. When
+discard/offload/compact references prompt deltas whose SYSTEM section recorded
+a still-running job pid, runtime refreshes those jobs at prompt-build time and
+adds a `RUNNING JOB LIST` snapshot only for pids that are still running. The
+model inspects or stops those jobs through ordinary `run_bash` commands such as
+`ps -p <pid>` or `kill <pid>`.
 
-### Context Shrink Action
+Waiting on external state is a structured `run_bash` mode, not a separate tool.
+The model uses `loop_cmd` with `interval_ms`; core repeatedly runs that check
+command until its exit code is 0, the total `loop_timeout_ms` expires, or the
+active turn is cancelled. `once_timeout_ms` bounds each individual check
+command. The success condition is intentionally fixed at exit code 0 and is not
+a separate configurable action field. This keeps `sleep 90 && check` out of normal Bash,
+lets the UI render a Poll action through the existing `core.action` topic, and
+preserves the model/runtime boundary: the model defines the command, while core
+owns the fixed success condition, approval, wait bounds, audit, bounded output,
+and cancellation.
 
-`memmgr` with `type=context, op=shrink` is the structured action that actually
+Background and timed-out shell jobs are owned by the session that created them.
+Core tracks their pid lifecycle and injects status changes as prompt evidence.
+It does not automatically terminate them on normal timeout, final answer, or
+context compact; the model/user must explicitly inspect or stop a still-running
+pid when cleanup is desired.
+
+### Context Discard Action
+
+`memmgr` with `type=context, op=discard` is the structured action that actually
 removes dynamic prompt context. It accepts ids that came from rendered prompt
 slices:
 
@@ -986,7 +1049,7 @@ slices:
   "intent": "Remove stale context by id.",
   "args": {
     "type": "context",
-    "op": "shrink",
+    "op": "discard",
     "delta_ids": ["pd_1782200000000_2"]
   }
 }
@@ -1002,8 +1065,9 @@ Rules:
 Forced compaction uses the same response envelope and action protocol; it does
 not introduce a separate `compressed_delta` schema. The model decides what
 should be offloaded and supplies ids; runtime owns validation and copies actual
-prompt delta content into scratch. A typical forced shrink response first
-asks runtime to offload covered prompt context, then shrinks those dynamic ids:
+prompt delta content into scratch. A typical forced context reduction response
+first asks runtime to offload covered prompt context, then discards those dynamic
+ids:
 
 ```json
 {
@@ -1013,7 +1077,7 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
   "next_actions": [
     {
       "action": "memmgr",
-      "intent": "Offload dynamic prompt context before shrinking.",
+      "intent": "Offload dynamic prompt context before discarding it.",
       "args": {
         "type": "scratch",
         "op": "write",
@@ -1027,7 +1091,7 @@ asks runtime to offload covered prompt context, then shrinks those dynamic ids:
       "intent": "Remove dynamic prompt deltas covered by the compact summary.",
       "args": {
         "type": "context",
-        "op": "shrink",
+        "op": "discard",
         "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
       }
     }

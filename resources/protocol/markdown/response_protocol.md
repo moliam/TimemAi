@@ -3,7 +3,7 @@
 Your response must be organized as a markdown chaptered with pre-defined names as below.
 
 The top-level response is Markdown, not JSON. Only the individual action blocks
-inside `## Intermediate_Actions` use JSON objects.
+inside `## Working_Still_Action` use JSON objects.
 
 Required section rules:
 
@@ -25,9 +25,12 @@ Required section rules:
   context that should remain visible to you in later prompt context. Runtime
   keeps it for you in future context. User may input many questions in a turn, you can use
   free talk to answer intermediately and keep working.
-- `## Intermediate_Actions` contains one or more action objects. Each action object must
-  match the tool catalog exactly.
-  DO NOT include `## Intermediate_Actions` when `## Status` is `finished`.
+- `## Working_Still_Action` contains a single action object, an array of action
+  objects, or an array of action groups. Each action object must match the tool
+  catalog exactly. A group has `order` (`sequential` or `parallel`) and
+  `actions`. Groups execute one after another; actions in a sequential group run
+  in order, actions in a parallel group may run concurrently when safe.
+  DO NOT include `## Working_Still_Action` when `## Status` is `finished`.
 - `## Context Compact` lets you replace old dynamic context with a concise
   summary. Provide delta_ids plus a summary. Runtime will hide the referenced
   dynamic prompt deltas and append your summary as a new dynamic prompt delta. A
@@ -59,13 +62,13 @@ finished
 ## Progress
 正在执行用户要求的本地检查。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 {
   "action": "run_bash",
   "intent": "Run the requested local check.",
   "args": {
-    "command": "printf '%s\\n' example",
+    "cmd": "printf '%s\\n' example",
     "timeout_ms": 5000
   }
 }
@@ -76,13 +79,13 @@ finished
 ## Free_Talk
 这个任务我将会分成 ..... 几个步骤进行，下面先进行..
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 {
   "action": "run_bash",
   "intent": "浏览当前目录的文件",
   "args": {
-    "command": "ls -al",
+    "cmd": "ls -al",
     "timeout_ms": 1000
   }
 }
@@ -102,9 +105,47 @@ finished
 ## Context Compact
 delta_ids: pd_100_1, pd_100_2
 summary:
-Earlier work identified the UI rendering issue as repeated redraw of long
-network retry messages. Keep the fix direction: compact retry notice, show a
-countdown line and a separate detail line, and avoid redrawing new Timem
-headers on every tick. Current todo: patch the renderer, add regression tests,
-and rerun the shell UI test set. Work principle: keep core data structured and
-let the shell decide terminal layout.
+This is the summary....
+
+
+## -------- Example: multiple actions and polling --------
+
+## Free_Talk
+我会先并行检查两个本地状态，然后轮询等待外部状态就绪。
+
+## Working_Still_Action
+```action
+[
+  {
+    "order": "parallel",
+    "actions": [
+      {
+        "action": "run_bash",
+        "intent": "检查当前分支",
+        "args": {
+          "cmd": "git branch --show-current",
+          "timeout_ms": 3000
+        }
+      },
+      {
+        "action": "run_bash",
+        "intent": "检查工作区状态",
+        "args": {
+          "cmd": "git status --short",
+          "timeout_ms": 3000
+        }
+      }
+    ]
+  },
+  {
+    "action": "run_bash",
+    "intent": "等待 CI 完成",
+    "args": {
+      "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
+      "interval_ms": 10000,
+      "loop_timeout_ms": 600000,
+      "once_timeout_ms": 5000
+    }
+  }
+]
+```

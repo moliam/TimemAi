@@ -31,6 +31,7 @@ pub mod memmgr;
 mod notification;
 pub mod profiler;
 pub mod prompt_cache;
+pub mod prompt_components;
 pub mod prompt_render;
 pub mod prompt_spec;
 pub mod provider;
@@ -46,12 +47,8 @@ pub mod session_runtime;
 pub mod session_worker;
 #[path = "../../resources/capabilities/tools/run_bash.rs"]
 pub mod shell_exec;
-#[path = "../../resources/capabilities/tools/shell_job_status.rs"]
-pub mod shell_job_status;
 pub mod status_summary;
 pub mod status_view;
-#[path = "../../resources/capabilities/tools/tool_job_status.rs"]
-pub mod tool_job_status;
 pub mod tool_jobs;
 #[path = "../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;
@@ -89,14 +86,15 @@ pub use host::{
     normalize_user_supplements, resolve_topic_reply, session_worker_default_display_name,
     topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
     CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
-    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelResponseTopic, CoreSessionState,
-    CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic, CoreTopicEvent,
-    CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic, HostDecision,
-    HostDecisionDefault, HostDecisionRequest, NoopTurnUi, OutputExpansionRequest,
-    OutputExpansionResolution, RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn,
-    TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
-    TurnStopSummary, TurnUi, CORE_TOPIC_ACTION, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
+    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
+    CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
+    CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic,
+    HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
+    NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
+    RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
+    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, CORE_TOPIC_ACTION,
+    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
     CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_USER_APPROVAL_REQUEST,
     CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
@@ -112,6 +110,7 @@ pub use prompt_cache::{
     split_old_and_new_delta, split_prompt, stable_text_fingerprint, CacheControl, PromptBlock,
     PromptBlockRole, PromptParts,
 };
+pub use prompt_components::{PromptComponent, PromptComponentRole};
 pub use provider::{
     build_provider_request, default_api_protocol_for_provider, default_base_url_for_provider,
     default_model_for_provider, interpret_provider_http_response, is_default_base_url_for_provider,
@@ -128,16 +127,16 @@ pub use provider_config::{
 };
 pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
 pub use redaction::{redact_value, REDACTED};
-use response_protocol::ParsedAction;
 pub use response_protocol::ResponseProtocolKind;
+use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup};
 pub use retry_policy::{
     is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
     ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
     DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
 };
 pub use runtime_context::{
-    format_supporting_context, local_time_label, runtime_time_context, supporting_context,
-    turn_supporting_context, LocalTimeParts, SupportingContextInput,
+    format_supporting_context, local_time_label, runtime_info_context, runtime_time_context,
+    supporting_context, turn_supporting_context, LocalTimeParts, SupportingContextInput,
 };
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
@@ -145,10 +144,12 @@ pub use session_runtime::{
 };
 pub use session_worker::{
     CoreSessionWorker, CoreSessionWorkerConfig, CoreSessionWorkerEvent, CoreSessionWorkerHandle,
-    CoreSessionWorkerRuntime,
+    CoreSessionWorkerLifecycleState, CoreSessionWorkerManager, CoreSessionWorkerRuntime,
+    CoreSessionWorkerStatus,
 };
 use shell_exec::FileShellJobStore;
 pub use shell_exec::ShellJobRecord;
+pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
 pub use status_summary::{
     context_bar_filled, context_percent, meaningful_latest_usage, runtime_token_status_view,
     token_status_summary, RuntimeTokenStatusView, TokenStatusSummary, TokenUsageBreakdown,
@@ -252,7 +253,74 @@ pub struct TurnFinal {
 }
 
 fn llm_final_answer_slice_text(final_answer: &str) -> String {
-    format!("final_answer:\n{final_answer}")
+    format!(
+        "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n{final_answer}"
+    )
+}
+
+fn normalize_assistant_speaker_name(name: &str) -> String {
+    let clean = name
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '\n' | '\r' => ' ',
+            _ => ch,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if clean.is_empty() {
+        "TIMEM_ASSISTANT".to_string()
+    } else {
+        clean
+    }
+}
+
+fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> PromptComponentRole {
+    match prompt_type {
+        "user_question" | "user_supplement" => PromptComponentRole::user(),
+        "llm_response" | "llm_free_talk" => {
+            PromptComponentRole::assistant(assistant_speaker_name.to_string())
+        }
+        _ => PromptComponentRole::system(),
+    }
+}
+
+fn context_reduction_delta_ids_from_action_groups(groups: &[ParsedActionGroup]) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    for action in groups.iter().flat_map(|group| &group.actions) {
+        if action.action != "memmgr" {
+            continue;
+        }
+        let mem_type = action.input_lower("type");
+        let op = action.input_lower("op");
+        let scratch_kind = action.input_lower("kind");
+        let reduces_context = (mem_type == "context" && op == "discard")
+            || (mem_type == "scratch" && op == "write" && scratch_kind == "context_offload");
+        if reduces_context {
+            for id in action.input_list("delta_ids") {
+                let id = id.trim();
+                if !id.is_empty() {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    ids.into_iter().collect()
+}
+
+fn extract_pid_after_marker(text: &str, marker: &str) -> Option<u32> {
+    let start = text.find(marker)? + marker.len();
+    let digits = text[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u32>().ok()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -339,14 +407,72 @@ pub struct ChatHistoryRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingApproval {
     request: ApprovalRequest,
-    command: String,
-    background: bool,
-    timeout_ms: u64,
+    approved_action: PendingApprovedAction,
     intent: String,
+    continuation: Option<PendingApprovalContinuation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingApprovalContinuation {
+    ParallelGroup {
+        actions: Vec<ParsedAction>,
+        current_index: usize,
+        approved: Vec<(usize, PendingApproval)>,
+        denied_results: Vec<(usize, String)>,
+        completed_results: Vec<(usize, String)>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingApprovedAction {
+    RunBash {
+        command: String,
+        background: bool,
+        timeout_ms: i64,
+        interval_ms: Option<u64>,
+        once_timeout_ms: u64,
+        session_id: String,
+        turn_id: String,
+    },
+}
+
+impl PendingApprovedAction {
+    fn command(&self) -> &str {
+        match self {
+            PendingApprovedAction::RunBash { command, .. } => command,
+        }
+    }
+
+    fn audit_input(&self, approval_id: &str, risk: &str, reason: &str) -> Value {
+        match self {
+            PendingApprovedAction::RunBash {
+                command,
+                background,
+                timeout_ms,
+                interval_ms,
+                once_timeout_ms,
+                session_id,
+                turn_id,
+            } => json!({
+                "command": command,
+                "background": background,
+                "timeout_ms": timeout_ms,
+                "interval_ms": interval_ms,
+                "loop_timeout_ms": if interval_ms.is_some() { Some(*timeout_ms) } else { None },
+                "once_timeout_ms": if interval_ms.is_some() { Some(*once_timeout_ms) } else { None },
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "approval_id": approval_id,
+                "risk": risk,
+                "reason": reason,
+            }),
+        }
+    }
 }
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
 const DEFAULT_ROUND_BUDGET: u32 = 50;
+const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 5;
 const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
 const MEM_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
 const MEM_GUARD_STALE_AFTER: Duration = Duration::from_secs(60 * 60 * 6);
@@ -459,6 +585,49 @@ impl Drop for MemGuardLock {
 pub(crate) enum ActionExecution {
     Completed(String),
     NeedsApproval(PendingApproval),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongRunningCommandDecision {
+    Continue,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongRunningCommandStatus {
+    pub action: String,
+    pub command: String,
+    pub elapsed: Duration,
+    pub timeout_ms: Option<i64>,
+}
+
+pub trait ActionRuntime {
+    fn should_cancel(&mut self) -> bool;
+
+    fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
+
+    fn on_long_running_command(
+        &mut self,
+        _status: &LongRunningCommandStatus,
+    ) -> LongRunningCommandDecision {
+        LongRunningCommandDecision::Continue
+    }
+}
+
+pub(crate) struct CancelOnlyActionRuntime<'a> {
+    should_cancel: &'a mut dyn FnMut() -> bool,
+}
+
+impl<'a> CancelOnlyActionRuntime<'a> {
+    pub(crate) fn new(should_cancel: &'a mut dyn FnMut() -> bool) -> Self {
+        Self { should_cancel }
+    }
+}
+
+impl ActionRuntime for CancelOnlyActionRuntime<'_> {
+    fn should_cancel(&mut self) -> bool {
+        (self.should_cancel)()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -645,13 +814,18 @@ pub struct AgentCore {
     current_round: u32,
     pub(crate) current_stats: UsageStats,
     repair_attempted: bool,
+    repair_attempts: u32,
     last_repair_issue: Option<String>,
     pending_approval: Option<PendingApproval>,
     pub(crate) bash_approval_mode: BashApprovalMode,
     current_action_turn_id: Option<String>,
+    current_session_id: Option<String>,
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
+    pending_prompt_components: Vec<PromptComponent>,
+    prompt_component_sequence: u64,
+    assistant_speaker_name: String,
 }
 impl AgentCore {
     pub fn new(
@@ -668,11 +842,13 @@ impl AgentCore {
         );
         let static_prompt = static_prompt.into();
         let capabilities = CapabilityRegistry::builtin();
-        let response_protocol = ResponseProtocolKind::Markdown;
+        let response_protocol = ResponseProtocolKind::default();
+        let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
         let rendered_static_prompt = prompt_render::render_static_prompt(
             &static_prompt,
             &capabilities,
             response_protocol.suite(),
+            &assistant_speaker_name,
         );
         Self {
             static_prompt,
@@ -695,18 +871,162 @@ impl AgentCore {
             current_round: 0,
             current_stats: UsageStats::zero(),
             repair_attempted: false,
+            repair_attempts: 0,
             last_repair_issue: None,
             pending_approval: None,
             bash_approval_mode: BashApprovalMode::Ask,
             current_action_turn_id: None,
+            current_session_id: None,
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
+            pending_prompt_components: Vec::new(),
+            prompt_component_sequence: 0,
+            assistant_speaker_name,
         }
+    }
+
+    pub fn set_assistant_speaker_name(&mut self, name: impl AsRef<str>) {
+        self.assistant_speaker_name = normalize_assistant_speaker_name(name.as_ref());
+        self.refresh_rendered_static_prompt();
+    }
+
+    pub fn assistant_speaker_name(&self) -> &str {
+        &self.assistant_speaker_name
     }
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
         self.bash_approval_mode = mode;
     }
+
+    pub(crate) fn current_session_id(&self) -> String {
+        self.current_session_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    pub(crate) fn current_action_turn_id(&self) -> String {
+        self.current_action_turn_id
+            .clone()
+            .unwrap_or_else(|| "unknown_turn".to_string())
+    }
+
+    pub fn running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
+        self.shell_jobs.running_for_session(session_id)
+    }
+
+    pub fn refresh_running_shell_jobs_for_session(
+        &mut self,
+        session_id: &str,
+    ) -> Vec<RunningShellJob> {
+        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates(updates);
+        running
+    }
+
+    fn submit_running_job_updates_for_session(&mut self, session_id: &str) {
+        let (_, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates(updates);
+    }
+
+    fn submit_running_job_updates(&mut self, updates: Vec<ShellJobExitUpdate>) {
+        if updates.is_empty() {
+            return;
+        }
+        let text = updates
+            .into_iter()
+            .map(|update| {
+                format!(
+                    "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms",
+                    update.pid,
+                    update.description(),
+                    compact_text(&update.command, 500),
+                    update.elapsed_ms,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "running_job_update",
+            text,
+            "runtime",
+        );
+    }
+
+    fn submit_running_job_list_if_any(&mut self, session_id: &str) {
+        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates(updates);
+        if running.is_empty() {
+            return;
+        }
+        let mut text = String::from("RUNNING JOB LIST:");
+        for job in running {
+            text.push_str(&format!(
+                "\npid={}, {}, cmd={}, still running",
+                job.pid,
+                job.description(),
+                compact_text(&job.command, 500),
+            ));
+        }
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "running_job_list",
+            text,
+            "runtime",
+        );
+    }
+
+    fn referenced_system_slices_running_pids(&self, delta_ids: &[String]) -> BTreeSet<u32> {
+        let target_delta_ids = delta_ids
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>();
+        if target_delta_ids.is_empty() {
+            return BTreeSet::new();
+        }
+
+        let mut pids = BTreeSet::new();
+        for delta in &self.deltas {
+            if !target_delta_ids.contains(&delta.delta_id) {
+                continue;
+            }
+            for slice in prompt_render::render_delta_slices(delta) {
+                if role_for_prompt_type(&slice.prompt_type, &self.assistant_speaker_name)
+                    != PromptComponentRole::system()
+                {
+                    continue;
+                }
+                for line in slice.text.lines() {
+                    let lower = line.to_ascii_lowercase();
+                    let is_running_line = lower.contains("still running")
+                        || lower.contains("keeps running")
+                        || lower.contains("is still running");
+                    if is_running_line {
+                        if let Some(pid) = extract_pid_after_marker(line, "pid=") {
+                            pids.insert(pid);
+                        }
+                    }
+                }
+            }
+        }
+        pids
+    }
+
+    fn referenced_deltas_have_current_running_jobs(
+        &mut self,
+        session_id: &str,
+        delta_ids: &[String],
+    ) -> bool {
+        let referenced_pids = self.referenced_system_slices_running_pids(delta_ids);
+        if referenced_pids.is_empty() {
+            return false;
+        }
+        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates(updates);
+        running.iter().any(|job| referenced_pids.contains(&job.pid))
+    }
+
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
         self.max_llm_input_tokens = max_llm_input_tokens.max(3_000);
     }
@@ -756,6 +1076,7 @@ impl AgentCore {
             &self.static_prompt,
             &self.capabilities,
             self.response_protocol.suite(),
+            &self.assistant_speaker_name,
         );
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
@@ -795,6 +1116,9 @@ impl AgentCore {
     }
     pub fn capability_tool_count(&self) -> usize {
         self.capabilities.tool_count()
+    }
+    pub fn capability_contains_tool(&self, action: &str) -> bool {
+        self.capabilities.contains_tool(action)
     }
     pub fn capability_skill_count(&self) -> usize {
         self.capabilities.skill_count()
@@ -866,9 +1190,11 @@ impl AgentCore {
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
+        self.repair_attempts = 0;
         self.last_repair_issue = None;
         self.pending_approval = None;
         self.current_action_turn_id = None;
+        self.current_session_id = None;
         self.current_action_user_question.clear();
         self.last_notifications.clear();
         self.loaded_work_instruction_fingerprints.clear();
@@ -925,6 +1251,7 @@ impl AgentCore {
         self.round_budget = self.configured_round_budget;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
+        self.repair_attempts = 0;
         self.last_repair_issue = None;
         self.pending_approval = None;
         self.last_notifications.clear();
@@ -936,31 +1263,60 @@ impl AgentCore {
             now_ms(),
             &self.current_action_user_question,
         );
+        let pending_token_estimate = self
+            .pending_prompt_components
+            .iter()
+            .map(|component| estimate_prompt_tokens(&component.content))
+            .sum::<u32>();
         let should_memory_precheck = supporting_context
             .map(should_run_memory_precheck)
             .unwrap_or(false);
-        let mut text = format!("User question:\n{}", user_input.trim());
+        let text = user_input.trim().to_string();
         let filtered_supporting_context = supporting_context
             .map(|ctx| self.filter_repeated_work_instructions(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
+        let mut system_texts = Vec::new();
         if let Some(ctx) = filtered_supporting_context.as_deref() {
-            text.push_str("\n\nSupporting context:\n");
-            text.push_str(ctx.trim());
+            system_texts.push(ctx.trim().to_string());
         }
-        let incoming_prompt_tokens = estimate_prompt_tokens(&text);
-        if let Some(shrink_review) = self.consume_shrink_review_if_needed(incoming_prompt_tokens) {
-            text.push_str("\n\nLong-context maintenance:\n");
-            text.push_str(&shrink_review);
+        let mut token_estimate_text = text.clone();
+        for system_text in &system_texts {
+            token_estimate_text.push('\n');
+            token_estimate_text.push_str(system_text);
         }
-        text.push_str(&format!("\nrounds_remaining: {}", self.round_budget));
-        let mut slices = vec![("user_question".to_string(), text)];
+        let incoming_prompt_tokens = estimate_prompt_tokens(&token_estimate_text);
+        let pending_dynamic_tokens =
+            estimate_prompt_tokens(&token_estimate_text) + pending_token_estimate;
+        if let Some(shrink_review) =
+            self.consume_shrink_review_if_needed(incoming_prompt_tokens, pending_dynamic_tokens)
+        {
+            system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
+        }
+        self.submit_prompt_component(
+            PromptComponentRole::user(),
+            "user_question",
+            text,
+            "user_input",
+        );
+        for system_text in system_texts {
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "runtime_note",
+                system_text,
+                "runtime",
+            );
+        }
         if should_memory_precheck {
             let result = self.runtime_memory_precheck(user_input, 5);
-            slices.push(("result_of_llm_action".to_string(), result));
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "result_of_llm_action",
+                result,
+                "runtime_memory_precheck",
+            );
         }
-        self.append_delta(slices);
         CoreStep::NeedModel {
-            prompt: self.render_prompt(),
+            prompt: self.build_next_prompt(),
             rounds_remaining: self.round_budget,
         }
     }
@@ -969,13 +1325,7 @@ impl AgentCore {
         if text.is_empty() {
             return None;
         }
-        self.append_slice_to_latest_delta(
-            "user_supplement".to_string(),
-            format!(
-                "User supplement during current turn:\n{}\n\nNote: This supplement was entered while the model was already working on the current turn. Treat it as the latest user instruction/correction.",
-                text
-            ),
-        );
+        self.append_slice_to_latest_delta("user_supplement".to_string(), text.to_string());
         Some(CoreStep::NeedModel {
             prompt: self.render_prompt(),
             rounds_remaining: self.remaining_rounds(),
@@ -1005,35 +1355,51 @@ impl AgentCore {
     }
 
     pub fn apply_model_response(&mut self, response: LlmResponse) -> CoreStep {
+        self.apply_model_response_with_cancel(response, &mut || false)
+    }
+
+    pub fn apply_model_response_with_cancel(
+        &mut self,
+        response: LlmResponse,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> CoreStep {
+        let mut runtime = CancelOnlyActionRuntime::new(should_cancel);
+        self.apply_model_response_with_action_runtime(response, &mut runtime)
+    }
+
+    pub fn apply_model_response_with_action_runtime(
+        &mut self,
+        response: LlmResponse,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
         self.last_notifications.clear();
         self.current_round += 1;
         self.current_stats.add(&response.usage);
         self.last_observed_prompt_tokens = self
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
-        if response.truncated && !self.repair_attempted {
+        if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
             let protocol_suite = self.response_protocol.suite();
             return self.request_protocol_repair(
                 "truncated_model_output",
                 protocol_suite.repair_instruction("truncated_model_output"),
                 &response.content,
+                runtime,
             );
         }
         let protocol_suite = self.response_protocol.suite();
         let parsed = protocol_suite.parse(&response.content, &self.capabilities);
         let mut slices = Vec::new();
-        if !parsed.thought.is_empty() && parsed.thought_keep_in_context {
-            slices.push((
-                "llm_free_talk".to_string(),
-                format!("Free_talk:\n{}", parsed.thought),
-            ));
+        if !parsed.thought.is_empty() {
+            slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
         }
         if let Some(issue) = parsed.repair_issue.clone() {
-            if !self.repair_attempted {
+            if self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
                 return self.request_protocol_repair(
                     &issue,
                     protocol_suite.repair_instruction(&issue),
                     &response.content,
+                    runtime,
                 );
             }
             if issue == "invalid_json"
@@ -1044,7 +1410,7 @@ impl AgentCore {
                     "llm_response".to_string(),
                     llm_final_answer_slice_text(&final_text),
                 ));
-                self.append_delta(slices);
+                self.defer_next_turn_slices(slices);
                 return CoreStep::Final(TurnFinal {
                     final_answer: final_text,
                     stats: self.current_stats.clone(),
@@ -1075,7 +1441,7 @@ impl AgentCore {
                 "llm_response".to_string(),
                 llm_final_answer_slice_text(&final_text),
             ));
-            self.append_delta(slices);
+            self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
                 stats: self.current_stats.clone(),
@@ -1085,6 +1451,22 @@ impl AgentCore {
             });
         }
         self.last_notifications = notification::notifications_from_envelope(&parsed);
+        if !self.last_notifications.is_empty() {
+            let events = host::notification_topic_events(
+                &self.current_session_id(),
+                &self.last_notifications,
+            );
+            runtime.on_core_topic_events(&events);
+        }
+        let compact_delta_ids = parsed
+            .context_compacts
+            .iter()
+            .flat_map(|compact| compact.delta_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        let compact_refs_current_running_jobs = self.referenced_deltas_have_current_running_jobs(
+            &self.current_session_id(),
+            &compact_delta_ids,
+        );
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
@@ -1124,7 +1506,7 @@ impl AgentCore {
                 "llm_response".to_string(),
                 llm_final_answer_slice_text(&final_text),
             ));
-            self.append_delta(slices);
+            self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
                 stats: self.current_stats.clone(),
@@ -1145,30 +1527,38 @@ impl AgentCore {
             slices.push(("runtime_note".to_string(), note.to_string()));
         }
 
-        if !parsed.next_actions.is_empty() {
-            let mut result_lines = Vec::new();
-            for action in parsed.next_actions {
-                match self.execute_action(action) {
-                    ActionExecution::Completed(result) => result_lines.push(result),
-                    ActionExecution::NeedsApproval(pending) => {
-                        if !result_lines.is_empty() {
-                            slices.push((
-                                "result_of_llm_action".to_string(),
-                                result_lines.join("\n\n"),
-                            ));
-                        }
-                        self.append_delta(slices);
-                        let request = pending.request.clone();
-                        self.pending_approval = Some(pending);
-                        return CoreStep::NeedsUserApproval { request };
+        if !parsed.action_groups.is_empty() {
+            let context_reduction_delta_ids =
+                context_reduction_delta_ids_from_action_groups(&parsed.action_groups);
+            let should_snapshot_running_jobs = self.referenced_deltas_have_current_running_jobs(
+                &self.current_session_id(),
+                &context_reduction_delta_ids,
+            );
+            let result_lines = match self.execute_action_groups(parsed.action_groups, runtime) {
+                Ok(result_lines) => result_lines,
+                Err((result_lines, pending)) => {
+                    if !result_lines.is_empty() {
+                        slices.push((
+                            "result_of_llm_action".to_string(),
+                            result_lines.join("\n\n"),
+                        ));
                     }
+                    self.append_delta(slices);
+                    let request = pending.request.clone();
+                    self.pending_approval = Some(pending);
+                    return CoreStep::NeedsUserApproval { request };
                 }
-            }
+            };
             if !result_lines.is_empty() {
                 slices.push((
                     "result_of_llm_action".to_string(),
                     result_lines.join("\n\n"),
                 ));
+            }
+            if should_snapshot_running_jobs {
+                self.submit_running_job_list_if_any(&self.current_session_id());
+            } else {
+                self.submit_running_job_updates_for_session(&self.current_session_id());
             }
             self.append_delta(slices);
             self.append_in_turn_shrink_review_if_needed();
@@ -1183,6 +1573,11 @@ impl AgentCore {
             };
         }
         if !parsed.context_compacts.is_empty() {
+            if compact_refs_current_running_jobs {
+                self.submit_running_job_list_if_any(&self.current_session_id());
+            } else {
+                self.submit_running_job_updates_for_session(&self.current_session_id());
+            }
             self.append_delta(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
@@ -1211,7 +1606,7 @@ impl AgentCore {
             "llm_response".to_string(),
             llm_final_answer_slice_text(&final_text),
         ));
-        self.append_delta(slices);
+        self.defer_next_turn_slices(slices);
         CoreStep::Final(TurnFinal {
             final_answer: final_text,
             stats: self.current_stats.clone(),
@@ -1235,11 +1630,76 @@ impl AgentCore {
         session: &str,
         turn_id: &str,
     ) -> CoreStep {
+        self.apply_model_response_with_repair_audit_and_cancel(
+            response,
+            audit_file,
+            session,
+            turn_id,
+            &mut || false,
+        )
+    }
+
+    pub fn apply_model_response_with_repair_audit_and_cancel(
+        &mut self,
+        response: LlmResponse,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> CoreStep {
         let repair_calls_before = self.current_stats().repair_calls;
         let response_model = response.model_name.clone();
         let response_usage = response.usage.clone();
         let response_truncated = response.truncated;
-        let step = self.apply_model_response(response);
+        let mut runtime = CancelOnlyActionRuntime::new(should_cancel);
+        let step = self.apply_model_response_with_action_runtime(response, &mut runtime);
+        self.record_model_repair_audit_if_needed(
+            audit_file,
+            session,
+            turn_id,
+            repair_calls_before,
+            &response_model,
+            &response_usage,
+            response_truncated,
+        );
+        step
+    }
+
+    pub fn apply_model_response_with_repair_audit_and_runtime(
+        &mut self,
+        response: LlmResponse,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
+        let repair_calls_before = self.current_stats().repair_calls;
+        let response_model = response.model_name.clone();
+        let response_usage = response.usage.clone();
+        let response_truncated = response.truncated;
+        let step = self.apply_model_response_with_action_runtime(response, runtime);
+        self.record_model_repair_audit_if_needed(
+            audit_file,
+            session,
+            turn_id,
+            repair_calls_before,
+            &response_model,
+            &response_usage,
+            response_truncated,
+        );
+        step
+    }
+
+    fn record_model_repair_audit_if_needed(
+        &self,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        repair_calls_before: u32,
+        response_model: &str,
+        response_usage: &UsageStats,
+        response_truncated: bool,
+    ) {
         let repair_calls_after = self.current_stats().repair_calls;
         if repair_calls_after > repair_calls_before {
             let _ = append_audit_event(
@@ -1248,24 +1708,24 @@ impl AgentCore {
                     session,
                     turn_id,
                     self.last_repair_issue(),
-                    &response_model,
-                    &response_usage,
+                    response_model,
+                    response_usage,
                     response_truncated,
                     repair_calls_after,
                     repair_calls_after.saturating_sub(repair_calls_before),
                 ),
             );
         }
-        step
     }
 
     pub fn record_turn_start_audit(
-        &self,
+        &mut self,
         audit_file: &Path,
         session: &str,
         turn_id: &str,
         user_input: &str,
     ) {
+        self.current_session_id = Some(session.to_string());
         let _ = append_audit_event(
             audit_file,
             &turn_start_audit_event(session, turn_id, user_input),
@@ -1305,6 +1765,25 @@ impl AgentCore {
     }
 
     pub fn resolve_user_approval(&mut self, approval_id: &str, approved: bool) -> CoreStep {
+        self.resolve_user_approval_with_cancel(approval_id, approved, &mut || false)
+    }
+
+    pub fn resolve_user_approval_with_cancel(
+        &mut self,
+        approval_id: &str,
+        approved: bool,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> CoreStep {
+        let mut runtime = CancelOnlyActionRuntime::new(should_cancel);
+        self.resolve_user_approval_with_runtime(approval_id, approved, &mut runtime)
+    }
+
+    pub fn resolve_user_approval_with_runtime(
+        &mut self,
+        approval_id: &str,
+        approved: bool,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
         let Some(pending) = self.pending_approval.take() else {
             self.append_delta(vec![(
                 "result_of_llm_action".to_string(),
@@ -1323,23 +1802,189 @@ impl AgentCore {
             self.pending_approval = Some(pending);
             return CoreStep::NeedsUserApproval { request };
         }
+        if let Some(continuation) = pending.continuation.clone() {
+            return self.resolve_parallel_group_approval_with_runtime(
+                pending,
+                approved,
+                continuation,
+                runtime,
+            );
+        }
         let result = if approved {
-            shell_exec::execute_approved_bash(
-                &pending.command,
-                pending.background,
-                pending.timeout_ms,
-                &pending.request,
-                &self.shell_jobs,
-            )
+            match &pending.approved_action {
+                PendingApprovedAction::RunBash {
+                    command,
+                    background,
+                    timeout_ms,
+                    interval_ms,
+                    once_timeout_ms,
+                    session_id,
+                    turn_id,
+                } => shell_exec::execute_approved_bash(
+                    command,
+                    *background,
+                    *timeout_ms,
+                    *interval_ms,
+                    *once_timeout_ms,
+                    session_id,
+                    turn_id,
+                    interval_ms.is_none(),
+                    &pending.request,
+                    &self.shell_jobs,
+                    runtime,
+                ),
+            }
         } else {
             format!(
-                "Action result: run_bash\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
-                pending.command, pending.request.approval_id, pending.request.reason
+                "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
+                pending.request.action,
+                pending.approved_action.command(),
+                pending.request.approval_id,
+                pending.request.reason
             )
         };
         let result = annotate_action_result_with_intent(result, &pending.intent);
         self.record_pending_approval_audit(&pending, approved, &result);
         self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
+        self.append_in_turn_shrink_review_if_needed();
+        if self.remaining_rounds() == 0 {
+            return CoreStep::RoundLimitReached {
+                max_rounds: self.round_budget,
+            };
+        }
+        CoreStep::NeedModel {
+            prompt: self.render_prompt(),
+            rounds_remaining: self.remaining_rounds(),
+        }
+    }
+
+    fn denied_approval_result(&self, pending: &PendingApproval) -> String {
+        annotate_action_result_with_intent(
+            format!(
+                "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
+                pending.request.action,
+                pending.approved_action.command(),
+                pending.request.approval_id,
+                pending.request.reason
+            ),
+            &pending.intent,
+        )
+    }
+
+    fn finish_parallel_group_after_approvals(
+        &mut self,
+        actions: Vec<ParsedAction>,
+        approved: Vec<(usize, PendingApproval)>,
+        denied_results: Vec<(usize, String)>,
+        completed_results: Vec<(usize, String)>,
+        runtime: &mut dyn ActionRuntime,
+    ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
+        let mut results = vec![None; actions.len()];
+        for (idx, result) in denied_results.into_iter().chain(completed_results) {
+            if let Some(slot) = results.get_mut(idx) {
+                *slot = Some(result);
+            }
+        }
+
+        let mut handles = Vec::new();
+        for (idx, pending) in approved {
+            handles.push(self.spawn_approved_parallel_bash_action(idx, pending));
+        }
+
+        for (idx, action) in actions.iter().cloned().enumerate() {
+            if results.get(idx).is_some_and(Option::is_some) || action.action == "run_bash" {
+                continue;
+            }
+            match self.execute_action(action, runtime) {
+                ActionExecution::Completed(result) => {
+                    if let Some(slot) = results.get_mut(idx) {
+                        *slot = Some(result);
+                    }
+                }
+                ActionExecution::NeedsApproval(pending) => {
+                    self.collect_approved_parallel_bash_handles(handles, &mut results, runtime);
+                    return Err((Self::ordered_parallel_results(results), pending));
+                }
+            }
+        }
+
+        self.collect_approved_parallel_bash_handles(handles, &mut results, runtime);
+        Ok(Self::ordered_parallel_results(results))
+    }
+
+    fn resolve_parallel_group_approval_with_runtime(
+        &mut self,
+        mut pending: PendingApproval,
+        approved_by_user: bool,
+        continuation: PendingApprovalContinuation,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
+        let PendingApprovalContinuation::ParallelGroup {
+            actions,
+            current_index,
+            mut approved,
+            mut denied_results,
+            mut completed_results,
+        } = continuation;
+
+        pending.continuation = None;
+        if approved_by_user {
+            approved.push((current_index, pending));
+        } else {
+            let result = self.denied_approval_result(&pending);
+            self.record_pending_approval_audit(&pending, false, &result);
+            denied_results.push((current_index, result));
+        }
+
+        for next_index in (current_index + 1)..actions.len() {
+            let action = actions[next_index].clone();
+            if action.action != "run_bash" {
+                continue;
+            }
+            match self.execute_action(action, runtime) {
+                ActionExecution::Completed(result) => {
+                    completed_results.push((next_index, result));
+                }
+                ActionExecution::NeedsApproval(next_pending) => {
+                    let pending = Self::pending_approval_with_parallel_continuation(
+                        next_pending,
+                        actions,
+                        next_index,
+                        approved,
+                        denied_results,
+                        completed_results,
+                    );
+                    let request = pending.request.clone();
+                    self.pending_approval = Some(pending);
+                    return CoreStep::NeedsUserApproval { request };
+                }
+            }
+        }
+
+        let result_lines = match self.finish_parallel_group_after_approvals(
+            actions,
+            approved,
+            denied_results,
+            completed_results,
+            runtime,
+        ) {
+            Ok(results) => results,
+            Err((partial, pending)) => {
+                self.pending_approval = Some(pending.clone());
+                self.append_delta(vec![(
+                    "result_of_llm_action".to_string(),
+                    partial.join("\n\n"),
+                )]);
+                return CoreStep::NeedsUserApproval {
+                    request: pending.request,
+                };
+            }
+        };
+
+        self.append_delta(vec![(
+            "result_of_llm_action".to_string(),
+            result_lines.join("\n\n"),
+        )]);
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
             return CoreStep::RoundLimitReached {
@@ -1360,11 +2005,46 @@ impl AgentCore {
         session: &str,
         turn_id: &str,
     ) -> CoreStep {
+        self.resolve_user_approval_with_audit_and_cancel(
+            approval,
+            approved,
+            audit_file,
+            session,
+            turn_id,
+            &mut || false,
+        )
+    }
+
+    pub fn resolve_user_approval_with_audit_and_cancel(
+        &mut self,
+        approval: &ApprovalRequest,
+        approved: bool,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> CoreStep {
         let _ = append_audit_event(
             audit_file,
             &user_approval_audit_event(session, turn_id, approval, approved),
         );
-        self.resolve_user_approval(&approval.approval_id, approved)
+        self.resolve_user_approval_with_cancel(&approval.approval_id, approved, should_cancel)
+    }
+
+    pub fn resolve_user_approval_with_audit_and_runtime(
+        &mut self,
+        approval: &ApprovalRequest,
+        approved: bool,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> CoreStep {
+        let _ = append_audit_event(
+            audit_file,
+            &user_approval_audit_event(session, turn_id, approval, approved),
+        );
+        self.resolve_user_approval_with_runtime(&approval.approval_id, approved, runtime)
     }
 
     pub fn continue_after_round_limit(&mut self) -> CoreStep {
@@ -1372,10 +2052,7 @@ impl AgentCore {
         self.round_budget = DEFAULT_ROUND_BUDGET;
         self.append_delta(vec![(
             "result_of_llm_action".to_string(),
-            format!(
-                "Runtime round budget continued by user.\nrounds_remaining: {}",
-                self.round_budget
-            ),
+            "Runtime round budget continued by user.".to_string(),
         )]);
         CoreStep::NeedModel {
             prompt: self.render_prompt(),
@@ -1442,8 +2119,27 @@ impl AgentCore {
         prompt_render::render_prompt_with_rendered_static(
             &self.rendered_static_prompt,
             &self.deltas,
+            &self.assistant_speaker_name,
+            self.response_protocol.lang_format(),
         )
     }
+
+    pub fn submit_prompt_component(
+        &mut self,
+        role: PromptComponentRole,
+        kind: impl Into<String>,
+        content: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Option<String> {
+        let logical_time_ms = now_ms();
+        self.submit_prompt_component_at(role, kind, content, source, logical_time_ms)
+    }
+
+    pub fn build_next_prompt(&mut self) -> String {
+        self.flush_pending_prompt_components();
+        self.render_prompt()
+    }
+
     fn render_prompt_slices(&self) -> Vec<PromptSlice> {
         prompt_render::render_prompt_slices(&self.deltas)
     }
@@ -1456,30 +2152,86 @@ impl AgentCore {
         issue: &str,
         instruction: &str,
         raw_response: &str,
+        runtime: &mut dyn ActionRuntime,
     ) -> CoreStep {
         self.repair_attempted = true;
+        self.repair_attempts = self.repair_attempts.saturating_add(1);
         self.last_repair_issue = Some(issue.to_string());
         self.current_stats.repair_calls = self.current_stats.repair_calls.saturating_add(1);
-        self.append_delta(vec![(
-            "response_repair".to_string(),
-            format!(
-                "Protocol repair request\nshrink_priority: discard_first\nissue: {}\nreason: {}\ninstruction:\n{}\n\nPrevious model response to repair:\n[BEGIN PREVIOUS_LLM_RESPONSE]\n{}\n[END PREVIOUS_LLM_RESPONSE]",
-                issue,
-                self.response_protocol.suite().repair_reason(issue),
-                instruction,
-                self.response_protocol
-                    .suite()
-                    .focused_repair_text(issue, raw_response),
-            ),
+        runtime.on_core_topic_events(&[host::model_repair_topic_event(
+            self.current_session_id(),
+            issue,
+            self.repair_attempts,
+            MAX_PROTOCOL_REPAIR_ATTEMPTS,
         )]);
+        let focused_response = self
+            .response_protocol
+            .suite()
+            .focused_repair_text(issue, raw_response);
+        let repair_note = format!(
+            "{}'s previous response is not protocol compliant.\nerror: {}\n\n{}",
+            self.assistant_speaker_name, issue, instruction
+        );
+        let prompt = self.render_prompt_with_temporary_delta(vec![
+            ("llm_response".to_string(), focused_response),
+            ("response_repair".to_string(), repair_note),
+        ]);
         CoreStep::NeedModel {
-            prompt: self.render_prompt(),
+            prompt,
             rounds_remaining: self.remaining_rounds(),
         }
     }
 
+    fn render_prompt_with_temporary_delta(&self, slice_texts: Vec<(String, String)>) -> String {
+        let time_ms = now_ms();
+        let delta_id = format!("temp_repair_{}_{}", time_ms, self.repair_attempts);
+        let chunks = slice_texts
+            .into_iter()
+            .flat_map(|(prompt_type, text)| {
+                split_text_for_prompt_slices(&text, PROMPT_SLICE_TEXT_LIMIT)
+                    .into_iter()
+                    .map(move |chunk| (prompt_type.clone(), chunk))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let slice_count = chunks.len();
+        let slices = chunks
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (prompt_type, text))| {
+                let slice_index = idx + 1;
+                PromptSlice {
+                    delta_id: delta_id.clone(),
+                    slice_id: format!(
+                        "ps_{}_s{:03}",
+                        delta_id.trim_start_matches("pd_"),
+                        slice_index
+                    ),
+                    prompt_type,
+                    time_ms,
+                    text,
+                    slice_index,
+                    slice_count,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut deltas = self.deltas.clone();
+        deltas.push(PromptDelta {
+            delta_id,
+            time_ms,
+            slices,
+            hidden_slice_ids: Vec::new(),
+        });
+        prompt_render::render_prompt_with_rendered_static(
+            &self.rendered_static_prompt,
+            &deltas,
+            &self.assistant_speaker_name,
+            self.response_protocol.lang_format(),
+        )
+    }
+
     fn append_in_turn_shrink_review_if_needed(&mut self) {
-        if let Some(shrink_review) = self.consume_shrink_review_if_needed(0) {
+        if let Some(shrink_review) = self.consume_shrink_review_if_needed(0, 0) {
             self.append_delta(vec![(
                 "result_of_llm_action".to_string(),
                 format!("Long-context maintenance:\n{shrink_review}"),
@@ -1487,17 +2239,72 @@ impl AgentCore {
         }
     }
 
+    fn submit_prompt_component_at(
+        &mut self,
+        role: PromptComponentRole,
+        kind: impl Into<String>,
+        content: impl Into<String>,
+        source: impl Into<String>,
+        logical_time_ms: i64,
+    ) -> Option<String> {
+        let content = content.into();
+        if content.trim().is_empty() {
+            return None;
+        }
+        self.prompt_component_sequence = self.prompt_component_sequence.saturating_add(1);
+        let sequence = self.prompt_component_sequence;
+        let batch_id = format!("pcb_{}", logical_time_ms);
+        let id = format!("pc_{}_{}", logical_time_ms, sequence);
+        self.pending_prompt_components.push(PromptComponent {
+            id: id.clone(),
+            role,
+            kind: kind.into(),
+            content,
+            source: source.into(),
+            created_at_ms: logical_time_ms,
+            sequence,
+            batch_id,
+            cache_policy_hint: None,
+        });
+        Some(id)
+    }
+
+    fn submit_prompt_components_from_slice_texts(
+        &mut self,
+        slice_texts: Vec<(String, String)>,
+        source: &str,
+        logical_time_ms: i64,
+    ) {
+        for (prompt_type, text) in slice_texts {
+            let role = role_for_prompt_type(&prompt_type, &self.assistant_speaker_name);
+            self.submit_prompt_component_at(role, prompt_type, text, source, logical_time_ms);
+        }
+    }
+
     fn append_delta(&mut self, slice_texts: Vec<(String, String)>) {
-        if slice_texts.is_empty() {
+        let logical_time_ms = now_ms();
+        self.submit_prompt_components_from_slice_texts(slice_texts, "runtime", logical_time_ms);
+        self.flush_pending_prompt_components();
+    }
+
+    fn flush_pending_prompt_components(&mut self) {
+        if self.pending_prompt_components.is_empty() {
             return;
         }
-        let timestamp = now_ms();
+        let mut components = std::mem::take(&mut self.pending_prompt_components);
+        components.sort_by_key(|component| (component.created_at_ms, component.sequence));
+        let timestamp = components
+            .iter()
+            .map(|component| component.created_at_ms)
+            .min()
+            .unwrap_or_else(now_ms);
         let delta_id = format!("pd_{}_{}", timestamp, self.deltas.len() + 1);
-        let chunks = slice_texts
+        let chunks = components
             .into_iter()
-            .flat_map(|(prompt_type, text)| {
-                let slice_time_ms = now_ms();
-                split_text_for_prompt_slices(&text, PROMPT_SLICE_TEXT_LIMIT)
+            .flat_map(|component| {
+                let prompt_type = component.prompt_type();
+                let slice_time_ms = component.created_at_ms;
+                split_text_for_prompt_slices(&component.content, PROMPT_SLICE_TEXT_LIMIT)
                     .into_iter()
                     .map(move |chunk| (prompt_type.clone(), slice_time_ms, chunk))
                     .collect::<Vec<_>>()
@@ -1530,6 +2337,15 @@ impl AgentCore {
             slices,
             hidden_slice_ids: Vec::new(),
         });
+    }
+
+    fn defer_next_turn_slices(&mut self, slice_texts: Vec<(String, String)>) {
+        let logical_time_ms = now_ms();
+        self.submit_prompt_components_from_slice_texts(
+            slice_texts,
+            "previous_model_response",
+            logical_time_ms,
+        );
     }
 
     fn append_slice_to_latest_delta(&mut self, prompt_type: String, text: String) {
@@ -1569,7 +2385,11 @@ impl AgentCore {
             );
         }
     }
-    fn consume_shrink_review_if_needed(&mut self, incoming_prompt_tokens: u32) -> Option<String> {
+    fn consume_shrink_review_if_needed(
+        &mut self,
+        incoming_prompt_tokens: u32,
+        pending_dynamic_tokens: u32,
+    ) -> Option<String> {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
         let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
         let slices = self.render_prompt_slices();
@@ -1579,7 +2399,8 @@ impl AgentCore {
         let dynamic_tokens = slices
             .iter()
             .map(|slice| estimate_prompt_tokens(&slice.text))
-            .sum::<u32>();
+            .sum::<u32>()
+            .saturating_add(pending_dynamic_tokens);
         if estimated_prompt_tokens < force_threshold {
             return None;
         }
@@ -1610,7 +2431,7 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use memmgr type=scratch op=write kind=context_offload for important but lengthy existing deltas or kind=notes for compact checkpoints, then use memmgr type=context op=shrink on covered delta_id ranges. Do not target prompt_0.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use memmgr type=scratch op=write kind=context_offload for important but lengthy existing deltas or kind=notes for compact checkpoints, then use memmgr type=context op=discard on covered delta_id ranges. Do not target prompt_0.";
         Some(format!(
             "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{instruction}",
             self.max_llm_input_tokens
@@ -1692,7 +2513,265 @@ impl AgentCore {
         rows
     }
 
-    fn execute_action(&mut self, action: ParsedAction) -> ActionExecution {
+    fn execute_action_groups(
+        &mut self,
+        groups: Vec<ParsedActionGroup>,
+        runtime: &mut dyn ActionRuntime,
+    ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
+        let mut result_lines = Vec::new();
+        for group in groups {
+            if group.order == ActionGroupOrder::Parallel && group.actions.len() > 1 {
+                match self.execute_parallel_action_group(group.actions, runtime) {
+                    Ok(group_results) => result_lines.extend(group_results),
+                    Err((group_results, pending)) => {
+                        result_lines.extend(group_results);
+                        return Err((result_lines, pending));
+                    }
+                }
+                continue;
+            }
+            for action in group.actions {
+                match self.execute_action(action, runtime) {
+                    ActionExecution::Completed(result) => result_lines.push(result),
+                    ActionExecution::NeedsApproval(pending) => {
+                        return Err((result_lines, pending));
+                    }
+                }
+            }
+        }
+        Ok(result_lines)
+    }
+
+    fn can_spawn_parallel_bash_action(&self, action: &ParsedAction) -> bool {
+        self.bash_approval_mode == BashApprovalMode::Approve && action.action == "run_bash"
+    }
+
+    fn spawn_approved_parallel_bash_action(
+        &mut self,
+        idx: usize,
+        pending: PendingApproval,
+    ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)> {
+        let action = ParsedAction {
+            action: pending.request.action.clone(),
+            intent: pending.intent.clone(),
+            parent_intent: None,
+            raw_input: pending.approved_action.audit_input(
+                &pending.request.approval_id,
+                &pending.request.risk,
+                &pending.request.reason,
+            ),
+        };
+        let pending_for_thread = pending.clone();
+        let shell_jobs = self.shell_jobs.clone();
+        self.current_stats.tool_calls += 1;
+        thread::spawn(move || {
+            let result = match &pending_for_thread.approved_action {
+                PendingApprovedAction::RunBash {
+                    command,
+                    background,
+                    timeout_ms,
+                    interval_ms,
+                    once_timeout_ms,
+                    session_id,
+                    turn_id,
+                } => {
+                    let mut should_cancel = || false;
+                    let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
+                    shell_exec::execute_approved_bash(
+                        command,
+                        *background,
+                        *timeout_ms,
+                        *interval_ms,
+                        *once_timeout_ms,
+                        session_id,
+                        turn_id,
+                        interval_ms.is_none(),
+                        &pending_for_thread.request,
+                        &shell_jobs,
+                        &mut runtime,
+                    )
+                }
+            };
+            (idx, action, pending_for_thread, result)
+        })
+    }
+
+    fn spawn_parallel_bash_action(
+        &mut self,
+        idx: usize,
+        action: ParsedAction,
+    ) -> thread::JoinHandle<(usize, ParsedAction, String)> {
+        let action_for_audit = action.clone();
+        let shell_jobs = self.shell_jobs.clone();
+        let session_id = self.current_session_id();
+        let turn_id = self.current_action_turn_id();
+        self.current_stats.tool_calls += 1;
+        thread::spawn(move || {
+            let loop_command = action.input_str("loop_cmd");
+            let is_regular_command = loop_command.is_empty();
+            let cmd_command = action.input_str("cmd");
+            let command = if is_regular_command {
+                cmd_command.clone()
+            } else {
+                loop_command.clone()
+            };
+            let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
+                ActionExecution::Completed(
+                    "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.".to_string(),
+                )
+            } else {
+                let mut should_cancel = || false;
+                let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
+                shell_exec::execute_run_bash(
+                    &command,
+                    action.background(),
+                    if is_regular_command {
+                        action.timeout_ms_i64(5000)
+                    } else {
+                        action.input_i64("loop_timeout_ms").unwrap_or(600_000)
+                    },
+                    action.input_u64("interval_ms"),
+                    action.input_u64("once_timeout_ms").unwrap_or(5000),
+                    BashApprovalMode::Approve,
+                    &action.intent,
+                    &shell_jobs,
+                    &session_id,
+                    &turn_id,
+                    is_regular_command,
+                    &mut runtime,
+                )
+            };
+            let result = match result {
+                ActionExecution::Completed(result) => result,
+                ActionExecution::NeedsApproval(_) => format!(
+                    "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
+                    &command,
+                ),
+            };
+            (idx, action_for_audit, result)
+        })
+    }
+
+    fn collect_parallel_bash_handles(
+        &self,
+        handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
+        results: &mut [Option<String>],
+        runtime: &mut dyn ActionRuntime,
+    ) {
+        for handle in handles {
+            match handle.join() {
+                Ok((idx, action, result)) => {
+                    let result = annotate_action_result_with_intent(result, &action.intent);
+                    self.record_action_audit(&action, "completed", Some(&result));
+                    self.emit_action_finish_topic(&action, &result, runtime);
+                    if let Some(slot) = results.get_mut(idx) {
+                        *slot = Some(result);
+                    }
+                }
+                Err(_) => {
+                    let result =
+                        "Action result: run_bash\nerror: parallel_action_panicked".to_string();
+                    if let Some(slot) = results.iter_mut().find(|slot| slot.is_none()) {
+                        *slot = Some(result);
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_approved_parallel_bash_handles(
+        &self,
+        handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)>>,
+        results: &mut [Option<String>],
+        runtime: &mut dyn ActionRuntime,
+    ) {
+        for handle in handles {
+            match handle.join() {
+                Ok((idx, action, pending, result)) => {
+                    let result = annotate_action_result_with_intent(result, &action.intent);
+                    self.record_pending_approval_audit(&pending, true, &result);
+                    self.emit_action_finish_topic(&action, &result, runtime);
+                    if let Some(slot) = results.get_mut(idx) {
+                        *slot = Some(result);
+                    }
+                }
+                Err(_) => {
+                    let result =
+                        "Action result: run_bash\nerror: parallel_action_panicked".to_string();
+                    if let Some(slot) = results.iter_mut().find(|slot| slot.is_none()) {
+                        *slot = Some(result);
+                    }
+                }
+            }
+        }
+    }
+
+    fn ordered_parallel_results(results: Vec<Option<String>>) -> Vec<String> {
+        results.into_iter().flatten().collect()
+    }
+
+    fn pending_approval_with_parallel_continuation(
+        mut pending: PendingApproval,
+        actions: Vec<ParsedAction>,
+        current_index: usize,
+        approved: Vec<(usize, PendingApproval)>,
+        denied_results: Vec<(usize, String)>,
+        completed_results: Vec<(usize, String)>,
+    ) -> PendingApproval {
+        pending.continuation = Some(PendingApprovalContinuation::ParallelGroup {
+            actions,
+            current_index,
+            approved,
+            denied_results,
+            completed_results,
+        });
+        pending
+    }
+
+    fn execute_parallel_action_group(
+        &mut self,
+        actions: Vec<ParsedAction>,
+        runtime: &mut dyn ActionRuntime,
+    ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
+        let action_count = actions.len();
+        let mut results = vec![None; action_count];
+        let mut handles = Vec::new();
+        for (idx, action) in actions.iter().cloned().enumerate() {
+            if self.can_spawn_parallel_bash_action(&action) {
+                handles.push(self.spawn_parallel_bash_action(idx, action));
+                continue;
+            }
+            match self.execute_action(action, runtime) {
+                ActionExecution::Completed(result) => {
+                    results[idx] = Some(result);
+                }
+                ActionExecution::NeedsApproval(pending) => {
+                    self.collect_parallel_bash_handles(handles, &mut results, runtime);
+                    let pending = Self::pending_approval_with_parallel_continuation(
+                        pending,
+                        actions,
+                        idx,
+                        Vec::new(),
+                        Vec::new(),
+                        results
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(idx, result)| result.map(|result| (idx, result)))
+                            .collect(),
+                    );
+                    return Err((Vec::new(), pending));
+                }
+            }
+        }
+        self.collect_parallel_bash_handles(handles, &mut results, runtime);
+        Ok(Self::ordered_parallel_results(results))
+    }
+
+    fn execute_action(
+        &mut self,
+        action: ParsedAction,
+        runtime: &mut dyn ActionRuntime,
+    ) -> ActionExecution {
         let action_for_audit = action.clone();
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
@@ -1734,24 +2813,26 @@ impl AgentCore {
             }
         };
         self.current_stats.tool_calls += 1;
-        let execution = match tool_registry::execute_builtin_tool(self, dispatch_name, &action) {
-            Some(execution) => execution,
-            None => ActionExecution::Completed(format!(
-                "Action result: {}\nunsupported native action",
-                dispatch_name
-            )),
-        };
+        let execution =
+            match tool_registry::execute_builtin_tool(self, dispatch_name, &action, runtime) {
+                Some(execution) => execution,
+                None => ActionExecution::Completed(format!(
+                    "Action result: {}\nunsupported native action",
+                    dispatch_name
+                )),
+            };
         match execution {
             ActionExecution::Completed(result) => {
                 let result = annotate_action_result_with_intent(result, &action.intent);
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
+                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
                 ActionExecution::Completed(result)
             }
             ActionExecution::NeedsApproval(pending) => {
                 let result = annotate_action_result_with_intent(format!(
                     "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
                     action_for_audit.action,
-                    pending.command,
+                    pending.approved_action.command(),
                     pending.request.approval_id,
                     pending.request.risk,
                     pending.request.reason
@@ -1760,6 +2841,25 @@ impl AgentCore {
                 ActionExecution::NeedsApproval(pending)
             }
         }
+    }
+
+    fn emit_action_finish_topic(
+        &self,
+        action: &ParsedAction,
+        result: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) {
+        let notification = notification::notification_from_action(action);
+        let mut event = host::notification_topic_event(&self.current_session_id(), &notification);
+        event.topic.attributes["event"] = json!("finish");
+        event.topic.attributes["active"] = json!(false);
+        event.payload["event"] = json!("finish");
+        event.payload["active"] = json!(false);
+        event.payload["status"] = json!(Self::action_finish_status(action, result));
+        if let Some(pid) = action_result_pid(result) {
+            event.payload["pid"] = json!(pid);
+        }
+        runtime.on_core_topic_events(&[event]);
     }
 
     fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> String {
@@ -1773,6 +2873,47 @@ impl AgentCore {
             return self.tool_jobs.spawn(&action.action, path, &payload);
         }
         executor::execute_command_action(&action.action, path, &payload, action.shell_timeout_ms())
+    }
+
+    fn action_finish_status(action: &ParsedAction, result: &str) -> &'static str {
+        let lower = result.to_lowercase();
+        if action.action == "run_bash" && action.background() {
+            return "background_running";
+        }
+        if action.action == "capmgr" && action.input_lower("op") == "job_status" {
+            if lower.contains("state: finished") || lower.contains("has finished") {
+                return "background_finished";
+            }
+            if lower.contains("state: cancelled") || lower.contains("was cancelled") {
+                return "cancelled";
+            }
+            if lower.contains("state: running") || lower.contains("still running") {
+                return "background_running";
+            }
+        }
+        if lower.contains("polling state: finished")
+            || lower.contains("exit code: 0")
+            || lower.contains("status: 0")
+            || lower.contains("the command finished")
+        {
+            return "completed";
+        }
+        if lower.contains("polling state: timeout")
+            || lower.contains("timed out")
+            || lower.contains("timeout")
+        {
+            return "timeout";
+        }
+        if lower.contains("cancelled") {
+            return "cancelled";
+        }
+        if lower.contains("not executed")
+            || lower.contains("invalid_input")
+            || lower.contains("error:")
+        {
+            return "failed";
+        }
+        "completed"
     }
 
     fn record_action_audit(&self, action: &ParsedAction, status: &str, result: Option<&str>) {
@@ -1816,14 +2957,11 @@ impl AgentCore {
                 } else {
                     "denied_by_user".to_string()
                 },
-                input: json!({
-                    "command": pending.command,
-                    "background": pending.background,
-                    "timeout_ms": pending.timeout_ms,
-                    "approval_id": pending.request.approval_id,
-                    "risk": pending.request.risk,
-                    "reason": pending.request.reason,
-                }),
+                input: pending.approved_action.audit_input(
+                    &pending.request.approval_id,
+                    &pending.request.risk,
+                    &pending.request.reason,
+                ),
                 result_summary: Some(compact_text(result, 2_000)),
             },
             turn_id,
@@ -2041,6 +3179,17 @@ impl AgentCore {
     }
 }
 
+fn action_result_pid(result: &str) -> Option<u32> {
+    result.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("pid=")?;
+        let pid = rest
+            .split(|ch: char| !ch.is_ascii_digit())
+            .next()
+            .unwrap_or_default();
+        pid.parse::<u32>().ok()
+    })
+}
+
 #[derive(Debug, Clone)]
 struct FileMemoryStore {
     dir: PathBuf,
@@ -2129,6 +3278,11 @@ impl FileMemoryStore {
             .map_err(std::io::Error::other)?
     }
 
+    fn count(&self) -> std::io::Result<usize> {
+        self.guard
+            .with_read(|| self.read_all_unlocked().map(|rows| rows.len()))
+            .map_err(std::io::Error::other)?
+    }
     fn update(
         &self,
         operation: &str,
@@ -2367,7 +3521,7 @@ impl FileMemoryStore {
 
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: query|schema|sql|insert|update|upsert|delete\n- raw_chat: query|sql|delete\n- scratch: query|write|read|delete\n- context: shrink\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from query results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat query lists recent chat records. loaded_chat_records={}.",
+            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|sql|delete\n- scratch: search|write|read|delete\n- context: discard\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -2459,7 +3613,7 @@ impl FileMemoryStore {
         }
         let mut stmt = conn
             .prepare(sql)
-            .map_err(|_| "sql_prepare_failed".to_string())?;
+            .map_err(|err| format!("sql_prepare_failed: {err}"))?;
         let column_names = stmt
             .column_names()
             .into_iter()
@@ -2468,15 +3622,18 @@ impl FileMemoryStore {
         let column_count = column_names.len();
         let mut rows = stmt
             .query(params_from_iter(params.iter().map(String::as_str)))
-            .map_err(|_| "sql_query_failed".to_string())?;
+            .map_err(|err| format!("sql_query_failed: {err}"))?;
         let mut out = Vec::new();
-        while let Some(row) = rows.next().map_err(|_| "sql_row_failed".to_string())? {
+        while let Some(row) = rows
+            .next()
+            .map_err(|err| format!("sql_row_failed: {err}"))?
+        {
             let mut cells = Vec::new();
             #[allow(clippy::needless_range_loop)]
             for idx in 0..column_count {
                 let value = match row
                     .get_ref(idx)
-                    .map_err(|_| "sql_value_failed".to_string())?
+                    .map_err(|err| format!("sql_value_failed: {err}"))?
                 {
                     ValueRef::Null => "NULL".to_string(),
                     ValueRef::Integer(v) => v.to_string(),
@@ -3088,7 +4245,7 @@ fn memory_missing_expected_version_result(
     current_content: &str,
 ) -> String {
     format!(
-        "missing_expected_version id={} current_version={} current_content={} hint=query with memmgr type=durable op=query or op=sql first, then retry memmgr type=durable op=update with expected_version=current_version",
+        "missing_expected_version id={} current_version={} current_content={} hint=read the current row with memmgr type=durable op=sql first, then retry memmgr type=durable op=update with expected_version=current_version",
         id,
         current_version,
         compact_text(current_content, 240)
@@ -3152,8 +4309,8 @@ pub(crate) fn format_scratch_read_result(record: &ScratchNoteRecord) -> String {
 fn prompt_type_role_for_scratch(prompt_type: &str) -> &'static str {
     match prompt_type {
         "user_question" | "user_supplement" => "USER",
-        "llm_response" | "llm_free_talk" => "TIMEM_ASSISTANT",
-        "result_of_llm_action" => "ACTIONS",
+        "llm_response" | "llm_free_talk" => "ASSISTANT",
+        "result_of_llm_action" => "SYSTEM",
         _ => "SYSTEM",
     }
 }
@@ -3393,5 +4550,131 @@ fn step_to_json(step: CoreStep) -> serde_json::Value {
             "repair_issue": turn.repair_issue,
             "stop_summary": turn.stop_summary
         }),
+    }
+}
+
+#[cfg(test)]
+mod prompt_component_tests {
+    use super::*;
+
+    fn test_core(name: &str) -> AgentCore {
+        let dir = std::env::temp_dir().join(format!(
+            "timem_prompt_component_test_{}_{}",
+            name,
+            super::unique_id("tmp")
+        ));
+        AgentCore::new(
+            "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+            CoreProfile {
+                name: "test".to_string(),
+                provider: "test".to_string(),
+                model: "test".to_string(),
+            },
+            dir,
+        )
+    }
+
+    #[test]
+    fn build_next_prompt_orders_pending_components_without_role_merging() {
+        let mut core = test_core("ordering");
+        core.set_assistant_speaker_name("Ai4");
+
+        core.submit_prompt_component_at(
+            PromptComponentRole::system(),
+            "result_of_llm_action",
+            "Action result: run_bash\nold result",
+            "previous_model_response",
+            10,
+        );
+        core.submit_prompt_component_at(
+            PromptComponentRole::user(),
+            "user_question",
+            "new input",
+            "user_input",
+            20,
+        );
+        core.submit_prompt_component_at(
+            PromptComponentRole::system(),
+            "runtime_note",
+            "found something new",
+            "runtime",
+            30,
+        );
+        core.submit_prompt_component_at(
+            PromptComponentRole::assistant("Ai4"),
+            "free_talk",
+            "assistant note",
+            "previous_model_response",
+            40,
+        );
+
+        let prompt = core.build_next_prompt();
+        let system_first = prompt
+            .find("## SYSTEM\n\nThe following are results of Ai4 newly initiated actions:")
+            .unwrap();
+        let action_result = prompt.find("Action result: run_bash").unwrap();
+        let user = prompt.find("## USER\n\nnew input").unwrap();
+        let system_second = prompt.find("## SYSTEM\n\nfound something new").unwrap();
+        let assistant = prompt.find("## Ai4\n\nassistant note").unwrap();
+
+        assert!(system_first < user);
+        assert!(system_first < action_result);
+        assert!(action_result < user);
+        assert!(user < system_second);
+        assert!(system_second < assistant);
+        assert_eq!(prompt.matches("## SYSTEM").count(), 2);
+        let dynamic_prompt = prompt.split("[BEGIN DELTA]").nth(1).unwrap_or("");
+        assert!(!dynamic_prompt.contains("created_at_ms"));
+        assert!(!dynamic_prompt.contains("sequence"));
+        assert!(!dynamic_prompt.contains("batch_id"));
+    }
+
+    #[test]
+    fn previous_model_response_components_share_earliest_logical_time() {
+        let mut core = test_core("previous_batch");
+        let batch_time = 100;
+        core.submit_prompt_components_from_slice_texts(
+            vec![
+                (
+                    "llm_free_talk".to_string(),
+                    "previous free talk".to_string(),
+                ),
+                (
+                    "llm_response".to_string(),
+                    "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\nprevious final"
+                        .to_string(),
+                ),
+            ],
+            "previous_model_response",
+            batch_time,
+        );
+        core.submit_prompt_component_at(
+            PromptComponentRole::user(),
+            "user_question",
+            "next user input",
+            "user_input",
+            200,
+        );
+
+        assert_eq!(core.pending_prompt_components.len(), 3);
+        assert!(core.pending_prompt_components[..2]
+            .iter()
+            .all(|component| component.created_at_ms == batch_time));
+        assert!(
+            core.pending_prompt_components[0].sequence < core.pending_prompt_components[1].sequence
+        );
+
+        let prompt = core.build_next_prompt();
+        let free_talk = prompt.find("previous free talk").unwrap();
+        let final_answer = prompt.find("previous final").unwrap();
+        let user = prompt.find("next user input").unwrap();
+        assert!(free_talk < user);
+        assert!(final_answer < user);
+    }
+
+    #[test]
+    fn action_result_pid_extracts_timeout_pid_for_action_topic_metadata() {
+        let result = "Action result: run_bash\npid=49189, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.\nCommand: sleep 18";
+        assert_eq!(super::action_result_pid(result), Some(49189));
     }
 }

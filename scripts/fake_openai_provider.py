@@ -50,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
             content = (
                 "## Progress\n"
                 + progress
-                + "\n\n## Intermediate_Actions\n```action\n"
+                + "\n\n## Working_Still_Action\n```action\n"
                 + json.dumps(
                     {
                         "action": "run_bash",
@@ -59,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
                             "自动换行和状态栏刷新不会乱框。"
                         ),
                         "args": {
-                            "command": (
+                            "cmd": (
                                 "printf 'STRESS_ACTION_DONE\\n'; "
                                 "sleep 1; "
                                 "printf '长输出-一二三四五六七八九十-abcdefghijklmnopqrstuvwxyz-1234567890-│└─\\n'"
@@ -71,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 + "\n```"
             )
-        elif "## USER" in prompt and "User supplement during current turn:" in prompt and "SUPPLEMENT_OK" in prompt:
+        elif "## USER" in prompt and "SUPPLEMENT_OK" in prompt:
             content = "## Status\nfinished\n\n## Final_Answer\nSUPPLEMENT_OK"
         else:
             time.sleep(self.response_delay)

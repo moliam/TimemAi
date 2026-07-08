@@ -570,9 +570,6 @@ pub fn parse_provider_response(
             )
         }
     };
-    if content.trim().is_empty() {
-        return Err("empty_model_content".to_string());
-    }
     Ok(LlmResponse {
         content,
         model_name: config.model.clone(),
@@ -587,7 +584,9 @@ pub fn interpret_provider_http_response(
     body_text: &str,
     stderr_text: &str,
 ) -> ProviderHttpResponseInterpretation {
+    let mut parsed_json = true;
     let raw_json: Value = serde_json::from_str(body_text).unwrap_or_else(|_| {
+        parsed_json = false;
         json!({
             "raw_text": body_text,
             "stderr": stderr_text,
@@ -595,6 +594,13 @@ pub fn interpret_provider_http_response(
     });
     let result = if !(200..300).contains(&status) {
         Err(provider_http_error_message(status, &raw_json))
+    } else if !parsed_json {
+        Ok(LlmResponse {
+            content: body_text.to_string(),
+            model_name: config.model.clone(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
     } else {
         parse_provider_response(config, &raw_json)
     };
@@ -852,6 +858,19 @@ mod tests {
         );
         assert!(markdown_body.get("response_format").is_none());
 
+        aliyun.response_protocol = ResponseProtocolKind::Xml;
+        assert_eq!(plan_structured_output(&aliyun), StructuredOutputHint::None);
+        let xml_body = build_provider_request(
+            &aliyun,
+            &[ProviderPromptBlock {
+                role: ProviderPromptRole::System,
+                text: "The top-level response is XML, not JSON or Markdown.".to_string(),
+                cache: ProviderCacheControl::None,
+            }],
+            plan_structured_output(&aliyun),
+        );
+        assert!(xml_body.get("response_format").is_none());
+
         let mut custom = config(ApiProtocol::OpenAiCompatible);
         custom.provider = "custom".to_string();
         custom.response_protocol = ResponseProtocolKind::Json;
@@ -908,12 +927,35 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_request_sends_formatted_response_trailer_without_cache_control() {
+        let mut config = config(ApiProtocol::Anthropic);
+        config.provider = "anthropic".to_string();
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
+            crate::prompt_render::formatted_response_trailer("XML")
+        );
+
+        let prepared = prepare_provider_request(&config, &prompt);
+        let content = prepared.body["messages"][0]["content"].as_array().unwrap();
+
+        assert_eq!(
+            content.last().unwrap()["text"],
+            "Follow the system prompt, give your XML formatted response:"
+        );
+        assert_eq!(content.last().unwrap().get("cache_control"), None);
+        assert!(!content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Follow the system prompt, give your XML formatted response:"));
+    }
+
+    #[test]
     fn openai_responses_request_uses_official_shape() {
         let mut config = config(ApiProtocol::OpenAiResponses);
         config.provider = "openai".to_string();
         config.model = "gpt-4o".to_string();
         config.max_llm_output_tokens = 2048;
-        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nUser question:\nhello\n[END DELTA]";
+        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]";
 
         let prepared = prepare_provider_request(&config, prompt);
         let body = prepared.body;
@@ -934,7 +976,7 @@ mod tests {
     fn openai_compatible_request_splits_static_and_dynamic_prompt() {
         let mut config = config(ApiProtocol::OpenAiCompatible);
         config.provider = "aliyun".to_string();
-        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nUser question:\nsecret\n[END DELTA]";
+        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nsecret\n[END DELTA]";
 
         let prepared = prepare_provider_request(&config, prompt);
         let body = prepared.body;
@@ -981,6 +1023,29 @@ mod tests {
                 .contains(&format!("delta {idx}")));
             assert_eq!(messages[idx]["cache_control"]["type"], "ephemeral");
         }
+    }
+
+    #[test]
+    fn openai_compatible_request_sends_formatted_response_trailer_without_cache_control() {
+        let mut config = config(ApiProtocol::OpenAiCompatible);
+        config.provider = "aliyun".to_string();
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
+            crate::prompt_render::formatted_response_trailer("JSON")
+        );
+
+        let prepared = prepare_provider_request(&config, &prompt);
+        let messages = prepared.body["messages"].as_array().unwrap();
+
+        assert_eq!(
+            messages.last().unwrap()["content"],
+            "Follow the system prompt, give your JSON formatted response:"
+        );
+        assert_eq!(messages.last().unwrap().get("cache_control"), None);
+        assert!(!messages[messages.len() - 2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Follow the system prompt, give your JSON formatted response:"));
     }
 
     #[test]
@@ -1087,7 +1152,7 @@ mod tests {
             interpret_provider_http_response(&config, 200, "not json", "curl stderr detail");
         assert_eq!(interpreted.raw_json["raw_text"], "not json");
         assert_eq!(interpreted.raw_json["stderr"], "curl stderr detail");
-        assert_eq!(interpreted.result.unwrap_err(), "empty_model_content");
+        assert_eq!(interpreted.result.unwrap().content, "not json");
     }
 
     #[test]
@@ -1159,6 +1224,19 @@ mod tests {
 
     #[test]
     fn openai_compatible_response_reads_cache_and_truncation() {
+        let empty = parse_provider_response(
+            &config(ApiProtocol::OpenAiCompatible),
+            &json!({
+                "choices":[{"finish_reason":"stop","message":{"content":"","role":"assistant"}}],
+                "usage":{"prompt_tokens":15707,"completion_tokens":2,"total_tokens":15709}
+            }),
+        )
+        .unwrap();
+        assert_eq!(empty.content, "");
+        assert_eq!(empty.usage.prompt_tokens, 15707);
+        assert_eq!(empty.usage.completion_tokens, 2);
+        assert!(!empty.truncated);
+
         let response = parse_provider_response(
             &config(ApiProtocol::OpenAiCompatible),
             &json!({

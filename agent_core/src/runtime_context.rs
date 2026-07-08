@@ -57,6 +57,21 @@ pub fn turn_supporting_context(
     context
 }
 
+pub fn runtime_info_context(entries: &[impl AsRef<str>]) -> Option<String> {
+    let mut lines = entries
+        .iter()
+        .map(AsRef::as_ref)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.insert(0, "runtime_info:".to_string());
+    Some(lines.join("\n"))
+}
+
 pub fn format_supporting_context(input: SupportingContextInput<'_>, runtime_time: &str) -> String {
     format!(
         "provider: {}, model: {}\nruntime: {}\nrun_bash_target: {}\nruntime_time: {}",
@@ -184,5 +199,21 @@ mod tests {
         assert!(context.contains("provider: aliyun, model: qwen-plus"));
         assert!(context.contains("\n\nwork instructions\nworkspace refs"));
         assert!(!context.contains("  work instructions"));
+    }
+
+    #[test]
+    fn runtime_info_context_uses_host_supplied_entries_without_cwd() {
+        let context = runtime_info_context(&[
+            "ui: shell",
+            "run_bash: available; executes on user_local_machine",
+            "",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            context,
+            "runtime_info:\n- ui: shell\n- run_bash: available; executes on user_local_machine"
+        );
+        assert!(!context.contains("cwd:"));
     }
 }

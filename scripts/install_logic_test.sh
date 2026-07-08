@@ -48,4 +48,24 @@ if grep -q 'Run: $COMMAND_NAME --space' "$ROOT_DIR/install.sh"; then
   exit 1
 fi
 
+if ! grep -q 'cargo fetch --locked' "$ROOT_DIR/install.sh"; then
+  echo "install script should fetch Rust crate dependencies from Cargo.lock before building" >&2
+  exit 1
+fi
+
+if ! grep -q 'cargo build --locked -p timem_shell --release' "$ROOT_DIR/install.sh"; then
+  echo "install script should build the release binary with locked dependencies" >&2
+  exit 1
+fi
+
+if ! grep -q 'pkg-config' "$ROOT_DIR/install.sh"; then
+  echo "install script should cover Linux pkg-config for native Rust crate builds" >&2
+  exit 1
+fi
+
+if ! grep -q 'Cargo downloads Rust crates' "$ROOT_DIR/README.md"; then
+  echo "README should explain that Cargo installs Rust crate dependencies automatically" >&2
+  exit 1
+fi
+
 echo "install_logic_test: ok"

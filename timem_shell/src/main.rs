@@ -10,6 +10,7 @@ use reedline::{
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -29,19 +30,20 @@ use timem_shell::{
     observation_panel_width_for_terminal, parse_cli_args, provider_config_from_env,
     render_final_response_at, render_prof_report_data, render_shell_status_bar,
     render_thinking_view_at, render_turn_outcome_text, run_session_turn,
-    runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
-    stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_load_topic_event,
+    runtime_active_elapsed_secs, runtime_info_context, runtime_profile_report,
+    shell_status_message_from_core_topic, stale_context_decision_request, topic_event_status_hint,
+    work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
     work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
     CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
-    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
-    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
-    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
-    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
-    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
-    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
-    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
-    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
+    LongRunningCommandContinueRequest, ModelDirection, NoopTurnUi, ObservationEvent,
+    ObservationPanel, OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
+    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
+    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot,
+    StaleContextDecisionRequest, ThinkingViewSnapshot, TurnInput, TurnUi,
+    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
+    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
+    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, SPINNER_ICONS,
+    TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -109,7 +111,7 @@ fn main() {
         .as_deref()
         .or_else(|| env.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str))
         .map(ResponseProtocolKind::from_name)
-        .unwrap_or(ResponseProtocolKind::Markdown);
+        .unwrap_or_default();
     config.response_protocol = response_protocol;
     core.set_response_protocol(response_protocol);
     core.configure_self_tool_runtime(
@@ -135,11 +137,13 @@ fn main() {
         }
     }
     core.configure_runtime_from_host(&config, bash_approval_mode);
+    let session_runtime_info = runtime_info_context(&shell_runtime_info_entries(&core));
     let session = session_id();
     let mut workspace_pending = !load_workspace_dirs_from_path(&workspace_config).is_empty();
 
     if let Some(input) = options.once_json_input.as_deref() {
         let context = combine_additional_contexts([
+            session_runtime_info.as_deref(),
             work_instruction_context.as_deref(),
             options.supporting_context.as_deref(),
         ]);
@@ -342,6 +346,7 @@ fn main() {
             &mut turn_ui,
         );
         let turn_additional_context = combine_additional_contexts([
+            session_runtime_info.as_deref(),
             turn_work_instruction_context.as_deref(),
             workspace_ctx.as_deref(),
         ]);
@@ -376,6 +381,47 @@ fn main() {
 
 fn consume_turn_cancel_request() -> bool {
     TURN_CANCEL_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+fn shell_runtime_info_entries(core: &AgentCore) -> Vec<String> {
+    let ui = if std::env::var("ITERM_SESSION_ID").is_ok() {
+        "iterm2"
+    } else {
+        "shell"
+    };
+    let mut entries = vec![
+        format!("ui: {ui}"),
+        format!("os: {}", host_os_type()),
+        format!("arch: {}", std::env::consts::ARCH),
+        format!("os_version: {}", host_os_version()),
+    ];
+    if core.capability_contains_tool("run_bash") {
+        entries.push("run_bash: available; executes on user_local_machine".to_string());
+    }
+    entries
+}
+
+fn host_os_type() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unknown"
+    }
+}
+
+fn host_os_version() -> String {
+    let mut uts = unsafe { std::mem::zeroed::<libc::utsname>() };
+    if unsafe { libc::uname(&mut uts) } != 0 {
+        return "unknown".to_string();
+    }
+    unsafe { CStr::from_ptr(uts.release.as_ptr()) }
+        .to_string_lossy()
+        .trim()
+        .to_string()
 }
 
 fn absolute_path(path: PathBuf) -> PathBuf {
@@ -422,6 +468,7 @@ impl TurnUi for CliTurnUi<'_> {
 
     fn on_model_request(&mut self, round: u32, prompt: &str) {
         if let Some(status) = self.status.as_deref_mut() {
+            status.settle_active_observations();
             status.set_model_direction(round, ModelDirection::Upstream);
             status.set_pending_request_usage(estimate_prompt_context_tokens(prompt));
             status.set_transient_observation("思考中...");
@@ -449,7 +496,6 @@ impl TurnUi for CliTurnUi<'_> {
                 status.set_intent(intent, hint.memory_activity);
             }
             status.apply_observation_events(observation_events_from_core_topic_events(events));
-            status.settle_active_observations();
         }
     }
 
@@ -500,6 +546,9 @@ impl TurnUi for CliTurnUi<'_> {
             }
             HostDecisionRequest::WorkInstructionLoad(request) => {
                 choose_work_instructions_load(&request) == ApprovalChoice::Allow
+            }
+            HostDecisionRequest::LongRunningCommandContinue(request) => {
+                request_long_running_command_continue(&request)
             }
         };
         if accepted {
@@ -782,6 +831,13 @@ fn request_stale_context_continue(request: StaleContextDecisionRequest) -> bool 
     }
 }
 
+fn request_long_running_command_continue(request: &LongRunningCommandContinueRequest) -> bool {
+    match choose_long_running_command_continue(request) {
+        ApprovalChoice::Allow => true,
+        ApprovalChoice::Deny => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApprovalChoice {
     Allow,
@@ -1026,6 +1082,36 @@ fn render_stale_context_choices(selected: ApprovalChoice) -> String {
     }
 }
 
+fn render_long_running_command_prompt(request: &LongRunningCommandContinueRequest) -> String {
+    let timeout_text = request.timeout_ms.map_or_else(
+        || "未提供 timeout_ms".to_string(),
+        |timeout_ms| {
+            let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+            let remaining = timeout.saturating_sub(request.elapsed);
+            format!(
+                "{}，剩余约 {}",
+                format_idle_duration(timeout),
+                format_idle_duration(remaining)
+            )
+        },
+    );
+    format!(
+        "\n命令仍在执行，已运行 {}，timeout={}。\ncommand: {}\n是否继续等待？选择“停止等待”会取消当前命令，并把这次取消作为用户补充交给模型继续判断。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        format_idle_duration(request.elapsed),
+        timeout_text,
+        request.command
+    )
+}
+
+fn render_long_running_command_choices(selected: ApprovalChoice) -> String {
+    let allow_label = "继续等待";
+    let deny_label = "停止等待";
+    match selected {
+        ApprovalChoice::Allow => format!("\x1b[7m[ {} ]\x1b[0m   {}", allow_label, deny_label),
+        ApprovalChoice::Deny => format!("  {}   \x1b[7m[ {} ]\x1b[0m", allow_label, deny_label),
+    }
+}
+
 fn format_idle_duration(duration: Duration) -> String {
     let total_minutes = duration.as_secs() / 60;
     let hours = total_minutes / 60;
@@ -1172,6 +1258,13 @@ fn choose_expand_output_tokens(request: OutputExpansionRequest) -> ApprovalChoic
 fn choose_stale_context_continue(request: StaleContextDecisionRequest) -> ApprovalChoice {
     print!("{}", render_stale_context_prompt(request));
     choose_with_keyboard(render_stale_context_choices, ApprovalChoice::Allow)
+}
+
+fn choose_long_running_command_continue(
+    request: &LongRunningCommandContinueRequest,
+) -> ApprovalChoice {
+    print!("{}", render_long_running_command_prompt(request));
+    choose_with_keyboard(render_long_running_command_choices, ApprovalChoice::Allow)
 }
 
 fn load_work_instructions_for_shell(
@@ -3054,7 +3147,7 @@ fn rewrite_submitted_user_line(input: &str, status_line_visible: bool) {
 }
 
 fn render_user_input_prompt(time_label: &str) -> String {
-    format!("[{time_label}] \x1b[1mYou\x1b[0m ❯❯ ")
+    format!("\x1b[94;1m[{time_label}] You ❯❯\x1b[0m ")
 }
 
 fn render_submitted_user_line_rewrite(
@@ -3445,7 +3538,7 @@ fn print_help() {
 }
 
 fn cli_help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; provider wire format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; model response parser: markdown|json, default markdown\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n  Response protocol: markdown\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; provider wire format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; model response parser: markdown|json|xml, default xml\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n  Response protocol: xml\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn runtime_help_text() -> &'static str {
@@ -3484,8 +3577,9 @@ mod static_prompt_tests {
         read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
         reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
         render_approval_choices, render_config_apply_report, render_config_menu,
-        render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
-        render_paste_recovery_choices, render_paste_recovery_prompt,
+        render_expand_output_choices, render_expand_output_prompt,
+        render_long_running_command_choices, render_long_running_command_prompt,
+        render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
         render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
         render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
         render_stale_context_prompt, render_startup_banner, render_startup_status_block,
@@ -3493,8 +3587,8 @@ mod static_prompt_tests {
         render_work_instructions_load_choices, render_work_instructions_load_prompt,
         render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
         rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
-        runtime_help_text, sanitize_user_input, startup_control_hint, strip_ansi,
-        strip_paste_markers, submitted_input_rows, thinking_supplement_terminal_mode,
+        runtime_help_text, sanitize_user_input, shell_runtime_info_entries, startup_control_hint,
+        strip_ansi, strip_paste_markers, submitted_input_rows, thinking_supplement_terminal_mode,
         timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
         workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
         ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey,
@@ -3505,11 +3599,11 @@ mod static_prompt_tests {
     };
     use agent_core::{
         stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
-        OutputExpansionRequest, ResponseProtocolKind, RoundLimitDecisionRequest,
-        RuntimeConfigApplyError, StaleContextDecisionRequest, WorkInstructionLoadMode,
-        WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
-        WorkspaceChange, WorkspaceCommandOutcome, WorkspaceCommandReport,
-        DEFAULT_STALE_CONTEXT_IDLE as STALE_CONTEXT_IDLE,
+        LongRunningCommandContinueRequest, OutputExpansionRequest, ResponseProtocolKind,
+        RoundLimitDecisionRequest, RuntimeConfigApplyError, StaleContextDecisionRequest,
+        WorkInstructionLoadMode, WorkInstructionLoadReport, WorkInstructionLoadRequest,
+        WorkInstructionLoadStatus, WorkspaceChange, WorkspaceCommandOutcome,
+        WorkspaceCommandReport, DEFAULT_STALE_CONTEXT_IDLE as STALE_CONTEXT_IDLE,
         DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD as STALE_CONTEXT_TOKEN_THRESHOLD,
     };
     use crossterm::event::Event;
@@ -3533,7 +3627,7 @@ mod static_prompt_tests {
 
     #[test]
     fn static_prompt_uses_full_shared_v1_resource() {
-        assert!(STATIC_PROMPT.contains("# Timem Static Prompt"));
+        assert!(STATIC_PROMPT.contains("# Timem System Prompt"));
         assert!(STATIC_PROMPT.contains("## Role"));
         assert!(STATIC_PROMPT.contains("## Memory"));
         assert!(STATIC_PROMPT.contains("## Tools And Skills"));
@@ -3550,6 +3644,7 @@ mod static_prompt_tests {
         assert!(STATIC_PROMPT.contains("persisted user/assistant chat records"));
         assert!(!STATIC_PROMPT.contains("\"durable|raw_chat|scratch|context\""));
         assert!(!STATIC_PROMPT.contains("\"durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink\""));
+        assert!(!STATIC_PROMPT.contains("\"query\": {\"type\": \"string\""));
         assert!(!STATIC_PROMPT.contains("\"tool_policy\""));
         assert!(!STATIC_PROMPT.contains("\"query_memory\""));
         assert!(!STATIC_PROMPT.contains("\"memory_schema\""));
@@ -3568,7 +3663,7 @@ mod static_prompt_tests {
         assert!(!STATIC_PROMPT.contains("Every model response must score"));
         assert!(STATIC_PROMPT.contains("Context maintenance"));
         assert!(STATIC_PROMPT.contains("`memmgr` actions"));
-        assert!(STATIC_PROMPT.contains("never targets this system prompt"));
+        assert!(STATIC_PROMPT.contains("do not target this system prompt"));
         assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
         assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));
         assert!(!STATIC_PROMPT.contains("\"action_result_guard\""));
@@ -3798,6 +3893,31 @@ mod static_prompt_tests {
         assert_eq!(
             render_stale_context_choices(ApprovalChoice::Deny),
             "  YES   \x1b[7m[ NO ]\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn long_running_command_prompt_is_keyboard_driven_and_defaults_to_wait() {
+        let request = LongRunningCommandContinueRequest::new(
+            "run_bash",
+            "sleep 120",
+            Duration::from_secs(65),
+            Some(180_000),
+        );
+
+        let prompt = render_long_running_command_prompt(&request);
+        assert!(prompt.contains("已运行 1 分钟"));
+        assert!(prompt.contains("timeout=3 分钟，剩余约 1 分钟"));
+        assert!(prompt.contains("command: sleep 120"));
+        assert!(prompt.contains("作为用户补充交给模型"));
+        assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
+        assert_eq!(
+            render_long_running_command_choices(ApprovalChoice::Allow),
+            "\x1b[7m[ 继续等待 ]\x1b[0m   停止等待"
+        );
+        assert_eq!(
+            render_long_running_command_choices(ApprovalChoice::Deny),
+            "  继续等待   \x1b[7m[ 停止等待 ]\x1b[0m"
         );
     }
 
@@ -5237,7 +5357,7 @@ mod static_prompt_tests {
     fn startup_status_block_groups_core_topics_away_from_help_text() {
         let rendered = render_startup_status_block(&[
             timem_shell::HostStatusMessage::info(
-                "Timem Core 启动成功：aliyun:qwen-plus，response protocol=markdown，tools=6，skills=0",
+                "Timem Core 启动成功：aliyun:qwen-plus，response protocol=xml，tools=6，skills=0",
             ),
             timem_shell::HostStatusMessage::info("已加载当前工作目录指令：AGENTS.md"),
         ]);
@@ -5329,14 +5449,18 @@ mod static_prompt_tests {
     fn submitted_user_line_rewrite_clears_wrapped_input_rows() {
         let rendered = render_submitted_user_line_rewrite("abcdef", false, 10, "12:00:00");
         assert!(rendered.starts_with("\x1b[3F\r\x1b[J"));
-        assert!(rendered.ends_with("[12:00:00] \x1b[1mYou\x1b[0m ❯❯ abcdef\n"));
+        assert!(rendered.ends_with("\x1b[94;1m[12:00:00] You ❯❯\x1b[0m abcdef\n"));
     }
 
     #[test]
-    fn user_input_prompt_uses_bold_you_and_double_arrow() {
+    fn user_input_prompt_uses_bright_blue_prefix_and_double_arrow() {
         assert_eq!(
             render_user_input_prompt("12:00:00"),
-            "[12:00:00] \x1b[1mYou\x1b[0m ❯❯ "
+            "\x1b[94;1m[12:00:00] You ❯❯\x1b[0m "
+        );
+        assert_eq!(
+            display_width(&render_user_input_prompt("12:00:00")),
+            display_width("[12:00:00] You ❯❯ ")
         );
     }
 
@@ -5408,5 +5532,33 @@ mod static_prompt_tests {
                 .map(|line| wrapped_terminal_rows(display_width(line), 40))
                 .sum::<usize>()
         );
+    }
+
+    #[test]
+    fn shell_runtime_info_is_host_supplied_and_has_no_cwd() {
+        let core = AgentCore::new(
+            STATIC_PROMPT,
+            CoreProfile {
+                name: "test".into(),
+                provider: "aliyun".into(),
+                model: "qwen-plus".into(),
+            },
+            std::env::temp_dir().join(format!("timem_shell_runtime_info_{}", epoch_millis())),
+        );
+        let entries = shell_runtime_info_entries(&core);
+        let joined = entries.join("\n");
+
+        assert!(joined.contains("ui:"));
+        assert!(
+            joined.contains("os: macos")
+                || joined.contains("os: linux")
+                || joined.contains("os: windows")
+                || joined.contains("os: unknown")
+        );
+        assert!(joined.contains("arch: "));
+        assert!(joined.contains("os_version: "));
+        assert!(joined.contains("run_bash: available"));
+        assert!(!joined.contains("cwd:"));
+        assert!(!joined.contains("/Users/"));
     }
 }

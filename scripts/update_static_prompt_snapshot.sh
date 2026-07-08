@@ -4,8 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-OUT_MARKDOWN="resources/protocol/markdown/expanded.md"
-OUT_JSON="resources/protocol/json/expanded.md"
+OUT_DIR="${TIMEM_EXPANDED_PROMPT_DIR:-target/static-prompt-expanded}"
+OUT_MARKDOWN="$OUT_DIR/markdown.md"
+OUT_JSON="$OUT_DIR/json.md"
+OUT_XML="$OUT_DIR/xml.md"
 TMP_DIR="$(mktemp -d)"
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -18,32 +20,79 @@ render_one() {
   TIMEM_RESPONSE_PROTOCOL="$protocol" cargo run -q -p agent_core --example expand_static_prompt > "$out"
 }
 
-TMP_MARKDOWN="$TMP_DIR/markdown.md"
-TMP_JSON="$TMP_DIR/json.md"
-render_one markdown "$TMP_MARKDOWN"
-render_one json "$TMP_JSON"
-
-if [ "${1:-}" = "--check" ]; then
-  failed=0
-  for pair in "$TMP_MARKDOWN:$OUT_MARKDOWN" "$TMP_JSON:$OUT_JSON"; do
-    tmp="${pair%%:*}"
-    out="${pair#*:}"
-    if ! cmp -s "$tmp" "$out"; then
-      echo "expanded static prompt snapshot is stale: $out" >&2
-      diff -u "$out" "$tmp" >&2 || true
-      failed=1
+validate_one() {
+  local protocol="$1"
+  local out="$2"
+  shift 2
+  local required=(
+    "[BEGIN SYSTEM PROMPT]"
+    '#### `run_bash`'
+    '#### `memmgr`'
+    "**Usage**"
+    "**Result**"
+    '"args": {'
+    '"cmd": "'
+  )
+  local forbidden=(
+    "Runtime info:"
+    "{{RT_ENV}}"
+    "cwd:"
+    "$HOME"
+    "\"output\": {"
+    "Background job id when background=true."
+    "\"output_file\""
+    "\"status_file\""
+    "\"approval_status\""
+    "\"static_prefix_policy\""
+    "static prefix is immutable global guidance"
+    "\"ui_status\""
+    "ui_label"
+    "ui_visible"
+  )
+  for pattern in "${required[@]}" "$@"; do
+    if ! grep -Fq "$pattern" "$out"; then
+      echo "missing required expanded static prompt item in $protocol: $pattern" >&2
+      return 1
     fi
   done
-  if [ "$failed" -ne 0 ]; then
-    echo "run: scripts/update_static_prompt_snapshot.sh" >&2
-    exit 1
-  fi
-  echo "static_prompt_snapshot: ok"
+  for pattern in "${forbidden[@]}"; do
+    if grep -Fq "$pattern" "$out"; then
+      echo "forbidden expanded static prompt item in $protocol: $pattern" >&2
+      return 1
+    fi
+  done
+}
+
+TMP_MARKDOWN="$TMP_DIR/markdown.md"
+TMP_JSON="$TMP_DIR/json.md"
+TMP_XML="$TMP_DIR/xml.md"
+render_one markdown "$TMP_MARKDOWN"
+render_one json "$TMP_JSON"
+render_one xml "$TMP_XML"
+
+validate_one markdown "$TMP_MARKDOWN" \
+  "Markdown response sections." \
+  "The top-level response is Markdown, not JSON." \
+  '`## Status`' \
+  '`## Working_Still_Action`'
+validate_one json "$TMP_JSON"
+validate_one xml "$TMP_XML" \
+  "XML response tags." \
+  "The top-level response is XML." \
+  '`<response>`' \
+  "<status>ALL_FINISHED</status>" \
+  '`<working_still_action>`'
+
+if [ "${1:-}" = "--check" ]; then
+  echo "static_prompt_expansion: ok"
 else
+  mkdir -p "$OUT_DIR"
   cp "$TMP_MARKDOWN" "$OUT_MARKDOWN"
   cp "$TMP_JSON" "$OUT_JSON"
+  cp "$TMP_XML" "$OUT_XML"
   trap - EXIT
   cleanup
-  echo "updated $OUT_MARKDOWN"
-  echo "updated $OUT_JSON"
+  echo "generated $OUT_MARKDOWN"
+  echo "generated $OUT_JSON"
+  echo "generated $OUT_XML"
 fi

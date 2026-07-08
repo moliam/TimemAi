@@ -5,42 +5,66 @@ binding_name: run_bash
 requires_host: local_command_execution
 summary: Run local shell commands.
 prompt_synopsis: |
-  run_bash command=<shell_command> [timeout_ms=<n>] [background=true|mode=background]
+  run_bash cmd=<shell_command> timeout_ms=<n> [background=true|mode=background]
+  run_bash loop_cmd=<check_command> interval_ms=<n> loop_timeout_ms=<total_wait_ms> [once_timeout_ms=<n>]
 description: |
   `run_bash` runs a shell command on the local machine and collects bounded
-  evidence from the command result. It supports foreground and background
-  execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
+  evidence from the command result. It supports normal, background, and
+  polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
+  `timeout_ms` is only how long Timem waits for a normal command. It is not a
+  kill deadline. If the wait budget is reached, Timem returns the pid and stops
+  waiting while the process may still be running.
   Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner.
+  Prefer to transform long sleep into loop_cmd or `while` loops with short sleep that can return as soon as cmd is done.
+  The loop command is re-run
+  until it exits with code 0 or loop_timeout_ms is reached. For
+  long local work that should keep running across interaction rounds, use
+  background=true. Background and timeout jobs return a pid; manage them with
+  normal shell commands if the user asks you to inspect or stop them.
 prompt_input: |
-  Use command for the shell command. Optional: timeout_ms, background=true or
-  mode=background.
+  Use cmd for a shell command. Optional: timeout_ms, background=true or
+  mode=background. Use loop_cmd with interval_ms for polling/waiting. loop_cmd
+  is run repeatedly until it exits with code 0 or loop_timeout_ms total wait budget
+  is reached. once_timeout_ms is the per-check command timeout.
 prompt_result: |
-  Foreground returns status and bounded output. Background returns job_id; use
-  shell_job_status with that job_id and your chosen timeout_ms to wait/check.
+  Normal/Polling returns status and bounded output. Background returns
+  `pid=..., now keeps running in background`.
+  NOTE: Timeout command won't be killed automatically,
+  instead you will receive its pid info.
+  !!! YOU MUST REMEMBER TO MANAGE/CLEAN/CHECK THESE STILL RUNNING PIDs.
+  !!! YOU MUST confirm whether the pid is still running and yours before killing it.
 input_schema: |
   {
     "type": "object",
     "properties": {
-      "command": {"type": "string", "description": "Shell command to execute."},
-      "timeout_ms": {"type": "integer", "description": "Foreground wait budget in milliseconds."},
-      "background": {"type": "boolean", "description": "When true, return a job_id instead of blocking."},
-      "mode": {"type": "string", "enum": ["foreground", "background"], "description": "Execution mode alias."}
+      "cmd": {"type": "string", "description": "Shell command to execute."},
+      "loop_cmd": {"type": "string", "description": "Polling check command. Runtime re-runs it until it exits with code 0."},
+      "timeout_ms": {"type": ">0 integer", "description": "Normal command wait budget in milliseconds. Default: 5000"},
+      "loop_timeout_ms": {"type": ">0 integer", "description": "Total polling wait budget in milliseconds when loop_cmd is present."},
+      "once_timeout_ms": {"type": ">0 integer", "description": "Per-check timeout in polling mode."},
+      "interval_ms": {"type": ">0 integer", "description": "Polling interval. Requires loop_cmd."},
+      "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."},
+      "mode": {"type": "string", "enum": ["normal", "background"], "description": "Execution mode alias."}
     },
-    "required": ["command"]
+    "x-required-any": [["cmd", "loop_cmd"]]
   }
 output_schema: |
   {
     "type": "object",
     "properties": {
       "command": {"type": "string", "description": "Command actually executed."},
-      "status": {"type": "integer", "description": "Process exit code for foreground success."},
-      "output": {"type": "string", "description": "Bounded stdout/stderr text for foreground execution."},
-      "job_id": {"type": "string", "description": "Background job id when background=true."},
-      "pid": {"type": "integer", "description": "Background process id."},
+      "mode": {"type": "string", "description": "poll when interval_ms was used."},
+      "state": {"type": "string", "description": "Polling state: finished|timeout|cancelled."},
+      "attempts": {"type": "integer", "description": "Polling attempts."},
+      "elapsed_ms": {"type": "integer", "description": "Polling elapsed time."},
+      "last_status": {"type": "integer", "description": "Last observed polling exit code."},
+      "status": {"type": "integer", "description": "Process exit code for normal command success."},
+      "output": {"type": "string", "description": "Bounded stdout/stderr text for normal command execution."},
+      "pid": {"type": "integer", "description": "Process id for background jobs and timed-out commands that are still running."},
       "output_file": {"type": "string", "description": "Path where background output is stored."},
       "status_file": {"type": "string", "description": "Path where background exit status is stored."},
       "approval_status": {"type": "string", "enum": ["approved_by_user", "denied_by_user"], "description": "Approval result."},
-      "error": {"type": "string", "description": "command_required|command_too_long|timeout|command_failed|background_spawn_failed"}
+      "reason": {"type": "string", "description": "Natural-language reason when a command is not executed, times out, or is cancelled."}
     }
   }
 example_json: |
@@ -48,7 +72,7 @@ example_json: |
     "action": "run_bash",
     "intent": "Count files in the current folder.",
     "args": {
-      "command": "rg --files | wc -l",
+      "cmd": "rg --files | wc -l",
       "timeout_ms": 5000
     }
   }

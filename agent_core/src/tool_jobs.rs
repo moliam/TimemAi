@@ -97,7 +97,7 @@ impl FileToolJobStore {
         };
         let _ = self.append(&record);
         format!(
-            "Action result: {action}\nstatus: background_started\njob_id: {}\npid: {}\noutput_file: {}\nstatus_file: {}\nnext_action: tool_job_status",
+            "Action result: {action}\nstatus: background_started\njob_id: {}\npid: {}\noutput_file: {}\nstatus_file: {}\nnext_action: capmgr op=job_status",
             record.id, record.pid, record.output_file, record.status_file
         )
     }
@@ -105,11 +105,11 @@ impl FileToolJobStore {
     pub fn status(&self, job_id: &str, wait_ms: u64) -> String {
         let clean_id = job_id.trim();
         if clean_id.is_empty() {
-            return "Action result: tool_job_status\nerror: job_id_required".to_string();
+            return "Action result: capmgr\nop: job_status\nerror: job_id_required".to_string();
         }
         let Some(record) = self.find(clean_id) else {
             return format!(
-                "Action result: tool_job_status\njob_id: {}\nerror: job_not_found",
+                "Action result: capmgr\nop: job_status\njob_id: {}\nerror: job_not_found",
                 clean_id
             );
         };
@@ -124,7 +124,7 @@ impl FileToolJobStore {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
                 if code == "cancelled" {
                     return format!(
-                        "Action result: tool_job_status\njob_id: {}\naction: {}\nstate: cancelled\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
+                        "Action result: capmgr\nop: job_status\njob_id: {}\naction: {}\nstate: cancelled\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
                         record.id,
                         record.action,
                         started.elapsed().as_millis(),
@@ -133,7 +133,7 @@ impl FileToolJobStore {
                     );
                 }
                 return format!(
-                    "Action result: tool_job_status\njob_id: {}\naction: {}\nstate: finished\nexit_code: {}\nwaited_ms: {}\noutput_file: {}\noutput:\n{}",
+                    "Action result: capmgr\nop: job_status\njob_id: {}\naction: {}\nstate: finished\nexit_code: {}\nwaited_ms: {}\noutput_file: {}\noutput:\n{}",
                     record.id,
                     record.action,
                     code,
@@ -145,7 +145,7 @@ impl FileToolJobStore {
             if started.elapsed() >= wait {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
                 return format!(
-                    "Action result: tool_job_status\njob_id: {}\naction: {}\nstate: running\npid: {}\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
+                    "Action result: capmgr\nop: job_status\njob_id: {}\naction: {}\nstate: running\npid: {}\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
                     record.id,
                     record.action,
                     record.pid,
@@ -161,11 +161,11 @@ impl FileToolJobStore {
     pub fn cancel(&self, job_id: &str) -> String {
         let clean_id = job_id.trim();
         if clean_id.is_empty() {
-            return "Action result: tool_job_status\nerror: job_id_required".to_string();
+            return "Action result: capmgr\nop: job_cancel\nerror: job_id_required".to_string();
         }
         let Some(record) = self.find(clean_id) else {
             return format!(
-                "Action result: tool_job_status\njob_id: {}\nerror: job_not_found",
+                "Action result: capmgr\nop: job_cancel\njob_id: {}\nerror: job_not_found",
                 clean_id
             );
         };
@@ -180,7 +180,7 @@ impl FileToolJobStore {
                 "finished"
             };
             return format!(
-                "Action result: tool_job_status\njob_id: {}\naction: {}\nstate: {}\nstatus: already_completed",
+                "Action result: capmgr\nop: job_cancel\njob_id: {}\naction: {}\nstate: {}\nstatus: already_completed",
                 record.id, record.action, state
             );
         }
@@ -189,7 +189,7 @@ impl FileToolJobStore {
         let _ = fs::write(&record.status_file, "cancelled");
         let output = fs::read_to_string(&record.output_file).unwrap_or_default();
         format!(
-            "Action result: tool_job_status\njob_id: {}\naction: {}\nstate: cancelled\npid: {}\noutput_file: {}\npartial_output:\n{}",
+            "Action result: capmgr\nop: job_cancel\njob_id: {}\naction: {}\nstate: cancelled\npid: {}\noutput_file: {}\npartial_output:\n{}",
             record.id,
             record.action,
             record.pid,
@@ -256,7 +256,12 @@ fn terminate_process(pid: u32) {
     #[cfg(unix)]
     {
         let group = format!("-{}", pid);
-        let status = Command::new("/bin/kill").arg("-TERM").arg(&group).status();
+        let status = Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(&group)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         if status.as_ref().is_ok_and(|s| s.success()) {
             return;
         }
@@ -264,6 +269,8 @@ fn terminate_process(pid: u32) {
     let _ = Command::new("/bin/kill")
         .arg("-TERM")
         .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
 }
 
@@ -305,7 +312,7 @@ mod tests {
         let status = store.status(job_id, 3000);
 
         assert!(
-            status.contains("Action result: tool_job_status"),
+            status.contains("Action result: capmgr\nop: job_status"),
             "{status}"
         );
         assert!(status.contains("state: finished"), "{status}");
@@ -343,7 +350,7 @@ mod tests {
         let cancelled = store.cancel(job_id);
 
         assert!(
-            cancelled.contains("Action result: tool_job_status"),
+            cancelled.contains("Action result: capmgr\nop: job_cancel"),
             "{cancelled}"
         );
         assert!(cancelled.contains("state: cancelled"), "{cancelled}");

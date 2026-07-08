@@ -34,6 +34,7 @@ pub struct TurnOutcome {
     pub repair_issue: Option<String>,
     pub stop_reason: Option<TurnStopReason>,
     pub stop_summary: Option<TurnStopSummary>,
+    pub running_jobs: Vec<crate::RunningShellJob>,
 }
 
 impl TurnOutcome {
@@ -52,6 +53,7 @@ impl TurnOutcome {
             repair_issue,
             stop_reason: None,
             stop_summary: None,
+            running_jobs: Vec::new(),
         }
     }
 
@@ -64,7 +66,13 @@ impl TurnOutcome {
             repair_issue: stopped.repair_issue,
             stop_reason: Some(stopped.stop_reason),
             stop_summary: Some(stopped.stop_summary),
+            running_jobs: Vec::new(),
         }
+    }
+
+    pub fn with_running_jobs(mut self, running_jobs: Vec<crate::RunningShellJob>) -> Self {
+        self.running_jobs = running_jobs;
+        self
     }
 }
 
@@ -246,6 +254,30 @@ pub enum OutputExpansionResolution {
     Stop(TurnStopSummary),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongRunningCommandContinueRequest {
+    pub action: String,
+    pub command: String,
+    pub elapsed: Duration,
+    pub timeout_ms: Option<i64>,
+}
+
+impl LongRunningCommandContinueRequest {
+    pub fn new(
+        action: impl Into<String>,
+        command: impl Into<String>,
+        elapsed: Duration,
+        timeout_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            action: action.into(),
+            command: command.into(),
+            elapsed,
+            timeout_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreSessionState {
     Running,
@@ -310,6 +342,7 @@ pub struct CoreTopicEvent {
 }
 
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
+pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
@@ -317,16 +350,24 @@ pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request"
 pub const CORE_TOPIC_OUTPUT_EXPAND_REQUEST: &str = "core.user.output_expand.request";
 pub const CORE_TOPIC_STALE_CONTEXT_REQUEST: &str = "core.user.stale_context.request";
 pub const CORE_TOPIC_WORK_INSTRUCTION_LOAD: &str = "core.work_instruction_load";
+pub const CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST: &str = "core.user.long_running_command.request";
 static TOPIC_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreModelResponseTopic {
     pub status: String,
     pub free_talk: String,
-    pub report_job_progress: String,
+    pub progress: String,
     pub final_answer: String,
     pub continue_work: bool,
     pub global: CoreGlobalWorkerStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreModelRepairTopic {
+    pub issue: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,10 +402,14 @@ impl Default for CoreGlobalWorkerStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreActionTopic {
     pub intent: Option<String>,
+    pub parent_intent: Option<String>,
     pub action: String,
     pub input: Value,
     pub kind: CoreActionKind,
     pub active: bool,
+    pub event: String,
+    pub status: String,
+    pub pid: Option<u32>,
     pub memory_activity: CoreMemoryActivity,
 }
 
@@ -391,7 +436,6 @@ impl CoreSessionWorkerIdentity {
         display_name: Option<String>,
         parent_session_id: Option<String>,
     ) -> Self {
-        let ordinal = ordinal.max(1);
         Self {
             session_id: session_id.into(),
             display_name: session_worker_default_display_name(ordinal, display_name),
@@ -412,7 +456,7 @@ pub fn session_worker_default_display_name(ordinal: u32, requested: Option<Strin
     requested
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("[Ai{}]", ordinal.max(1)))
+        .unwrap_or_else(|| format!("ID{ordinal}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -565,7 +609,7 @@ impl CoreTopicEvent {
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
-            report_job_progress: self.payload["report_job_progress"]
+            progress: self.payload["progress"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
@@ -575,6 +619,32 @@ impl CoreTopicEvent {
                 .to_string(),
             continue_work: self.payload["continue_work"].as_bool().unwrap_or(true),
             global: parse_global_worker_status(&self.payload["global"]),
+        })
+    }
+
+    pub fn as_model_repair(&self) -> Option<CoreModelRepairTopic> {
+        if self.topic.name != CORE_TOPIC_MODEL_REPAIR {
+            return None;
+        }
+        Some(CoreModelRepairTopic {
+            issue: self
+                .payload
+                .get("issue")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            attempt: self
+                .payload
+                .get("attempt")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0),
+            max_attempts: self
+                .payload
+                .get("max_attempts")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0),
         })
     }
 
@@ -593,6 +663,11 @@ impl CoreTopicEvent {
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
                 .map(str::to_string),
+            parent_intent: self.payload["parent_intent"]
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string),
             action: self.payload["action"]
                 .as_str()
                 .unwrap_or_default()
@@ -603,6 +678,17 @@ impl CoreTopicEvent {
                 self.payload["action"].as_str().unwrap_or_default(),
             ),
             active: self.payload["active"].as_bool().unwrap_or(false),
+            event: self.payload["event"]
+                .as_str()
+                .unwrap_or("start")
+                .to_string(),
+            status: self.payload["status"]
+                .as_str()
+                .unwrap_or("running")
+                .to_string(),
+            pid: self.payload["pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok()),
             memory_activity: memory_activity_from_topic_payload(&self.payload["memory_activity"]),
         })
     }
@@ -674,6 +760,30 @@ impl CoreTopicEvent {
             error: self.payload["error"].as_str().map(str::to_string),
         })
     }
+}
+
+pub fn model_repair_topic_event(
+    session_id: impl Into<String>,
+    issue: impl Into<String>,
+    attempt: u32,
+    max_attempts: u32,
+) -> CoreTopicEvent {
+    let issue = issue.into();
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MODEL_REPAIR,
+            json!({
+                "name": CORE_TOPIC_MODEL_REPAIR,
+            }),
+        ),
+        CoreSessionState::WaitingModel,
+        json!({
+            "issue": issue,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+        }),
+    )
 }
 
 pub fn core_initialized_topic_event(
@@ -1008,6 +1118,7 @@ pub enum HostDecisionRequest {
     OutputExpansion(OutputExpansionRequest),
     StaleContextContinue(StaleContextDecisionRequest),
     WorkInstructionLoad(WorkInstructionLoadRequest),
+    LongRunningCommandContinue(LongRunningCommandContinueRequest),
 }
 
 impl HostDecisionRequest {
@@ -1018,14 +1129,16 @@ impl HostDecisionRequest {
             Self::OutputExpansion(_) => "output_expansion",
             Self::StaleContextContinue(_) => "stale_context_continue",
             Self::WorkInstructionLoad(_) => "work_instruction_load",
+            Self::LongRunningCommandContinue(_) => "long_running_command_continue",
         }
     }
 
     pub fn safe_default(&self) -> HostDecisionDefault {
         match self {
-            Self::UserApproval(_) | Self::RoundLimitContinue(_) | Self::OutputExpansion(_) => {
-                HostDecisionDefault::Accept
-            }
+            Self::UserApproval(_)
+            | Self::RoundLimitContinue(_)
+            | Self::OutputExpansion(_)
+            | Self::LongRunningCommandContinue(_) => HostDecisionDefault::Accept,
             Self::StaleContextContinue(_) | Self::WorkInstructionLoad(_) => {
                 HostDecisionDefault::Decline
             }
@@ -1038,7 +1151,8 @@ impl HostDecisionRequest {
             Self::UserApproval(_)
             | Self::RoundLimitContinue(_)
             | Self::OutputExpansion(_)
-            | Self::StaleContextContinue(_) => None,
+            | Self::StaleContextContinue(_)
+            | Self::LongRunningCommandContinue(_) => None,
         }
     }
 
@@ -1049,6 +1163,7 @@ impl HostDecisionRequest {
             Self::OutputExpansion(_) => CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
             Self::StaleContextContinue(_) => CORE_TOPIC_STALE_CONTEXT_REQUEST,
             Self::WorkInstructionLoad(_) => CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+            Self::LongRunningCommandContinue(_) => CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
         }
     }
 
@@ -1122,7 +1237,7 @@ pub(crate) fn notification_topic_event(
         CoreNotification::ModelResponse {
             status,
             free_talk,
-            report_job_progress,
+            progress,
             final_answer,
             continue_work,
         } => {
@@ -1139,7 +1254,7 @@ pub(crate) fn notification_topic_event(
                 json!({
                     "status": status,
                     "free_talk": free_talk,
-                    "report_job_progress": report_job_progress,
+                    "progress": progress,
                     "final_answer": final_answer,
                     "continue_work": continue_work,
                     "global": global_worker_status_payload(CoreGlobalWorkerStatus::new(direct_turn_worker_count)),
@@ -1148,6 +1263,7 @@ pub(crate) fn notification_topic_event(
         }
         CoreNotification::Action {
             intent,
+            parent_intent,
             action,
             input,
             kind,
@@ -1161,15 +1277,19 @@ pub(crate) fn notification_topic_event(
                     "name": CORE_TOPIC_ACTION,
                     "action": action,
                     "active": active,
+                    "event": "start",
                 }),
             ),
             CoreSessionState::Running,
             json!({
                 "intent": intent,
+                "parent_intent": parent_intent,
                 "action": action,
                 "input": input,
                 "kind": action_kind_topic_payload(kind),
                 "active": active,
+                "event": "start",
+                "status": "running",
                 "memory_activity": memory_activity,
             }),
         ),
@@ -1193,9 +1313,21 @@ pub fn topic_event_status_hint(events: &[CoreTopicEvent]) -> Option<CoreTopicSta
 
 fn action_kind_topic_payload(kind: &CoreActionKind) -> Value {
     match kind {
-        CoreActionKind::Bash { command } => json!({
+        CoreActionKind::Bash {
+            command,
+            mode,
+            interval_ms,
+            timeout_ms,
+            loop_timeout_ms,
+            once_timeout_ms,
+        } => json!({
             "kind": "bash",
             "command": command,
+            "mode": mode,
+            "interval_ms": interval_ms,
+            "timeout_ms": timeout_ms,
+            "loop_timeout_ms": loop_timeout_ms,
+            "once_timeout_ms": once_timeout_ms,
         }),
         CoreActionKind::ShellJob { job_id } => json!({
             "kind": "shell_job",
@@ -1232,6 +1364,11 @@ fn action_kind_from_topic_payload(value: &Value, fallback_action: &str) -> CoreA
     match value["kind"].as_str().unwrap_or_default() {
         "bash" => CoreActionKind::Bash {
             command: value["command"].as_str().unwrap_or_default().to_string(),
+            mode: value["mode"].as_str().unwrap_or("normal").to_string(),
+            interval_ms: value["interval_ms"].as_u64(),
+            timeout_ms: value["timeout_ms"].as_i64(),
+            loop_timeout_ms: value["loop_timeout_ms"].as_i64(),
+            once_timeout_ms: value["once_timeout_ms"].as_u64(),
         },
         "shell_job" => CoreActionKind::ShellJob {
             job_id: value["job_id"].as_str().unwrap_or_default().to_string(),
@@ -1319,6 +1456,12 @@ fn decision_request_payload(request: &HostDecisionRequest) -> Value {
             "directory": work.directory.display().to_string(),
             "file_names": work.file_names,
         }),
+        HostDecisionRequest::LongRunningCommandContinue(command) => json!({
+            "action": command.action,
+            "command": command.command,
+            "elapsed_ms": command.elapsed.as_millis(),
+            "timeout_ms": command.timeout_ms,
+        }),
     }
 }
 
@@ -1372,6 +1515,14 @@ fn host_decision_request_from_payload(kind: &str, payload: &Value) -> Option<Hos
                     .iter()
                     .map(|item| item.as_str().map(str::to_string))
                     .collect::<Option<Vec<_>>>()?,
+            },
+        )),
+        "long_running_command_continue" => Some(HostDecisionRequest::LongRunningCommandContinue(
+            LongRunningCommandContinueRequest {
+                action: payload["action"].as_str()?.to_string(),
+                command: payload["command"].as_str()?.to_string(),
+                elapsed: Duration::from_millis(payload["elapsed_ms"].as_u64()?),
+                timeout_ms: payload.get("timeout_ms").and_then(Value::as_i64),
             },
         )),
         _ => None,
@@ -1863,6 +2014,14 @@ mod tests {
                 directory: "/tmp/project".into(),
                 file_names: vec!["AGENTS.md".to_string(), "CLAUDE.md".to_string()],
             }),
+            HostDecisionRequest::LongRunningCommandContinue(
+                LongRunningCommandContinueRequest::new(
+                    "run_bash",
+                    "sleep 120",
+                    Duration::from_secs(65),
+                    None,
+                ),
+            ),
         ];
 
         for request in requests {
@@ -1923,7 +2082,7 @@ mod tests {
             &CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: String::new(),
-                report_job_progress: "not waiting".to_string(),
+                progress: "not waiting".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
@@ -1970,7 +2129,7 @@ mod tests {
             &CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: String::new(),
-                report_job_progress: "not waiting".to_string(),
+                progress: "not waiting".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
@@ -1987,16 +2146,22 @@ mod tests {
             CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: "planning next step".to_string(),
-                report_job_progress: "checking context".to_string(),
+                progress: "checking context".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
             CoreNotification::Action {
                 intent: Some("Inspect local files.".to_string()),
+                parent_intent: None,
                 action: "run_bash".to_string(),
-                input: serde_json::json!({"command": "pwd"}),
+                input: serde_json::json!({"cmd": "pwd"}),
                 kind: crate::CoreActionKind::Bash {
                     command: "pwd".to_string(),
+                    mode: "normal".to_string(),
+                    interval_ms: None,
+                    timeout_ms: None,
+                    loop_timeout_ms: None,
+                    once_timeout_ms: None,
                 },
                 active: true,
                 memory_activity: crate::CoreMemoryActivity::None,
@@ -2026,7 +2191,7 @@ mod tests {
                 "payload": {
                     "status": "working",
                     "free_talk": "planning next step",
-                    "report_job_progress": "checking context",
+                    "progress": "checking context",
                     "final_answer": "",
                     "continue_work": true,
                     "global": {
@@ -2041,7 +2206,7 @@ mod tests {
             Some(CoreModelResponseTopic {
                 status: "working".to_string(),
                 free_talk: "planning next step".to_string(),
-                report_job_progress: "checking context".to_string(),
+                progress: "checking context".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
                 global: CoreGlobalWorkerStatus::new(1),
@@ -2062,6 +2227,7 @@ mod tests {
                         "name": CORE_TOPIC_ACTION,
                         "action": "run_bash",
                         "active": true,
+                        "event": "start",
                     },
                 },
                 "state": {
@@ -2069,15 +2235,23 @@ mod tests {
                 },
                 "payload": {
                     "intent": "Inspect local files.",
+                    "parent_intent": null,
                     "action": "run_bash",
                     "input": {
-                        "command": "pwd",
+                        "cmd": "pwd",
                     },
                     "kind": {
                         "kind": "bash",
                         "command": "pwd",
+                        "mode": "normal",
+                        "interval_ms": null,
+                        "timeout_ms": null,
+                        "loop_timeout_ms": null,
+                        "once_timeout_ms": null,
                     },
                     "active": true,
+                    "event": "start",
+                    "status": "running",
                     "memory_activity": "none",
                 },
             })
@@ -2086,12 +2260,21 @@ mod tests {
             events[1].as_action(),
             Some(CoreActionTopic {
                 intent: Some("Inspect local files.".to_string()),
+                parent_intent: None,
                 action: "run_bash".to_string(),
-                input: serde_json::json!({"command": "pwd"}),
+                input: serde_json::json!({"cmd": "pwd"}),
                 kind: CoreActionKind::Bash {
-                    command: "pwd".to_string()
+                    command: "pwd".to_string(),
+                    mode: "normal".to_string(),
+                    interval_ms: None,
+                    timeout_ms: None,
+                    loop_timeout_ms: None,
+                    once_timeout_ms: None,
                 },
                 active: true,
+                event: "start".to_string(),
+                status: "running".to_string(),
+                pid: None,
                 memory_activity: CoreMemoryActivity::None,
             })
         );
@@ -2100,8 +2283,48 @@ mod tests {
             Some(CoreTopicStatusHint {
                 intent: Some("Inspect local files.".to_string()),
                 action: "run_bash".to_string(),
-                input: serde_json::json!({"command": "pwd"}),
+                input: serde_json::json!({"cmd": "pwd"}),
                 memory_activity: CoreMemoryActivity::None,
+            })
+        );
+    }
+
+    #[test]
+    fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
+        let event = model_repair_topic_event("session_a", "invalid_xml", 2, 5);
+
+        assert_eq!(event.session_id, "session_a");
+        assert_eq!(event.topic.name, CORE_TOPIC_MODEL_REPAIR);
+        assert_eq!(event.topic.attributes["name"], CORE_TOPIC_MODEL_REPAIR);
+        assert_eq!(event.state, CoreSessionState::WaitingModel);
+        assert!(!event.expects_reply());
+        assert!(!event.is_blocking_request());
+        assert_eq!(
+            event.as_model_repair(),
+            Some(CoreModelRepairTopic {
+                issue: "invalid_xml".to_string(),
+                attempt: 2,
+                max_attempts: 5,
+            })
+        );
+        assert_eq!(
+            event.wire_payload(),
+            json!({
+                "session_id": "session_a",
+                "topic": {
+                    "name": CORE_TOPIC_MODEL_REPAIR,
+                    "attributes": {
+                        "name": CORE_TOPIC_MODEL_REPAIR,
+                    },
+                },
+                "state": {
+                    "name": "waiting_model",
+                },
+                "payload": {
+                    "issue": "invalid_xml",
+                    "attempt": 2,
+                    "max_attempts": 5,
+                },
             })
         );
     }
@@ -2264,10 +2487,16 @@ mod tests {
     fn topic_callbacks_can_copy_owned_snapshots_for_async_hosts() {
         let notifications = vec![CoreNotification::Action {
             intent: Some("Inspect local files.".to_string()),
+            parent_intent: None,
             action: "run_bash".to_string(),
-            input: serde_json::json!({"command": "pwd"}),
+            input: serde_json::json!({"cmd": "pwd"}),
             kind: CoreActionKind::Bash {
                 command: "pwd".to_string(),
+                mode: "normal".to_string(),
+                interval_ms: None,
+                timeout_ms: None,
+                loop_timeout_ms: None,
+                once_timeout_ms: None,
             },
             active: true,
             memory_activity: CoreMemoryActivity::None,
@@ -2285,7 +2514,7 @@ mod tests {
 
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].session_id, "session_a");
-        assert_eq!(queued[0].as_action().unwrap().input["command"], "pwd");
+        assert_eq!(queued[0].as_action().unwrap().input["cmd"], "pwd");
     }
 
     #[test]
@@ -2294,8 +2523,24 @@ mod tests {
             (
                 CoreActionKind::Bash {
                     command: "pwd".to_string(),
+                    mode: "normal".to_string(),
+                    interval_ms: None,
+                    timeout_ms: None,
+                    loop_timeout_ms: None,
+                    once_timeout_ms: None,
                 },
-                json!({"kind": "bash", "command": "pwd"}),
+                json!({"kind": "bash", "command": "pwd", "mode": "normal", "interval_ms": null, "timeout_ms": null, "loop_timeout_ms": null, "once_timeout_ms": null}),
+            ),
+            (
+                CoreActionKind::Bash {
+                    command: "gh run list".to_string(),
+                    mode: "poll".to_string(),
+                    interval_ms: Some(5000),
+                    timeout_ms: None,
+                    loop_timeout_ms: Some(600000),
+                    once_timeout_ms: Some(5000),
+                },
+                json!({"kind": "bash", "command": "gh run list", "mode": "poll", "interval_ms": 5000, "timeout_ms": null, "loop_timeout_ms": 600000, "once_timeout_ms": 5000}),
             ),
             (
                 CoreActionKind::ShellJob {

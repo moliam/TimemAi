@@ -50,20 +50,36 @@ The manifest is the human-maintained source for:
 - enum field constraints derived from property `enum` values
 - examples
 
-Foreground/background execution is part of the capability interface:
+Normal/background execution is part of the capability interface:
 
 - Built-in tools can own specialized lifecycle semantics when needed. `run_bash`
   keeps a dedicated path because it includes approval policy and local shell
   safety checks.
-- Command-bound registered tools run in the foreground by default. If their
+- Command-bound registered tools run in normal mode by default. If their
   YAML declares `background` or `mode=background` in `input_schema`, core may
   start the command as a background `tool_job`, persist its status under the
   runtime memory directory, and return a `job_id`.
 - Background command-bound tools are checked or cancelled through
-  `tool_job_status`; background `run_bash` jobs use `shell_job_status` for the
-  same status/cancel lifecycle. The shell UI does not manage those jobs. Core
-  owns job ids, output/status files, process termination, polling, bounded
-  readback, and action evidence.
+  `capmgr op=job_status|job_cancel`. Background and timed-out `run_bash` jobs
+  are tracked by pid in the session running-job set. Core emits natural-language
+  action evidence when a job starts or times out, one-time `RUNNING_JOB_UPDATE`
+  prompt components when a tracked job exits, and a `RUNNING JOB LIST` snapshot
+  after large context compaction. The model can inspect or stop those jobs with
+  ordinary `run_bash` commands such as `ps -p <pid>` or `kill <pid>`. The shell
+  UI does not manage those jobs.
+- External or remote status waiting should use `run_bash` polling mode, not a
+  normal `sleep && check` command. When `interval_ms` is present,
+  `run_bash` repeatedly runs the command until it exits with code 0, the total
+  `loop_timeout_ms` expires, or the active turn is cancelled. `once_timeout_ms`
+  bounds each individual check command. The model owns the check command; core
+  owns the fixed success condition, interval/timeout bounds, cancellation
+  checks, bounded output, approval, audit, and the structured action result.
+- Normal `run_bash` uses a positive model-provided `timeout_ms`. Core still owns
+  the process and emits a structured host decision request after the
+  long-command threshold, so a UI can render elapsed/remaining time and let the
+  user keep waiting or stop waiting. Stopping waiting becomes a
+  `cancelled_by_user` action result plus a `user_supplement` for the next model
+  response.
 - A model cannot opt a registered command tool into background execution unless
   that field is declared in the tool manifest. Manifest validation rejects the
   undeclared field before execution.
@@ -116,7 +132,7 @@ slice instead of executing it.
 Supported tool bindings:
 
 - `binding_type: builtin`: dispatches to a compiled executor binding such as
-  `run_bash`, `memmgr`, `shell_job_status`, or `capmgr`.
+  `run_bash`, `memmgr`, `self_tool`, or `capmgr`.
 - `binding_type: command`: dispatches to a command script inside the runtime
   overlay directory. `binding_name` must be a relative path such as
   `scripts/my_tool.sh`.
@@ -141,7 +157,8 @@ Command binding protocol:
   `{"action": "...", "intent": "...", "args": {"key": "value"}}`.
 - Script stdout/stderr is captured as the action result and truncated to a
   bounded size.
-- Execution timeout follows the action's `timeout_ms`, clamped to 1-15 seconds.
+- Execution timeout follows the action's positive `timeout_ms` without an upper
+  clamp.
   Long-running work should still use a builtin/background executor.
 
 ### Skill

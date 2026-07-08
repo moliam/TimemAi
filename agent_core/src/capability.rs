@@ -8,10 +8,6 @@ use crate::prompt_spec::replace_markdown_placeholder_with_text;
 const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
 const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
-const SHELL_JOB_STATUS_MANIFEST: &str =
-    include_str!("../../resources/capabilities/tools/shell_job_status.yaml");
-const TOOL_JOB_STATUS_MANIFEST: &str =
-    include_str!("../../resources/capabilities/tools/tool_job_status.yaml");
 const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,8 +188,6 @@ impl CapabilityRegistry {
                 MEMMGR_MANIFEST,
                 CAPMGR_MANIFEST,
                 RUN_BASH_MANIFEST,
-                SHELL_JOB_STATUS_MANIFEST,
-                TOOL_JOB_STATUS_MANIFEST,
                 SELF_TOOL_MANIFEST,
             ],
             &[],
@@ -1855,9 +1849,9 @@ mod tests {
         assert!(registry.contains_tool("memmgr"));
         assert!(registry.contains_tool("capmgr"));
         assert!(registry.contains_tool("run_bash"));
-        assert!(registry.contains_tool("shell_job_status"));
-        assert!(registry.contains_tool("tool_job_status"));
+        assert!(!registry.contains_tool("shell_job_status"));
         assert!(registry.contains_tool("self_tool"));
+        assert!(!registry.contains_tool("tool_job_status"));
         assert!(!registry.contains_tool("query_memory"));
     }
 
@@ -1877,7 +1871,7 @@ mod tests {
         assert!(registry
             .validate_action_input(
                 "run_bash",
-                &json_object([("command", Value::String("pwd".to_string()))])
+                &json_object([("cmd", Value::String("pwd".to_string()))])
             )
             .unwrap_err()
             .contains("unsupported_action:run_bash"));
@@ -1895,8 +1889,8 @@ mod tests {
         );
 
         assert!(registry.contains_tool("run_bash"));
-        assert!(registry.contains_tool("shell_job_status"));
-        assert!(registry.contains_tool("tool_job_status"));
+        assert!(!registry.contains_tool("shell_job_status"));
+        assert!(!registry.contains_tool("tool_job_status"));
         assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
     }
 
@@ -1908,25 +1902,37 @@ mod tests {
         assert!(rendered.contains("#### `memmgr`"));
         assert!(rendered.contains("#### `capmgr`"));
         assert!(rendered.contains("#### `run_bash`"));
-        assert!(rendered.contains("#### `shell_job_status`"));
-        assert!(rendered.contains("#### `tool_job_status`"));
+        assert!(!rendered.contains("#### `shell_job_status`"));
+        assert!(!rendered.contains("#### `tool_job_status`"));
         assert!(rendered.contains("#### `self_tool`"));
+        assert!(rendered.contains("interval_ms"));
+        assert!(rendered.contains("loop_timeout_ms"));
+        assert!(rendered.contains("once_timeout_ms"));
+        assert!(rendered.contains("exits with code 0"));
         assert!(rendered.contains("**Synopsis**"));
         assert!(rendered.contains("**Options**"));
         assert!(rendered.contains("Unified local memory manager"));
         assert!(rendered.contains("Use when the user asks about Timem itself"));
         assert!(rendered.contains("Conditional:"));
-        assert!(rendered.contains("(type=durable, op=query) requires query"));
+        assert!(rendered.contains("Use sql for durable reads"));
+        assert!(!rendered.contains("durable: query|schema"));
+        assert!(!rendered.contains("empty is allowed for durable/raw_chat/scratch recent listing"));
         assert!(rendered.contains("Conditional one of:"));
-        assert!(rendered.contains("(type=context, op=shrink) requires one of delta_ids"));
+        assert!(rendered.contains("(type=context, op=discard) requires one of delta_ids"));
         assert!(!rendered.contains("when `` is"));
         assert!(rendered.contains("**Result**"));
         assert!(!rendered.contains("```"));
         assert!(!rendered.contains("**Example action**"));
         assert!(!rendered.contains("read_back_command"));
         assert!(!rendered.contains("large_readback"));
+        assert!(!rendered.contains("check_timeout_ms"));
         assert!(rendered.contains("`background`:"));
-        assert!(rendered.contains("Foreground returns status and bounded output"));
+        assert!(rendered.contains("Normal/Polling returns status and bounded output"));
+        assert!(rendered.contains("Background returns"));
+        assert!(rendered.contains("Timeout command won't be killed automatically"));
+        assert!(rendered.contains("`timeout_ms` is only how long Timem waits"));
+        assert!(rendered.contains("It is not a kill deadline"));
+        assert!(rendered.contains("Use loop_cmd with interval_ms"));
         assert!(rendered.contains("`op`:"));
         assert!(rendered.contains("`kind`:"));
         assert!(rendered.contains("`id`:"));
@@ -1944,14 +1950,8 @@ mod tests {
         assert_eq!(registry.binding_name("memmgr"), Some("memmgr"));
         assert_eq!(registry.binding_name("capmgr"), Some("capmgr"));
         assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
-        assert_eq!(
-            registry.binding_name("shell_job_status"),
-            Some("shell_job_status")
-        );
-        assert_eq!(
-            registry.binding_name("tool_job_status"),
-            Some("tool_job_status")
-        );
+        assert_eq!(registry.binding_name("shell_job_status"), None);
+        assert_eq!(registry.binding_name("tool_job_status"), None);
         assert_eq!(registry.binding_name("self_tool"), Some("self_tool"));
         assert_eq!(registry.binding_name("future_tool"), None);
     }
@@ -1976,11 +1976,11 @@ mod tests {
                 "memmgr",
                 &json_object([
                     ("type", Value::String("durable".to_string())),
-                    ("op", Value::String("query".to_string())),
+                    ("op", Value::String("sql".to_string())),
                 ])
             )
             .unwrap_err()
-            .contains("input.query_required_when_op=query,type=durable"));
+            .contains("input.sql_required_when_op=sql,type=durable"));
         assert!(registry
             .validate_action_input(
                 "memmgr",
@@ -2037,21 +2037,25 @@ mod tests {
                 "memmgr",
                 &json_object([
                     ("type", Value::String("context".to_string())),
-                    ("op", Value::String("shrink".to_string())),
+                    ("op", Value::String("discard".to_string())),
                 ])
             )
             .unwrap_err()
-            .contains("input.any_required_when_delta_ids_when_op=shrink,type=context"));
+            .contains("input.any_required_when_delta_ids_when_op=discard,type=context"));
         assert!(registry
             .validate_action_input(
                 "shell_job_status",
                 &json_object([("job_id", Value::String("job_1".to_string()))])
             )
-            .is_ok());
+            .unwrap_err()
+            .contains("unsupported_action:shell_job_status"));
         assert!(registry
             .validate_action_input(
-                "tool_job_status",
-                &json_object([("job_id", Value::String("tool_job_1".to_string()))])
+                "capmgr",
+                &json_object([
+                    ("op", Value::String("job_cancel".to_string())),
+                    ("job_id", Value::String("tool_job_1".to_string())),
+                ])
             )
             .is_ok());
         assert!(registry
@@ -2062,21 +2066,28 @@ mod tests {
                     ("op", Value::String("cancel".to_string())),
                 ])
             )
+            .unwrap_err()
+            .contains("unsupported_action:shell_job_status"));
+        assert!(registry
+            .validate_action_input(
+                "capmgr",
+                &json_object([
+                    ("op", Value::String("job_status".to_string())),
+                    ("job_id", Value::String("tool_job_1".to_string())),
+                ])
+            )
             .is_ok());
         assert!(registry
             .validate_action_input(
                 "tool_job_status",
-                &json_object([
-                    ("job_id", Value::String("tool_job_1".to_string())),
-                    ("op", Value::String("pause".to_string())),
-                ])
+                &json_object([("job_id", Value::String("tool_job_1".to_string()))])
             )
             .unwrap_err()
-            .contains("input.op_unsupported:pause"));
+            .contains("unsupported_action:tool_job_status"));
         assert!(registry
             .validate_action_input("run_bash", &json_object([]))
             .unwrap_err()
-            .contains("input.command_required"));
+            .contains("input.any_required:cmd|loop_cmd"));
         assert!(registry
             .validate_action_input("self_tool", &json_object([]))
             .unwrap_err()
@@ -2112,7 +2123,7 @@ mod tests {
             .validate_action_input(
                 "run_bash",
                 &json_object([
-                    ("command", Value::String("pwd".to_string())),
+                    ("cmd", Value::String("pwd".to_string())),
                     (
                         "large_readback_opt_in",
                         Value::String("need full output".to_string())
@@ -2125,7 +2136,7 @@ mod tests {
             .validate_action_input(
                 "run_bash",
                 &json_object([
-                    ("command", Value::String("test -s output.txt".to_string())),
+                    ("cmd", Value::String("test -s output.txt".to_string())),
                     ("timeout_ms", Value::Number(5000.into())),
                 ])
             )
@@ -2215,7 +2226,26 @@ mod tests {
             .validate_action_input(
                 "run_bash",
                 &json_object([
-                    ("command", Value::String("pwd".to_string())),
+                    ("cmd", Value::String("pwd".to_string())),
+                    ("mode", Value::String("normal".to_string())),
+                ])
+            )
+            .is_ok());
+        assert!(registry
+            .validate_action_input(
+                "run_bash",
+                &json_object([
+                    ("cmd", Value::String("pwd".to_string())),
+                    ("mode", Value::String("foreground".to_string())),
+                ])
+            )
+            .unwrap_err()
+            .contains("input.mode_unsupported:foreground"));
+        assert!(registry
+            .validate_action_input(
+                "run_bash",
+                &json_object([
+                    ("cmd", Value::String("pwd".to_string())),
                     ("mode", Value::String("daemon".to_string())),
                 ])
             )
@@ -2238,7 +2268,7 @@ mod tests {
     }
 
     #[test]
-    fn run_bash_idl_uses_command_without_removed_expect_fields() {
+    fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
         let registry = CapabilityRegistry::builtin();
         let catalog = registry.tool_catalog_value();
         let run_bash = catalog
@@ -2254,20 +2284,34 @@ mod tests {
             .and_then(Value::as_object)
             .expect("run_bash input schema properties");
 
-        assert!(input_properties.contains_key("command"));
+        assert!(input_properties.contains_key("cmd"));
+        assert!(input_properties.contains_key("loop_cmd"));
+        assert!(input_properties.contains_key("loop_timeout_ms"));
+        assert!(input_properties.contains_key("once_timeout_ms"));
+        assert!(!input_properties.contains_key("command"));
         assert!(!input_properties.contains_key("read_back_command"));
         assert!(!input_properties.contains_key("large_readback_opt_in"));
+        assert!(!input_properties.contains_key("check_timeout_ms"));
         assert!(!input_properties.contains_key("expect"));
         assert!(!input_properties.contains_key("expect_timeout_ms"));
 
-        let required = input_schema
-            .get("required")
+        let required_any = input_schema
+            .get("required_any")
             .and_then(Value::as_array)
-            .expect("run_bash required");
-        assert!(required.iter().any(|field| field == "command"));
+            .expect("run_bash required_any");
+        assert!(required_any.iter().any(|group| {
+            group
+                .as_array()
+                .map(|fields| fields.iter().any(|field| field == "cmd"))
+                .unwrap_or(false)
+        }));
 
         let prompt = registry.render_tool_catalog_markdown();
-        assert!(prompt.contains("run_bash command=<shell_command>"));
+        assert!(prompt.contains("run_bash cmd=<shell_command>"));
+        assert!(prompt.contains("run_bash loop_cmd=<check_command>"));
+        assert!(prompt.contains("loop_timeout_ms"));
+        assert!(prompt.contains("once_timeout_ms"));
+        assert!(!prompt.contains("check_timeout_ms"));
         assert!(!prompt.contains("`expect`:"));
         assert!(!prompt.contains("expect_timeout_ms"));
     }
@@ -2292,7 +2336,7 @@ mod tests {
         assert!(loaded_tool.contains("manual:"));
         assert!(loaded_tool.contains("#### `run_bash`"));
         assert!(loaded_tool.contains("**Options**"));
-        assert!(loaded_tool.contains("run_bash command=<shell_command>"));
+        assert!(loaded_tool.contains("run_bash cmd=<shell_command>"));
         assert!(!loaded_tool.contains("read_back_command"));
         assert!(!loaded_tool.contains("large_readback"));
         assert!(!loaded_tool.contains("expect_timeout_ms"));
