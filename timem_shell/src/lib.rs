@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod final_answer_renderer;
 mod observation;
 mod profiler;
 
@@ -17,19 +18,20 @@ pub use agent_core::{
     local_time_label, meaningful_latest_usage, model_retry_audit_event, normalize_workspace_dir,
     parse_api_protocol, parse_token_count, resolve_topic_reply, runtime_active_elapsed_secs,
     runtime_config_apply_report, runtime_config_field_value, runtime_config_menu_report,
-    runtime_config_report, runtime_profile_report, runtime_retry_status_view, runtime_time_context,
-    runtime_token_status_view, stale_context_decision_request, stale_context_prompt_needed,
-    supporting_context, topic_event_status_hint, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_load_topic_event,
+    runtime_config_report, runtime_info_context, runtime_profile_report, runtime_retry_status_view,
+    runtime_time_context, runtime_token_status_view, stale_context_decision_request,
+    stale_context_prompt_needed, supporting_context, topic_event_status_hint,
+    work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
     work_instruction_mode_from_sources, workspace_config_file, workspace_menu_report,
     workspace_reference_context, ApiProtocol, CapabilityHostProfile, CoreActionTopic,
     CoreLifecycleEvent, CoreLifecycleTopic, CoreMemoryActivity, CoreModelResponseTopic,
     CoreTopicEvent, HostDecision, HostDecisionDefault, HostDecisionRequest, HostStatusLevel,
-    HostStatusMessage, LocalLLMKeyFile, ModelDirection, ModelProfile, NoopTurnUi,
-    OutputExpansionRequest, ProviderConfig, RoundLimitDecisionRequest, RuntimeConfigApplyError,
-    RuntimeConfigApplyMessage, RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport,
-    RuntimeConfigEffect, RuntimeConfigField, RuntimeConfigMenuItem, RuntimeConfigMenuReport,
-    RuntimeConfigReport, RuntimeConfigReportInput, RuntimeConfigReportItem, RuntimeConfigReportRow,
+    HostStatusMessage, LocalLLMKeyFile, LongRunningCommandContinueRequest, ModelDirection,
+    ModelProfile, NoopTurnUi, OutputExpansionRequest, ProviderConfig, RoundLimitDecisionRequest,
+    RunningShellJob, RuntimeConfigApplyError, RuntimeConfigApplyMessage,
+    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigEffect,
+    RuntimeConfigField, RuntimeConfigMenuItem, RuntimeConfigMenuReport, RuntimeConfigReport,
+    RuntimeConfigReportInput, RuntimeConfigReportItem, RuntimeConfigReportRow,
     RuntimeConfigRowKind, RuntimeConfigSection, RuntimeProfiler, RuntimeRetryStatus,
     RuntimeRetryStatusView, RuntimeTokenStatusView, StaleContextDecisionRequest, StorageProfile,
     SupportingContextInput, TokenUsageBreakdown, TopicReply, TopicReplyError, TurnInput,
@@ -43,6 +45,9 @@ pub use agent_core::{
     DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
 };
 pub use agent_core::{cancelled_turn_result, run_session_turn};
+pub use final_answer_renderer::{
+    render_final_answer_markdown, FinalAnswerRenderer, TermimadFinalAnswerRenderer,
+};
 pub use observation::{
     observation_events_from_core_topic_events, observation_panel_width_for_terminal,
     render_observation_panel, render_observation_panel_at,
@@ -250,15 +255,36 @@ pub fn render_final_response_at(
     );
     let status_line = dim_line(&status);
     let body = render_terminal_markdown(text);
+    let body = body.trim_end_matches('\n');
     format!("{}\n{body}\n{status_line}\n\n", timem_prefix(time_label))
 }
 
 pub fn render_turn_outcome_text(outcome: &TurnOutcome) -> String {
-    outcome
+    let mut text = outcome
         .stop_summary
         .as_ref()
         .map(render_turn_stop_summary)
-        .unwrap_or_else(|| outcome.text.clone())
+        .unwrap_or_else(|| outcome.text.clone());
+    if !outcome.running_jobs.is_empty() {
+        if !text.trim().is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&render_running_jobs_for_user(&outcome.running_jobs));
+    }
+    text
+}
+
+pub fn render_running_jobs_for_user(jobs: &[RunningShellJob]) -> String {
+    let mut out = String::from("RUNNING JOB LIST:\n");
+    for job in jobs {
+        out.push_str(&format!(
+            "- pid={}, {}, cmd={}, still running\n",
+            job.pid,
+            job.description(),
+            job.command
+        ));
+    }
+    out.trim_end().to_string()
 }
 
 pub fn render_turn_stop_summary(stop: &TurnStopSummary) -> String {
@@ -295,25 +321,7 @@ pub fn render_turn_stop_summary(stop: &TurnStopSummary) -> String {
 }
 
 pub fn render_terminal_markdown(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    let mut bold = false;
-    while let Some(idx) = rest.find("**") {
-        out.push_str(&rest[..idx]);
-        if bold {
-            out.push_str(ANSI_RESET);
-            bold = false;
-        } else {
-            out.push_str(ANSI_BOLD);
-            bold = true;
-        }
-        rest = &rest[idx + 2..];
-    }
-    out.push_str(rest);
-    if bold {
-        out.push_str(ANSI_RESET);
-    }
-    out
+    render_final_answer_markdown(text)
 }
 
 pub fn token_status(stats: &UsageStats) -> String {
@@ -785,6 +793,10 @@ mod tests {
             "https://dashscope.aliyuncs.com/compatible-mode/v1"
         );
         assert_eq!(config.api_protocol, ApiProtocol::OpenAiCompatible);
+        assert_eq!(
+            config.response_protocol,
+            agent_core::ResponseProtocolKind::Xml
+        );
     }
 
     #[test]
@@ -836,7 +848,7 @@ mod tests {
             "--api-protocol",
             "openai-compatible",
             "--response-protocol",
-            "json",
+            "xml",
             "--api-key",
             "cli-key",
             "--model",
@@ -869,7 +881,7 @@ mod tests {
         assert_eq!(options.space.as_deref(), Some(".x"));
         assert_eq!(options.provider.as_deref(), Some("custom-claude-gateway"));
         assert_eq!(options.api_protocol.as_deref(), Some("openai-compatible"));
-        assert_eq!(options.response_protocol.as_deref(), Some("json"));
+        assert_eq!(options.response_protocol.as_deref(), Some("xml"));
         assert_eq!(options.api_key.as_deref(), Some("cli-key"));
         assert_eq!(options.model.as_deref(), Some("gpt-x"));
         assert_eq!(options.base_url.as_deref(), Some("http://local/v1"));
@@ -1012,6 +1024,30 @@ mod tests {
             render_turn_outcome_text(&outcome),
             "模型调用失败：provider_http_400"
         );
+    }
+
+    #[test]
+    fn shell_appends_running_job_list_after_final_answer() {
+        let outcome = TurnOutcome::final_response(
+            "任务完成。",
+            UsageStats::zero(),
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .with_running_jobs(vec![RunningShellJob {
+            pid: 12345,
+            kind: "timeout".to_string(),
+            command: "sleep 30".to_string(),
+            session_id: "session_a".to_string(),
+            turn_id: "turn_a".to_string(),
+            created_at_ms: 1000,
+        }]);
+
+        let rendered = render_turn_outcome_text(&outcome);
+        assert!(rendered.starts_with("任务完成。"));
+        assert!(rendered.contains("RUNNING JOB LIST:"));
+        assert!(rendered.contains("pid=12345, old job timeout, cmd=sleep 30, still running"));
     }
 
     #[test]
@@ -1238,7 +1274,7 @@ mod tests {
     fn thinking_view_renders_observation_panel_and_status_line() {
         let mut observations = ObservationPanel::new(8, 60);
         observations.apply(ObservationEvent::Persistent("正在分析用户请求".into()));
-        observations.apply(ObservationEvent::Active("Bash: rg --files | wc -l".into()));
+        observations.apply(ObservationEvent::Active("rg --files | wc -l".into()));
         let view = render_thinking_view_at(
             &ThinkingViewSnapshot {
                 status: ShellStatusSnapshot {
@@ -1273,7 +1309,7 @@ mod tests {
         assert!(view.contains("Thought / Action"));
         assert!(view.contains("Thought / Action  ⏳ 00:12"));
         assert!(view.contains("· 正在分析用户请求"));
-        assert!(view.contains("\x1b[38;5;245m· Bash: rg --files | wc -l"));
+        assert!(view.contains("\x1b[38;5;245m· rg --files | wc -l"));
         assert!(view.contains("aliyun:qwen-plus ⇌2 ║ ▲1.2K | ▼20 | KVC(⌁300)"));
         assert!(view.contains("├─ context : ▰▱▱▱▱▱▱▱▱▱"));
         assert!(view.contains("└─ △800  ▽12"));
@@ -1296,7 +1332,7 @@ mod tests {
                 "整理任务现场：保留用户目标、当前进度、下一步，不展示模型私有 thought。".into(),
             ));
             observations.apply(ObservationEvent::ActiveChild {
-                text: format!("Bash: {command}"),
+                text: format!("{command}"),
                 is_last: true,
             });
             observations.apply(ObservationEvent::Transient("思考中...".into()));
@@ -1354,20 +1390,20 @@ mod tests {
         );
 
         let rendered = render_worker_thinking_views_at(
-            &[("[Ai1]", &ai1), ("[Ai2]", &ai2), ("Review", &ai3)],
+            &[("ID0", &ai1), ("ID1", &ai2), ("Review", &ai3)],
             "09:30:00",
         );
 
-        assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 [Ai1]  ⬇"));
-        assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 [Ai2]  ⬇"));
+        assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 ID0  ⬇"));
+        assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 ID1  ⬇"));
         assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 Review  ⬇"));
         assert_eq!(rendered.matches("Thought / Action  ⏳").count(), 3);
         assert_eq!(rendered.matches("思考中...").count(), 3);
         assert!(rendered.contains("aliyun:qwen-plus ⇌12 (⚠3)"));
         assert!(rendered.contains("KVC(⌁53.9K ✚4.9K)"));
-        assert!(rendered.contains("└─ Bash: cargo test -p agent_core"));
-        assert!(rendered.contains("└─ Bash: printf"));
-        assert!(rendered.contains("└─ Bash: rg -n"));
+        assert!(rendered.contains("└─ cargo test -p agent_core"));
+        assert!(rendered.contains("└─ printf"));
+        assert!(rendered.contains("└─ rg -n"));
         assert!(!rendered.contains("private model thought"));
         assert!(!rendered.contains("run_bash"));
 
@@ -1544,6 +1580,53 @@ mod tests {
     }
 
     #[test]
+    fn thinking_view_renders_protocol_repair_warning_in_observation_panel() {
+        let mut observations = ObservationPanel::new(20, 84);
+        observations.apply(ObservationEvent::Persistent(
+            "⚠️ 模型回复偏离协议，重试 (2/5)...".into(),
+        ));
+        observations.apply(ObservationEvent::EnsureTransient("思考中...".into()));
+
+        let view = render_thinking_view_at(
+            &ThinkingViewSnapshot {
+                status: ShellStatusSnapshot {
+                    provider: "aliyun".into(),
+                    model: "qwen-plus".into(),
+                    intent: "ignored in panel mode".into(),
+                    memory_activity: CoreMemoryActivity::None,
+                    model_round: 4,
+                    direction: ModelDirection::Upstream,
+                    usage: UsageStats {
+                        repair_calls: 2,
+                        prompt_tokens: 12_000,
+                        completion_tokens: 300,
+                        ..UsageStats::zero()
+                    },
+                    latest_usage: Some(UsageStats {
+                        prompt_tokens: 4_000,
+                        completion_tokens: 100,
+                        ..UsageStats::zero()
+                    }),
+                    tick: 0,
+                    elapsed_secs: 15,
+                    max_llm_input_tokens: 100_000,
+                    retry: None,
+                },
+                observations,
+            },
+            "12:00:00",
+        );
+
+        assert!(view.contains("Thought / Action  ⏳ 00:15"), "{view}");
+        assert!(
+            view.contains("⚠️ 模型回复偏离协议，重试 (2/5)..."),
+            "{view}"
+        );
+        assert!(view.contains("思考中..."), "{view}");
+        assert!(view.contains("aliyun:qwen-plus ⇌4 (⚠2)"), "{view}");
+    }
+
+    #[test]
     fn final_response_visual_contract() {
         let rendered = render_final_response_at(
             "测试代号是 ALPHA-42。",
@@ -1603,6 +1686,41 @@ mod tests {
     }
 
     #[test]
+    fn final_response_renders_common_markdown_shapes() {
+        let rendered = render_final_response_at(
+            "# 结论\n> 关键观察\n\n运行 `cargo test`：\n```text\nok 12 passed\n```",
+            &UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                ..UsageStats::zero()
+            },
+            None,
+            "custom",
+            "qwen-plus",
+            1,
+            100_000,
+            "17:20:00",
+        );
+
+        assert!(rendered.contains("结论"));
+        assert!(rendered.contains("关键观察"));
+        assert!(rendered.contains("cargo test"));
+        assert!(rendered.contains("ok 12 passed"));
+        assert!(!rendered.contains("# 结论"));
+        assert!(!rendered.contains("```text"));
+        assert!(!rendered.contains("`cargo test`"));
+    }
+
+    #[test]
+    fn final_response_markdown_renderer_resets_unclosed_inline_styles() {
+        let rendered = render_terminal_markdown("先 `code\n再 **bold");
+        assert!(rendered.contains("code"));
+        assert!(rendered.contains("bold"));
+        assert!(!rendered.contains("**bold"));
+    }
+
+    #[test]
     fn final_status_line_is_always_dim_wrapped() {
         let rendered = render_final_response_at(
             "ok",
@@ -1658,7 +1776,7 @@ mod tests {
         let event = agent_core::core_initialized_topic_event(
             "session_a",
             &profile,
-            "markdown",
+            "xml",
             100_000,
             50,
             6,
@@ -1670,7 +1788,7 @@ mod tests {
         assert_eq!(message.level, HostStatusLevel::Info);
         assert!(message.text.contains("Timem Core 启动成功"));
         assert!(message.text.contains("aliyun:qwen-plus"));
-        assert!(message.text.contains("response protocol=markdown"));
+        assert!(message.text.contains("response protocol=xml"));
         assert!(message.text.contains("tools=6"));
 
         let rendered = render_shell_status_bar(&message);

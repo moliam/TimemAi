@@ -10,6 +10,8 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 ## Belongs here
 
 - Terminal UI rendering, ANSI styling, prompt lines, status panels, and menus.
+- Final-answer Markdown rendering behind `final_answer_renderer`, with a
+  replaceable renderer interface and a community renderer backend by default.
 - Reedline/input handling, paste recovery, Ctrl+C/Esc behavior, and TTY quirks.
 - CLI flags, process env collection, shell history, and startup banner display.
 - Collecting CLI/env config values, then passing the effective runtime config to
@@ -78,7 +80,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Lifecycle topic rendering. Shell may render `core.lifecycle` as startup status
   text, but it should not invent reusable core lifecycle state from local
   control flow when core already exposes a structured topic.
-- Session worker display. Shell may render worker display names such as `[Ai1]`
+- Session worker display. Shell may render worker display names such as `ID0`
   or user-renamed labels from lifecycle topics. It must not keep the canonical
   worker identity as terminal-only state; identity belongs to the core/UI
   protocol so future web/iOS hosts see the same worker.
@@ -107,6 +109,11 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   Shell may render the request and collect the user's choice, but it must not
   execute the command, shape stdout/stderr evidence, decide tool semantics, or
   write tool audit records.
+- Terminal-side decision UI for long foreground `run_bash` commands with
+  positive model-provided `timeout_ms`. Shell renders the
+  keep-waiting/stop-waiting menu and returns the user's decision through the
+  core host-decision channel; core owns the process lifecycle, action result,
+  and any follow-up `user_supplement`.
 - Local host concerns such as where this shell process stores history or audit
   files.
 - Choosing host policy for this terminal process, while using `agent_core`
@@ -128,10 +135,14 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   `agent_core` dispatch rather than by terminal UI code.
 - Model-requested tool execution, including `run_bash` process execution,
   command output/evidence shaping, command status handling, and tool audit.
-- Registered tool job lifecycle management, including background job ids,
-  status files, output files, polling/cancel semantics, process termination,
-  and timeout policy. Shell may display the resulting core topics or action
-  evidence, but must not manage those jobs itself.
+- Registered tool job lifecycle management. For command-bound registered tools,
+  core owns job ids/status/output files and cancel semantics. For `run_bash`,
+  core owns the session running-pid set for background jobs and timed-out
+  normal commands, one-time job-exit updates, and running-job snapshots after
+  large context shrink/compact. Shell may display the resulting core topics or
+  action evidence, but must not manage those jobs itself.
+- Long-command process waiting and cancellation. Shell may prompt the user for
+  a decision, but core owns the process lifecycle and resulting prompt evidence.
 - Memory conflict logic, context shrink/compact algorithms, provider cache
   planning, or retry policy.
 - Runtime configuration validation or reusable configuration side effects, such
@@ -139,6 +150,11 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Prompt/resource language that should be shared by other Timem hosts.
 - Prompt/supporting-context assembly rules. Shell should provide context source
   values, not decide how runtime identity and additional context are combined.
+- Session prompt component assembly. Shell may submit user input, user
+  supplements, and host-provided context values through core APIs, but it must
+  not build dynamic prompt deltas itself or format `## USER` / `## SYSTEM` /
+  assistant blocks. The per-session pending component buffer and
+  `build_next_prompt()` belong to `agent_core`.
 - Long-lived runtime state that another UI would need to reproduce.
 - User-facing stopped-turn copy inside the reusable turn loop. A stopped turn
   should be represented structurally so non-terminal hosts can render it in

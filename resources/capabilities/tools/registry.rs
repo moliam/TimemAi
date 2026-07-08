@@ -1,24 +1,19 @@
 use crate::response_protocol::ParsedAction;
-use crate::{capmgr, memmgr, self_tool, shell_exec, shell_job_status, tool_job_status};
-use crate::{ActionExecution, AgentCore};
+use crate::{capmgr, memmgr, self_tool, shell_exec};
+use crate::{ActionExecution, ActionRuntime, AgentCore};
 
-pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
-    "memmgr",
-    "capmgr",
-    "run_bash",
-    "shell_job_status",
-    "tool_job_status",
-    "self_tool",
-];
+pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &["memmgr", "capmgr", "run_bash", "self_tool"];
 
-type BuiltinToolCallback = fn(&mut AgentCore, &ParsedAction) -> ActionExecution;
+type BuiltinToolCallback =
+    fn(&mut AgentCore, &ParsedAction, &mut dyn ActionRuntime) -> ActionExecution;
 
 pub(crate) fn execute_builtin_tool(
     core: &mut AgentCore,
     binding_name: &str,
     action: &ParsedAction,
+    runtime: &mut dyn ActionRuntime,
 ) -> Option<ActionExecution> {
-    builtin_tool_callback(binding_name).map(|callback| callback(core, action))
+    builtin_tool_callback(binding_name).map(|callback| callback(core, action, runtime))
 }
 
 fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
@@ -26,35 +21,41 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
         "capmgr" => Some(execute_capmgr),
         "memmgr" => Some(execute_memmgr),
         "self_tool" => Some(execute_self_tool),
-        "shell_job_status" => Some(execute_shell_job_status),
-        "tool_job_status" => Some(execute_tool_job_status),
         "run_bash" => Some(execute_run_bash),
         _ => None,
     }
 }
 
-fn execute_capmgr(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_capmgr(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
     ActionExecution::Completed(capmgr::execute_action(core, action))
 }
 
-fn execute_memmgr(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_memmgr(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
     ActionExecution::Completed(memmgr::execute(core, action))
 }
 
-fn execute_self_tool(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
+fn execute_self_tool(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
     ActionExecution::Completed(self_tool::execute_action(core, action))
 }
 
-fn execute_shell_job_status(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
-    ActionExecution::Completed(shell_job_status::execute_action(core, action))
-}
-
-fn execute_tool_job_status(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
-    ActionExecution::Completed(tool_job_status::execute_action(core, action))
-}
-
-fn execute_run_bash(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
-    shell_exec::execute_run_bash_action(core, action)
+fn execute_run_bash(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
+    shell_exec::execute_run_bash_action(core, action, runtime)
 }
 
 #[cfg(test)]

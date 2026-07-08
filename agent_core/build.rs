@@ -5,11 +5,12 @@ fn main() {
         "../resources/protocol/json/response_schema_summary.json",
         "../resources/protocol/markdown/response_protocol.md",
         "../resources/protocol/markdown/response_schema_summary.md",
+        "../resources/protocol/xml/response_protocol.md",
+        "../resources/protocol/xml/response_schema_summary.md",
         "../resources/capabilities/tools/capmgr.yaml",
         "../resources/capabilities/tools/memmgr.yaml",
         "../resources/capabilities/tools/run_bash.yaml",
         "../resources/capabilities/tools/self_tool.yaml",
-        "../resources/capabilities/tools/shell_job_status.yaml",
     ];
 
     for resource in resources {

@@ -1,3 +1,5 @@
+use crate::prompt_render::split_formatted_response_trailer;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptBlockRole {
     System,
@@ -76,6 +78,7 @@ pub fn split_old_and_new_delta(dynamic_prompt: &str) -> (String, String) {
 }
 
 pub fn prompt_parts_from_rendered_prompt(rendered_prompt: &str) -> PromptParts {
+    let rendered_prompt = split_formatted_response_trailer(rendered_prompt).0;
     let (static_prompt, dynamic_prompt) = split_prompt(rendered_prompt);
     let dynamic_prompt = if dynamic_prompt.is_empty() {
         rendered_prompt.to_string()
@@ -119,7 +122,9 @@ pub fn plan_incremental_cache(parts: PromptParts) -> Vec<PromptBlock> {
     let segments = split_prompt_segments(&dynamic);
     let cache_indexes = cache_tail_indexes(&segments);
     blocks.extend(segments.into_iter().enumerate().map(|(idx, segment)| {
-        let cache = if cache_indexes.contains(&idx) {
+        let cache = if is_temporary_prompt_segment(&segment) {
+            CacheControl::None
+        } else if cache_indexes.contains(&idx) {
             CacheControl::Ephemeral
         } else {
             CacheControl::None
@@ -133,8 +138,24 @@ pub fn plan_incremental_cache(parts: PromptParts) -> Vec<PromptBlock> {
     blocks
 }
 
+fn is_temporary_prompt_segment(segment: &PromptSegment) -> bool {
+    segment_delta_id(&segment.text)
+        .as_deref()
+        .is_some_and(|id| id.starts_with("temp_"))
+}
+
 pub fn plan_prompt_cache(rendered_prompt: &str) -> Vec<PromptBlock> {
-    plan_incremental_cache(prompt_parts_from_rendered_prompt(rendered_prompt))
+    let (prompt_without_trailer, trailer) = split_formatted_response_trailer(rendered_prompt);
+    let mut blocks =
+        plan_incremental_cache(prompt_parts_from_rendered_prompt(prompt_without_trailer));
+    if let Some(trailer) = trailer {
+        blocks.push(PromptBlock {
+            role: PromptBlockRole::User,
+            text: trailer,
+            cache: CacheControl::None,
+        });
+    }
+    blocks
 }
 
 pub fn stable_text_fingerprint(text: &str) -> String {
@@ -249,13 +270,56 @@ mod tests {
 
     #[test]
     fn cache_planner_keeps_one_delta_as_one_addressable_block() {
-        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nslice one\n\n## ACTIONS\nslice two\n[END DELTA]";
+        let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nslice one\n\n## SYSTEM\nslice two\n[END DELTA]";
 
         let blocks = plan_prompt_cache(prompt);
 
         assert_eq!(blocks.len(), 2);
         assert!(blocks[1].text.contains("slice one"));
         assert!(blocks[1].text.contains("slice two"));
+    }
+
+    #[test]
+    fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]\n\n{}",
+            crate::prompt_render::formatted_response_trailer("XML")
+        );
+
+        let parts = prompt_parts_from_rendered_prompt(&prompt);
+        assert!(parts.new_delta.contains("delta1"));
+        assert!(!parts
+            .new_delta
+            .contains("Follow the system prompt, give your XML formatted response:"));
+
+        let blocks = plan_prompt_cache(&prompt);
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks[1].text.contains("delta1"));
+        assert!(!blocks[1]
+            .text
+            .contains("Follow the system prompt, give your XML formatted response:"));
+        assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
+        assert_eq!(
+            blocks[2].text,
+            "Follow the system prompt, give your XML formatted response:"
+        );
+        assert_eq!(blocks[2].cache, CacheControl::None);
+    }
+
+    #[test]
+    fn temporary_repair_delta_is_not_cache_controlled() {
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## SYSTEM\nrepair\n[END DELTA]\n\n{}",
+            crate::prompt_render::formatted_response_trailer("XML")
+        );
+
+        let blocks = plan_prompt_cache(&prompt);
+        let repair_block = blocks
+            .iter()
+            .find(|block| block.text.contains("temp_repair_123_1"))
+            .expect("missing temporary repair block");
+
+        assert_eq!(repair_block.cache, CacheControl::None);
     }
 
     #[derive(Debug, Default)]

@@ -30,6 +30,9 @@ cat >"$TMP_DIR/data/.space/audit/api_audit.jsonl" <<'JSONL'
 {"type":"llm_request","provider":"fixture-markdown-protocol","model":"m","body":{"instructions":"STATIC MARKDOWN RESPONSE PROTOCOL\n## Response Protocol\nThe top-level response is Markdown, not JSON.","input":"[BEGIN DELTA]\ndelta_id: pd_md_1\n\n## USER\nmarkdown hello\n[END DELTA]"}}
 {"type":"llm_request","provider":"fixture-markdown-protocol","model":"m","body":{"instructions":"STATIC MARKDOWN RESPONSE PROTOCOL\n## Response Protocol\nThe top-level response is Markdown, not JSON.","input":"[BEGIN DELTA]\ndelta_id: pd_md_1\n\n## USER\nmarkdown hello\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_md_2\n\n## TIMEM_ASSISTANT\nfinal_answer:\nmarkdown hi\n[END DELTA]"}}
 {"type":"llm_request","provider":"fixture-markdown-protocol","model":"m","body":{"instructions":"STATIC MARKDOWN RESPONSE PROTOCOL\n## Response Protocol\nThe top-level response is Markdown, not JSON.","input":"[BEGIN DELTA]\ndelta_id: pd_md_1\n\n## USER\nmarkdown hello\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_md_2\n\n## TIMEM_ASSISTANT\nfinal_answer:\nmarkdown hi\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_md_3\n\n## USER\nmarkdown follow up\n[END DELTA]"}}
+{"type":"llm_request","provider":"fixture-xml-protocol","model":"m","body":{"instructions":"STATIC XML RESPONSE PROTOCOL\n## Response Protocol\nThe top-level response is XML, not JSON or Markdown.","input":"[BEGIN DELTA]\ndelta_id: pd_xml_1\n\n## USER\nxml hello\n[END DELTA]"}}
+{"type":"llm_request","provider":"fixture-xml-protocol","model":"m","body":{"instructions":"STATIC XML RESPONSE PROTOCOL\n## Response Protocol\nThe top-level response is XML, not JSON or Markdown.","input":"[BEGIN DELTA]\ndelta_id: pd_xml_1\n\n## USER\nxml hello\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_xml_2\n\n## TIMEM_ASSISTANT\nfinal_answer:\nxml hi\n[END DELTA]"}}
+{"type":"llm_request","provider":"fixture-xml-protocol","model":"m","body":{"instructions":"STATIC XML RESPONSE PROTOCOL\n## Response Protocol\nThe top-level response is XML, not JSON or Markdown.","input":"[BEGIN DELTA]\ndelta_id: pd_xml_1\n\n## USER\nxml hello\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_xml_2\n\n## TIMEM_ASSISTANT\nfinal_answer:\nxml hi\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_xml_3\n\n## USER\nxml follow up\n[END DELTA]"}}
 JSONL
 
 OUTPUT="$(python3 scripts/kvc_replay.py \
@@ -39,7 +42,7 @@ OUTPUT="$(python3 scripts/kvc_replay.py \
   --max-checkpoints 1)"
 
 case "$OUTPUT" in
-  *"audit_files: 1"*$'\n'*"llm_requests: 6"* ) ;;
+  *"audit_files: 1"*$'\n'*"llm_requests: 9"* ) ;;
   *)
     echo "kvc_replay_test: fixture replay did not count expected requests" >&2
     echo "$OUTPUT" >&2

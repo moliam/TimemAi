@@ -34,6 +34,20 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   type: a terminal host, server host, or desktop app may expose local command
   execution, while a mobile app or sandboxed host may not.
 - Prompt context construction and runtime-injected context sections.
+- Session prompt component assembly. Core owns the per-session pending prompt
+  component buffer, `submit_prompt_component(...)`, and `build_next_prompt()`.
+  Runtime/model/user/action outputs enter the next model prompt as structured
+  `PromptComponent` records with role, kind, source, logical timestamp, and
+  sequence. `build_next_prompt()` is the single formatting exit that drains the
+  pending buffer into dynamic prompt deltas. Other modules should not hand-roll
+  visible prompt text or bypass this queue when adding context for the next
+  model call.
+- Prompt component ordering. The pending prompt buffer is a timeline, not a
+  role map. It must preserve repeated visible roles such as
+  `SYSTEM -> USER -> SYSTEM -> Ai4`. Components derived from one previous LLM
+  response parsing/execution batch use the same earliest logical timestamp so
+  they appear before later user/runtime submissions. Logical timestamps are only
+  for prompt assembly order and must not be rendered into the model prompt.
 - Active-turn context updates such as user supplements entered while a model
   turn is in progress, including their prompt-slice insertion and audit events.
 - Host-decision results once chosen by the UI, such as applying user approval
@@ -57,13 +71,21 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Local tool execution abstractions that return structured action evidence.
 - Registered command-tool foreground/background execution semantics. Core owns
   background job ids, persisted status/output files, polling, cancellation,
-  timeout handling, process termination, and action evidence for tool jobs.
-  Hosts may render progress/status, but they must not own the lifecycle for
-  model-requested registered tool jobs.
+  timeout handling, process termination, and action evidence for command-bound
+  tool jobs. For `run_bash`, core owns the session running-pid set for
+  background jobs and timed-out normal commands. `run_bash` prompt evidence
+  shows the running transition once, core injects one-time job-exit updates on
+  status transition, and core injects a full running-job snapshot only after
+  large context shrink/compact. Hosts may render progress/status, but they must
+  not own the lifecycle for model-requested jobs.
 - Model-requested local tool execution, including `run_bash`, command approval
   application, process execution, command output/evidence shaping, and tool
   audit. Hosts may provide user decisions and cancellation signals, but the
   executor remains a core responsibility.
+- Long foreground command lifecycle for positive model-provided `timeout_ms`:
+  core owns process waiting, long-running decision requests, timeout transition
+  into the session running-pid set, action result shaping, and user-supplement
+  insertion after host/user cancellation.
 - Structured reports, requests, stop reasons, status snapshots, and topic events
   for any host UI to render.
 - Optional per-session worker lifecycle. Core may provide a worker that owns one
@@ -71,13 +93,18 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   thread. This is a host adapter convenience for multi-session/web-style
   execution; it must preserve the same topic/request semantics as the
   synchronous `run_session_turn` path.
+- Multi-session worker management. Core owns the standard manager that allocates
+  session worker identities from `ID0`, keeps worker handles/status snapshots,
+  shares global working-worker state across workers, polls worker events, and
+  shuts workers down. Hosts may choose to use the manager or manage workers
+  explicitly, but they should not create incompatible identity/lifecycle rules.
 - Session worker shutdown semantics. Core owns cancellation and cleanup for its
   worker threads: shutdown cancels the active turn, rejects new work, skips
   queued turn/rename commands that have not started, emits a stop event, and
   joins the thread when the worker owner shuts down or is dropped.
 - Session worker identity and workspace metadata. Worker identity includes
   `session_id`, display name, ordinal, and optional parent session id. Default
-  display names are `[Ai1]`, `[Ai2]`, ... by ordinal, but host/user/parent-agent
+  display names are `ID0`, `ID1`, ... by ordinal, but host/user/parent-agent
   code may rename a worker through core's worker handle. Workspace metadata may
   include current directory, data/audit paths, runtime, bash target, sanitized
   environment, and workspace reference directories. Do not expose full prompt

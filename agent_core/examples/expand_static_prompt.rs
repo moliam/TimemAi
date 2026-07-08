@@ -17,7 +17,7 @@ fn main() {
     let response_protocol = std::env::var("TIMEM_RESPONSE_PROTOCOL")
         .ok()
         .map(|value| ResponseProtocolKind::from_name(&value))
-        .unwrap_or(ResponseProtocolKind::Markdown);
+        .unwrap_or_default();
     core.set_response_protocol(response_protocol);
 
     println!("# Expanded Static Prompt Snapshot");

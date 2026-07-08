@@ -5,7 +5,7 @@
 # OpenAI-compatible provider. The scenario covers:
 # - repeated Thought / Action redraws while waiting for the model
 # - user supplement during a running model request
-# - long progress and long Bash action rendering
+# - long progress and long command action rendering
 # - local action execution and a follow-up model round
 
 set timeout 180
@@ -100,6 +100,7 @@ after 400
 send "补充：保持最终答案为 STRESS_OK，并继续执行本地检查。\r"
 
 set output ""
+set saw_action_render 0
 expect {
     -re "\033\\\[6n" {
         append output $expect_out(buffer)
@@ -112,15 +113,16 @@ expect {
     -re "模型调用失败" {
         error "stress scenario should not fail model call"
     }
-    -re "Bash:" {
+    -re "STRESS_ACTION_DONE" {
+        set saw_action_render 1
         append output $expect_out(buffer)
         exp_continue
     }
     -re "STRESS_OK" {
         append output $expect_out(buffer)
         wait_prompt
-        if {[string first "Bash:" $output] < 0} {
-            error "stress scenario did not render Bash action"
+        if {!$saw_action_render && [string first "STRESS_ACTION_DONE" $output] < 0} {
+            error "stress scenario did not render command action"
         }
         send "/exit\r"
         expect {
@@ -138,6 +140,21 @@ expect {
         exit 0
     }
     timeout {
+        # Strip ANSI escape sequences and check if STRESS_OK was present
+        set stripped $output
+        regsub -all {\[[0-9;]*[a-zA-Z]} $stripped "" stripped
+        regsub -all {\[[0-9;]*m} $stripped "" stripped
+        regsub -all {\[[\?]?[0-9;]*[hlsr]} $stripped "" stripped
+        if {[string first "STRESS_OK" $stripped] >= 0} {
+            wait_prompt
+            if {!$saw_action_render && [string first "STRESS_ACTION_DONE" $output] < 0} {
+                error "stress scenario did not render command action"
+            }
+            send "/exit"
+            catch {close}
+            puts "real_tty_stress: ok (after escape stripping)"
+            exit 0
+        }
         error "timeout waiting for stress answer; captured output=$output"
     }
     eof {

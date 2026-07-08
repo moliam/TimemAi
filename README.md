@@ -153,7 +153,7 @@ Common examples:
 export TIMEM_GATEWAY_PROVIDER=aliyun
 export TIMEM_API_KEY=...
 export TIMEM_API_PROTOCOL=openai-compatible
-export TIMEM_RESPONSE_PROTOCOL=markdown
+export TIMEM_RESPONSE_PROTOCOL=xml
 export TIMEM_MAX_LLM_INPUT=100K
 export TIMEM_MAX_LLM_OUTPUT=10K
 ```
@@ -190,8 +190,8 @@ and other providers use OpenAI-compatible chat completions. For a custom
 gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 
 `TIMEM_RESPONSE_PROTOCOL` chooses how the model must format its response for
-the local runtime parser. Supported values are `markdown` and `json`; the
-default is `markdown`.
+the local runtime parser. Supported values are `markdown`, `json`, and `xml`;
+the default is `xml`.
 
 `TIMEM_WORK_INSTRUCTIONS` controls whether Timem loads `AGENTS.md` and
 `CLAUDE.md` from the current working directory into agent context. Supported
@@ -246,9 +246,8 @@ capabilities/
 ```
 
 Runtime tool manifests may add or override canonical tool names only when they
-bind to an existing builtin executor such as `run_bash`, `memmgr`,
-`shell_job_status`, or `capmgr`, or to a command script inside the overlay
-directory.
+bind to an existing builtin executor such as `run_bash`, `memmgr`, `self_tool`,
+or `capmgr`, or to a command script inside the overlay directory.
 
 Command-bound tools use this manifest shape:
 
@@ -309,7 +308,7 @@ source /path/to/your/env
 
 ## Local Shell Jobs
 
-`run_bash` runs short commands in the foreground. For long builds, tests,
+`run_bash` runs short commands in normal mode. For long builds, tests,
 package installs, or video commands, the model can request:
 
 ```json
@@ -317,15 +316,19 @@ package installs, or video commands, the model can request:
   "action": "run_bash",
   "intent": "Run a long local task.",
   "args": {
-    "command": "cargo test",
+    "cmd": "cargo test",
     "background": true
   }
 }
 ```
 
-Runtime returns a `job_id`, output file, and status file. The model should poll
-with `shell_job_status` instead of retrying the same command after a foreground
-timeout.
+Runtime returns a process id such as `pid=12345, now keeps running in
+background`. If a normal command reaches its `timeout_ms`, runtime returns
+`pid=12345, timeout, but is still running` and keeps tracking that process.
+When a tracked job exits, runtime adds a one-time `RUNNING_JOB_UPDATE` to the
+next prompt delta. After large context compaction, runtime can also add a
+`RUNNING JOB LIST` snapshot. The model can inspect or stop those jobs with
+ordinary `run_bash` commands such as `ps -p <pid>` or `kill <pid>`.
 
 `Ctrl+C` is always a cancellation key, not an exit key: while editing input it
 cancels the current line, inside menus it cancels the current selection, and
@@ -350,18 +353,26 @@ Timem shell currently supports macOS and Linux. Windows is not supported yet.
 `install.sh` detects the OS before building:
 
 - macOS: checks Xcode Command Line Tools and `curl`.
-- Linux: checks `cc`, `make`, `curl`, and `ca-certificates`; when possible it
-  installs them with `apt-get`, `dnf`, `yum`, `pacman`, or `zypper`.
+- Linux: checks `cc`, `make`, `curl`, `pkg-config`, and `ca-certificates`;
+  when possible it installs them with `apt-get`, `dnf`, `yum`, `pacman`, or
+  `zypper`.
 
 If Rust/cargo is not installed, `install.sh` installs the Rust toolchain with
-rustup first, then builds the release binary. Cargo 1.78+ is required because
-the repository uses `Cargo.lock` v4; if an older Cargo is found and `rustup`
-exists, the installer updates the stable toolchain automatically. To disable
-automatic Rust install/update:
+rustup first. Cargo 1.78+ is required because the repository uses
+`Cargo.lock` v4; if an older Cargo is found and `rustup` exists, the installer
+updates the stable toolchain automatically. To disable automatic Rust
+install/update:
 
 ```bash
 TIMEM_SHELL_SKIP_RUST_INSTALL=1 ./install.sh
 ```
+
+After Rust is ready, the installer runs `cargo fetch --locked` and
+`cargo build --locked -p timem_shell --release`. Cargo downloads Rust crates
+from `Cargo.lock` automatically, including terminal rendering dependencies such
+as `termimad`; users do not manually install those crate libraries. If this
+step fails on a fresh machine, check network access to crates.io and rerun
+`./install.sh`.
 
 If a manual `cargo run` fails with `lock file version '4' was found`, update
 Rust first:

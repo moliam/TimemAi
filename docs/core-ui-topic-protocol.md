@@ -127,10 +127,15 @@ web/socket state. Hosts should not infer reusable core lifecycle state solely
 from host-local control flow.
 
 Worker identity is the cross-host display identity for a logical session worker.
-Default names are `[Ai1]`, `[Ai2]`, ... by ordinal, and hosts may allow users or
+Default names are `ID0`, `ID1`, ... by ordinal, and hosts may allow users or
 parent workers to rename them. Core redacts secret-looking workspace env values
 before publishing lifecycle payloads; hosts should still avoid sending API keys
 or other secrets as worker metadata.
+
+Hosts that need multiple concurrent sessions should prefer
+`CoreSessionWorkerManager` or an equivalent adapter preserving the same protocol:
+the default worker is `ID0`, additional unnamed workers are `ID1`, `ID2`, ...
+and all workers created by one manager share the global working-worker counter.
 
 ### `core.model.response`
 

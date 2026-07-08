@@ -15,7 +15,7 @@ pub fn normalize_scratch_kind(scratch_type: &str) -> String {
 pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
     let mem_type = action.input_lower("type");
     let op = action.input_lower("op");
-    let query = action.input_str("query");
+    let search_text = action.input_str("search_text");
     let content = action.input_str("content");
     let scratch_type = action.input_str("kind");
     let label = action.input_str("label");
@@ -32,31 +32,6 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
     let before_ms = action.input_i64("before_ms");
     let expected_version = action.input_u64("expected_version");
     match (mem_type.as_str(), op.as_str()) {
-        ("durable", "query") => {
-            core.current_stats.mem_reads += 1;
-            let rows = core.memory.query(&query, limit).unwrap_or_default();
-            if rows.is_empty() {
-                format!(
-                    "Action result: memmgr\ntype: durable\nop: query\nquery: {}\nresults: none",
-                    query
-                )
-            } else {
-                let lines = rows
-                    .into_iter()
-                    .map(|r| {
-                        format!(
-                            "- id={} version={} created_at_ms={} updated_at_ms={} content={}",
-                            r.id, r.version, r.created_at_ms, r.updated_at_ms, r.content
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!(
-                    "Action result: memmgr\ntype: durable\nop: query\nquery: {}\nresults:\n{}",
-                    query, lines
-                )
-            }
-        }
         ("durable", "schema") => {
             core.current_stats.mem_reads += 1;
             core.memory.schema_text(&core.chat_history)
@@ -68,10 +43,18 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 .sql_read(&core.chat_history, &sql, &params, limit)
             {
                 Ok(rows) if rows.is_empty() => {
-                    format!(
-                        "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults: none",
-                        mem_type, sql
-                    )
+                    if mem_type == "durable" {
+                        let total_rows = core.memory.count().unwrap_or_default();
+                        format!(
+                            "Action result: memmgr\ntype: durable\nop: sql\nsql: {}\nresults: none\ndurable_memory_total_rows: {}",
+                            sql, total_rows
+                        )
+                    } else {
+                        format!(
+                            "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults: none",
+                            mem_type, sql
+                        )
+                    }
                 }
                 Ok(rows) => {
                     let lines = rows
@@ -111,16 +94,16 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 }
             }
         }
-        ("raw_chat", "query") => {
+        ("raw_chat", "search") => {
             let rows = core
                 .chat_history
-                .query(&query, limit, after_ms, before_ms)
+                .query(&search_text, limit, after_ms, before_ms)
                 .unwrap_or_default();
-            let delta_rows = core.query_prompt_slices(&query, limit, after_ms, before_ms);
+            let delta_rows = core.query_prompt_slices(&search_text, limit, after_ms, before_ms);
             if rows.is_empty() && delta_rows.is_empty() {
                 format!(
-                    "Action result: memmgr\ntype: raw_chat\nop: query\nquery: {}\nresults: none",
-                    query
+                    "Action result: memmgr\ntype: raw_chat\nop: search\nsearch_text: {}\nresults: none",
+                    search_text
                 )
             } else {
                 let mut sections = Vec::new();
@@ -161,17 +144,20 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                     sections.push(format!("current_prompt_deltas:\n{}", lines));
                 }
                 format!(
-                    "Action result: memmgr\ntype: raw_chat\nop: query\nquery: {}\nresults:\n{}",
-                    query,
+                    "Action result: memmgr\ntype: raw_chat\nop: search\nsearch_text: {}\nresults:\n{}",
+                    search_text,
                     sections.join("\n")
                 )
             }
         }
         ("raw_chat", "delete") => {
-            match core.chat_history.delete(&id, &query, limit, after_ms, before_ms) {
+            match core
+                .chat_history
+                .delete(&id, &search_text, limit, after_ms, before_ms)
+            {
                 Ok(deleted) => format!(
-                    "Action result: memmgr\ntype: raw_chat\nop: delete\nid: {}\nquery: {}\ndeleted_count: {}",
-                    id, query, deleted
+                    "Action result: memmgr\ntype: raw_chat\nop: delete\nid: {}\nsearch_text: {}\ndeleted_count: {}",
+                    id, search_text, deleted
                 ),
                 Err(err) => {
                     format!("Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}", err)
@@ -214,10 +200,10 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 err
             ),
         },
-        ("scratch", "query") => match core.scratch.query(&query, limit) {
+        ("scratch", "search") => match core.scratch.query(&search_text, limit) {
             Ok(rows) if rows.is_empty() => format!(
-                "Action result: memmgr\ntype: scratch\nop: query\nquery: {}\nresults: none",
-                query
+                "Action result: memmgr\ntype: scratch\nop: search\nsearch_text: {}\nresults: none",
+                search_text
             ),
             Ok(rows) => {
                 let lines = rows
@@ -235,12 +221,12 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "Action result: memmgr\ntype: scratch\nop: query\nquery: {}\nresults:\n{}",
-                    query, lines
+                    "Action result: memmgr\ntype: scratch\nop: search\nsearch_text: {}\nresults:\n{}",
+                    search_text, lines
                 )
             }
             Err(err) => format!(
-                "Action result: memmgr\ntype: scratch\nop: query\nerror: {}",
+                "Action result: memmgr\ntype: scratch\nop: search\nerror: {}",
                 err
             ),
         },
@@ -258,8 +244,8 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 err
             ),
         },
-        ("context", "shrink") => core.apply_prompt_shrink(
-            "Action result: memmgr\ntype: context\nop: shrink",
+        ("context", "discard") => core.apply_prompt_shrink(
+            "Action result: memmgr\ntype: context\nop: discard",
             &delta_ids,
             &[],
         ),

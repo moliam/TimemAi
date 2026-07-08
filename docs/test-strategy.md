@@ -58,7 +58,7 @@ checks. If a dimension is not applicable, record that residual decision in
   real `AgentCore`, real action execution, real audit writes, and UI decisions.
 - Replay story tests: scripted multi-turn user/model conversations that exercise
   normal replies, malformed model recovery, memory retrieve, scratch offload,
-  context shrink, audit writes, and observation rendering in one end-to-end
+  context discard, audit writes, and observation rendering in one end-to-end
   path.
 - Real TTY smoke: compiled release binary driven through a pseudo terminal for
   input/editor/menu behavior.
@@ -79,17 +79,17 @@ checks. If a dimension is not applicable, record that residual decision in
 |---|---|---|---|
 | Provider config, protocol, URL, output/input limits | `provider_config_from_env`, `parse_cli_args`, provider switch default-reset tests, protocol adapter tests | startup banner and `/config` real TTY smoke including provider switch/default URL validation | full CI |
 | Provider response parsing and errors | OpenAI-compatible, OpenAI Responses, Anthropic usage/error tests | truncated output expansion session test; transient provider error retry session test; protocol repair session test with audit assertions | edge regression session group |
-| Prompt cache planning | `prompt_cache_strategy_*`, prefix-cache simulator tests with bounded lookback, provider request cache-control tests, Anthropic cache read/create usage tests, `scripts/kvc_replay_test.sh`, `scripts/kvc_replay.py` local audit replay | `session_turn_preserves_incremental_prompt_cache_plan_across_rounds`, `session_turn_preserves_cache_plan_with_json_response_protocol`, `session_turn_preserves_cache_plan_with_markdown_response_protocol`, request audit redaction/hash tests | full CI runs JSON/Markdown replay fixture coverage; run local audit replay before cache-strategy releases |
+| Prompt cache planning | `prompt_cache_strategy_*`, prefix-cache simulator tests with bounded lookback, provider request cache-control tests, Anthropic cache read/create usage tests, `scripts/kvc_replay_test.sh`, `scripts/kvc_replay.py` local audit replay | `session_turn_preserves_incremental_prompt_cache_plan_across_rounds`, `session_turn_preserves_cache_plan_with_json_response_protocol`, `session_turn_preserves_cache_plan_with_markdown_response_protocol`, `session_turn_preserves_cache_plan_with_xml_response_protocol`, request audit redaction/hash tests | full CI runs JSON/Markdown/XML replay fixture coverage; run local audit replay before cache-strategy releases |
 | Prompt delta/slice rendering | prompt segmentation, multi-slice core tests, focused response-repair slice tests | shrink session E2E | edge regression shrink group |
 | Forced shrink | core shrink threshold, stale observed-token invalidation, static-dominant guard | `session_turn_forced_shrink_runs_to_final_without_repeated_shrink` | edge regression shrink + session groups |
 | Scratch notes and context offload | scratch write/read/query/delete, invalid refs, missing fields | `session_turn_scratch_context_offload_records_id_and_continues` | session group |
 | Durable memory | query/update/delete, expected version, SQL read surface | realistic multi-turn memory story | memory concurrency + realistic story groups |
 | Multi-CLI memory conflicts | mem guard cross-process and same-version conflict tests | realistic story exercises shared storage shape | memory concurrency group |
 | Chat history | persisted query, delete, SQL time-window, current prompt fallback | realistic story | full CI |
-| Bash actions | approval risk, foreground shell, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
+| Bash actions | approval risk, normal shell, background jobs, documented `ask/approve` parsing | bash approval session E2E | shell job group |
 | Runtime self tool | `self_tool::tests::*`, manifest/registry/executor tests, sensitive/protected env denial tests | core action replay for env/path/about/process plus UI observation tests | full CI |
 | User scenario replay | focused core replay tests for coding, memory QA, self QA/env update, and file-writing output | `scenario_coding_inspects_project_and_reports_from_shell_evidence`, `scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering`, `scenario_self_qa_and_runtime_env_update_stays_bounded`, `scenario_file_writing_outputs_artifact_and_verifies_content` | full CI |
-| Background jobs | background start/poll/cancel/status timeout tests for bash and registered command tools | realistic story where applicable | shell/tool job groups |
+| Background jobs | `run_bash` pid start, timeout-to-running, exit update, shrink-time running list, and registered command-tool job tests | realistic story where applicable | shell/tool job groups |
 | Multi-turn replay story | protocol parsing, memory/scratch/shrink primitives | `session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering` | full CI |
 | Session worker lifecycle | lifecycle topic/accessor, worker channel tests | `session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement`, `session_worker_rename_emits_updated_identity_topic`, `session_worker_shutdown_cancels_pending_host_decision`, `core_lifecycle_topic_round_trips_worker_identity_workspace_and_context` | full CI |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |
@@ -106,15 +106,16 @@ checks. If a dimension is not applicable, record that residual decision in
 `scripts/ci.sh` must run:
 
 1. shell script syntax checks
-2. install logic tests
-3. sensitive scan over tracked files
-4. `cargo fmt --check`
-5. `cargo test --workspace`
-6. performance guard via `scripts/performance_guard.sh`
-7. repeated edge regression via `scripts/edge_regression.sh`
-8. release build
-9. real TTY smoke through `expect`
-10. whitespace check
+2. module boundary check via `scripts/module_boundary_check.sh`
+3. install logic tests
+4. sensitive scan over tracked files
+5. `cargo fmt --check`
+6. `cargo test --workspace`
+7. performance guard via `scripts/performance_guard.sh`
+8. repeated edge regression via `scripts/edge_regression.sh`
+9. release build
+10. real TTY smoke through `expect`
+11. whitespace check
 
 `scripts/edge_regression.sh` defaults to two iterations. Increase pressure with:
 

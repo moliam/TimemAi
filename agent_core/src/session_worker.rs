@@ -4,8 +4,9 @@ use crate::{
     HostDecision, HostDecisionRequest, ModelClient, ProviderConfig, ProviderModelClient,
     RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnUi, UsageStats,
 };
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -232,6 +233,214 @@ pub struct CoreSessionWorker {
     join: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreSessionWorkerLifecycleState {
+    Running,
+    Stopping,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreSessionWorkerStatus {
+    pub identity: CoreSessionWorkerIdentity,
+    pub state: CoreSessionWorkerLifecycleState,
+}
+
+struct ManagedSessionWorker {
+    identity: CoreSessionWorkerIdentity,
+    state: CoreSessionWorkerLifecycleState,
+    worker: CoreSessionWorker,
+}
+
+pub struct CoreSessionWorkerManager {
+    runtime: CoreSessionWorkerRuntime,
+    next_ordinal: u32,
+    workers: BTreeMap<String, ManagedSessionWorker>,
+}
+
+impl CoreSessionWorkerManager {
+    pub fn new() -> Self {
+        Self {
+            runtime: CoreSessionWorkerRuntime::new(),
+            next_ordinal: 0,
+            workers: BTreeMap::new(),
+        }
+    }
+
+    pub fn runtime(&self) -> CoreSessionWorkerRuntime {
+        self.runtime.clone()
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    pub fn working_worker_count(&self) -> usize {
+        self.runtime.working_worker_count()
+    }
+
+    pub fn statuses(&self) -> Vec<CoreSessionWorkerStatus> {
+        self.workers
+            .values()
+            .map(|worker| CoreSessionWorkerStatus {
+                identity: worker.identity.clone(),
+                state: worker.state,
+            })
+            .collect()
+    }
+
+    pub fn handle(&self, session_id: &str) -> Option<CoreSessionWorkerHandle> {
+        self.workers
+            .get(session_id)
+            .map(|worker| worker.worker.handle())
+    }
+
+    pub fn ensure_default_worker(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+    ) -> Result<String, String> {
+        if let Some(session_id) = self.workers.keys().next() {
+            return Ok(session_id.clone());
+        }
+        self.spawn_worker(core, config, workspace, None, None)
+    }
+
+    pub fn ensure_default_worker_with_model_client<M>(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
+        if let Some(session_id) = self.workers.keys().next() {
+            return Ok(session_id.clone());
+        }
+        self.spawn_worker_with_model_client(core, config, workspace, None, None, model_client)
+    }
+
+    pub fn spawn_worker(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        display_name: Option<String>,
+        parent_session_id: Option<String>,
+    ) -> Result<String, String> {
+        self.spawn_worker_with_model_client(
+            core,
+            config,
+            workspace,
+            display_name,
+            parent_session_id,
+            ProviderModelClient,
+        )
+    }
+
+    pub fn spawn_worker_with_model_client<M>(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        display_name: Option<String>,
+        parent_session_id: Option<String>,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self
+            .next_ordinal
+            .checked_add(1)
+            .ok_or_else(|| "session_worker_ordinal_overflow".to_string())?;
+        let session_id = format!("session_{ordinal}");
+        let identity = CoreSessionWorkerIdentity::new(
+            session_id.clone(),
+            ordinal,
+            display_name,
+            parent_session_id,
+        );
+        let worker = CoreSessionWorker::spawn_with_runtime_model_client(
+            core,
+            config,
+            CoreSessionWorkerConfig::new(identity.clone(), workspace),
+            self.runtime.clone(),
+            model_client,
+        );
+        self.workers.insert(
+            session_id.clone(),
+            ManagedSessionWorker {
+                identity,
+                state: CoreSessionWorkerLifecycleState::Running,
+                worker,
+            },
+        );
+        Ok(session_id)
+    }
+
+    pub fn try_recv_event(&mut self, session_id: &str) -> Option<CoreSessionWorkerEvent> {
+        let managed = self.workers.get_mut(session_id)?;
+        match managed.worker.events().try_recv() {
+            Ok(event) => {
+                if matches!(event, CoreSessionWorkerEvent::WorkerStopped) {
+                    managed.state = CoreSessionWorkerLifecycleState::Stopped;
+                }
+                Some(event)
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
+        }
+    }
+
+    pub fn request_shutdown(&mut self, session_id: &str) -> Result<(), String> {
+        let managed = self
+            .workers
+            .get_mut(session_id)
+            .ok_or_else(|| "session_worker_not_found".to_string())?;
+        managed.state = CoreSessionWorkerLifecycleState::Stopping;
+        managed.worker.handle().request_shutdown()
+    }
+
+    pub fn remove_stopped(&mut self, session_id: &str) -> Result<(), String> {
+        let Some(managed) = self.workers.get(session_id) else {
+            return Err("session_worker_not_found".to_string());
+        };
+        if managed.state != CoreSessionWorkerLifecycleState::Stopped {
+            return Err("session_worker_not_stopped".to_string());
+        }
+        let managed = self.workers.remove(session_id).unwrap();
+        managed.worker.shutdown()
+    }
+
+    pub fn shutdown_all(mut self) -> Result<(), String> {
+        for managed in self.workers.values_mut() {
+            let _ = managed.worker.handle().request_shutdown();
+            managed.state = CoreSessionWorkerLifecycleState::Stopping;
+        }
+        let mut first_error = None;
+        for (_session_id, managed) in self.workers {
+            if let Err(err) = managed.worker.shutdown() {
+                first_error.get_or_insert(err);
+            }
+        }
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Default for CoreSessionWorkerManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoreSessionWorker {
     pub fn spawn(
         core: AgentCore,
@@ -291,6 +500,7 @@ impl CoreSessionWorker {
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();
             let workspace = worker_config.workspace.clone();
+            core.set_assistant_speaker_name(&identity.display_name);
             let init_event = core_initialized_topic_event_with_worker(
                 &identity.session_id,
                 core.profile(),
@@ -353,6 +563,7 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::Rename { display_name } => {
                         identity.rename(display_name);
+                        core.set_assistant_speaker_name(&identity.display_name);
                         let event = core_initialized_topic_event_with_worker(
                             &identity.session_id,
                             core.profile(),
@@ -520,7 +731,9 @@ impl TurnUi for WorkerTurnUi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApiProtocol, BashApprovalMode, CoreProfile, LlmResponse, UsageStats};
+    use crate::{
+        ApiProtocol, BashApprovalMode, CoreProfile, LlmResponse, ResponseProtocolKind, UsageStats,
+    };
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier, Mutex};
     use std::time::Instant;
@@ -595,8 +808,7 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
-            let has_supplement = prompt.contains("## USER")
-                && prompt.contains("User supplement during current turn:");
+            let has_supplement = prompt.contains("## USER") && prompt.contains("SUPPLEMENT");
             let content = if has_supplement {
                 "## Status\nfinished\n\n## Final_Answer\nSUPPLEMENT_WORKER_OK"
             } else {
@@ -657,7 +869,7 @@ mod tests {
                         .worker
                         .as_ref()
                         .map(|worker| worker.display_name.as_str()),
-                    Some("[Ai1]")
+                    Some("ID1")
                 );
                 assert_eq!(lifecycle.context.unwrap().visible_delta_count, 0);
             }
@@ -752,7 +964,7 @@ mod tests {
         match lifecycle {
             CoreSessionWorkerEvent::Topics(events) => {
                 let lifecycle = events[0].as_lifecycle().unwrap();
-                assert_eq!(lifecycle.worker.unwrap().display_name, "[Ai3]");
+                assert_eq!(lifecycle.worker.unwrap().display_name, "ID3");
             }
             other => panic!("unexpected first worker event: {other:?}"),
         }
@@ -771,6 +983,273 @@ mod tests {
         }
 
         worker.shutdown().unwrap();
+    }
+
+    struct ManagerOkModel;
+
+    impl ModelClient for ManagerOkModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            _prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            Ok(LlmResponse {
+                content: "## Status\nfinished\n\n## Final_Answer\nMANAGER_OK".to_string(),
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    total_tokens: 12,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            })
+        }
+    }
+
+    fn wait_for_manager_event(
+        manager: &mut CoreSessionWorkerManager,
+        session_id: &str,
+        label: &str,
+    ) -> CoreSessionWorkerEvent {
+        let started = Instant::now();
+        loop {
+            if let Some(event) = manager.try_recv_event(session_id) {
+                return event;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{label} timed out waiting for manager event"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn session_worker_manager_allocates_id0_default_and_tracks_lifecycle() {
+        let dir = tmp_dir("manager_default");
+        let core = AgentCore::new(
+            "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+            CoreProfile {
+                name: "test".to_string(),
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+            },
+            &dir,
+        );
+        let mut manager = CoreSessionWorkerManager::new();
+        let session_id = manager
+            .ensure_default_worker_with_model_client(
+                core,
+                test_config(),
+                CoreSessionWorkerWorkspace::new(
+                    &dir,
+                    dir.join("api_audit.jsonl"),
+                    "test-runtime",
+                    "local",
+                ),
+                ManagerOkModel,
+            )
+            .expect("manager should spawn default worker");
+        assert_eq!(session_id, "session_0");
+        assert_eq!(manager.worker_count(), 1);
+        assert_eq!(manager.statuses()[0].identity.display_name, "ID0");
+        assert_eq!(
+            manager.statuses()[0].state,
+            CoreSessionWorkerLifecycleState::Running
+        );
+
+        match wait_for_manager_event(&mut manager, &session_id, "manager lifecycle") {
+            CoreSessionWorkerEvent::Topics(events) => {
+                let lifecycle = events[0].as_lifecycle().unwrap();
+                assert_eq!(lifecycle.worker.unwrap().display_name, "ID0");
+            }
+            other => panic!("unexpected manager lifecycle event: {other:?}"),
+        }
+
+        let handle = manager.handle(&session_id).expect("manager handle");
+        handle
+            .run_turn("hello through manager", None)
+            .expect("manager worker should accept turn");
+        let outcome = loop {
+            match wait_for_manager_event(&mut manager, &session_id, "manager turn") {
+                CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+                CoreSessionWorkerEvent::Topics(_)
+                | CoreSessionWorkerEvent::ModelRequest { .. }
+                | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                other => panic!("unexpected manager turn event: {other:?}"),
+            }
+        };
+        assert_eq!(outcome.text, "MANAGER_OK");
+
+        manager
+            .request_shutdown(&session_id)
+            .expect("manager should request shutdown");
+        assert_eq!(
+            manager.statuses()[0].state,
+            CoreSessionWorkerLifecycleState::Stopping
+        );
+        loop {
+            match wait_for_manager_event(&mut manager, &session_id, "manager shutdown") {
+                CoreSessionWorkerEvent::WorkerStopped => break,
+                CoreSessionWorkerEvent::Topics(_) => {}
+                other => panic!("unexpected manager shutdown event: {other:?}"),
+            }
+        }
+        assert_eq!(
+            manager.statuses()[0].state,
+            CoreSessionWorkerLifecycleState::Stopped
+        );
+        manager
+            .remove_stopped(&session_id)
+            .expect("stopped worker should be removable");
+        assert_eq!(manager.worker_count(), 0);
+    }
+
+    #[test]
+    fn session_worker_manager_allocates_multiple_workers_from_id0() {
+        let mut manager = CoreSessionWorkerManager::new();
+        let mut session_ids = Vec::new();
+        for idx in 0..2 {
+            let dir = tmp_dir(&format!("manager_multi_{idx}"));
+            let core = AgentCore::new(
+                "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+                CoreProfile {
+                    name: "test".to_string(),
+                    provider: "test".to_string(),
+                    model: "test-model".to_string(),
+                },
+                &dir,
+            );
+            let session_id = manager
+                .spawn_worker_with_model_client(
+                    core,
+                    test_config(),
+                    CoreSessionWorkerWorkspace::new(
+                        &dir,
+                        dir.join("api_audit.jsonl"),
+                        "test-runtime",
+                        "local",
+                    ),
+                    None,
+                    None,
+                    ManagerOkModel,
+                )
+                .expect("manager should spawn worker");
+            session_ids.push(session_id);
+        }
+        assert_eq!(session_ids, vec!["session_0", "session_1"]);
+        let names = manager
+            .statuses()
+            .into_iter()
+            .map(|status| status.identity.display_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["ID0", "ID1"]);
+        manager.shutdown_all().unwrap();
+    }
+
+    struct BlockingManagerModel {
+        release: Arc<AtomicBool>,
+    }
+
+    impl ModelClient for BlockingManagerModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            _prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            while !self.release.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok(LlmResponse {
+                content: "## Status\nfinished\n\n## Final_Answer\nCOUNT_OK".to_string(),
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    total_tokens: 12,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            })
+        }
+    }
+
+    #[test]
+    fn session_worker_manager_tracks_global_working_count() {
+        let release = Arc::new(AtomicBool::new(false));
+        let mut manager = CoreSessionWorkerManager::new();
+        let mut session_ids = Vec::new();
+        for idx in 0..2 {
+            let dir = tmp_dir(&format!("manager_count_{idx}"));
+            let core = AgentCore::new(
+                "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+                CoreProfile {
+                    name: "test".to_string(),
+                    provider: "test".to_string(),
+                    model: "test-model".to_string(),
+                },
+                &dir,
+            );
+            let session_id = manager
+                .spawn_worker_with_model_client(
+                    core,
+                    test_config(),
+                    CoreSessionWorkerWorkspace::new(
+                        &dir,
+                        dir.join("api_audit.jsonl"),
+                        "test-runtime",
+                        "local",
+                    ),
+                    None,
+                    None,
+                    BlockingManagerModel {
+                        release: Arc::clone(&release),
+                    },
+                )
+                .unwrap();
+            let _ = wait_for_manager_event(&mut manager, &session_id, "manager count lifecycle");
+            manager
+                .handle(&session_id)
+                .unwrap()
+                .run_turn(format!("count {idx}"), None)
+                .unwrap();
+            session_ids.push(session_id);
+        }
+
+        for session_id in &session_ids {
+            loop {
+                match wait_for_manager_event(&mut manager, session_id, "manager count request") {
+                    CoreSessionWorkerEvent::ModelRequest { .. } => break,
+                    CoreSessionWorkerEvent::Topics(_) => {}
+                    other => panic!("unexpected manager count pre-release event: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(manager.working_worker_count(), 2);
+
+        release.store(true, Ordering::SeqCst);
+        for session_id in &session_ids {
+            loop {
+                match wait_for_manager_event(&mut manager, session_id, "manager count finish") {
+                    CoreSessionWorkerEvent::TurnFinished { outcome } => {
+                        assert_eq!(outcome.text, "COUNT_OK");
+                        break;
+                    }
+                    CoreSessionWorkerEvent::Topics(_)
+                    | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                    other => panic!("unexpected manager count finish event: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(manager.working_worker_count(), 0);
+        manager.shutdown_all().unwrap();
     }
 
     struct ApprovalReplayModel {
@@ -798,13 +1277,13 @@ mod tests {
                 r#"## Progress
 需要用户确认后执行本地命令。
 
-## Intermediate_Actions
+## Working_Still_Action
 ```action
 {
   "action": "run_bash",
   "intent": "Run a command that requires approval.",
   "args": {
-    "command": "printf approval-worker-ok",
+    "cmd": "printf approval-worker-ok",
     "timeout_ms": 5000
   }
 }
@@ -823,6 +1302,86 @@ mod tests {
                 truncated: false,
             })
         }
+    }
+
+    struct AssistantHeadingModel {
+        expected_heading: String,
+        calls: u32,
+    }
+
+    impl ModelClient for AssistantHeadingModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.calls += 1;
+            if self.calls == 1 {
+                assert!(!prompt.contains(&self.expected_heading));
+            } else {
+                assert!(
+                    prompt.contains(&self.expected_heading),
+                    "prompt should contain assistant heading {}:\n{}",
+                    self.expected_heading,
+                    prompt
+                );
+            }
+            Ok(LlmResponse {
+                content: "## Status\nfinished\n\n## Final_Answer\nok".to_string(),
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 10,
+                    completion_tokens: 2,
+                    total_tokens: 12,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            })
+        }
+    }
+
+    #[test]
+    fn session_worker_identity_sets_prompt_assistant_heading() {
+        let dir = tmp_dir("worker_assistant_heading");
+        let core = AgentCore::new(
+            "STATIC",
+            CoreProfile {
+                name: "test".to_string(),
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+            },
+            &dir,
+        );
+        let worker = CoreSessionWorker::spawn_with_model_client(
+            core,
+            test_config(),
+            test_worker_config(&dir, "session_worker_heading", 4),
+            AssistantHeadingModel {
+                expected_heading: "## ID4".to_string(),
+                calls: 0,
+            },
+        );
+
+        worker
+            .handle()
+            .run_turn("hello", None)
+            .expect("worker should accept run_turn");
+        let first = wait_for_turn_finished(worker.events(), "heading first", false);
+        assert_eq!(first.text, "ok");
+        worker
+            .handle()
+            .run_turn("continue", None)
+            .expect("worker should accept second run_turn");
+        let second = wait_for_turn_finished(worker.events(), "heading second", false);
+        assert_eq!(second.text, "ok");
+        worker
+            .handle()
+            .request_shutdown()
+            .expect("worker should accept shutdown");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1018,8 +1577,7 @@ mod tests {
             _audit_file: &std::path::Path,
             should_cancel: &mut dyn FnMut() -> bool,
         ) -> Result<LlmResponse, String> {
-            let has_supplement = prompt.contains("## USER")
-                && prompt.contains("User supplement during current turn:");
+            let has_supplement = prompt.contains("## USER") && prompt.contains("SUPPLEMENT");
             self.calls.lock().unwrap().push(ConcurrentModelCall {
                 worker: self.worker.to_string(),
                 has_supplement,
@@ -1117,7 +1675,7 @@ mod tests {
                 .worker
                 .unwrap()
                 .display_name,
-            "[Ai1]"
+            "ID1"
         );
         assert_eq!(
             lifecycle_b
@@ -1126,7 +1684,7 @@ mod tests {
                 .worker
                 .unwrap()
                 .display_name,
-            "[Ai2]"
+            "ID2"
         );
 
         handle_a
@@ -1184,7 +1742,7 @@ mod tests {
             self.call_no += 1;
             let content = if self.call_no == 1 {
                 self.first_call_barrier.wait();
-                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Intermediate_Actions\n```action\n{\"action\":\"run_bash\",\"intent\":\"执行一个短命令。\",\"args\":{\"command\":\"printf worker-count-ok\",\"timeout_ms\":5000}}\n```"
+                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"action\":\"self_tool\",\"intent\":\"读取运行时自身信息以推进测试回合。\",\"args\":{\"type\":\"about_me\",\"op\":\"read\"}}\n```"
                     .to_string()
             } else {
                 "## Status\nfinished\n\n## Final_Answer\nWORKER_COUNT_DONE".to_string()
@@ -1204,33 +1762,56 @@ mod tests {
         }
     }
 
-    fn collect_model_response_worker_counts(
+    fn drain_worker_count_event(
         events: &Receiver<CoreSessionWorkerEvent>,
         label: &str,
-    ) -> Vec<usize> {
-        let mut counts = Vec::new();
-        loop {
-            match events
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap_or_else(|_| panic!("{label} timed out waiting for turn finish"))
-            {
-                CoreSessionWorkerEvent::Topics(events) => {
-                    counts.extend(
-                        events
-                            .iter()
-                            .filter_map(CoreTopicEvent::as_model_response)
-                            .map(|topic| topic.global.working_worker_count),
-                    );
-                }
-                CoreSessionWorkerEvent::TurnFinished { outcome } => {
-                    assert_eq!(outcome.text, "WORKER_COUNT_DONE");
-                    return counts;
-                }
-                CoreSessionWorkerEvent::ModelRequest { .. }
-                | CoreSessionWorkerEvent::ModelResponse { .. } => {}
-                other => panic!("{label} unexpected event while collecting counts: {other:?}"),
+        counts: &mut Vec<usize>,
+        finished: &mut bool,
+    ) {
+        if *finished {
+            return;
+        }
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(CoreSessionWorkerEvent::Topics(events)) => {
+                counts.extend(
+                    events
+                        .iter()
+                        .filter_map(CoreTopicEvent::as_model_response)
+                        .map(|topic| topic.global.working_worker_count),
+                );
+            }
+            Ok(CoreSessionWorkerEvent::TurnFinished { outcome }) => {
+                assert_eq!(outcome.text, "WORKER_COUNT_DONE");
+                *finished = true;
+            }
+            Ok(CoreSessionWorkerEvent::ModelRequest { .. })
+            | Ok(CoreSessionWorkerEvent::ModelResponse { .. }) => {}
+            Ok(other) => panic!("{label} unexpected event while collecting counts: {other:?}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{label} event channel disconnected before turn finish")
             }
         }
+    }
+
+    fn collect_two_worker_model_response_counts(
+        events_a: &Receiver<CoreSessionWorkerEvent>,
+        events_b: &Receiver<CoreSessionWorkerEvent>,
+    ) -> Vec<usize> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut counts = Vec::new();
+        let mut finished_a = false;
+        let mut finished_b = false;
+        while !(finished_a && finished_b) {
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for worker count turns; finished_a={finished_a} finished_b={finished_b} counts={counts:?}"
+                );
+            }
+            drain_worker_count_event(events_a, "worker_count_a", &mut counts, &mut finished_a);
+            drain_worker_count_event(events_b, "worker_count_b", &mut counts, &mut finished_b);
+        }
+        counts
     }
 
     #[test]
@@ -1293,10 +1874,8 @@ mod tests {
         handle_a.run_turn("worker count a", None).unwrap();
         handle_b.run_turn("worker count b", None).unwrap();
 
-        let counts_a = collect_model_response_worker_counts(worker_a.events(), "worker_count_a");
-        let counts_b = collect_model_response_worker_counts(worker_b.events(), "worker_count_b");
-        let mut all_counts = counts_a;
-        all_counts.extend(counts_b);
+        let all_counts =
+            collect_two_worker_model_response_counts(worker_a.events(), worker_b.events());
 
         assert!(
             all_counts.contains(&2),
@@ -1392,6 +1971,110 @@ mod tests {
         calls: Arc<Mutex<Vec<StressModelCall>>>,
     }
 
+    struct ProtocolTurnStressModel {
+        worker_idx: usize,
+        protocol: ResponseProtocolKind,
+        calls: Arc<Mutex<Vec<ProtocolTurnStressCall>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ProtocolTurnStressCall {
+        worker_idx: usize,
+        protocol: ResponseProtocolKind,
+        turn_idx: usize,
+        has_own_supplement: bool,
+        saw_cross_session_marker: bool,
+    }
+
+    fn protocol_turn_payload(
+        protocol: ResponseProtocolKind,
+        answer: &str,
+        free_talk: &str,
+    ) -> String {
+        match protocol {
+            ResponseProtocolKind::Json => serde_json::json!({
+                "status": "ALL_FINISHED",
+                "free_talk": free_talk,
+                "final_answer": answer,
+            })
+            .to_string(),
+            ResponseProtocolKind::Markdown => {
+                format!(
+                    "## Free_talk\n{free_talk}\n\n## Status\nfinished\n\n## Final_Answer\n{answer}"
+                )
+            }
+            ResponseProtocolKind::Xml => {
+                format!(
+                    "<response><free_talk>{}</free_talk><status>ALL_FINISHED</status><final_answer>{}</final_answer></response>",
+                    free_talk, answer
+                )
+            }
+        }
+    }
+
+    impl ModelClient for ProtocolTurnStressModel {
+        fn call_model(
+            &mut self,
+            _config: &ProviderConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            if should_cancel() {
+                return Err("cancelled_by_user".to_string());
+            }
+            let turn_idx = latest_stress_turn(prompt, self.worker_idx, 10_000);
+            let own_marker = format!("PROTO_SUPP_MARKER_{}_{}", self.worker_idx, turn_idx);
+            let has_own_supplement = prompt.contains(&own_marker);
+            let saw_cross_session_marker = (0..6)
+                .filter(|idx| *idx != self.worker_idx)
+                .any(|idx| prompt.contains(&format!("PROTO_SUPP_MARKER_{idx}_")));
+            self.calls.lock().unwrap().push(ProtocolTurnStressCall {
+                worker_idx: self.worker_idx,
+                protocol: self.protocol,
+                turn_idx,
+                has_own_supplement,
+                saw_cross_session_marker,
+            });
+            if turn_idx % 10 == 0 && !has_own_supplement {
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_millis(80) {
+                    if should_cancel() {
+                        return Err("cancelled_by_user".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            let answer = if saw_cross_session_marker {
+                format!("PROTO_WORKER_{}_LEAK", self.worker_idx)
+            } else if has_own_supplement {
+                format!(
+                    "PROTO_WORKER_{}_TURN_{turn_idx}_SUPPLEMENTED",
+                    self.worker_idx
+                )
+            } else {
+                format!("PROTO_WORKER_{}_TURN_{turn_idx}_OK", self.worker_idx)
+            };
+            let content = protocol_turn_payload(
+                self.protocol,
+                &answer,
+                &format!("worker {} turn {turn_idx} protocol stress", self.worker_idx),
+            );
+            Ok(LlmResponse {
+                content,
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 800,
+                    completion_tokens: 32,
+                    total_tokens: 832,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            })
+        }
+    }
+
     fn stress_marker(worker_idx: usize, turn_idx: usize, step_idx: usize) -> String {
         format!("STRESS_ACTION_DONE_W{worker_idx}_T{turn_idx}_S{step_idx}")
     }
@@ -1445,7 +2128,7 @@ mod tests {
                 "run_bash",
                 format!("Run a short stress shell action for {marker}."),
                 serde_json::json!({
-                    "command": format!("printf {marker}"),
+                    "cmd": format!("printf {marker}"),
                     "timeout_ms": 5000,
                 }),
             ),
@@ -1453,7 +2136,7 @@ mod tests {
                 "run_bash",
                 format!("Exercise long command validation for {marker}."),
                 serde_json::json!({
-                    "command": format!("printf {marker}; # {}", "x".repeat(2_100)),
+                    "cmd": format!("printf {marker}; # {}", "x".repeat(2_100)),
                     "timeout_ms": 5000,
                 }),
             ),
@@ -1470,8 +2153,9 @@ mod tests {
                 format!("Query durable memory marker {marker}."),
                 serde_json::json!({
                     "type": "durable",
-                    "op": "query",
-                    "query": marker,
+                    "op": "sql",
+                    "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1",
+                    "params": [format!("%{marker}%")],
                     "limit": 1,
                 }),
             ),
@@ -1531,7 +2215,7 @@ mod tests {
             }
             if completed_actions < target_actions {
                 let content = format!(
-                    "## Progress\n{}\n\n## Intermediate_Actions\n```action\n{}\n```",
+                    "## Progress\n{}\n\n## Working_Still_Action\n```action\n{}\n```",
                     stress_progress(self.worker_idx, turn_idx, completed_actions),
                     stress_action_response(self.worker_idx, turn_idx, completed_actions)
                 );
@@ -1624,7 +2308,7 @@ mod tests {
                         .worker
                         .unwrap()
                         .display_name,
-                    format!("[Ai{}]", worker_idx + 1)
+                    format!("ID{}", worker_idx + 1)
                 );
 
                 handle
@@ -1769,6 +2453,196 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "dedicated high-pressure worker test: 6 workers, >1000 turns, protocol-compliant payloads"]
+    fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
+        const WORKERS: usize = 6;
+        const TURNS_PER_WORKER: usize = 167;
+        const TOTAL_TURNS: usize = WORKERS * TURNS_PER_WORKER;
+        assert!(TOTAL_TURNS > 1000);
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut host_threads = Vec::new();
+        let started = Instant::now();
+
+        for worker_idx in 0..WORKERS {
+            let protocol = match worker_idx % 3 {
+                0 => ResponseProtocolKind::Json,
+                1 => ResponseProtocolKind::Markdown,
+                _ => ResponseProtocolKind::Xml,
+            };
+            let dir = tmp_dir(&format!("protocol_turn_stress_worker_{worker_idx}"));
+            let mut core = AgentCore::new(
+                "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+                CoreProfile {
+                    name: "test".to_string(),
+                    provider: "test".to_string(),
+                    model: "test-model".to_string(),
+                },
+                &dir,
+            );
+            core.set_response_protocol(protocol);
+            core.set_max_rounds(50);
+            core.set_max_llm_input_tokens(1_000_000);
+            let mut config = test_config();
+            config.response_protocol = protocol;
+            let worker = CoreSessionWorker::spawn_with_model_client(
+                core,
+                config,
+                test_worker_config(
+                    &dir,
+                    &format!("protocol_stress_session_{worker_idx}"),
+                    worker_idx as u32 + 1,
+                ),
+                ProtocolTurnStressModel {
+                    worker_idx,
+                    protocol,
+                    calls: Arc::clone(&calls),
+                },
+            );
+
+            host_threads.push(thread::spawn(move || {
+                let handle = worker.handle();
+                let _lifecycle = worker
+                    .events()
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("protocol stress worker should emit lifecycle");
+                let mut response_topics = 0usize;
+                let mut final_zero_worker_topics = 0usize;
+                let mut supplemented_turns = 0usize;
+                for turn in 0..TURNS_PER_WORKER {
+                    let input = format!("stress worker {worker_idx} turn {turn}");
+                    handle
+                        .run_turn(input, None)
+                        .expect("protocol stress worker should accept turn");
+                    if turn % 10 == 0 {
+                        supplemented_turns += 1;
+                        handle.add_user_supplement(format!(
+                            "PROTO_SUPP_MARKER_{worker_idx}_{turn}: supplement for turn {turn}"
+                        ));
+                    }
+                    loop {
+                        match worker
+                            .events()
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("protocol stress turn should finish")
+                        {
+                            CoreSessionWorkerEvent::Topics(events) => {
+                                for event in events {
+                                    if let Some(response) = event.as_model_response() {
+                                        response_topics += 1;
+                                        if response.global.working_worker_count == 0 {
+                                            final_zero_worker_topics += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            CoreSessionWorkerEvent::TurnFinished { outcome } => {
+                                let expected = if turn % 10 == 0 {
+                                    format!("PROTO_WORKER_{worker_idx}_TURN_{turn}_SUPPLEMENTED")
+                                } else {
+                                    format!("PROTO_WORKER_{worker_idx}_TURN_{turn}_OK")
+                                };
+                                assert_eq!(outcome.text, expected);
+                                break;
+                            }
+                            CoreSessionWorkerEvent::ModelRequest { .. }
+                            | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                            other => panic!(
+                                "protocol stress worker {worker_idx} unexpected event: {other:?}"
+                            ),
+                        }
+                    }
+                }
+                handle.request_shutdown().unwrap();
+                loop {
+                    match worker
+                        .events()
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("protocol stress worker should stop")
+                    {
+                        CoreSessionWorkerEvent::WorkerStopped => break,
+                        CoreSessionWorkerEvent::Topics(_)
+                        | CoreSessionWorkerEvent::ModelRequest { .. }
+                        | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                        other => panic!(
+                            "protocol stress worker {worker_idx} unexpected stop event: {other:?}"
+                        ),
+                    }
+                }
+                worker.shutdown().unwrap();
+                (
+                    response_topics,
+                    final_zero_worker_topics,
+                    supplemented_turns,
+                )
+            }));
+        }
+
+        let mut response_topics = 0usize;
+        let mut final_zero_worker_topics = 0usize;
+        let mut supplemented_turns = 0usize;
+        for host_thread in host_threads {
+            let (worker_responses, worker_zero_topics, worker_supplements) = host_thread
+                .join()
+                .expect("protocol stress host thread should not panic");
+            response_topics += worker_responses;
+            final_zero_worker_topics += worker_zero_topics;
+            supplemented_turns += worker_supplements;
+        }
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.len() >= TOTAL_TURNS,
+            "supplemented turns may add stale/discarded model calls"
+        );
+        assert_eq!(response_topics, TOTAL_TURNS);
+        assert!(
+            final_zero_worker_topics >= 1,
+            "the final model response topic should tell UI no worker remains active"
+        );
+        assert!(
+            calls.iter().all(|call| !call.saw_cross_session_marker),
+            "no worker prompt should include another worker's supplement marker"
+        );
+        assert_eq!(
+            calls.iter().filter(|call| call.has_own_supplement).count(),
+            supplemented_turns
+        );
+        for protocol in [
+            ResponseProtocolKind::Json,
+            ResponseProtocolKind::Markdown,
+            ResponseProtocolKind::Xml,
+        ] {
+            assert!(
+                calls.iter().any(|call| call.protocol == protocol),
+                "protocol stress should include {protocol:?}"
+            );
+        }
+        for worker_idx in 0..WORKERS {
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call.worker_idx == worker_idx)
+                    .count(),
+                TURNS_PER_WORKER
+            );
+            assert!(
+                calls
+                    .iter()
+                    .any(|call| call.worker_idx == worker_idx
+                        && call.turn_idx == TURNS_PER_WORKER - 1),
+                "worker {worker_idx} should complete the final turn"
+            );
+        }
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(180),
+            "dedicated worker stress should finish without deadlock or unbounded growth; elapsed={elapsed:?}"
+        );
+    }
+
     fn wait_for_stress_turn_finished(
         events: &Receiver<CoreSessionWorkerEvent>,
         handle: &CoreSessionWorkerHandle,
@@ -1800,7 +2674,7 @@ mod tests {
                 CoreSessionWorkerEvent::Topics(events) => {
                     for event in events {
                         if let Some(response) = event.as_model_response() {
-                            if response.report_job_progress.len() > 2_000 {
+                            if response.progress.len() > 2_000 {
                                 long_progress_seen = true;
                             }
                         }

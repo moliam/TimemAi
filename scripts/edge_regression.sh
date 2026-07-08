@@ -31,8 +31,10 @@ for i in $(seq 1 "$ITERATIONS"); do
   cargo test -p agent_core mem_guard_keeps_concurrent_memory_updates_from_losing_records -- --nocapture
 
   echo "== edge regression iteration $i/$ITERATIONS: shell jobs =="
-  cargo test -p agent_core run_bash_can_start_and_poll_background_job -- --nocapture
-  cargo test -p agent_core shell_job_status_waits_for_model_chosen_timeout_before_running_result -- --nocapture
+  cargo test -p agent_core background_job_reports_pid_and_running_list_until_exit -- --nocapture
+  cargo test -p agent_core run_bash_background_job_enters_running_list_and_later_emits_exit_update -- --nocapture
+  cargo test -p agent_core running_job_list_is_injected_when_discard_references_running_job_delta -- --nocapture
+  cargo test -p agent_core timeout_job_is_reported_running_and_model_can_kill_by_pid -- --nocapture
 
   echo "== edge regression iteration $i/$ITERATIONS: realistic story =="
   cargo test -p agent_core ci_realistic_multiturn_memory_tools_security_and_shrink_story -- --nocapture

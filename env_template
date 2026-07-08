@@ -20,7 +20,7 @@
 # anthropic, and other providers default to openai-compatible. For custom
 # gateways, set this explicitly.
 # export TIMEM_API_PROTOCOL=openai-compatible
-# export TIMEM_RESPONSE_PROTOCOL=markdown
+# export TIMEM_RESPONSE_PROTOCOL=xml
 
 # Generic API key. Prefer env/source over command-line flags so secrets do not
 # land in shell history.

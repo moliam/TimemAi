@@ -15,6 +15,11 @@ pub enum CoreMemoryActivity {
 pub enum CoreActionKind {
     Bash {
         command: String,
+        mode: String,
+        interval_ms: Option<u64>,
+        timeout_ms: Option<i64>,
+        loop_timeout_ms: Option<i64>,
+        once_timeout_ms: Option<u64>,
     },
     ShellJob {
         job_id: String,
@@ -46,12 +51,13 @@ pub enum CoreNotification {
     ModelResponse {
         status: String,
         free_talk: String,
-        report_job_progress: String,
+        progress: String,
         final_answer: String,
         continue_work: bool,
     },
     Action {
         intent: Option<String>,
+        parent_intent: Option<String>,
         action: String,
         input: Value,
         kind: CoreActionKind,
@@ -68,14 +74,15 @@ fn action_memory_activity(action: &ParsedAction) -> CoreMemoryActivity {
 }
 
 fn action_active(action: &ParsedAction) -> bool {
-    matches!(action.action.as_str(), "run_bash" | "shell_job_status")
+    action.action == "run_bash"
+        || (action.action == "capmgr" && action.input_lower("op") == "job_status")
 }
 
 fn memmgr_memory_activity(action: &ParsedAction) -> CoreMemoryActivity {
     let mem_type = action.input_str("type");
     let op = action.input_str("op");
     match (mem_type.as_str(), op.as_str()) {
-        ("durable", "query" | "schema" | "sql") => CoreMemoryActivity::Read,
+        ("durable", "schema" | "sql") => CoreMemoryActivity::Read,
         ("durable", _) => CoreMemoryActivity::Write,
         _ => CoreMemoryActivity::None,
     }
@@ -90,7 +97,7 @@ pub fn notifications_from_envelope(envelope: &ParsedEnvelope) -> Vec<CoreNotific
             "finished".to_string()
         },
         free_talk: envelope.thought.trim().to_string(),
-        report_job_progress: if envelope.continue_work {
+        progress: if envelope.continue_work {
             envelope.report_job_progress.trim().to_string()
         } else {
             String::new()
@@ -104,8 +111,15 @@ pub fn notifications_from_envelope(envelope: &ParsedEnvelope) -> Vec<CoreNotific
 
 pub fn notification_from_action(action: &ParsedAction) -> CoreNotification {
     let intent = (!action.intent.trim().is_empty()).then(|| action.intent.trim().to_string());
+    let parent_intent = action
+        .parent_intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|intent| !intent.is_empty())
+        .map(ToString::to_string);
     CoreNotification::Action {
         intent,
+        parent_intent,
         action: action.action.clone(),
         input: action.raw_input.clone(),
         kind: action_kind(action),
@@ -116,12 +130,33 @@ pub fn notification_from_action(action: &ParsedAction) -> CoreNotification {
 
 fn action_kind(action: &ParsedAction) -> CoreActionKind {
     match action.action.as_str() {
-        "run_bash" => CoreActionKind::Bash {
-            command: action.input_str("command"),
-        },
-        "shell_job_status" => CoreActionKind::ShellJob {
-            job_id: action.input_str("job_id"),
-        },
+        "run_bash" => {
+            let interval_ms = action.input_u64("interval_ms");
+            let loop_command = action.input_str("loop_cmd");
+            let command = if loop_command.is_empty() {
+                action.input_str("cmd")
+            } else {
+                loop_command
+            };
+            CoreActionKind::Bash {
+                command,
+                mode: if interval_ms.is_some() {
+                    "poll".to_string()
+                } else if action.background() {
+                    "background".to_string()
+                } else {
+                    "normal".to_string()
+                },
+                interval_ms,
+                timeout_ms: if interval_ms.is_some() {
+                    None
+                } else {
+                    action.input_i64("timeout_ms")
+                },
+                loop_timeout_ms: interval_ms.and_then(|_| action.input_i64("loop_timeout_ms")),
+                once_timeout_ms: interval_ms.and_then(|_| action.input_u64("once_timeout_ms")),
+            }
+        }
         "memmgr" => CoreActionKind::Memory {
             surface: action.input_str("type"),
             operation: action.input_str("op"),
@@ -129,7 +164,14 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
         "capmgr" => CoreActionKind::Capability {
             op: action.input_str("op"),
             kind: action.input_str("kind"),
-            id: action.input_str("id"),
+            id: if matches!(
+                action.input_lower("op").as_str(),
+                "job_status" | "job_cancel"
+            ) {
+                action.input_str("job_id")
+            } else {
+                action.input_str("id")
+            },
         },
         "self_tool" => CoreActionKind::SelfTool {
             self_type: action.input_str("type"),
@@ -153,7 +195,7 @@ mod tests {
     fn notification_events_are_protocol_independent_core_data() {
         let suite = ResponseProtocolKind::Json.suite();
         let envelope = suite.parse(
-            r#"{"status":"working","free_talk":"先说明一下我的判断。","report_job_progress":"正在检查。","next_actions":[{"action":"memmgr","intent":"查询项目记忆","args":{"type":"durable","op":"query","query":"project"}},{"action":"run_bash","intent":"查看文件","args":{"command":"pwd"}},{"action":"self_tool","intent":"读取运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","free_talk":"先说明一下我的判断。","report_job_progress":"正在检查。","next_actions":[{"action":"memmgr","intent":"查询项目记忆","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"action":"run_bash","intent":"查看文件","args":{"cmd":"pwd"}},{"action":"self_tool","intent":"读取运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
             &crate::capability::CapabilityRegistry::builtin(),
         );
         let events = notifications_from_envelope(&envelope);
@@ -163,39 +205,49 @@ mod tests {
                 CoreNotification::ModelResponse {
                     status: "working".to_string(),
                     free_talk: "先说明一下我的判断。".to_string(),
-                    report_job_progress: "正在检查。".to_string(),
+                    progress: "正在检查。".to_string(),
                     final_answer: String::new(),
                     continue_work: true,
                 },
                 CoreNotification::Action {
                     intent: Some("查询项目记忆".to_string()),
+                    parent_intent: None,
                     action: "memmgr".to_string(),
                     input: serde_json::json!({
                         "type": "durable",
-                        "op": "query",
-                        "query": "project"
+                        "op": "sql",
+                        "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
+                        "params": ["%project%"],
+                        "limit": 5
                     }),
                     kind: CoreActionKind::Memory {
                         surface: "durable".to_string(),
-                        operation: "query".to_string(),
+                        operation: "sql".to_string(),
                     },
                     active: false,
                     memory_activity: CoreMemoryActivity::Read,
                 },
                 CoreNotification::Action {
                     intent: Some("查看文件".to_string()),
+                    parent_intent: None,
                     action: "run_bash".to_string(),
                     input: serde_json::json!({
-                        "command": "pwd"
+                        "cmd": "pwd"
                     }),
                     kind: CoreActionKind::Bash {
                         command: "pwd".to_string(),
+                        mode: "normal".to_string(),
+                        interval_ms: None,
+                        timeout_ms: None,
+                        loop_timeout_ms: None,
+                        once_timeout_ms: None,
                     },
                     active: true,
                     memory_activity: CoreMemoryActivity::None,
                 },
                 CoreNotification::Action {
                     intent: Some("读取运行时信息".to_string()),
+                    parent_intent: None,
                     action: "self_tool".to_string(),
                     input: serde_json::json!({
                         "type": "about_me",
@@ -210,5 +262,57 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn capmgr_job_status_notification_uses_job_id_as_capability_id() {
+        let suite = ResponseProtocolKind::Json.suite();
+        let envelope = suite.parse(
+            r#"{"report_job_progress":"检查后台工具任务。","next_actions":[{"action":"capmgr","intent":"等待后台工具任务","args":{"op":"job_status","job_id":"tool_job_42","timeout_ms":1000}}]}"#,
+            &crate::capability::CapabilityRegistry::builtin(),
+        );
+        let events = notifications_from_envelope(&envelope);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                CoreNotification::Action {
+                    kind: CoreActionKind::Capability { op, id, .. },
+                    active: true,
+                    ..
+                } if op == "job_status" && id == "tool_job_42"
+            )
+        }));
+    }
+
+    #[test]
+    fn group_intent_is_preserved_as_parent_intent_without_overwriting_action_intent() {
+        let suite = ResponseProtocolKind::Json.suite();
+        let envelope = suite.parse(
+            r#"{"report_job_progress":"checking","next_actions":[{"order":"parallel","intent":"先做项目检查","actions":[{"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},{"action":"run_bash","intent":"单独检查 B","args":{"cmd":"printf b","timeout_ms":5000}}]}]}"#,
+            &crate::capability::CapabilityRegistry::builtin(),
+        );
+        let events = notifications_from_envelope(&envelope);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                CoreNotification::Action {
+                    intent: None,
+                    parent_intent: Some(parent),
+                    kind: CoreActionKind::Bash { command, .. },
+                    ..
+                } if parent == "先做项目检查" && command == "printf a"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                CoreNotification::Action {
+                    intent: Some(intent),
+                    parent_intent: None,
+                    kind: CoreActionKind::Bash { command, .. },
+                    ..
+                } if intent == "单独检查 B" && command == "printf b"
+            )
+        }));
     }
 }
