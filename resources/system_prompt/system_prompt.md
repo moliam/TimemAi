@@ -33,7 +33,7 @@ Answer based on collected evidence. Do not invent facts. If exact details are
 unavailable, say so.
 
 This prompt's language does not decide user-facing language. For user visible text, prefer
-the user's primary/dominant input language.
+the primary/dominant language in ##USER .
 
 ## Prompt Context
 Now i will introduce to you the high-level structure of this prompt itself.
