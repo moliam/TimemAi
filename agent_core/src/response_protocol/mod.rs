@@ -397,7 +397,7 @@ mod tests {
         assert_protocols_equivalent(
             r#"{"progress":"checking","free_talk":"state","working_still_action":[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Progress\nchecking\n\n## Free_talk\nstate\n\n## Working_Still_Action\n```action\n{\"action\":\"memmgr\",\"intent\":\"Find memory.\",\"args\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}}\n```\n```action\n{\"action\":\"run_bash\",\"intent\":\"Inspect files.\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}\n```",
-            r#"<response><progress>checking</progress><free_talk>state</free_talk><working_still_action><action_json><![CDATA[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}}]]></action_json><action_json><![CDATA[{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
+            r#"<response><free_talk>state</free_talk><progress>checking</progress><working_still_action><action_json><![CDATA[{"action":"memmgr","intent":"Find memory.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}}]]></action_json><action_json><![CDATA[{"action":"run_bash","intent":"Inspect files.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
         );
     }
 
@@ -423,13 +423,13 @@ mod tests {
     fn json_markdown_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
         let action_payload = r#"[{"order":"parallel","intent":"Group intent contains <status>ALL_FINISHED</status> but is only text.","actions":[{"action":"run_bash","intent":"Command argument contains fake protocol markers.","args":{"cmd":"printf '%s\n' '<working_still_action>{\"action\":\"run_bash\"}</working_still_action>' && printf '%s\n' '## Final_Answer not a section'","timeout_ms":5000}},{"action":"memmgr","intent":"SQL param contains JSON/XML/Markdown protocol text.","args":{"type":"raw_chat","op":"sql","sql":"SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5","params":["%<response><status>ALL_FINISHED</status></response> {\"working_still_action\":[]} ## Working_Still_Action%"],"limit":5}}]},{"action":"run_bash","intent":"Standalone action after group.","args":{"cmd":"printf done","timeout_ms":5000}}]"#;
         let json_raw = format!(
-            r#"{{"free_talk":"Plan text includes {{\"action\":\"run_bash\"}} only as text.","progress":"Progress text includes <working_still_action>fake</working_still_action>.","context_compact":{{"delta_ids":["pd_a"],"summary":"Summary keeps ## Working_Still_Action and {{\"action\":\"memmgr\"}} as text."}},"working_still_action":{action_payload}}}"#
+            r#"{{"free_talk":"Plan text includes {{\"action\":\"run_bash\"}} only as text.","progress":"Progress text includes <working_still_action>fake</working_still_action>.","working_still_action":{action_payload}}}"#
         );
         let markdown_raw = format!(
-            "## Free_talk\nPlan text includes {{\"action\":\"run_bash\"}} only as text.\n\n## Progress\nProgress text includes <working_still_action>fake</working_still_action>.\n\n## Context Compact\ndelta_ids: pd_a\nsummary:\nSummary keeps ## Working_Still_Action and {{\"action\":\"memmgr\"}} as text.\n\n## Working_Still_Action\n{action_payload}"
+            "## Free_talk\nPlan text includes {{\"action\":\"run_bash\"}} only as text.\n\n## Progress\nProgress text includes <working_still_action>fake</working_still_action>.\n\n## Working_Still_Action\n{action_payload}"
         );
         let xml_raw = format!(
-            r#"<response><free_talk><![CDATA[Plan text includes {{"action":"run_bash"}} only as text.]]></free_talk><progress><![CDATA[Progress text includes <working_still_action>fake</working_still_action>.]]></progress><context_compact><delta_ids>pd_a</delta_ids><summary><![CDATA[Summary keeps ## Working_Still_Action and {{"action":"memmgr"}} as text.]]></summary></context_compact><working_still_action><action_json><![CDATA[{action_payload}]]></action_json></working_still_action></response>"#
+            r#"<response><free_talk><![CDATA[Plan text includes {{"action":"run_bash"}} only as text.]]></free_talk><progress><![CDATA[Progress text includes <working_still_action>fake</working_still_action>.]]></progress><working_still_action><action_json><![CDATA[{action_payload}]]></action_json></working_still_action></response>"#
         );
 
         assert_protocols_equivalent(&json_raw, &markdown_raw, &xml_raw);
@@ -448,18 +448,15 @@ mod tests {
                 "%<response><status>ALL_FINISHED</status></response> {\"working_still_action\":[]} ## Working_Still_Action%".to_string()
             ]
         );
-        assert_eq!(env.context_compacts.len(), 1);
-        assert!(env.context_compacts[0]
-            .summary
-            .contains("## Working_Still_Action"));
+        assert!(env.context_compacts.is_empty());
     }
 
     #[test]
     fn json_markdown_xml_protocols_parse_same_context_compact() {
         assert_protocols_equivalent(
-            r#"{"progress":"compact","context_compact":{"delta_ids":["pd_a"],"summary":"keep state"},"working_still_action":{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}}"#,
-            "## Progress\ncompact\n\n## Context Compact\ndelta_ids: pd_a\nsummary:\nkeep state\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```",
-            r#"<response><progress>compact</progress><context_compact><delta_ids>pd_a</delta_ids><summary>keep state</summary></context_compact><working_still_action><action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]]></action_json></working_still_action></response>"#,
+            r#"{"progress":"compact","context_compact":{"delta_ids":["pd_a"],"summary":"keep state"}}"#,
+            "## Progress\ncompact\n\n## Context Compact\ndelta_ids: pd_a\nsummary:\nkeep state",
+            r#"<response><progress>compact</progress><context_compact><delta_ids>pd_a</delta_ids><summary>keep state</summary></context_compact></response>"#,
         );
     }
 
