@@ -55,7 +55,8 @@ pub(crate) mod tool_registry;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
-    append_audit_event, host_start_audit_event, max_llm_output_increased_audit_event,
+    append_audit_event, append_repair_output_event, host_start_audit_event,
+    max_llm_output_increased_audit_event, model_repair_output_event,
     model_repair_request_audit_event, model_retry_audit_event, read_audit_doc,
     round_limit_audit_event, stale_context_choice_audit_event, turn_error_audit_event,
     turn_final_audit_event, turn_start_audit_event, user_approval_audit_event,
@@ -128,7 +129,7 @@ pub use provider_config::{
 pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
 pub use redaction::{redact_value, REDACTED};
 pub use response_protocol::ResponseProtocolKind;
-use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup};
+use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};
 pub use retry_policy::{
     is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
     ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
@@ -242,6 +243,13 @@ pub struct LlmResponse {
     pub usage: UsageStats,
     pub truncated: bool,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AssistantReplayMode {
+    RawOutput,
+    ExtractedFields,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnFinal {
     pub final_answer: String,
@@ -826,6 +834,7 @@ pub struct AgentCore {
     pending_prompt_components: Vec<PromptComponent>,
     prompt_component_sequence: u64,
     assistant_speaker_name: String,
+    assistant_replay_mode: AssistantReplayMode,
 }
 impl AgentCore {
     pub fn new(
@@ -883,6 +892,7 @@ impl AgentCore {
             pending_prompt_components: Vec::new(),
             prompt_component_sequence: 0,
             assistant_speaker_name,
+            assistant_replay_mode: AssistantReplayMode::RawOutput,
         }
     }
 
@@ -894,6 +904,15 @@ impl AgentCore {
     pub fn assistant_speaker_name(&self) -> &str {
         &self.assistant_speaker_name
     }
+
+    pub fn set_assistant_replay_mode(&mut self, mode: AssistantReplayMode) {
+        self.assistant_replay_mode = mode;
+    }
+
+    pub fn assistant_replay_mode(&self) -> AssistantReplayMode {
+        self.assistant_replay_mode
+    }
+
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
         self.bash_approval_mode = mode;
     }
@@ -1378,6 +1397,7 @@ impl AgentCore {
         self.last_observed_prompt_tokens = self
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
+        let raw_model_output = response.content.clone();
         if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
             let protocol_suite = self.response_protocol.suite();
             return self.request_protocol_repair(
@@ -1390,9 +1410,6 @@ impl AgentCore {
         let protocol_suite = self.response_protocol.suite();
         let parsed = protocol_suite.parse(&response.content, &self.capabilities);
         let mut slices = Vec::new();
-        if !parsed.thought.is_empty() {
-            slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
-        }
         if let Some(issue) = parsed.repair_issue.clone() {
             if self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
                 return self.request_protocol_repair(
@@ -1406,9 +1423,10 @@ impl AgentCore {
                 && protocol_suite.can_show_plain_text_after_repair_failure(&response.content)
             {
                 let final_text = response.content.trim().to_string();
-                slices.push((
-                    "llm_response".to_string(),
-                    llm_final_answer_slice_text(&final_text),
+                slices.extend(self.assistant_replay_slices(
+                    &raw_model_output,
+                    None,
+                    Some(&final_text),
                 ));
                 self.defer_next_turn_slices(slices);
                 return CoreStep::Final(TurnFinal {
@@ -1437,9 +1455,10 @@ impl AgentCore {
                     )),
                 });
             }
-            slices.push((
-                "llm_response".to_string(),
-                llm_final_answer_slice_text(&final_text),
+            slices.extend(self.assistant_replay_slices(
+                &raw_model_output,
+                Some(&parsed),
+                Some(&final_text),
             ));
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
@@ -1502,9 +1521,10 @@ impl AgentCore {
                 }
             }
             let final_text = parsed.final_text();
-            slices.push((
-                "llm_response".to_string(),
-                llm_final_answer_slice_text(&final_text),
+            slices.extend(self.assistant_replay_slices(
+                &raw_model_output,
+                Some(&parsed),
+                Some(&final_text),
             ));
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
@@ -1523,6 +1543,7 @@ impl AgentCore {
         }
 
         // Omitted status is an intentional shorthand for status:working.
+        slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         if let Some(note) = parsed.runtime_note.as_deref() {
             slices.push(("runtime_note".to_string(), note.to_string()));
         }
@@ -1602,9 +1623,10 @@ impl AgentCore {
         } else {
             final_text
         };
-        slices.push((
-            "llm_response".to_string(),
-            llm_final_answer_slice_text(&final_text),
+        slices.extend(self.assistant_replay_slices(
+            &raw_model_output,
+            Some(&parsed),
+            Some(&final_text),
         ));
         self.defer_next_turn_slices(slices);
         CoreStep::Final(TurnFinal {
@@ -1651,6 +1673,7 @@ impl AgentCore {
         let response_model = response.model_name.clone();
         let response_usage = response.usage.clone();
         let response_truncated = response.truncated;
+        let response_content = response.content.clone();
         let mut runtime = CancelOnlyActionRuntime::new(should_cancel);
         let step = self.apply_model_response_with_action_runtime(response, &mut runtime);
         self.record_model_repair_audit_if_needed(
@@ -1661,6 +1684,7 @@ impl AgentCore {
             &response_model,
             &response_usage,
             response_truncated,
+            &response_content,
         );
         step
     }
@@ -1677,6 +1701,7 @@ impl AgentCore {
         let response_model = response.model_name.clone();
         let response_usage = response.usage.clone();
         let response_truncated = response.truncated;
+        let response_content = response.content.clone();
         let step = self.apply_model_response_with_action_runtime(response, runtime);
         self.record_model_repair_audit_if_needed(
             audit_file,
@@ -1686,6 +1711,7 @@ impl AgentCore {
             &response_model,
             &response_usage,
             response_truncated,
+            &response_content,
         );
         step
     }
@@ -1699,15 +1725,42 @@ impl AgentCore {
         response_model: &str,
         response_usage: &UsageStats,
         response_truncated: bool,
+        raw_response: &str,
     ) {
         let repair_calls_after = self.current_stats().repair_calls;
         if repair_calls_after > repair_calls_before {
+            let issue = self.last_repair_issue();
             let _ = append_audit_event(
                 audit_file,
                 &model_repair_request_audit_event(
                     session,
                     turn_id,
-                    self.last_repair_issue(),
+                    issue,
+                    response_model,
+                    response_usage,
+                    response_truncated,
+                    repair_calls_after,
+                    repair_calls_after.saturating_sub(repair_calls_before),
+                ),
+            );
+            let instruction = issue
+                .map(|issue| self.response_protocol.suite().repair_instruction(issue))
+                .unwrap_or("Please resend the response using the required protocol format.");
+            let system_message = format!(
+                "{}'s previous response is not protocol compliant.\nerror: {}\n\n{}",
+                self.assistant_speaker_name,
+                issue.unwrap_or("unknown_repair_issue"),
+                instruction
+            );
+            let _ = append_repair_output_event(
+                audit_file,
+                &model_repair_output_event(
+                    session,
+                    turn_id,
+                    issue,
+                    &self.assistant_speaker_name,
+                    raw_response,
+                    &system_message,
                     response_model,
                     response_usage,
                     response_truncated,
@@ -2236,6 +2289,41 @@ impl AgentCore {
                 "result_of_llm_action".to_string(),
                 format!("Long-context maintenance:\n{shrink_review}"),
             )]);
+        }
+    }
+
+    fn assistant_replay_slices(
+        &self,
+        raw_response: &str,
+        parsed: Option<&ParsedEnvelope>,
+        final_text: Option<&str>,
+    ) -> Vec<(String, String)> {
+        match self.assistant_replay_mode {
+            AssistantReplayMode::RawOutput => {
+                let raw = raw_response.trim();
+                if raw.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![("llm_response".to_string(), raw.to_string())]
+                }
+            }
+            AssistantReplayMode::ExtractedFields => {
+                let mut slices = Vec::new();
+                if let Some(parsed) = parsed {
+                    if !parsed.thought.is_empty() {
+                        slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
+                    }
+                }
+                if let Some(final_text) = final_text {
+                    if !final_text.trim().is_empty() {
+                        slices.push((
+                            "llm_response".to_string(),
+                            llm_final_answer_slice_text(final_text),
+                        ));
+                    }
+                }
+                slices
+            }
         }
     }
 
