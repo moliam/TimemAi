@@ -439,6 +439,7 @@ pub(crate) enum PendingApprovedAction {
         once_timeout_ms: u64,
         session_id: String,
         turn_id: String,
+        cwd: PathBuf,
     },
 }
 
@@ -459,6 +460,7 @@ impl PendingApprovedAction {
                 once_timeout_ms,
                 session_id,
                 turn_id,
+                cwd,
             } => json!({
                 "command": command,
                 "background": background,
@@ -468,6 +470,7 @@ impl PendingApprovedAction {
                 "once_timeout_ms": if interval_ms.is_some() { Some(*once_timeout_ms) } else { None },
                 "session_id": session_id,
                 "turn_id": turn_id,
+                "cwd": cwd,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -832,6 +835,8 @@ pub struct AgentCore {
     prompt_component_sequence: u64,
     assistant_speaker_name: String,
     assistant_replay_mode: AssistantReplayMode,
+    current_prompt_cwd: PathBuf,
+    cwd_note_pending: bool,
 }
 impl AgentCore {
     pub fn new(
@@ -850,6 +855,7 @@ impl AgentCore {
         let capabilities = CapabilityRegistry::builtin();
         let response_protocol = ResponseProtocolKind::default();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
+        let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let rendered_static_prompt = prompt_render::render_static_prompt(
             &static_prompt,
             &capabilities,
@@ -890,6 +896,8 @@ impl AgentCore {
             prompt_component_sequence: 0,
             assistant_speaker_name,
             assistant_replay_mode: AssistantReplayMode::RawOutput,
+            current_prompt_cwd,
+            cwd_note_pending: true,
         }
     }
 
@@ -908,6 +916,61 @@ impl AgentCore {
 
     pub fn assistant_replay_mode(&self) -> AssistantReplayMode {
         self.assistant_replay_mode
+    }
+
+    pub fn current_prompt_cwd(&self) -> &Path {
+        &self.current_prompt_cwd
+    }
+
+    pub fn change_prompt_cwd(&mut self, new_path: impl AsRef<str>) -> Result<PathBuf, String> {
+        let new_path = new_path.as_ref().trim();
+        if new_path.is_empty() {
+            return Err("new_path_required".to_string());
+        }
+        let candidate = Path::new(new_path);
+        let candidate = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            self.current_prompt_cwd.join(candidate)
+        };
+        let canonical = fs::canonicalize(&candidate).map_err(|_| "path_not_found".to_string())?;
+        if !canonical.is_dir() {
+            return Err("path_is_not_directory".to_string());
+        }
+        self.current_prompt_cwd = canonical.clone();
+        self.cwd_note_pending = true;
+        Ok(canonical)
+    }
+
+    fn cwd_prompt_note(&self) -> String {
+        format!(
+            "[!!!NOTE] cwd now set to: {} , you can save/shorten `cd` command based on this path.",
+            self.current_prompt_cwd.display()
+        )
+    }
+
+    fn submit_cwd_note_if_pending(&mut self) {
+        if !self.cwd_note_pending {
+            return;
+        }
+        self.cwd_note_pending = false;
+        self.submit_cwd_note_at(now_ms());
+    }
+
+    fn submit_cwd_note_at(&mut self, logical_time_ms: i64) {
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "runtime_note",
+            self.cwd_prompt_note(),
+            "runtime_cwd",
+        );
+        if let Some(component) = self.pending_prompt_components.last_mut() {
+            component.created_at_ms = logical_time_ms;
+        }
+    }
+
+    fn cwd_note_slice(&self) -> (String, String) {
+        ("runtime_note".to_string(), self.cwd_prompt_note())
     }
 
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
@@ -1331,6 +1394,7 @@ impl AgentCore {
                 "runtime_memory_precheck",
             );
         }
+        self.submit_cwd_note_if_pending();
         CoreStep::NeedModel {
             prompt: self.build_next_prompt(),
             rounds_remaining: self.round_budget,
@@ -1500,6 +1564,7 @@ impl AgentCore {
                     ),
                 ));
                 slices.push(("result_of_llm_action".to_string(), shrink_result));
+                slices.push(self.cwd_note_slice());
             } else {
                 slices.push((
                     "result_of_llm_action".to_string(),
@@ -1870,8 +1935,10 @@ impl AgentCore {
                     once_timeout_ms,
                     session_id,
                     turn_id,
+                    cwd,
                 } => shell_exec::execute_approved_bash(
                     command,
+                    cwd,
                     *background,
                     *timeout_ms,
                     *interval_ms,
@@ -2364,6 +2431,10 @@ impl AgentCore {
 
     fn append_delta(&mut self, slice_texts: Vec<(String, String)>) {
         let logical_time_ms = now_ms();
+        if self.cwd_note_pending {
+            self.cwd_note_pending = false;
+            self.submit_cwd_note_at(logical_time_ms);
+        }
         self.submit_prompt_components_from_slice_texts(slice_texts, "runtime", logical_time_ms);
         self.flush_pending_prompt_components();
     }
@@ -2653,11 +2724,13 @@ impl AgentCore {
                     once_timeout_ms,
                     session_id,
                     turn_id,
+                    cwd,
                 } => {
                     let mut should_cancel = || false;
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                     shell_exec::execute_approved_bash(
                         command,
+                        cwd,
                         *background,
                         *timeout_ms,
                         *interval_ms,
@@ -2684,6 +2757,7 @@ impl AgentCore {
         let shell_jobs = self.shell_jobs.clone();
         let session_id = self.current_session_id();
         let turn_id = self.current_action_turn_id();
+        let cwd = self.current_prompt_cwd().to_path_buf();
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
             let loop_command = action.input_str("loop_cmd");
@@ -2703,6 +2777,7 @@ impl AgentCore {
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                 shell_exec::execute_run_bash(
                     &command,
+                    &cwd,
                     action.background(),
                     if is_regular_command {
                         action.timeout_ms_i64(5000)

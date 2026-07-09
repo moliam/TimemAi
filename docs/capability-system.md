@@ -236,6 +236,9 @@ manifest and executor path as other builtin tools. It is intentionally narrow:
 - `type=mem_path, op=read`: current memory/audit paths.
 - `type=about_me, op=read`: software name, version, author/contact, project/star
   info, summary, current process id, working directory, and executable path.
+- `type=cwd, op=read|chg_cwd`: current prompt context cwd. `chg_cwd` requires
+  `new_path`; relative paths resolve from the current prompt context cwd. Future
+  `run_bash` actions in that same prompt context execute from this cwd.
 
 Do not use `self_tool` for user memory, shell commands, project file edits, or
 provider model calls. Those remain owned by `memmgr`, `run_bash`, and the

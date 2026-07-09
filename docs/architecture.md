@@ -1000,6 +1000,9 @@ local project work. Current surfaces:
 - `type=about_me, op=read`: report TimemAi name, version, author/contact,
   project/star info, and a short software summary, plus current process id,
   working directory, and executable path.
+- `type=cwd, op=read|chg_cwd`: inspect or change the active prompt context
+  working directory. Relative paths resolve from that prompt context's current
+  cwd. This is prompt-context metadata, not process-global state.
 
 Candidate future surfaces are `config` for runtime config inspection,
 `workspace` for loaded workspace references, `capabilities` for active
@@ -1032,6 +1035,14 @@ Current local-command approval is configured at startup:
 
 - `TIMEM_BASH_APPROVAL=ask`: ask before running bash actions.
 - `TIMEM_BASH_APPROVAL=approve`: run bash actions directly.
+
+Each prompt context owns its own `run_bash` cwd. At session start, after
+`self_tool type=cwd op=chg_cwd`, and after context compaction, core injects a
+short `SYSTEM` note such as `[!!!NOTE] cwd now set to: ...` so the model can
+avoid redundant `cd` prefixes. `run_bash` execution uses the same cwd recorded in
+that prompt context, including normal, polling, background, approval, and
+parallel Bash paths. Shell UI only renders the resulting action/status evidence;
+it does not maintain the execution cwd.
 
 The runtime validates structured action shape and command limits. It does not
 infer the user's semantic goal from the natural-language text.

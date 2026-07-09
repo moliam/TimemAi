@@ -2077,8 +2077,9 @@ fn protocol_repair_delta_separates_previous_output_from_system_error() {
     let raw_pos = prompt
         .find(raw_response)
         .expect("missing previous model output");
-    let system_pos = prompt
+    let system_pos = prompt[raw_pos..]
         .find("## SYSTEM")
+        .map(|pos| raw_pos + pos)
         .expect("missing system repair slice");
     let issue_pos = prompt
         .find("final_answer_requires_status_finished")
@@ -6509,6 +6510,124 @@ fn self_tool_env_denies_memory_path_writes_through_core_action() {
     assert!(prompt.contains("reason: memory_path_env_is_startup_only"));
     assert!(!prompt.contains("status: updated_current_process_env"));
     assert!(!prompt.contains(attempted_path));
+}
+
+#[test]
+fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
+    let memory_dir = tmp_dir("self_tool_chg_cwd_memory");
+    let work_dir = tmp_dir("self_tool_chg_cwd_work");
+    let sub_dir = work_dir.join("sub");
+    fs::create_dir_all(&sub_dir).unwrap();
+    fs::write(sub_dir.join("marker.txt"), "cwd-ok").unwrap();
+    let sub_dir = fs::canonicalize(&sub_dir).unwrap();
+
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+
+    let first_prompt = match core.begin_turn("先确认 cwd", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected prompt, got {other:?}"),
+    };
+    assert!(first_prompt.contains("[!!!NOTE] cwd now set to:"));
+
+    let response = format!(
+        r#"{{
+  "status":"working",
+  "working_still_action":[
+    {{"action":"self_tool","args":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}},
+    {{"action":"run_bash","args":{{"cmd":"pwd; cat marker.txt","timeout_ms":5000}}}}
+  ]
+}}"#,
+        sub_dir.display()
+    );
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(response),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+
+    assert_eq!(core.current_prompt_cwd(), sub_dir.as_path());
+    assert!(prompt.contains("Action result: self_tool"), "{prompt}");
+    assert!(prompt.contains("type: cwd"), "{prompt}");
+    assert!(prompt.contains("op: chg_cwd"), "{prompt}");
+    assert!(
+        prompt.contains("status: updated_prompt_context_cwd"),
+        "{prompt}"
+    );
+    assert!(prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", sub_dir.display())));
+    assert!(prompt.contains("Action result: run_bash"), "{prompt}");
+    assert!(prompt.contains(&sub_dir.display().to_string()), "{prompt}");
+    assert!(prompt.contains("cwd-ok"), "{prompt}");
+}
+
+#[test]
+fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
+    let memory_dir = tmp_dir("self_tool_relative_cwd_memory");
+    let base_dir = tmp_dir("self_tool_relative_cwd_base");
+    let sub_dir = base_dir.join("nested");
+    fs::create_dir_all(&sub_dir).unwrap();
+    fs::write(sub_dir.join("rel.txt"), "relative-ok").unwrap();
+    let base_dir = fs::canonicalize(&base_dir).unwrap();
+    let sub_dir = fs::canonicalize(&sub_dir).unwrap();
+
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
+
+    let _ = core.begin_turn("切到相对路径", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","working_still_action":[{"action":"self_tool","args":{"type":"cwd","op":"chg_cwd","new_path":"nested"}},{"action":"run_bash","args":{"cmd":"pwd; cat rel.txt","timeout_ms":5000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+
+    assert_eq!(core.current_prompt_cwd(), sub_dir.as_path());
+    assert!(prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", sub_dir.display())));
+    assert!(prompt.contains("relative-ok"), "{prompt}");
+}
+
+#[test]
+fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
+    let memory_dir = tmp_dir("self_tool_bad_cwd_memory");
+    let base_dir = tmp_dir("self_tool_bad_cwd_base");
+    let base_dir = fs::canonicalize(&base_dir).unwrap();
+    let missing = base_dir.join("missing");
+
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
+
+    let _ = core.begin_turn("切到不存在路径", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"status":"working","working_still_action":[{{"action":"self_tool","args":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}}]}}"#,
+            missing.display()
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+
+    assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
+    assert!(prompt.contains("Action result: self_tool"), "{prompt}");
+    assert!(prompt.contains("type: cwd"), "{prompt}");
+    assert!(prompt.contains("error: path_not_found"), "{prompt}");
+    assert!(!prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", missing.display())));
 }
 
 #[test]
