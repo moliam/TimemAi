@@ -154,7 +154,7 @@ Command binding protocol:
 
 - Runtime starts `/bin/sh <binding_name>`.
 - Runtime writes one JSON object to stdin:
-  `{"action": "...", "intent": "...", "args": {"key": "value"}}`.
+  `{"action": "...", "args": {"key": "value"}}`.
 - Script stdout/stderr is captured as the action result and truncated to a
   bounded size.
 - Execution timeout follows the action's positive `timeout_ms` without an upper
@@ -195,7 +195,6 @@ Expected shape:
 ```json
 {
   "action": "capmgr",
-  "intent": "Load the needed skill body before using it.",
   "args": {
     "op": "load",
     "kind": "skill",

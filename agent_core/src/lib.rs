@@ -338,7 +338,6 @@ pub struct ApprovalRequest {
     pub command: String,
     pub reason: String,
     pub risk: String,
-    pub intent: String,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BashApprovalMode {
@@ -416,7 +415,6 @@ pub struct ChatHistoryRecord {
 pub(crate) struct PendingApproval {
     request: ApprovalRequest,
     approved_action: PendingApprovedAction,
-    intent: String,
     continuation: Option<PendingApprovalContinuation>,
 }
 
@@ -663,7 +661,6 @@ struct ActionAuditEntry {
     time_ms: i64,
     round: u32,
     action: String,
-    intent: String,
     status: String,
     input: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1896,7 +1893,6 @@ impl AgentCore {
                 pending.request.reason
             )
         };
-        let result = annotate_action_result_with_intent(result, &pending.intent);
         self.record_pending_approval_audit(&pending, approved, &result);
         self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
         self.append_in_turn_shrink_review_if_needed();
@@ -1912,15 +1908,12 @@ impl AgentCore {
     }
 
     fn denied_approval_result(&self, pending: &PendingApproval) -> String {
-        annotate_action_result_with_intent(
-            format!(
-                "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
-                pending.request.action,
-                pending.approved_action.command(),
-                pending.request.approval_id,
-                pending.request.reason
-            ),
-            &pending.intent,
+        format!(
+            "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
+            pending.request.action,
+            pending.approved_action.command(),
+            pending.request.approval_id,
+            pending.request.reason
         )
     }
 
@@ -2641,8 +2634,6 @@ impl AgentCore {
     ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)> {
         let action = ParsedAction {
             action: pending.request.action.clone(),
-            intent: pending.intent.clone(),
-            parent_intent: None,
             raw_input: pending.approved_action.audit_input(
                 &pending.request.approval_id,
                 &pending.request.risk,
@@ -2721,7 +2712,6 @@ impl AgentCore {
                     action.input_u64("interval_ms"),
                     action.input_u64("once_timeout_ms").unwrap_or(5000),
                     BashApprovalMode::Approve,
-                    &action.intent,
                     &shell_jobs,
                     &session_id,
                     &turn_id,
@@ -2749,7 +2739,6 @@ impl AgentCore {
         for handle in handles {
             match handle.join() {
                 Ok((idx, action, result)) => {
-                    let result = annotate_action_result_with_intent(result, &action.intent);
                     self.record_action_audit(&action, "completed", Some(&result));
                     self.emit_action_finish_topic(&action, &result, runtime);
                     if let Some(slot) = results.get_mut(idx) {
@@ -2776,7 +2765,6 @@ impl AgentCore {
         for handle in handles {
             match handle.join() {
                 Ok((idx, action, pending, result)) => {
-                    let result = annotate_action_result_with_intent(result, &action.intent);
                     self.record_pending_approval_audit(&pending, true, &result);
                     self.emit_action_finish_topic(&action, &result, runtime);
                     if let Some(slot) = results.get_mut(idx) {
@@ -2864,10 +2852,7 @@ impl AgentCore {
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
             Err(err) => {
-                let result = annotate_action_result_with_intent(
-                    format!("Action result: {}\nerror: {}", action.action, err),
-                    &action.intent,
-                );
+                let result = format!("Action result: {}\nerror: {}", action.action, err);
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
                 return ActionExecution::Completed(result);
             }
@@ -2876,21 +2861,15 @@ impl AgentCore {
             .capabilities
             .validate_action_input(&action.action, &action.raw_input)
         {
-            let result = annotate_action_result_with_intent(
-                format!(
-                    "Action result: {}\nerror: invalid_input\nmessage: {}",
-                    action.action, issue
-                ),
-                &action.intent,
+            let result = format!(
+                "Action result: {}\nerror: invalid_input\nmessage: {}",
+                action.action, issue
             );
             self.record_action_audit(&action_for_audit, "invalid_input", Some(&result));
             return ActionExecution::Completed(result);
         }
         if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
-            let result = annotate_action_result_with_intent(
-                self.execute_command_capability(&action, path),
-                &action.intent,
-            );
+            let result = self.execute_command_capability(&action, path);
             self.record_action_audit(&action_for_audit, "completed", Some(&result));
             return ActionExecution::Completed(result);
         }
@@ -2911,20 +2890,19 @@ impl AgentCore {
             };
         match execution {
             ActionExecution::Completed(result) => {
-                let result = annotate_action_result_with_intent(result, &action.intent);
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
                 self.emit_action_finish_topic(&action_for_audit, &result, runtime);
                 ActionExecution::Completed(result)
             }
             ActionExecution::NeedsApproval(pending) => {
-                let result = annotate_action_result_with_intent(format!(
+                let result = format!(
                     "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
                     action_for_audit.action,
                     pending.approved_action.command(),
                     pending.request.approval_id,
                     pending.request.risk,
                     pending.request.reason
-                ), &action_for_audit.intent);
+                );
                 self.record_action_audit(&action_for_audit, "needs_user_approval", Some(&result));
                 ActionExecution::NeedsApproval(pending)
             }
@@ -2954,7 +2932,6 @@ impl AgentCore {
         self.current_stats.tool_calls += 1;
         let payload = json!({
             "action": action.action,
-            "intent": action.intent,
             "args": action.raw_input,
         });
         if action.background() {
@@ -3014,7 +2991,6 @@ impl AgentCore {
                 time_ms: now_ms(),
                 round: self.current_round.max(1),
                 action: action.action.clone(),
-                intent: action.intent.clone(),
                 status: status.to_string(),
                 input: action.audit_input(),
                 result_summary: result.map(|text| compact_text(text, 2_000)),
@@ -3039,7 +3015,6 @@ impl AgentCore {
                 time_ms: now_ms(),
                 round: self.current_round.max(1),
                 action: pending.request.action.clone(),
-                intent: pending.intent.clone(),
                 status: if approved {
                     "approved_completed".to_string()
                 } else {
@@ -4343,18 +4318,6 @@ fn memory_missing_expected_version_result(
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
-fn annotate_action_result_with_intent(result: String, intent: &str) -> String {
-    let intent = intent.trim();
-    if intent.is_empty() || result.lines().any(|line| line.starts_with("intent: ")) {
-        return result;
-    }
-    if let Some((head, tail)) = result.split_once('\n') {
-        format!("{head}\nintent: {intent}\n{tail}")
-    } else {
-        format!("{result}\nintent: {intent}")
-    }
-}
-
 pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {

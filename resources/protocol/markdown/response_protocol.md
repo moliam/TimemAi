@@ -8,9 +8,8 @@ inside `## Working_Still_Action` use JSON objects.
 Required section rules:
 
 - If work is still in progress, omit `## Status` or write `## Status` with
-  `working`, provide progress when useful, and include concrete actions when
-  runtime work is needed. Do not write `## Final_Answer` while still working; use
-  `## Progress` for user-visible ongoing reports.
+  `working`, provide `## Free_Talk` when useful, and include concrete actions when
+  runtime work is needed. Do not write `## Final_Answer` while still working.
 - If the task is complete, write `## Status` with `finished` and provide
   `## Final_Answer`. `finished` means the current user request is complete; it does
   not close the Timem session or prevent the user from continuing. Do not use
@@ -58,15 +57,12 @@ finished
 
 ## Free_Talk
 好的，你关于yy的整改要求我收到了，等会我做完 xx 后再进行
-
-## Progress
 正在执行用户要求的本地检查。
 
 ## Working_Still_Action
 ```action
 {
   "action": "run_bash",
-  "intent": "Run the requested local check.",
   "args": {
     "cmd": "printf '%s\\n' example",
     "timeout_ms": 5000
@@ -83,7 +79,6 @@ finished
 ```action
 {
   "action": "run_bash",
-  "intent": "浏览当前目录的文件",
   "args": {
     "cmd": "ls -al",
     "timeout_ms": 1000
@@ -98,8 +93,6 @@ finished
 刚刚已经完成了任务 A，总结如下：
 输出位于....
 现在继续进行工作B。但由于上下文太长且混杂我先压缩一下
-
-## Progress
 正在压缩上下文...
 
 ## Context Compact
@@ -121,7 +114,6 @@ This is the summary....
     "actions": [
       {
         "action": "run_bash",
-        "intent": "检查当前分支",
         "args": {
           "cmd": "git branch --show-current",
           "timeout_ms": 3000
@@ -129,7 +121,6 @@ This is the summary....
       },
       {
         "action": "run_bash",
-        "intent": "检查工作区状态",
         "args": {
           "cmd": "git status --short",
           "timeout_ms": 3000
@@ -139,7 +130,6 @@ This is the summary....
   },
   {
     "action": "run_bash",
-    "intent": "等待 CI 完成",
     "args": {
       "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
       "interval_ms": 10000,

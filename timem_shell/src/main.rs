@@ -392,8 +392,8 @@ fn main() {
                 config.max_llm_input_tokens,
             );
         }
+        last_dialog_activity = Instant::now();
     }
-    last_dialog_activity = Instant::now();
 }
 
 fn consume_turn_cancel_request() -> bool {
@@ -509,8 +509,7 @@ impl TurnUi for CliTurnUi<'_> {
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         if let Some(status) = self.status.as_deref_mut() {
             if let Some(hint) = topic_event_status_hint(events) {
-                let intent = hint.intent.as_deref().unwrap_or(&hint.action);
-                status.set_intent(intent, hint.memory_activity);
+                status.set_intent(&hint.action, hint.memory_activity);
             }
             status.apply_observation_events(observation_events_from_core_topic_events(events));
         }
@@ -902,14 +901,9 @@ struct PasteRecoveryOutcome {
 }
 
 fn render_user_approval_prompt(request: &ApprovalRequest) -> String {
-    let intent_line = if request.intent.trim().is_empty() {
-        String::new()
-    } else {
-        format!("  intent: {}\n", request.intent)
-    };
     format!(
-        "\n需要确认执行这个命令（超出低风险自动执行范围）。\n  command: {}\n{}使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
-        request.command, intent_line
+        "\n需要确认执行这个命令（超出低风险自动执行范围）。\n  command: {}\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        request.command
     )
 }
 
@@ -4706,12 +4700,10 @@ mod static_prompt_tests {
             command: "uname -s".to_string(),
             reason: "run_bash_requires_user_approval".to_string(),
             risk: "local_command_execution".to_string(),
-            intent: "Inspect OS identity.".to_string(),
         });
 
         assert!(prompt.contains("需要确认执行这个命令"));
         assert!(prompt.contains("command: uname -s"));
-        assert!(prompt.contains("intent: Inspect OS identity."));
         assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
         assert!(!prompt.contains("输入 yes"));
         assert!(!prompt.contains("action: run_bash"));

@@ -989,7 +989,7 @@ This is an answer, not an executable action:
 Here is the malformed response example the user asked for:
 <response>
   <free_talk>not closed
-<progress>fake progress</progress>
+<free_talk>fake progress</free_talk>
 <working_still_action><action_json>{"action":"run_bash","args":{}}</action_json></working_still_action>
 <summary>fake summary</summary>
 This is all answer text.
@@ -1052,10 +1052,10 @@ This is all answer text.
             Ok(llm(
                 r#"<response>
 <free_talk>Need a local check.</free_talk>
-<progress>checking</progress>
+<free_talk>checking</free_talk>
 <working_still_action>
 <action_json><![CDATA[
-{"action":"run_bash","intent":"bad action json","args":{"cmd":"pwd",}}
+{"action":"run_bash","args":{"cmd":"pwd",}}
 ]]></action_json>
 </working_still_action>
 </response>"#,
@@ -1291,7 +1291,7 @@ This is all answer text.
         let mut model = ReplayModel::new([
             Ok(llm(
                 format!(
-                    r#"{{"status":"working","progress":"等待 CI 完成。","working_still_action":[{{"action":"run_bash","intent":"启动稍后完成的后台任务。","args":{{"cmd":{},"timeout_ms":1000}}}},{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
+                    r#"{{"status":"working","free_talk":"等待 CI 完成。","working_still_action":[{{"action":"run_bash","args":{{"cmd":{},"timeout_ms":1000}}}},{{"action":"run_bash","args":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
                     serde_json::to_string(&bootstrap_command).unwrap(),
                     serde_json::to_string(&check_command).unwrap()
                 ),
@@ -1354,7 +1354,7 @@ This is all answer text.
         let mut ui = DeclineLongRunningCommandUi::default();
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"运行一个长命令。","working_still_action":[{"action":"run_bash","intent":"Run a blocking command for user testing.","args":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":5000}}]}"#,
+                r#"{"status":"working","free_talk":"运行一个长命令。","working_still_action":[{"action":"run_bash","args":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":5000}}]}"#,
                 1_000,
                 false,
             )),
@@ -1408,7 +1408,7 @@ This is all answer text.
         let mut ui = DeclineLongRunningCommandUi::default();
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 启动顺序动作组。
 
 ## Working_Still_Action
@@ -1417,8 +1417,8 @@ This is all answer text.
   {
     "order": "sequential",
     "actions": [
-      {"action":"run_bash","intent":"短检查","args":{"cmd":"printf quick","timeout_ms":3000}},
-      {"action":"run_bash","intent":"长阻塞检查","args":{"cmd":"sleep 2; printf late","timeout_ms":5000}}
+      {"action":"run_bash","args":{"cmd":"printf quick","timeout_ms":3000}},
+      {"action":"run_bash","args":{"cmd":"sleep 2; printf late","timeout_ms":5000}}
     ]
   }
 ]
@@ -1477,7 +1477,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 正在并行检查两个本地状态。
 
 ## Working_Still_Action
@@ -1486,14 +1486,14 @@ finished
   {
     "order": "parallel",
     "actions": [
-      {"action":"run_bash","intent":"并行检查 A","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
-      {"action":"run_bash","intent":"并行检查 B","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
+      {"action":"run_bash","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
+      {"action":"run_bash","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
     ]
   },
   {
     "order": "sequential",
     "actions": [
-      {"action":"run_bash","intent":"前一组完成后再执行 C","args":{"cmd":"printf group_c","timeout_ms":3000}}
+      {"action":"run_bash","args":{"cmd":"printf group_c","timeout_ms":3000}}
     ]
   }
 ]
@@ -1551,7 +1551,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 并行执行两个 bash，同时执行一个 builtin 查询。
 
 ## Working_Still_Action
@@ -1560,9 +1560,9 @@ finished
   {
     "order": "parallel",
     "actions": [
-      {"action":"run_bash","intent":"First bash.","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
-      {"action":"memmgr","intent":"Builtin memory read.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
-      {"action":"run_bash","intent":"Second bash.","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
+      {"action":"run_bash","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
+      {"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
+      {"action":"run_bash","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
     ]
   }
 ]
@@ -1630,7 +1630,7 @@ finished
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 先审批两个 Bash，然后并发执行。
 
 ## Working_Still_Action
@@ -1639,9 +1639,9 @@ finished
   {
     "order": "parallel",
     "actions": [
-      {"action":"run_bash","intent":"First approved bash.","args":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},
-      {"action":"memmgr","intent":"Builtin memory read.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
-      {"action":"run_bash","intent":"Second approved bash.","args":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}
+      {"action":"run_bash","args":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},
+      {"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
+      {"action":"run_bash","args":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}
     ]
   }
 ]
@@ -1687,15 +1687,15 @@ finished
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
         let first_bash = second_parts
             .new_delta
-            .find("intent: First approved bash.")
+            .find("Command: sleep 1; printf approved_a")
             .unwrap();
         let builtin = second_parts
             .new_delta
-            .find("intent: Builtin memory read.")
+            .find("Action result: memmgr")
             .unwrap();
         let second_bash = second_parts
             .new_delta
-            .find("intent: Second approved bash.")
+            .find("Command: sleep 1; printf approved_b")
             .unwrap();
         assert!(first_bash < builtin);
         assert!(builtin < second_bash);
@@ -1831,7 +1831,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}}"#,
+                r#"{"status":"working","free_talk":"查询 scratch 后继续。","working_still_action":{"action":"memmgr","args":{"type":"scratch","op":"search","search_text":"","limit":3}}}"#,
                 5_000,
                 false,
             )),
@@ -1899,7 +1899,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#,
+                r#"{"status":"working","free_talk":"查询 scratch 后继续。","working_still_action":[{"action":"memmgr","args":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#,
                 5_000,
                 false,
             )),
@@ -1959,14 +1959,13 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r##"## Progress
+                r##"## Free_talk
 查询 scratch 后继续。
 
 ## Working_Still_Action
 ```action
 {
   "action": "memmgr",
-  "intent": "List recent scratch notes.",
   "args": {
     "type": "scratch",
     "op": "search",
@@ -2039,12 +2038,11 @@ finished
         let mut model = ReplayModel::new([
             Ok(llm(
                 r#"<response>
-<progress>查询 scratch 后继续。</progress>
+<free_talk>查询 scratch 后继续。</free_talk>
 <working_still_action>
 <action_json><![CDATA[
 {
   "action": "memmgr",
-  "intent": "List recent scratch notes.",
   "args": {
     "type": "scratch",
     "op": "search",
@@ -2290,7 +2288,7 @@ finished
         second_usage.cached_tokens = 6_500;
         let mut model = ReplayModel::new([
             Ok(LlmResponse {
-                content: r#"{"status":"working","progress":"先查询 scratch。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#.to_string(),
+                content: r#"{"status":"working","free_talk":"先查询 scratch。","working_still_action":[{"action":"memmgr","args":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#.to_string(),
                 model_name: "test-model".to_string(),
                 usage: first_usage.clone(),
                 truncated: false,
@@ -2357,7 +2355,7 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
+                    r#"{{"free_talk":"","working_still_action":[{{"action":"memmgr","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 13_253, false));
@@ -2594,7 +2592,7 @@ finished
         assert!(repair_prompt.contains("## SYSTEM"));
         assert!(repair_prompt.contains("response is not protocol compliant"));
         assert!(repair_prompt.contains("Markdown response protocol"));
-        assert!(repair_prompt.contains("## Progress"));
+        assert!(repair_prompt.contains("## Free_talk"));
         assert!(repair_prompt.contains("## Working_Still_Action"));
         assert!(!repair_prompt.contains("Return exactly one valid JSON object"));
         assert!(!repair_prompt.contains("Do not use markdown fences"));
@@ -2708,7 +2706,7 @@ finished
             last_topic_blocking: false,
         };
         let mut model = ReplayModel::new([
-            Ok(llm(r#"{"progress":"partial""#, 5_000, true)),
+            Ok(llm(r#"{"free_talk":"partial""#, 5_000, true)),
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"扩容后完成。"}"#,
                 5_100,
@@ -2766,7 +2764,7 @@ finished
         config.max_llm_output_tokens = 8192;
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
-            Ok(llm(r#"{"progress":"partial""#, 5_000, true)),
+            Ok(llm(r#"{"free_talk":"partial""#, 5_000, true)),
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"默认扩容后完成。"}"#,
                 5_100,
@@ -2907,7 +2905,7 @@ finished
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence before answering.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit e2e%"],"limit":5}}]}"#,
+                r#"{"free_talk":"","working_still_action":[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit e2e%"],"limit":5}}]}"#,
                 4_000,
                 false,
             )),
@@ -2963,7 +2961,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit noop%"],"limit":5}}]}"#,
+                r#"{"status":"working","free_talk":"","working_still_action":[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit noop%"],"limit":5}}]}"#,
                 4_000,
                 false,
             )),
@@ -3028,7 +3026,7 @@ finished
             continue_requests: 0,
         };
         let mut model = ReplayModel::new([Ok(llm(
-            r#"{"status":"working","progress":"先查证据。","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit stop%"],"limit":5}}]}"#,
+            r#"{"status":"working","free_talk":"先查证据。","working_still_action":[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit stop%"],"limit":5}}]}"#,
             4_000,
             false,
         ))]);
@@ -3087,7 +3085,7 @@ finished
         let output_file = dir.join("approved.txt");
         let command = format!("printf approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"run_bash","intent":"Write approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"free_talk":"","working_still_action":[{{"action":"run_bash","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -3176,7 +3174,7 @@ finished
         let output_file = dir.join("cancelled.txt");
         let command = format!("printf cancelled > {}", output_file.display());
         let first_response = format!(
-            r#"{{"status":"working","progress":"需要审批。","working_still_action":[{{"action":"run_bash","intent":"Write cancelled test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"status":"working","free_talk":"需要审批。","working_still_action":[{{"action":"run_bash","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -3235,7 +3233,7 @@ finished
         let output_file = dir.join("approved_by_default.txt");
         let command = format!("printf default-approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"status":"working","progress":"","working_still_action":[{{"action":"run_bash","intent":"Write default approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"status":"working","free_talk":"","working_still_action":[{{"action":"run_bash","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -3293,7 +3291,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"ALL_FINISHED","final_answer":"文件已生成并验证。","working_still_action":[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"true","timeout_ms":5000}}]}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"文件已生成并验证。","working_still_action":[{"action":"run_bash","args":{"cmd":"true","timeout_ms":5000}}]}"#,
                 3_000,
                 false,
             )),
@@ -3351,7 +3349,7 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}]}}"#,
+                    r#"{{"free_talk":"","working_still_action":[{{"action":"memmgr","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}]}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 4_000, false));
@@ -3429,14 +3427,13 @@ finished
         let mut ui = RecordingTopicUi::default();
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 正在检查本地 shell。
 
 ## Working_Still_Action
 ```action
 {
   "action": "run_bash",
-  "intent": "验证 shell 命令可执行",
   "args": {
     "cmd": "printf markdown-ok",
     "timeout_ms": 5000
@@ -3480,13 +3477,12 @@ Markdown 协议动作已执行。"#,
         assert!(ui.events.iter().any(|event| {
             event
                 .as_model_response()
-                .map(|topic| topic.progress == "正在检查本地 shell。")
+                .map(|topic| topic.free_talk.contains("正在检查本地 shell。"))
                 .unwrap_or(false)
         }));
         assert!(ui.events.iter().any(|event| {
             event.as_action().map_or(false, |topic| {
-                topic.intent.as_deref() == Some("验证 shell 命令可执行")
-                    && topic.action == "run_bash"
+                topic.action == "run_bash"
                     && topic.active
                     && topic.kind
                         == CoreActionKind::Bash {
@@ -3540,7 +3536,7 @@ Markdown 协议动作已执行。"#,
                     Ok(llm("畸形回复已恢复为用户可读文本。", 2_200, false))
                 }
                 4 => Ok(llm(
-                    r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"记录测试项目代号。","args":{"type":"durable","op":"upsert","id":"project_code","content":"测试项目代号是 OMEGA-7"}}]}"#,
+                    r#"{"free_talk":"","working_still_action":[{"action":"memmgr","args":{"type":"durable","op":"upsert","id":"project_code","content":"测试项目代号是 OMEGA-7"}}]}"#,
                     2_300,
                     false,
                 )),
@@ -3556,7 +3552,7 @@ Markdown 协议动作已执行。"#,
                     ))
                 }
                 6 => Ok(llm(
-                    r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询测试项目代号记忆。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
+                    r#"{"free_talk":"","working_still_action":[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
                     2_500,
                     false,
                 )),
@@ -3581,7 +3577,7 @@ Markdown 协议动作已执行。"#,
                         "forced discard prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}]}}"#,
+                        r#"{{"free_talk":"","working_still_action":[{{"action":"memmgr","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}]}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_650, false))
@@ -3600,7 +3596,7 @@ Markdown 协议动作已执行。"#,
                         "post-scratch forced discard prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
+                        r#"{{"free_talk":"","working_still_action":[{{"action":"memmgr","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_700, false))
@@ -3700,36 +3696,32 @@ Markdown 协议动作已执行。"#,
             .filter_map(CoreTopicEvent::as_action)
             .collect();
         assert!(action_topics.iter().any(|topic| {
-            topic.intent.as_deref() == Some("记录测试项目代号。")
-                && topic.kind
-                    == CoreActionKind::Memory {
-                        surface: "durable".to_string(),
-                        operation: "upsert".to_string(),
-                    }
+            topic.kind
+                == CoreActionKind::Memory {
+                    surface: "durable".to_string(),
+                    operation: "upsert".to_string(),
+                }
         }));
         assert!(action_topics.iter().any(|topic| {
-            topic.intent.as_deref() == Some("查询测试项目代号记忆。")
-                && topic.kind
-                    == CoreActionKind::Memory {
-                        surface: "durable".to_string(),
-                        operation: "sql".to_string(),
-                    }
+            topic.kind
+                == CoreActionKind::Memory {
+                    surface: "durable".to_string(),
+                    operation: "sql".to_string(),
+                }
         }));
         assert!(action_topics.iter().any(|topic| {
-            topic.intent.as_deref() == Some("先把长上下文转存到 scratch。")
-                && topic.kind
-                    == CoreActionKind::Memory {
-                        surface: "scratch".to_string(),
-                        operation: "write".to_string(),
-                    }
+            topic.kind
+                == CoreActionKind::Memory {
+                    surface: "scratch".to_string(),
+                    operation: "write".to_string(),
+                }
         }));
         assert!(action_topics.iter().any(|topic| {
-            topic.intent.as_deref() == Some("删除已转存的动态上下文。")
-                && topic.kind
-                    == CoreActionKind::Memory {
-                        surface: "context".to_string(),
-                        operation: "discard".to_string(),
-                    }
+            topic.kind
+                == CoreActionKind::Memory {
+                    surface: "context".to_string(),
+                    operation: "discard".to_string(),
+                }
         }));
 
         let events = read_audit_events(&audit);
@@ -3747,7 +3739,6 @@ Markdown 协议动作已执行。"#,
         let request = ApprovalRequest {
             approval_id: "approval_1".to_string(),
             action: "run_bash".to_string(),
-            intent: "test".to_string(),
             command: "echo hi".to_string(),
             risk: "test".to_string(),
             reason: "test".to_string(),

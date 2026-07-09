@@ -1240,7 +1240,7 @@ mod tests {
         let response = parse_provider_response(
             &config(ApiProtocol::OpenAiCompatible),
             &json!({
-                "choices":[{"message":{"content":"{\"report_job_progress\":\"hi\"}"}}],
+                "choices":[{"message":{"content":"{\"free_talk\":\"hi\"}"}}],
                 "usage":{
                     "prompt_tokens":3019,
                     "completion_tokens":104,
@@ -1258,7 +1258,7 @@ mod tests {
         let response = parse_provider_response(
             &config(ApiProtocol::OpenAiCompatible),
             &json!({
-                "choices":[{"finish_reason":"length","message":{"content":"{\"report_job_progress\":\"partial\"}"}}],
+                "choices":[{"finish_reason":"length","message":{"content":"{\"free_talk\":\"partial\"}"}}],
                 "usage":{"prompt_tokens":10,"completion_tokens":10,"total_tokens":20}
             }),
         )
@@ -1268,7 +1268,7 @@ mod tests {
         let response = parse_provider_response(
             &config(ApiProtocol::OpenAiCompatible),
             &json!({
-                "choices":[{"message":{"content":"{\"report_job_progress\":\"hi\"}"}}],
+                "choices":[{"message":{"content":"{\"free_talk\":\"hi\"}"}}],
                 "usage":{
                     "prompt_tokens":8868,
                     "cache_creation_input_tokens":0,
@@ -1289,7 +1289,7 @@ mod tests {
         let response = parse_provider_response(
             &config(ApiProtocol::OpenAiResponses),
             &json!({
-                "output_text":"{\"report_job_progress\":\"hi\"}",
+                "output_text":"{\"free_talk\":\"hi\"}",
                 "usage":{
                     "input_tokens":8438,
                     "input_tokens_details":{"cached_tokens":4096},
@@ -1300,7 +1300,7 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(response.content, "{\"report_job_progress\":\"hi\"}");
+        assert_eq!(response.content, "{\"free_talk\":\"hi\"}");
         assert_eq!(response.usage.prompt_tokens, 8438);
         assert_eq!(response.usage.completion_tokens, 398);
         assert_eq!(response.usage.total_tokens, 8836);
@@ -1312,7 +1312,7 @@ mod tests {
             &json!({
                 "status":"incomplete",
                 "incomplete_details":{"reason":"max_output_tokens"},
-                "output_text":"{\"report_job_progress\":\"partial\"}",
+                "output_text":"{\"free_talk\":\"partial\"}",
                 "usage":{"input_tokens":10,"output_tokens":10,"total_tokens":20}
             }),
         )
@@ -1325,7 +1325,7 @@ mod tests {
                 "output":[{
                     "type":"message",
                     "role":"assistant",
-                    "content":[{"type":"output_text","text":"{\"report_job_progress\":\"from output\"}","annotations":[]}]
+                    "content":[{"type":"output_text","text":"{\"free_talk\":\"from output\"}","annotations":[]}]
                 }],
                 "usage":{
                     "input_tokens":32,
@@ -1337,10 +1337,7 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(
-            response.content,
-            "{\"report_job_progress\":\"from output\"}"
-        );
+        assert_eq!(response.content, "{\"free_talk\":\"from output\"}");
         assert_eq!(response.usage.prompt_tokens, 32);
         assert_eq!(response.usage.completion_tokens, 18);
         assert_eq!(response.usage.cached_tokens, 0);
@@ -1372,7 +1369,7 @@ mod tests {
             &config(ApiProtocol::Anthropic),
             &json!({
                 "stop_reason":"max_tokens",
-                "content":[{"type":"text","text":"{\"report_job_progress\":\"partial\"}"}],
+                "content":[{"type":"text","text":"{\"free_talk\":\"partial\"}"}],
                 "usage":{"input_tokens":10,"output_tokens":10}
             }),
         )

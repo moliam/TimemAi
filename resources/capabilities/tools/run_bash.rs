@@ -435,9 +435,6 @@ pub fn validate_bash_request(command: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("command_required".to_string());
     }
-    if trimmed.len() > 2000 {
-        return Err("command_too_long".to_string());
-    }
     Ok(())
 }
 
@@ -474,7 +471,6 @@ pub(crate) fn execute_run_bash_action(
         interval_ms,
         action.input_u64("once_timeout_ms").unwrap_or(5000),
         core.bash_approval_mode,
-        &action.intent,
         &core.shell_jobs,
         &session_id,
         &turn_id,
@@ -490,7 +486,6 @@ pub(crate) fn execute_run_bash(
     interval_ms: Option<u64>,
     once_timeout_ms: u64,
     approval_mode: BashApprovalMode,
-    intent: &str,
     shell_jobs: &FileShellJobStore,
     session_id: &str,
     turn_id: &str,
@@ -554,7 +549,6 @@ pub(crate) fn execute_run_bash(
                 command: command_to_run.to_string(),
                 reason: "run_bash_requires_user_approval".to_string(),
                 risk: "local_command_execution".to_string(),
-                intent: intent.to_string(),
             },
             approved_action: PendingApprovedAction::RunBash {
                 command: command_to_run.to_string(),
@@ -565,7 +559,6 @@ pub(crate) fn execute_run_bash(
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
             },
-            intent: intent.to_string(),
             continuation: None,
         });
     }
@@ -1025,9 +1018,6 @@ fn bash_action_not_executed(command: Option<&str>, reason: &str) -> String {
 fn bash_validation_message(reason: &str) -> &'static str {
     match reason {
         "command_required" => "No shell command was provided.",
-        "command_too_long" => {
-            "The shell command is too long for a single run_bash action. Split the work into smaller commands or write a short script file first."
-        }
         _ => "The shell command request did not pass runtime validation.",
     }
 }
@@ -1260,7 +1250,6 @@ mod tests {
             None,
             5000,
             BashApprovalMode::Approve,
-            "Wait then check.",
             &store,
             "session_a",
             "turn_a",
@@ -1288,7 +1277,6 @@ mod tests {
             None,
             5000,
             BashApprovalMode::Approve,
-            "Short wait.",
             &store,
             "session_a",
             "turn_a",
@@ -1350,7 +1338,6 @@ mod tests {
             Some(1000),
             1000,
             BashApprovalMode::Ask,
-            "等待外部状态完成",
             &store,
             "session_a",
             "turn_a",
@@ -1361,7 +1348,6 @@ mod tests {
             ActionExecution::NeedsApproval(pending) => {
                 assert_eq!(pending.request.action, "run_bash");
                 assert_eq!(pending.request.risk, "local_command_execution");
-                assert_eq!(pending.request.intent, "等待外部状态完成");
             }
             other => panic!("expected run_bash approval request, got {other:?}"),
         }
@@ -1377,7 +1363,6 @@ mod tests {
             Some(1000),
             1000,
             BashApprovalMode::Approve,
-            "等待外部状态完成",
             &store,
             "session_a",
             "turn_a",
@@ -1401,7 +1386,6 @@ mod tests {
             None,
             1000,
             BashApprovalMode::Approve,
-            "等待外部状态完成",
             &store,
             "session_a",
             "turn_a",
@@ -1557,16 +1541,13 @@ mod tests {
     }
 
     #[test]
-    fn bash_validation_rejects_empty_and_huge_commands() {
+    fn bash_validation_rejects_empty_and_allows_long_commands() {
         assert_eq!(
             validate_bash_request(""),
             Err("command_required".to_string())
         );
         let huge = "x".repeat(2001);
-        assert_eq!(
-            validate_bash_request(&huge),
-            Err("command_too_long".to_string())
-        );
+        assert!(validate_bash_request(&huge).is_ok());
         assert!(validate_bash_request("printf ok").is_ok());
     }
 }

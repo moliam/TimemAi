@@ -2366,7 +2366,6 @@ required:
 example_json: |
   {
     "action": "local_echo",
-    "intent": "Echo a short string.",
     "args": {
       "command": "printf hello"
     }
@@ -2432,7 +2431,6 @@ required:
 example_json: |
   {
     "action": "local_echo",
-    "intent": "Echo a short string.",
     "args": {
       "text": "hello"
     }
@@ -2457,7 +2455,6 @@ required:
 example_json: |
   {
     "action": "local_echo_builtin",
-    "intent": "Echo a short string.",
     "args": {
       "command": "printf hello"
     }
@@ -2501,7 +2498,6 @@ input_properties:
 example_json: |
   {
     "action": "ghost",
-    "intent": "Should not execute.",
     "args": {
       "query": "x"
     }

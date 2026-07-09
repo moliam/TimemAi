@@ -76,7 +76,6 @@ output_schema: |
 example_json: |
   {
     "action": "capmgr",
-    "intent": "Load skill xx",
     "args": {
       "op": "load",
       "kind": "skill",

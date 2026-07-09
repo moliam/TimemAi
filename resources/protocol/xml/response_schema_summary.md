@@ -6,8 +6,7 @@ Required output shape:
 
 1. `<response>` root.
 2. Optional `<free_talk>` visible working note.
-3. Optional `<progress>` short status update.
-4. Exactly one state branch:
+3. Exactly one state branch:
    - `<working_still_action>` when more tools are needed.
    - `<status>ALL_FINISHED</status>` followed by `<final_answer>` when all
      active/pending user prompts are complete.
@@ -15,7 +14,7 @@ Required output shape:
 
 Text fields:
 
-- `<free_talk>`, `<progress>`, `<final_answer>`, and context compact `<summary>`
+- `<free_talk>`, `<final_answer>`, and context compact `<summary>`
   are text fields. If they need to contain literal XML tags or XML examples,
   wrap the whole text in `<![CDATA[...]]>`.
 - `<final_answer>` contains the final Markdown response to the user. Use only
@@ -27,8 +26,7 @@ Actions:
 - Each `<action_json>` block contains raw JSON, not markdown fences.
 - JSON may be a single action object, an action group object, or an array of
   action/group objects.
-- Action object fields: `action` required, `args` required object, `intent`
-  optional concise user-visible reason.
+- Action object fields: `action` required, `args` required object.
 - Group object fields: `order` is `parallel` or `sequential`; `actions` is a
   required array of action objects. Workflow array entries execute in array
   order; inside each group, `order` controls whether actions run in parallel or

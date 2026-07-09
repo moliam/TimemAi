@@ -234,7 +234,7 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Added
 
-- Model response protocol now uses `report_job_progress` plus `continue`.
+- Model response protocol now uses `free_talk` plus `continue`.
   Progress can be shown in the Thought/Action panel while actions continue,
   and `continue:false` marks the final user-facing summary.
 - Guarded finalize allows `continue:false` plus a final `expect` check to skip

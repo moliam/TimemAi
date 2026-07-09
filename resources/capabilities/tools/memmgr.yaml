@@ -88,7 +88,6 @@ output_schema: |
 example_json: |
   {
     "action": "memmgr",
-    "intent": "Find confirmed durable memory before answering.",
     "args": {
       "type": "durable",
       "op": "sql",

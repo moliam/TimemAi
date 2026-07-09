@@ -8,7 +8,7 @@ structured core/UI topic protocol.
 ## Goals
 
 - Keep agent behavior in Rust and independent from iOS or any cloud service.
-- Let the model decide intent through explicit structured actions.
+- Let the model choose concrete structured actions when runtime work is needed.
 - Keep runtime responsibilities mechanical: protocol validation, persistence,
   provider IO, local command execution, and safety boundaries.
 - Preserve local-first operation. API keys, audit logs, memory, and chat history
@@ -94,8 +94,8 @@ flowchart LR
   `agent_core::status_view`, including structured retry status. Hosts may render
   retry countdowns, details, colors, or notifications differently, but should
   not store retry state as scattered UI strings.
-- Normalizes model progress/actions into UI-neutral topic events after model
-  response parsing: job progress, user-visible intent, activity state, memory
+- Normalizes model free_talk/actions into UI-neutral topic events after model
+  response parsing: visible working notes, activity state, memory
   read/write activity, and structured `CoreActionKind` values such as Bash,
   memory, capability, or self-tool activity. Core may include raw action/input
   as evidence, but hosts should render from the structured kind instead of
@@ -140,9 +140,8 @@ Key shell-side modules:
   the CLI implementation of the turn UI callbacks.
 - `observation.rs`: modular Thought / Action observation events and rendering.
   It consumes `CoreTopicEvent` values instead of parsing model responses in the
-  shell production path, renders user-facing intent as top-level `·` rows, and
-  renders `CoreActionKind` values as concrete Bash/memory/context activity child
-  rows using `├─`/`└─` prefixes.
+  shell production path, and renders `CoreActionKind` values as concrete
+  Bash/memory/context activity rows.
 - thinking status hints use `agent_core::topic_event_status_hint`; shell only
   maps the returned memory activity to a terminal marker.
 - `profiler.rs`: shell rendering for `/prof` from `RuntimeProfileReport`;
@@ -232,8 +231,8 @@ with the resource text and generated expanded prompt output from
 `scripts/update_static_prompt_snapshot.sh`.
 
 The XML suite uses `quick-xml` to parse the outer response tree. Before parsing,
-string-like fields (`free_talk`, `progress`, `final_answer`, and compact
-`summary`) are protected as raw text so unescaped XML examples inside them do
+string-like fields (`free_talk`, `final_answer`, and compact `summary`) are
+protected as raw text so unescaped XML examples inside them do
 not break the structural parser. Runtime control sections are only read from
 direct children of the root `<response>` node. Display-text fields such as
 `<final_answer>` and `<free_talk>` are treated as opaque text, so XML examples
@@ -249,8 +248,8 @@ response.
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
 `--response-protocol`. The default is `xml`; `markdown` and `json` remain
 available. All suites must produce the same internal `ParsedEnvelope` semantics
-for the same user-visible capability: status/final answer, progress, free_talk
-retention, actions, and `context_compact`.
+for the same user-visible capability: status/final answer, free_talk retention,
+actions, and `context_compact`.
 
 The prompt must not tell the model that multiple suites exist. It should only
 show the currently selected response protocol. This keeps provider-facing text
@@ -260,7 +259,7 @@ Markdown protocol recovery is intentionally bounded:
 
 - If the model emits a natural-language preface before a valid Markdown
   protocol section, the parser may recover from the first recognized protocol
-  heading such as `## Status`, `## Progress`, `## Final_Answer`,
+  heading such as `## Status`, `## Free_talk`, `## Final_Answer`,
   `## Working_Still_Action`, or `## Context Compact`.
 - A standalone fenced `action` block is treated as working protocol output.
 - Ordinary Markdown headings such as `## Notes` are not protocol. They remain a
@@ -732,13 +731,13 @@ model response protocol (`xml` by default; `markdown` and `json` optional). This
 is separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
 
 Each response parses into the same runtime envelope: optional `status`, optional
-`report_job_progress`, optional `next_actions`, optional `context_compact`, and
+`free_talk`, optional `next_actions`, optional `context_compact`, and
 optional `final_answer`.
-`report_job_progress` is progress text for the Thought/Action panel while
-the job is working. It is emitted to the host/UI as a job-progress notification
-and is not replayed into later prompt deltas; replay context keeps action
-intent, command/input, action results, runtime notes, compact summaries, and
-final answers. Missing `status` defaults to `working`. `status:"finished"`
+`free_talk` is the visible working note for the Thought/Action panel while
+the job is working. It is emitted to the host/UI as part of the accepted model
+response topic; replay context keeps command/input, action results, runtime
+notes, compact summaries, free_talk, and final answers. Missing `status`
+defaults to `working`. `status:"finished"`
 means the current task is complete: after that envelope, runtime ends the
 current model/action interaction and shows `final_answer` as the closing
 user-visible answer. `final_answer` and `status:"finished"` must appear
@@ -777,11 +776,9 @@ remain JSON objects inside `<action_json>` blocks.
 ```json
 {
   "free_talk": "optional context-visible free talk or plan",
-  "report_job_progress": "Checking the project files.",
   "next_actions": [
     {
       "action": "run_bash",
-      "intent": "Count Rust source lines",
       "args": {
         "cmd": "rg --files -g '*.rs' | xargs wc -l",
         "timeout_ms": 5000
@@ -793,16 +790,15 @@ remain JSON objects inside `<action_json>` blocks.
 
 With omitted `status` or `status:"working"`, `next_actions` or
 `context_compact` is required and
-`report_job_progress` is shown in the Thought/Action panel with a runtime
-progress marker. With `status:"finished"`, `final_answer` is required and is
+`free_talk` is shown in the Thought/Action panel. With
+`status:"finished"`, `final_answer` is required and is
 shown as the closing answer before runtime stops this task's action/model
 loop; `final_answer` without `status:"finished"` is also rejected for repair.
 `status:"finished"` must not include `next_actions`; if the model still needs
 evidence, it must stay `working`, run actions, and answer after the action
-result is visible. Every action needs a top-level `intent`; the shell
-displays it while the action runs. The parser also tolerates common provider
-drift such as a valid JSON envelope embedded in Markdown text, but it never
-shows raw protocol fragments to the user.
+result is visible. The parser also tolerates common provider drift such as a
+valid JSON envelope embedded in Markdown text, but it never shows raw protocol
+fragments to the user.
 
 Action sections accept the equivalent runtime shapes across JSON, Markdown, and
 XML suites: a single action object, an array of actions, a single action-group
@@ -817,7 +813,7 @@ model response:
 
 ```json
 {
-  "report_job_progress": "Compacting stale context before continuing.",
+  "free_talk": "Compacting stale context before continuing.",
   "context_compact": {
     "delta_ids": ["pd_100_1", "pd_100_2"],
     "summary": "Earlier work identified the retry redraw issue. Preserve the fix direction and test requirements."
@@ -825,7 +821,6 @@ model response:
   "next_actions": [
     {
       "action": "run_bash",
-      "intent": "Inspect the retry renderer.",
       "args": {
         "cmd": "rg -n 'retry_notice|render_thinking' timem_shell/src",
         "timeout_ms": 5000
@@ -847,7 +842,6 @@ Each `next_actions` item is a structured command:
 ```json
 {
   "action": "memmgr",
-  "intent": "Find recent chat messages by created time",
   "args": {
     "type": "raw_chat",
     "op": "sql",
@@ -862,8 +856,6 @@ Fields:
 - `action`: canonical tool name, such as `memmgr`, `run_bash`, `capmgr`, or
   `self_tool`. `memmgr` is the single model-facing interface for durable
   memory, raw chat history, scratch memory, and dynamic context discard.
-- `intent`: concise human-readable reason. It is required because shell UI uses
-  it as action status.
 - `args`: action-specific arguments as a JSON object. Put each parameter in its
   own JSON field. The top-level parser only validates this generic object
   against the manifest registry; concrete option meaning and validation
@@ -913,10 +905,10 @@ whether to answer or ask for another action.
 Provider output is untrusted. The runtime validates:
 
 - The response is a JSON object or contains an extractable JSON envelope.
-- `status`, `report_job_progress`, `final_answer`, and `context_compact` follow
+- `status`, `free_talk`, `final_answer`, and `context_compact` follow
   the active response protocol contract.
 - `next_actions` is an array when present.
-- Every action has `action`, `intent`, and valid `args`.
+- Every action has `action` and valid `args`.
 - SQL and bash actions pass their own safety checks.
 
 If validation fails, the runtime builds a temporary, non-cache-controlled repair
@@ -929,7 +921,7 @@ the concrete protocol error:
 
 ## SYSTEM
 <CURRENT_ASSISTANT_NAME>'s previous response is not protocol compliant.
-error: actions[0].intent_required
+error: actions[0].args_required
 ```
 
 Repair is retried a bounded number of times for one model response failure. Each
@@ -1089,7 +1081,6 @@ slices:
 ```json
 {
   "action": "memmgr",
-  "intent": "Remove stale context by id.",
   "args": {
     "type": "context",
     "op": "discard",
@@ -1114,13 +1105,11 @@ ids:
 
 ```json
 {
-  "free_talk": "Compact dynamic context before continuing.",
+  "free_talk": "Preparing to compact dynamic context before continuing.",
   "status": "working",
-  "report_job_progress": "Preparing to compact dynamic context.",
   "next_actions": [
     {
       "action": "memmgr",
-      "intent": "Offload dynamic prompt context before discarding it.",
       "args": {
         "type": "scratch",
         "op": "write",
@@ -1131,7 +1120,6 @@ ids:
     },
     {
       "action": "memmgr",
-      "intent": "Remove dynamic prompt deltas covered by the compact summary.",
       "args": {
         "type": "context",
         "op": "discard",

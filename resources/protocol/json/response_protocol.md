@@ -20,10 +20,8 @@ Examples below are format examples ONLY:
 
 {
   "free_talk": "好的，你关于 yy 的整改要求我收到了，等会我做完 xx 后再进行。",
-  "progress": "正在执行用户要求的本地检查。",
   "working_still_action": {
     "action": "run_bash",
-    "intent": "Run the requested local check.",
     "args": {
       "cmd": "printf '%s\\n' example",
       "timeout_ms": 5000
@@ -35,7 +33,6 @@ Examples below are format examples ONLY:
 
 {
   "free_talk": "刚刚已经完成了任务 A，总结如下。现在继续进行工作 B，但由于上下文太长且混杂，我先压缩一下。",
-  "progress": "正在压缩上下文...",
   "context_compact": {
     "delta_ids": ["pd_100_1", "pd_100_2"],
     "summary": "This is the summary...."
@@ -49,7 +46,6 @@ Examples below are format examples ONLY:
   "working_still_action": [
     {
       "order": "parallel",
-      "intent": "先做...",
       "actions": [
         {
           "action": "run_bash",
@@ -66,7 +62,6 @@ Examples below are format examples ONLY:
       "actions": [
         {
           "action": "run_bash",
-          "intent": "进行 yyy 的分任务...",
           "args": { "cmd": "...", "timeout_ms": 5000 }
         },
         {
@@ -81,7 +76,6 @@ Examples below are format examples ONLY:
     },
     {
       "action": "run_bash",
-      "intent": "等待 CI 完成",
       "args": {
         "loop_cmd": "...",
         "interval_ms": 10000,

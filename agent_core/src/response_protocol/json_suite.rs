@@ -67,7 +67,6 @@ pub fn can_show_plain_text_after_repair_failure(content: &str) -> bool {
     let lowered = trimmed.to_lowercase();
     ![
         "next_actions",
-        "report_job_progress",
         "memory_candidates",
         "\"action\"",
         "'action'",
@@ -81,7 +80,6 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         Ok(value) => value,
         Err(_) => {
             return ParsedEnvelope {
-                report_job_progress: String::new(),
                 final_answer: String::new(),
                 continue_work: true,
                 thought: String::new(),
@@ -122,7 +120,6 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     let value = unwrap_fields_envelope(value);
     if !value.is_object() {
         return ParsedEnvelope {
-            report_job_progress: String::new(),
             final_answer: String::new(),
             continue_work: true,
             thought: String::new(),
@@ -144,12 +141,6 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
             repair_issue = Some(format!("unexpected_top_level_field:{extra_key}"));
         }
     }
-    let report_job_progress = value
-        .get("progress")
-        .or_else(|| value.get("report_job_progress"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
     let final_answer = value
         .get("final_answer")
         .and_then(Value::as_str)
@@ -214,16 +205,10 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                         repair_issue = Some(format!("action_groups[{group_idx}].actions_required"));
                         break;
                     };
-                    let group_intent = group_object.get("intent").and_then(Value::as_str);
                     let mut parsed_group_actions = Vec::new();
                     for (action_idx, action) in actions.iter().enumerate() {
                         let label = format!("action_groups[{group_idx}].actions[{action_idx}]");
-                        match parse_action_value_with_fallback(
-                            action,
-                            &label,
-                            capabilities,
-                            group_intent,
-                        ) {
+                        match parse_action_value(action, &label, capabilities) {
                             Ok(action) => {
                                 next_actions.push(action.clone());
                                 parsed_group_actions.push(action);
@@ -278,7 +263,6 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                     .and_then(Value::as_str)
                     .map(ActionGroupOrder::from_name)
                     .unwrap_or(ActionGroupOrder::Sequential);
-                let group_intent = action.get("intent").and_then(Value::as_str);
                 let Some(group_actions) = action.get("actions").and_then(Value::as_array) else {
                     repair_issue = Some(format!("actions[{idx}].actions_required"));
                     break;
@@ -286,12 +270,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                 let mut parsed_group_actions = Vec::new();
                 for (action_idx, action) in group_actions.iter().enumerate() {
                     let label = format!("actions[{idx}].actions[{action_idx}]");
-                    match parse_action_value_with_fallback(
-                        action,
-                        &label,
-                        capabilities,
-                        group_intent,
-                    ) {
+                    match parse_action_value(action, &label, capabilities) {
                         Ok(action) => {
                             next_actions.push(action.clone());
                             parsed_group_actions.push(action);
@@ -381,7 +360,6 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         repair_issue = Some("next_actions_required_when_status_working".to_string());
     }
     ParsedEnvelope {
-        report_job_progress,
         final_answer,
         continue_work,
         thought,
@@ -412,15 +390,6 @@ fn parse_action_value(
     label: &str,
     capabilities: &CapabilityRegistry,
 ) -> Result<ParsedAction, String> {
-    parse_action_value_with_fallback(action, label, capabilities, None)
-}
-
-fn parse_action_value_with_fallback(
-    action: &Value,
-    label: &str,
-    capabilities: &CapabilityRegistry,
-    fallback_intent: Option<&str>,
-) -> Result<ParsedAction, String> {
     let name = action
         .get("action")
         .and_then(Value::as_str)
@@ -435,21 +404,6 @@ fn parse_action_value_with_fallback(
         Some(_) => return Err(format!("{label}.args_must_be_object")),
         None => return Err(format!("{label}.args_required")),
     };
-    let intent = action
-        .get("intent")
-        .or_else(|| input.get("intent"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    let parent_intent = if intent.is_empty() {
-        fallback_intent
-            .map(str::trim)
-            .filter(|intent| !intent.is_empty())
-            .map(ToString::to_string)
-    } else {
-        None
-    };
-    let intent = intent.to_string();
     let normalized_name = name.as_str();
     if !capabilities.contains_tool(normalized_name) {
         return Err(format!("unsupported_action:{normalized_name}"));
@@ -459,8 +413,6 @@ fn parse_action_value_with_fallback(
     }
     Ok(ParsedAction {
         action: name,
-        intent,
-        parent_intent,
         raw_input: input,
     })
 }
@@ -547,7 +499,7 @@ mod tests {
     #[test]
     fn parses_context_compact_field() {
         let env = parse_envelope(
-            r#"{"progress":"整理上下文","context_compact":{"delta_ids":["pd_a"],"summary":"keep important state"},"working_still_action":{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}}"#,
+            r#"{"free_talk":"整理上下文","context_compact":{"delta_ids":["pd_a"],"summary":"keep important state"},"working_still_action":{"action":"run_bash","args":{"cmd":"pwd"}}}"#,
             &caps(),
         );
 
@@ -561,7 +513,7 @@ mod tests {
     #[test]
     fn parses_action_groups_and_flattens_actions_for_notifications() {
         let env = parse_envelope(
-            r#"{"progress":"checking","working_still_action":[{"order":"parallel","actions":[{"action":"run_bash","intent":"Check A.","args":{"cmd":"printf a"}},{"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b"}}]},{"order":"sequential","actions":[{"action":"run_bash","intent":"Check C.","args":{"cmd":"printf c"}}]}]}"#,
+            r#"{"free_talk":"checking","working_still_action":[{"order":"parallel","actions":[{"action":"run_bash","args":{"cmd":"printf a"}},{"action":"run_bash","args":{"cmd":"printf b"}}]},{"order":"sequential","actions":[{"action":"run_bash","args":{"cmd":"printf c"}}]}]}"#,
             &caps(),
         );
 
@@ -601,10 +553,9 @@ mod tests {
                 "free_talk contains malformed action object but real action is valid",
                 json!({
                     "free_talk": "Bad example only: {\"action\":\"run_bash\",\"args\":{}}",
-                    "progress": "checking",
+                    "free_talk": "checking",
                     "working_still_action": {
                         "action": "run_bash",
-                        "intent": "Check cwd.",
                         "args": {"cmd": "pwd", "timeout_ms": 5000}
                     }
                 }),
@@ -612,10 +563,9 @@ mod tests {
             (
                 "progress contains status and final answer words but real action is valid",
                 json!({
-                    "progress": "Example only: {\"status\":\"ALL_FINISHED\",\"final_answer\":\"not real\"}",
+                    "free_talk": "Example only: {\"status\":\"ALL_FINISHED\",\"final_answer\":\"not real\"}",
                     "working_still_action": {
                         "action": "run_bash",
-                        "intent": "Check cwd.",
                         "args": {"cmd": "pwd", "timeout_ms": 5000}
                     }
                 }),
@@ -643,15 +593,15 @@ mod tests {
             (
                 "mixed groups and standalone actions preserve order",
                 json!({
-                    "progress": "checking",
+                    "free_talk": "checking",
                     "working_still_action": [
-                        {"order": "parallel", "intent": "Group A.", "actions": [
+                        {"order": "parallel", "actions": [
                             {"action": "run_bash", "args": {"cmd": "printf a", "timeout_ms": 5000}},
-                            {"action": "run_bash", "intent": "B.", "args": {"cmd": "printf b", "timeout_ms": 5000}}
+                            {"action": "run_bash", "args": {"cmd": "printf b", "timeout_ms": 5000}}
                         ]},
-                        {"action": "memmgr", "intent": "Read schema.", "args": {"type": "durable", "op": "schema"}},
+                        {"action": "memmgr", "args": {"type": "durable", "op": "schema"}},
                         {"order": "sequential", "actions": [
-                            {"action": "run_bash", "intent": "C.", "args": {"cmd": "printf c", "timeout_ms": 5000}}
+                            {"action": "run_bash", "args": {"cmd": "printf c", "timeout_ms": 5000}}
                         ]}
                     ]
                 }),
@@ -661,33 +611,33 @@ mod tests {
                 "context compact plus action",
                 json!({
                     "free_talk": "compact before continuing",
-                    "progress": "compacting",
+                    "free_talk": "compacting",
                     "context_compact": {"delta_ids": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
-                    "working_still_action": {"action": "run_bash", "intent": "Check files.", "args": {"cmd": "pwd"}}
+                    "working_still_action": {"action": "run_bash", "args": {"cmd": "pwd"}}
                 }),
                 vec!["run_bash"],
             ),
             (
                 "raw chat sql with punctuation params",
                 json!({
-                    "progress": "searching",
-                    "working_still_action": {"action": "memmgr", "intent": "Search chat.", "args": {"type": "raw_chat", "op": "sql", "sql": "SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5", "params": ["%{\"action\":\"run_bash\"}%"]}}
+                    "free_talk": "searching",
+                    "working_still_action": {"action": "memmgr", "args": {"type": "raw_chat", "op": "sql", "sql": "SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5", "params": ["%{\"action\":\"run_bash\"}%"]}}
                 }),
                 vec!["memmgr"],
             ),
             (
                 "polling bash action",
                 json!({
-                    "progress": "waiting",
-                    "working_still_action": {"action": "run_bash", "intent": "Wait for marker.", "args": {"loop_cmd": "test -f /tmp/timem_marker", "interval_ms": 1000, "loop_timeout_ms": 15000, "once_timeout_ms": 5000}}
+                    "free_talk": "waiting",
+                    "working_still_action": {"action": "run_bash", "args": {"loop_cmd": "test -f /tmp/timem_marker", "interval_ms": 1000, "loop_timeout_ms": 15000, "once_timeout_ms": 5000}}
                 }),
                 vec!["run_bash"],
             ),
             (
                 "self tool read",
                 json!({
-                    "progress": "checking self",
-                    "working_still_action": {"action": "self_tool", "intent": "Read about Timem.", "args": {"type": "about_me", "op": "read"}}
+                    "free_talk": "checking self",
+                    "working_still_action": {"action": "self_tool", "args": {"type": "about_me", "op": "read"}}
                 }),
                 vec!["self_tool"],
             ),
@@ -708,27 +658,27 @@ mod tests {
         let invalid_cases = [
             (
                 "object args required",
-                json!({"progress":"bad","working_still_action":{"action":"run_bash","intent":"Bad args.","args":"cmd=pwd"}}),
+                json!({"free_talk":"bad","working_still_action":{"action":"run_bash","args":"cmd=pwd"}}),
                 "actions[0].args_must_be_object",
             ),
             (
                 "group actions required",
-                json!({"progress":"bad","working_still_action":[{"order":"parallel","intent":"bad group"}]}),
+                json!({"free_talk":"bad","working_still_action":[{"order":"parallel"}]}),
                 "actions[0].actions_required",
             ),
             (
                 "unknown tool rejected",
-                json!({"progress":"bad","working_still_action":{"action":"fetch_web","intent":"No such tool.","args":{"url":"https://example.test"}}}),
+                json!({"free_talk":"bad","working_still_action":{"action":"fetch_web","args":{"url":"https://example.test"}}}),
                 "unsupported_action:fetch_web",
             ),
             (
                 "durable sql required",
-                json!({"progress":"bad","working_still_action":{"action":"memmgr","intent":"Bad mem query.","args":{"type":"durable","op":"sql"}}}),
+                json!({"free_talk":"bad","working_still_action":{"action":"memmgr","args":{"type":"durable","op":"sql"}}}),
                 "actions[0].input.sql_required_when_op=sql,type=durable",
             ),
             (
                 "finished cannot include action",
-                json!({"status":"ALL_FINISHED","final_answer":"done","working_still_action":{"action":"run_bash","intent":"Should not run.","args":{"cmd":"pwd"}}}),
+                json!({"status":"ALL_FINISHED","final_answer":"done","working_still_action":{"action":"run_bash","args":{"cmd":"pwd"}}}),
                 "status_finished_must_not_include_next_actions",
             ),
         ];
@@ -763,19 +713,19 @@ mod tests {
                 "unexpected_top_level_field:debug",
             ),
             (
-                r#"{"status":"working","progress":"checking","working_still_action":"bad"}"#,
+                r#"{"status":"working","free_talk":"checking","working_still_action":"bad"}"#,
                 "working_still_action_must_be_object_or_array",
             ),
             (
-                r#"{"status":"working","progress":"checking","working_still_action":[{"action":"run_bash","intent":"List."}]}"#,
+                r#"{"status":"working","free_talk":"checking","working_still_action":[{"action":"run_bash"}]}"#,
                 "actions[0].args_required",
             ),
             (
-                r#"{"status":"working","progress":"checking","working_still_action":[{"action":"fetch_web_page","intent":"Fetch.","args":{"url":"https://example.test"}}]}"#,
+                r#"{"status":"working","free_talk":"checking","working_still_action":[{"action":"fetch_web_page","args":{"url":"https://example.test"}}]}"#,
                 "unsupported_action:fetch_web_page",
             ),
             (
-                r#"{"continue":false,"progress":"done"}"#,
+                r#"{"continue":false,"note":"done"}"#,
                 "unexpected_top_level_field:continue",
             ),
             (
@@ -783,7 +733,7 @@ mod tests {
                 "unexpected_top_level_field:response_to_user",
             ),
             (
-                r#"{"status":"working","progress":"checking","working_still_action":[],"acceptance_check":{"is_satisfied":false}}"#,
+                r#"{"status":"working","free_talk":"checking","working_still_action":[],"acceptance_check":{"is_satisfied":false}}"#,
                 "unexpected_top_level_field:acceptance_check",
             ),
             (
@@ -791,7 +741,7 @@ mod tests {
                 "final_answer_must_not_start_with_runtime_progress_marker",
             ),
             (
-                r#"{"status":"working","progress":"compact","context_compact":{"delta_ids":["pd_a"]}}"#,
+                r#"{"status":"working","free_talk":"compact","context_compact":{"delta_ids":["pd_a"]}}"#,
                 "context_compact[0].summary_required",
             ),
         ];
@@ -811,9 +761,7 @@ mod tests {
         for action_name in ["final_answer", "final_response"] {
             let expected_issue = format!("unsupported_action:{action_name}");
             let env = parse_envelope(
-                &format!(
-                    r#"{{"action":"{action_name}","intent":"Reply.","args":{{"response_text":"OK"}}}}"#
-                ),
+                &format!(r#"{{"action":"{action_name}","args":{{"response_text":"OK"}}}}"#),
                 &caps(),
             );
 
@@ -826,7 +774,7 @@ mod tests {
     #[test]
     fn malformed_truncated_json_returns_invalid_json_without_panic() {
         let env = parse_envelope(
-            r#"{"status":"working","progress":"正在查询","working_still_action":[{"action":"memmgr","intent":"查询"#,
+            r#"{"status":"working","free_talk":"正在查询","working_still_action":[{"action":"memmgr"#,
             &caps(),
         );
 
@@ -840,8 +788,6 @@ fn is_allowed_response_top_level_key(key: &str) -> bool {
     matches!(
         key,
         "status"
-            | "progress"
-            | "report_job_progress"
             | "final_answer"
             | "working_still_action"
             | "next_actions"
@@ -852,7 +798,6 @@ fn is_allowed_response_top_level_key(key: &str) -> bool {
             | "context_compacts"
             | "action"
             | "args"
-            | "intent"
     )
 }
 
@@ -1142,9 +1087,7 @@ fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::
 pub(crate) fn is_likely_response_envelope(value: &Value) -> bool {
     let normalized = unwrap_fields_envelope(value.clone());
     normalized.as_object().is_some_and(|object| {
-        object.contains_key("progress")
-            || object.contains_key("report_job_progress")
-            || object.contains_key("working_still_action")
+        object.contains_key("working_still_action")
             || object.contains_key("next_actions")
             || object.contains_key("final_answer")
             || object.contains_key("status")
@@ -1190,15 +1133,7 @@ fn extract_balanced_json_object(input: &str) -> Option<String> {
 fn repair_known_string_field_quotes(input: &str) -> Option<String> {
     let mut output = input.to_string();
     let mut changed = false;
-    for key in [
-        "report_job_progress",
-        "free_talk",
-        "intent",
-        "search_text",
-        "content",
-        "command",
-        "sql",
-    ] {
+    for key in ["free_talk", "search_text", "content", "command", "sql"] {
         let (next, key_changed) = repair_unescaped_quotes_for_key(&output, key);
         output = next;
         changed |= key_changed;

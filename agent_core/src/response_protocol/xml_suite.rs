@@ -73,7 +73,6 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
             return malformed_xml_response("empty_response");
         }
         return ParsedEnvelope {
-            report_job_progress: String::new(),
             final_answer: protocol_text.to_string(),
             continue_work: false,
             thought: String::new(),
@@ -90,8 +89,6 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     let flow_issue = validate_response_branch_flow(&response);
     let mut repair_issue = None;
     let status_raw = response.first_child_text(&["status"]).to_ascii_lowercase();
-    let report_job_progress =
-        response.first_child_inner_xml(&["progress", "report", "report_job_progress"]);
     let final_answer = response.first_child_inner_xml(&["final_answer"]);
     let thought = response.first_child_inner_xml(&["free_talk", "free-talk", "freetalk"]);
     let thought_keep_in_context = !thought.trim().is_empty();
@@ -141,7 +138,6 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     }
 
     ParsedEnvelope {
-        report_job_progress,
         final_answer,
         continue_work,
         thought,
@@ -181,11 +177,6 @@ fn validate_response_branch_flow(response: &XmlNode) -> Option<String> {
             || child.name.eq_ignore_ascii_case("freetalk")
         {
             1
-        } else if child.name.eq_ignore_ascii_case("progress")
-            || child.name.eq_ignore_ascii_case("report")
-            || child.name.eq_ignore_ascii_case("report_job_progress")
-        {
-            2
         } else if child.name.eq_ignore_ascii_case("working_still_action")
             || child.name.eq_ignore_ascii_case("status")
             || child.name.eq_ignore_ascii_case("context_compact")
@@ -212,7 +203,6 @@ fn validate_response_branch_flow(response: &XmlNode) -> Option<String> {
 
 fn malformed_xml_response(issue: &str) -> ParsedEnvelope {
     ParsedEnvelope {
-        report_job_progress: String::new(),
         final_answer: String::new(),
         continue_work: true,
         thought: String::new(),
@@ -243,9 +233,6 @@ fn protect_raw_text_fields(text: &str) -> Option<String> {
         "free_talk",
         "free-talk",
         "freetalk",
-        "progress",
-        "report",
-        "report_job_progress",
         "final_answer",
         "summary",
     ];
@@ -590,7 +577,7 @@ fn parse_action_blocks(
         return (Vec::new(), Vec::new());
     }
 
-    let mut markdown = String::from("## Progress\nchecking\n\n## Working_Still_Action\n");
+    let mut markdown = String::from("## Free_talk\nchecking\n\n## Working_Still_Action\n");
     for block in action_blocks {
         markdown.push_str("```action\n");
         markdown.push_str(block.trim());
@@ -649,25 +636,25 @@ fn split_id_list(raw: &str) -> Vec<String> {
 pub fn xml_repair_instruction(issue: &str) -> &'static str {
     match issue {
         "truncated_model_output" => {
-            "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <progress> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
+            "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <free_talk> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
         }
         "external_tool_call_protocol" => {
-            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 XML response protocol：需要动作时写 <progress> 和 <working_still_action><action_json><![CDATA[{...}]]></action_json></working_still_action>；完成时写 <status>ALL_FINISHED</status> 和 <final_answer>...</final_answer>。"
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 XML response protocol：需要动作时写 <free_talk> 和 <working_still_action><action_json><![CDATA[{...}]]></action_json></working_still_action>；完成时写 <status>ALL_FINISHED</status> 和 <final_answer>...</final_answer>。"
         }
         "final_answer_requires_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你给了 <final_answer>，但没有明确 <status>ALL_FINISHED</status>。如果当前用户请求已经完成，请同时提供 <status>ALL_FINISHED</status> 和 <final_answer>；如果仍需 runtime 继续工作，请不要写 <final_answer>，改写 <progress> 和 <working_still_action>。"
+            "检查到刚刚的输出格式有点问题：你给了 <final_answer>，但没有明确 <status>ALL_FINISHED</status>。如果当前用户请求已经完成，请同时提供 <status>ALL_FINISHED</status> 和 <final_answer>；如果仍需 runtime 继续工作，请不要写 <final_answer>，改写 <free_talk> 和 <working_still_action>。"
         }
         "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你写了 <status>ALL_FINISHED</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果 final_answer 里需要展示 XML 标签或 XML 示例，请把整个 final_answer 文本包进 <![CDATA[ ... ]]>，避免示例标签被当作协议标签解析。如果仍需 runtime 继续工作，请不要写 ALL_FINISHED，并提供 <progress> 和需要的 <working_still_action>。"
+            "检查到刚刚的输出格式有点问题：你写了 <status>ALL_FINISHED</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果 final_answer 里需要展示 XML 标签或 XML 示例，请把整个 final_answer 文本包进 <![CDATA[ ... ]]>，避免示例标签被当作协议标签解析。如果仍需 runtime 继续工作，请不要写 ALL_FINISHED，并提供 <free_talk> 和需要的 <working_still_action>。"
         }
         "status_finished_must_not_include_next_actions" => {
-            "检查到刚刚的输出格式有点问题：<status>ALL_FINISHED</status> 表示当前用户请求已完成，因此不能同时包含 <working_still_action>。如果还需要 runtime 执行动作，请保持 working，用 <progress> 和 <working_still_action> 继续；拿到 action result 后再写 ALL_FINISHED 和 <final_answer>。"
+            "检查到刚刚的输出格式有点问题：<status>ALL_FINISHED</status> 表示当前用户请求已完成，因此不能同时包含 <working_still_action>。如果还需要 runtime 执行动作，请保持 working，用 <free_talk> 和 <working_still_action> 继续；拿到 action result 后再写 ALL_FINISHED 和 <final_answer>。"
         }
         "next_actions_required_when_status_working" => {
-            "检查到刚刚的输出格式有点问题：working 表示还需要 runtime 继续执行动作，因此必须提供 <progress> 和 <working_still_action>。如果当前用户请求已经完成，请改用 <status>ALL_FINISHED</status> 和 <final_answer>。"
+            "检查到刚刚的输出格式有点问题：working 表示还需要 runtime 继续执行动作，因此必须提供 <free_talk> 和 <working_still_action>。如果当前用户请求已经完成，请改用 <status>ALL_FINISHED</status> 和 <final_answer>。"
         }
         _ => {
-            "Use the XML response protocol. If work still needs runtime action, write <progress> and concrete <working_still_action>. If the current user request is complete, write <status>ALL_FINISHED</status> with <final_answer>; this does not close the Timem session."
+            "Use the XML response protocol. If work still needs runtime action, write <free_talk> and concrete <working_still_action>. If the current user request is complete, write <status>ALL_FINISHED</status> with <final_answer>; this does not close the Timem session."
         }
     }
 }
@@ -771,7 +758,6 @@ Found the original malformed response:
     <action_json>
 {
   "order": "parallel",
-  "intent": "并行拉起 3 个 sleep 15 后台任务",
   "actions": [
     { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
     { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
@@ -839,7 +825,7 @@ That was text, not a runtime action.
   <status>ALL_FINISHED</status>
   <final_answer>
 This answer explains multiple protocol snippets:
-<progress>fake progress inside final answer</progress>
+<legacy_note>fake legacy note inside final answer</legacy_note>
 <summary>fake compact summary inside final answer</summary>
 <free_talk>fake free talk inside final answer</free_talk>
 None of these are real control fields.
@@ -850,12 +836,11 @@ None of these are real control fields.
 
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert!(!env.continue_work);
-        assert!(env.report_job_progress.is_empty());
         assert!(env.thought.is_empty());
         assert!(env.context_compacts.is_empty());
         assert!(env
             .final_answer
-            .contains("<progress>fake progress inside final answer</progress>"));
+            .contains("<legacy_note>fake legacy note inside final answer</legacy_note>"));
         assert!(env
             .final_answer
             .contains("<summary>fake compact summary inside final answer</summary>"));
@@ -873,7 +858,7 @@ None of these are real control fields.
 Here is the malformed response example the user asked for:
 <response>
   <free_talk>not closed
-<progress>fake progress</progress>
+<legacy_note>fake note</legacy_note>
 <working_still_action><action_json>{"action":"run_bash","args":{}}</action_json></working_still_action>
 <summary>fake summary</summary>
 This is all answer text.
@@ -884,7 +869,6 @@ This is all answer text.
 
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert!(!env.continue_work);
-        assert!(env.report_job_progress.is_empty());
         assert!(env.next_actions.is_empty());
         assert!(env.action_groups.is_empty());
         assert!(env.final_answer.contains("<working_still_action>"));
@@ -928,9 +912,8 @@ Example text only:
   <action_json>{"action":"run_bash","args":{}}</action_json>
 </working_still_action>
 ]]></free_talk>
-<progress>checking</progress>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","intent":"Check cwd.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -939,7 +922,6 @@ Example text only:
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert!(env.continue_work);
         assert_eq!(env.next_actions.len(), 1);
-        assert_eq!(env.next_actions[0].intent, "Check cwd.");
         assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
         assert!(env.thought.contains("<working_still_action>"));
     }
@@ -952,9 +934,8 @@ Example text only:
 This is only a note:
 <note priority="high"><working_still_action><action_json>{"action":"run_bash","args":{}}</action_json></working_still_action></note>
 </free_talk>
-<progress>checking</progress>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","intent":"Check real action.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -962,33 +943,27 @@ This is only a note:
 
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert_eq!(env.next_actions.len(), 1);
-        assert_eq!(env.next_actions[0].intent, "Check real action.");
         assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
         assert!(env.thought.contains(r#"<note priority="high">"#));
         assert!(env.thought.contains("<working_still_action>"));
     }
 
     #[test]
-    fn free_talk_and_progress_raw_xml_text_do_not_break_real_action() {
+    fn free_talk_raw_xml_text_does_not_break_real_action() {
         let env = parse_xml_envelope(
             r#"<response>
 <free_talk>
 I am explaining a malformed example:
 <response><working_still_action><action_json>{ bad
 </free_talk>
-<progress>checking literal <status>ALL_FINISHED</status> as text</progress>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","intent":"Check real action.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
         );
 
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(
-            env.report_job_progress,
-            "checking literal <status>ALL_FINISHED</status> as text"
-        );
         assert!(env.thought.contains("<response><working_still_action>"));
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
@@ -999,10 +974,9 @@ I am explaining a malformed example:
         let env = parse_xml_envelope(
             r#"<response>
 <free_talk>text field can mention {"action":"run_bash"}</free_talk>
-<progress>checking</progress>
 <working_still_action>
 <action_json><![CDATA[
-{"action":"run_bash","intent":"bad action json","args":{"cmd":"pwd",}}
+{"action":"run_bash","args":{"cmd":"pwd",}}
 ]]></action_json>
 </working_still_action>
 </response>"#,
@@ -1033,9 +1007,8 @@ I am explaining a malformed example:
         let env = parse_xml_envelope(
             r#"<response>
 <free_talk>state</free_talk>
-<progress>checking</progress>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -1043,7 +1016,6 @@ I am explaining a malformed example:
 
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert!(env.continue_work);
-        assert_eq!(env.report_job_progress, "checking");
         assert_eq!(env.thought, "state");
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].action, "run_bash");
@@ -1059,7 +1031,6 @@ I am explaining a malformed example:
     <action_json><![CDATA[
 {
   "order": "parallel",
-  "intent": "并行拉起 3 个 sleep 15 后台任务",
   "actions": [
     { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
     { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
@@ -1085,15 +1056,13 @@ I am explaining a malformed example:
     }
 
     #[test]
-    fn action_intent_and_args_can_contain_xml_like_text() {
+    fn action_args_can_contain_xml_like_text() {
         let env = parse_xml_envelope(
             r#"<response>
-<progress>checking</progress>
 <working_still_action>
 <action_json><![CDATA[
 {
   "order": "parallel",
-  "intent": "Group intent mentions <response><status>ALL_FINISHED</status></response> only as text.",
   "actions": [
     {
       "action": "run_bash",
@@ -1104,7 +1073,6 @@ I am explaining a malformed example:
     },
     {
       "action": "run_bash",
-      "intent": "Print XML-like payload <payload id=\"42\">ok</payload> as data.",
       "args": {
         "cmd": "printf '%s\n' '<working_still_action><action_json>{\"action\":\"run_bash\"}</action_json></working_still_action>'",
         "timeout_ms": 5000
@@ -1120,14 +1088,7 @@ I am explaining a malformed example:
 
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert_eq!(env.action_groups.len(), 1);
-        assert_eq!(
-            env.action_groups[0].actions[0].parent_intent.as_deref(),
-            Some("Group intent mentions <response><status>ALL_FINISHED</status></response> only as text.")
-        );
         assert_eq!(env.next_actions[0].input_str("cmd"), "printf group");
-        assert!(env.next_actions[1]
-            .intent
-            .contains(r#"<payload id="42">ok</payload>"#));
         assert!(env.next_actions[1]
             .input_str("cmd")
             .contains("<working_still_action>"));
@@ -1138,7 +1099,6 @@ I am explaining a malformed example:
         let env = parse_xml_envelope(
             r#"<response>
 <free_talk>need compact</free_talk>
-<progress>compact</progress>
 <context_compact>
 <delta_ids>pd_a, pd_b</delta_ids>
 <summary><![CDATA[keep state]]></summary>
@@ -1158,7 +1118,6 @@ I am explaining a malformed example:
         let env = parse_xml_envelope(
             r#"<response>
 <free_talk>need compact</free_talk>
-<progress>compact</progress>
 <context_compact>
 <delta_ids>pd_a</delta_ids>
 <summary>
@@ -1201,13 +1160,12 @@ Keep this protocol example:
         let env = parse_xml_envelope(
             r#"<response>
 <free_talk>compact and act</free_talk>
-<progress>compact</progress>
 <context_compact>
 <delta_ids>pd_a</delta_ids>
 <summary>keep state</summary>
 </context_compact>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]]></action_json>
+<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd"}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),

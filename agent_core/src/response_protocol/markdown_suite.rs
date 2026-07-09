@@ -143,9 +143,6 @@ fn is_protocol_heading(heading: &str) -> bool {
     matches!(
         heading.trim().to_ascii_lowercase().as_str(),
         "status"
-            | "progress"
-            | "report"
-            | "report_job_progress"
             | "answer"
             | "final_answer"
             | "final answer"
@@ -183,15 +180,6 @@ fn parse_single_action(
     idx: usize,
     capabilities: &CapabilityRegistry,
 ) -> Result<ParsedAction, String> {
-    parse_single_action_with_fallback(value, idx, capabilities, None)
-}
-
-fn parse_single_action_with_fallback(
-    value: &Value,
-    idx: usize,
-    capabilities: &CapabilityRegistry,
-    fallback_intent: Option<&str>,
-) -> Result<ParsedAction, String> {
     let name = value
         .get("action")
         .and_then(Value::as_str)
@@ -210,23 +198,6 @@ fn parse_single_action_with_fallback(
         None => return Err(format!("actions[{idx}].args_required")),
     };
 
-    let intent = value
-        .get("intent")
-        .or_else(|| input.get("intent"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    let parent_intent = if intent.is_empty() {
-        fallback_intent
-            .map(str::trim)
-            .filter(|intent| !intent.is_empty())
-            .map(ToString::to_string)
-    } else {
-        None
-    };
-
     if !capabilities.contains_tool(&name) {
         return Err(format!("unsupported_action:{name}"));
     }
@@ -237,8 +208,6 @@ fn parse_single_action_with_fallback(
 
     Ok(ParsedAction {
         action: name,
-        intent,
-        parent_intent,
         raw_input: input,
     })
 }
@@ -259,18 +228,12 @@ fn parse_action_groups_value(
             .and_then(Value::as_str)
             .map(ActionGroupOrder::from_name)
             .unwrap_or(ActionGroupOrder::Sequential);
-        let group_intent = value.get("intent").and_then(Value::as_str);
         let Some(actions) = value.get("actions").and_then(Value::as_array) else {
             return Err("action_groups[0].actions_required".to_string());
         };
         let mut parsed_actions = Vec::new();
         for (action_idx, action) in actions.iter().enumerate() {
-            parsed_actions.push(parse_single_action_with_fallback(
-                action,
-                action_idx,
-                capabilities,
-                group_intent,
-            )?);
+            parsed_actions.push(parse_single_action(action, action_idx, capabilities)?);
         }
         return Ok(vec![ParsedActionGroup {
             order,
@@ -288,18 +251,12 @@ fn parse_action_groups_value(
                 .and_then(Value::as_str)
                 .map(ActionGroupOrder::from_name)
                 .unwrap_or(ActionGroupOrder::Sequential);
-            let group_intent = group.get("intent").and_then(Value::as_str);
             let Some(actions) = group.get("actions").and_then(Value::as_array) else {
                 return Err(format!("action_groups[{group_idx}].actions_required"));
             };
             let mut parsed_actions = Vec::new();
             for (action_idx, action) in actions.iter().enumerate() {
-                parsed_actions.push(parse_single_action_with_fallback(
-                    action,
-                    action_idx,
-                    capabilities,
-                    group_intent,
-                )?);
+                parsed_actions.push(parse_single_action(action, action_idx, capabilities)?);
             }
             groups.push(ParsedActionGroup {
                 order,
@@ -362,7 +319,6 @@ fn fenced_json_contains_protocol_markers(fenced: &str) -> bool {
 fn contains_protocol_json_markers(text: &str) -> bool {
     [
         "\"status\"",
-        "\"report_job_progress\"",
         "\"final_answer\"",
         "\"next_actions\"",
         "\"context_compact\"",
@@ -380,7 +336,6 @@ fn has_unclosed_code_fence(text: &str) -> bool {
 
 fn malformed_markdown_response(issue: &str) -> ParsedEnvelope {
     ParsedEnvelope {
-        report_job_progress: String::new(),
         final_answer: String::new(),
         continue_work: true,
         thought: String::new(),
@@ -436,7 +391,6 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
                 return malformed_markdown_response("unclosed_markdown_code_fence");
             }
             return ParsedEnvelope {
-                report_job_progress: String::new(),
                 final_answer: candidate.to_string(),
                 continue_work: false,
                 thought: String::new(),
@@ -453,7 +407,6 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             return super::json_suite::parse_envelope(content, capabilities);
         }
         return ParsedEnvelope {
-            report_job_progress: String::new(),
             final_answer: candidate.to_string(),
             continue_work: false,
             thought: String::new(),
@@ -474,7 +427,6 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             return super::json_suite::parse_envelope(content, capabilities);
         }
         return ParsedEnvelope {
-            report_job_progress: String::new(),
             final_answer: candidate.to_string(),
             continue_work: false,
             thought: String::new(),
@@ -491,7 +443,6 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     let sections = split_sections(candidate);
 
     let mut status_raw = String::new();
-    let mut report_job_progress = String::new();
     let mut final_answer = String::new();
     let mut thought = String::new();
     let mut thought_keep_in_context = false;
@@ -502,9 +453,6 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     for section in &sections {
         match section.heading.as_str() {
             "status" => status_raw = section.body.trim().to_lowercase(),
-            "progress" | "report" | "report_job_progress" => {
-                report_job_progress = section.body.clone();
-            }
             "answer" | "final_answer" | "final answer" => {
                 final_answer = section.body.clone();
             }
@@ -521,11 +469,6 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             "" => {
                 if !has_sections && has_action_blocks && actions_body.is_empty() {
                     actions_body = section.body.clone();
-                } else if !section.body.is_empty()
-                    && sections.len() > 1
-                    && report_job_progress.is_empty()
-                {
-                    report_job_progress = section.body.clone();
                 }
             }
             _ => {}
@@ -616,7 +559,6 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     }
 
     ParsedEnvelope {
-        report_job_progress,
         final_answer,
         continue_work,
         thought,
@@ -700,25 +642,25 @@ pub fn md_repair_instruction(issue: &str) -> &'static str {
     }
     match issue {
         "truncated_model_output" => {
-            "检查到刚刚的输出被 max output token 截断。请继续使用 Markdown response protocol，输出更短的 `## Progress`/`## Final_Answer`，长报告可用 `run_bash` 写入文件后在回答中给出路径。不要切换成顶层 JSON。"
+            "检查到刚刚的输出被 max output token 截断。请继续使用 Markdown response protocol，输出更短的 `## Free_talk`/`## Final_Answer`，长报告可用 `run_bash` 写入文件后在回答中给出路径。不要切换成顶层 JSON。"
         }
         "final_answer_requires_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你给了最终回答内容，但没有明确完成状态。如果当前用户请求已经完成，请写 `## Status` 为 `finished`，并写 `## Final_Answer`；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要写 `## Final_Answer`，改写 `## Progress` 和 `## Working_Still_Action`。"
+            "检查到刚刚的输出格式有点问题：你给了最终回答内容，但没有明确完成状态。如果当前用户请求已经完成，请写 `## Status` 为 `finished`，并写 `## Final_Answer`；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要写 `## Final_Answer`，改写 `## Free_talk` 和 `## Working_Still_Action`。"
         }
         "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你写了 `## Status` 为 `finished`，但缺少 `## Final_Answer`。如果当前用户请求已经完成，请同时提供 `## Status` 和 `## Final_Answer`；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要写 finished，并提供 `## Progress` 和需要的 `## Working_Still_Action`。"
+            "检查到刚刚的输出格式有点问题：你写了 `## Status` 为 `finished`，但缺少 `## Final_Answer`。如果当前用户请求已经完成，请同时提供 `## Status` 和 `## Final_Answer`；finished 不会关闭 Timem session。如果仍需要 runtime 继续工作，请不要写 finished，并提供 `## Free_talk` 和需要的 `## Working_Still_Action`。"
         }
         "status_finished_must_not_include_next_actions" => {
-            "检查到刚刚的输出格式有点问题：`## Status` finished 表示当前用户请求已完成，因此不能同时包含 `## Working_Still_Action`。如果还需要 runtime 执行动作，请保持 working，用 `## Progress` 和 `## Working_Still_Action` 继续；拿到 action result 后再写 finished 和 `## Final_Answer`。"
+            "检查到刚刚的输出格式有点问题：`## Status` finished 表示当前用户请求已完成，因此不能同时包含 `## Working_Still_Action`。如果还需要 runtime 执行动作，请保持 working，用 `## Free_talk` 和 `## Working_Still_Action` 继续；拿到 action result 后再写 finished 和 `## Final_Answer`。"
         }
         "next_actions_required_when_status_working" => {
-            "检查到刚刚的输出格式有点问题：请继续使用 Markdown response protocol。`## Status` working 表示还需要 runtime 继续执行动作，因此必须提供 `## Progress` 和 `## Working_Still_Action`。如果当前用户请求已经完成，请改用 `## Status` finished 和 `## Final_Answer`；finished 不会关闭 Timem session。"
+            "检查到刚刚的输出格式有点问题：请继续使用 Markdown response protocol。`## Status` working 表示还需要 runtime 继续执行动作，因此必须提供 `## Free_talk` 和 `## Working_Still_Action`。如果当前用户请求已经完成，请改用 `## Status` finished 和 `## Final_Answer`；finished 不会关闭 Timem session。"
         }
         "external_tool_call_protocol" => {
-            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 Markdown response protocol：需要动作时写 `## Progress` 和 `## Working_Still_Action`，动作放在 action JSON block 中；完成时写 `## Status` finished 和 `## Final_Answer`。"
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 Markdown response protocol：需要动作时写 `## Free_talk` 和 `## Working_Still_Action`，动作放在 action JSON block 中；完成时写 `## Status` finished 和 `## Final_Answer`。"
         }
         _ => {
-            "Use the Markdown response protocol. If work still needs runtime action, write `## Progress` and concrete `## Working_Still_Action`. If the current user request is complete, write `## Status` with `finished` and provide `## Final_Answer`; this does not close the Timem session. Do not switch to a top-level JSON response."
+            "Use the Markdown response protocol. If work still needs runtime action, write `## Free_talk` and concrete `## Working_Still_Action`. If the current user request is complete, write `## Status` with `finished` and provide `## Final_Answer`; this does not close the Timem session. Do not switch to a top-level JSON response."
         }
     }
 }
@@ -833,7 +775,7 @@ Example only:
 {"action":"run_bash","args":{}}
 ```
 
-## Progress
+## Free_talk
 not a real progress section
 "#;
         let env = parse_markdown_envelope(input, &caps());
@@ -869,7 +811,7 @@ not a real progress section
     #[test]
     fn malformed_fenced_json_with_protocol_markers_requests_repair() {
         let input =
-            "```json\n{\"report_job_progress\":\"bad dangling \\ path and raw \n newline\n```";
+            "```json\n{\"working_still_action\":{\"action\":\"run_bash\",\"args\":{\"cmd\":\"bad dangling \\ path and raw \n newline\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert_eq!(env.repair_issue.as_deref(), Some("invalid_json"));
@@ -878,7 +820,7 @@ not a real progress section
 
     #[test]
     fn unclosed_fenced_json_with_protocol_markers_requests_repair() {
-        let input = "```json\n{\"report_job_progress\":\"bad dangling \\ path";
+        let input = "```json\n{\"working_still_action\":{\"action\":\"run_bash\",\"args\":{\"cmd\":\"bad dangling \\ path";
         let env = parse_markdown_envelope(input, &caps());
 
         assert_eq!(env.repair_issue.as_deref(), Some("invalid_json"));
@@ -915,7 +857,7 @@ not a real progress section
 
     #[test]
     fn finished_without_answer_is_repair() {
-        let input = "## Status\nfinished\n\n## Progress\nDone";
+        let input = "## Status\nfinished\n\n## Free_talk\nDone";
         let env = parse_markdown_envelope(input, &caps());
         assert_eq!(
             env.repair_issue.as_deref(),
@@ -925,7 +867,7 @@ not a real progress section
 
     #[test]
     fn parses_context_compact_section() {
-        let input = "## Progress\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "## Free_talk\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -938,7 +880,7 @@ not a real progress section
 
     #[test]
     fn actions_section_json_fence_still_parses_action() {
-        let input = "## Progress\nchecking\n\n## Working_Still_Action\n```json\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "## Free_talk\nchecking\n\n## Working_Still_Action\n```json\n{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -950,7 +892,7 @@ not a real progress section
 
     #[test]
     fn actions_section_accepts_group_array() {
-        let input = r#"## Progress
+        let input = r#"## Free_talk
 checking
 
 ## Working_Still_Action
@@ -959,14 +901,14 @@ checking
   {
     "order": "parallel",
     "actions": [
-      {"action":"run_bash","intent":"Check A.","args":{"cmd":"printf a"}},
-      {"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b"}}
+      {"action":"run_bash","args":{"cmd":"printf a"}},
+      {"action":"run_bash","args":{"cmd":"printf b"}}
     ]
   },
   {
     "order": "sequential",
     "actions": [
-      {"action":"memmgr","intent":"Query durable memory.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}}
+      {"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}}
     ]
   }
 ]
@@ -983,14 +925,13 @@ checking
 
     #[test]
     fn actions_section_accepts_single_group_object() {
-        let input = r#"## Progress
+        let input = r#"## Free_talk
 checking
 
 ## Working_Still_Action
 ```action
 {
   "order": "parallel",
-  "intent": "Run three sleeps in parallel.",
   "actions": [
     {"action":"run_bash","args":{"cmd":"sleep 15","background":true}},
     {"action":"run_bash","args":{"cmd":"sleep 15","background":true}},
@@ -1004,16 +945,12 @@ checking
         assert_eq!(env.action_groups.len(), 1);
         assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
         assert_eq!(env.action_groups[0].actions.len(), 3);
-        assert_eq!(
-            env.action_groups[0].actions[0].parent_intent.as_deref(),
-            Some("Run three sleeps in parallel.")
-        );
         assert_eq!(env.next_actions.len(), 3);
     }
 
     #[test]
-    fn actions_section_accepts_mixed_groups_and_actions_with_optional_intent() {
-        let input = r#"## Progress
+    fn actions_section_accepts_mixed_groups_and_actions_without_intent() {
+        let input = r#"## Free_talk
 checking
 
 ## Working_Still_Action
@@ -1021,10 +958,9 @@ checking
 [
   {
     "order": "parallel",
-    "intent": "Check both files.",
     "actions": [
       {"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},
-      {"action":"run_bash","intent":"Check B.","args":{"cmd":"printf b","timeout_ms":5000}}
+      {"action":"run_bash","args":{"cmd":"printf b","timeout_ms":5000}}
     ]
   },
   {"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}
@@ -1035,37 +971,27 @@ checking
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert_eq!(env.action_groups.len(), 2);
         assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
-        assert_eq!(env.action_groups[0].actions[0].intent, "");
-        assert_eq!(
-            env.action_groups[0].actions[0].parent_intent.as_deref(),
-            Some("Check both files.")
-        );
-        assert_eq!(env.action_groups[0].actions[1].intent, "Check B.");
-        assert_eq!(env.action_groups[0].actions[1].parent_intent, None);
         assert_eq!(env.action_groups[1].order, ActionGroupOrder::Sequential);
-        assert_eq!(env.action_groups[1].actions[0].intent, "");
-        assert_eq!(env.action_groups[1].actions[0].parent_intent, None);
         assert_eq!(env.next_actions.len(), 3);
     }
 
     #[test]
     fn mixed_actions_preserve_model_order() {
-        let input = r#"## Progress
+        let input = r#"## Free_talk
 checking
 
 ## Working_Still_Action
 ```action
 [
-  {"action":"run_bash","intent":"First.","args":{"cmd":"printf first","timeout_ms":5000}},
+  {"action":"run_bash","args":{"cmd":"printf first","timeout_ms":5000}},
   {
     "order": "parallel",
-    "intent": "Middle group.",
     "actions": [
       {"action":"run_bash","args":{"cmd":"printf middle-a","timeout_ms":5000}},
       {"action":"run_bash","args":{"cmd":"printf middle-b","timeout_ms":5000}}
     ]
   },
-  {"action":"run_bash","intent":"Last.","args":{"cmd":"printf last","timeout_ms":5000}}
+  {"action":"run_bash","args":{"cmd":"printf last","timeout_ms":5000}}
 ]
 ```"#;
         let env = parse_markdown_envelope(input, &caps());
@@ -1109,11 +1035,11 @@ checking
 
     #[test]
     fn extracts_markdown_protocol_after_preface() {
-        let input = "我先说明一下处理计划。\n\n## Progress\nchecking\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "我先说明一下处理计划。\n\n## Free_talk\nchecking\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
-        assert_eq!(env.report_job_progress, "checking");
+        assert_eq!(env.thought, "checking");
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].action, "run_bash");
         assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
@@ -1121,7 +1047,7 @@ checking
 
     #[test]
     fn action_block_without_sections_is_working_protocol() {
-        let input = "```action\n{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "```action\n{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -1132,7 +1058,7 @@ checking
 
     #[test]
     fn actions_section_accepts_bare_json_array() {
-        let input = "## Progress\nchecking\n\n## Working_Still_Action\n[{\"action\":\"run_bash\",\"intent\":\"Check files.\",\"args\":{\"cmd\":\"pwd\"}},{\"action\":\"memmgr\",\"intent\":\"Query durable memory.\",\"args\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}}]";
+        let input = "## Free_talk\nchecking\n\n## Working_Still_Action\n[{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}},{\"action\":\"memmgr\",\"args\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}}]";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -1156,7 +1082,7 @@ checking
 
     #[test]
     fn malformed_action_block_is_not_downgraded_to_plain_answer() {
-        let input = "some preface\n```action\n{\"action\":\"run_bash\",\"intent\":\"Check\"}\n```";
+        let input = "some preface\n```action\n{\"action\":\"run_bash\"}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert_eq!(
@@ -1171,7 +1097,7 @@ checking
         let instruction = md_repair_instruction("next_actions_required_when_status_working");
 
         assert!(instruction.contains("Markdown response protocol"));
-        assert!(instruction.contains("## Progress"));
+        assert!(instruction.contains("## Free_talk"));
         assert!(instruction.contains("## Working_Still_Action"));
         assert!(instruction.contains("## Status"));
         assert!(!instruction.contains("Return exactly one valid JSON object"));

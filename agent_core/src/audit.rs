@@ -543,7 +543,6 @@ mod tests {
             command: "true".into(),
             reason: "ask mode".into(),
             risk: "user_approval_required".into(),
-            intent: "Verify output".into(),
         };
 
         let approval_event = user_approval_audit_event("s", "t", &approval, true);

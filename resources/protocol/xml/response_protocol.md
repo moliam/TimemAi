@@ -9,8 +9,8 @@ deviation will break the downstream parser and cause a protocol repair.
 1. **Single Root Element**: Your entire response MUST be wrapped inside a single
    `<response>...</response>` root tag.
 2. **Strict Generation Order**: You must generate tags in a linear stream order:
-   `<free_talk>` -> `<progress>` -> `[State Branch Target]`. Think first, and
-   decide the task state last.
+   `<free_talk>` -> `[State Branch Target]`. Think first, and decide the task
+   state last.
 3. **No Markdown Blocks in Actions**: Inside `<action_json>`, write raw JSON text
    wrapped ONLY in a `<![CDATA[...]]>` block. NEVER use markdown code blocks like
    ```json inside XML tags.
@@ -28,13 +28,12 @@ below:
 
 | Order | Tag Name | Presence | Rule & Description |
 | --- | --- | --- | --- |
-| **1** | `<free_talk>` | Optional | Raw text.Brief visible working note / planning note. Reason about the user's intent, plan your steps, or summarize tool outputs here. Use this space to determine if the task is finished. |
-| **2** | `<progress>` | Optional | Raw text. A short, human-readable status message indicating what you are currently doing, for example: `Searching database...`. |
-| **3** | **[State Branch]** | **Choose ONE** | Based on your `<free_talk>` reasoning, choose exactly one of the following paths. |
+| **1** | `<free_talk>` | Optional | Raw text.Brief visible working note / planning note. Reason about the user's request, plan your steps, or summarize tool outputs here. Use this space to determine if the task is finished. |
+| **2** | **[State Branch]** | **Choose ONE** | Based on your `<free_talk>` reasoning, choose exactly one of the following paths. |
 | -> | `<working_still_action>` | If more tools are needed | Contains one or more `<action_json>` blocks to execute tools. When using this tag, `<status>` and `<final_answer>` MUST NOT appear. |
 | -> | `<status>` | If completely done | Must contain exactly the string: `ALL_FINISHED`. It signals that all user requests are fully met. Must be immediately followed by `<final_answer>`. |
 | -> | `<context_compact>` | If context is too long | Used to compress history. Must contain `<delta_ids>` and a `<summary>` block. |
-| **4** | `<final_answer>` | Conditional | Raw text. Required ONLY if `<status>ALL_FINISHED</status>` is present. Contains the final Markdown response to the user. |
+| **3** | `<final_answer>` | Conditional | Raw text. Required ONLY if `<status>ALL_FINISHED</status>` is present. Contains the final Markdown response to the user. |
 
 ## Action JSON Payload Schema
 
@@ -49,7 +48,6 @@ Use one of the three JSON structures below.
 ```json
 {
   "action": "tool_name",
-  "intent": "Concise reason for this action",
   "args": { "param_name": "value" }
 }
 ```
@@ -59,7 +57,6 @@ Use one of the three JSON structures below.
 ```json
 {
   "order": "parallel",
-  "intent": "Shared goal of this action group",
   "actions": [
     { "action": "tool_1", "args": {} },
     { "action": "tool_2", "args": {} }
@@ -90,12 +87,10 @@ Examples below are format examples ONLY.
 ```xml
 <response>
   <free_talk>The user wants to check the environment status. I need to read the local config file first to verify the ports before proceeding.</free_talk>
-  <progress>Reading local configuration file...</progress>
   <working_still_action>
     <action_json><![CDATA[
 {
   "action": "run_bash",
-  "intent": "Check if config.json exists and read it",
   "args": {
     "cmd": "cat config.json",
     "timeout_ms": 5000

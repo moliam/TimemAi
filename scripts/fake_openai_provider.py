@@ -42,22 +42,18 @@ class Handler(BaseHTTPRequestHandler):
             content = "## Status\nfinished\n\n## Final_Answer\nSTRESS_OK"
         elif "TTY_STRESS" in prompt:
             time.sleep(self.response_delay)
-            progress = (
+            free_talk = (
                 "正在执行真实终端压力测试：验证 Thought / Action 面板在长进度、"
                 "长 Bash 命令、CJK 字符、box drawing 字符 │└─、以及用户中途补充"
                 "同时出现时仍然能稳定换行、保持边框宽度，并且不会重复残留旧行。"
             )
             content = (
-                "## Progress\n"
-                + progress
+                "## Free_talk\n"
+                + free_talk
                 + "\n\n## Working_Still_Action\n```action\n"
                 + json.dumps(
                     {
                         "action": "run_bash",
-                        "intent": (
-                            "执行一个包含较长命令文本的终端压力测试动作，用于验证观察窗树状渲染、"
-                            "自动换行和状态栏刷新不会乱框。"
-                        ),
                         "args": {
                             "cmd": (
                                 "printf 'STRESS_ACTION_DONE\\n'; "
