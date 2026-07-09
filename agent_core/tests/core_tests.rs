@@ -1,10 +1,10 @@
 use agent_core::capability::{CapabilityHostProfile, CapabilityRegistry};
 use agent_core::self_tool::SelfToolPaths;
 use agent_core::{
-    read_audit_doc, AgentCore, BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard,
-    OutputExpansionRequest, OutputExpansionResolution, ProviderConfig, ResponseProtocolKind,
-    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail,
-    TurnStopReason, UsageStats,
+    read_audit_doc, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile, CoreStep,
+    LlmResponse, MemGuard, OutputExpansionRequest, OutputExpansionResolution, ProviderConfig,
+    ResponseProtocolKind, RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField,
+    TurnFinal, TurnStopDetail, TurnStopReason, UsageStats,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -174,10 +174,78 @@ fn prompt_is_append_only_and_segmented() {
     };
     assert!(second.contains("[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]"));
     assert!(second.contains("## TIMEM_ASSISTANT"));
-    assert!(second.contains(
+    assert!(second.contains(r#"{"status":"ALL_FINISHED","final_answer":"你好"}"#));
+    assert!(!second.contains("All previous pending open tasks are completed."));
+    assert!(second.contains("## USER\n\n继续"));
+}
+
+#[test]
+fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("assistant_replay_extracted"),
+    );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
+    assert_eq!(
+        core.assistant_replay_mode(),
+        AssistantReplayMode::ExtractedFields
+    );
+
+    let _ = core.begin_turn("你好", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"你好"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains("先分析"));
+    assert!(prompt.contains(
         "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n你好"
     ));
-    assert!(second.contains("## USER\n\n继续"));
+    assert!(
+        !prompt.contains(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"你好"}"#)
+    );
+}
+
+#[test]
+fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("assistant_replay_raw_working"),
+    );
+    assert_eq!(core.assistant_replay_mode(), AssistantReplayMode::RawOutput);
+
+    let _ = core.begin_turn("查看自己信息", None);
+    let raw_response = r#"{"free_talk":"需要读取自身信息。","progress":"读取 about 信息。","working_still_action":[{"action":"self_tool","intent":"读取 Timem 自身信息。","args":{"type":"about_me","op":"read"}}]}"#;
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(raw_response),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let raw = prompt.find(raw_response).unwrap();
+    let system_result = prompt
+        .find("The following are results of TIMEM_ASSISTANT newly initiated actions:")
+        .unwrap();
+    assert!(assistant < raw);
+    assert!(raw < system_result);
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(!prompt.contains("## TIMEM_ASSISTANT\n\n需要读取自身信息。"));
 }
 
 #[test]
@@ -223,8 +291,21 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
 
     assert!(prompt.contains("YOUR ID is: Ai4"));
     assert!(prompt.contains("## Ai4"));
-    assert!(prompt.contains("The following are results of Ai4 newly initiated actions:"));
     assert!(!prompt.contains("CURRENT_ASSISTANT_NAME"));
+    assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
+
+    let _ = core.begin_turn("查看自身信息", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"progress":"读取自身信息。","working_still_action":[{"action":"self_tool","intent":"读取自身信息。","args":{"type":"about_me","op":"read"}}]}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("The following are results of Ai4 newly initiated actions:"));
     assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
 }
 
@@ -652,9 +733,10 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids.len(), 2);
     assert!(prompt.contains("## TIMEM_ASSISTANT"));
     assert!(prompt.contains("先分析"));
-    assert!(prompt.contains(
-        "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n结论"
-    ));
+    assert!(
+        prompt.contains(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"结论"}"#)
+    );
+    assert!(!prompt.contains("All previous pending open tasks are completed."));
 }
 
 #[test]
@@ -2129,6 +2211,7 @@ fn status_working_requires_working_still_action_and_keeps_progress_separate() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("status_working_progress"),
     );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
     let _ = core.begin_turn("查一下", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"working","progress":"正在查询。","working_still_action":[{"action":"memmgr","intent":"Find evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
@@ -2142,7 +2225,6 @@ fn status_working_requires_working_still_action_and_keeps_progress_separate() {
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
     assert!(!prompt.contains("progress:\n正在查询。"));
-    assert!(!prompt.contains("正在查询。"));
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("intent: Find evidence."));
 }
@@ -2317,6 +2399,33 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
     assert_eq!(events[0]["repair_calls"], 1);
     assert_eq!(events[0]["repair_calls_delta"], 1);
     assert_eq!(events[0]["usage"]["prompt_tokens"], 10);
+
+    let repair_log_file = dir.join("audit").join("api_output_repair.json");
+    let repair_log: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&repair_log_file).unwrap()).unwrap();
+    let records = repair_log["records"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["kind"], "model_output_repair");
+    assert_eq!(records[0]["session"], "session_1");
+    assert_eq!(records[0]["turn_id"], "turn_1");
+    assert_eq!(records[0]["issue"], "truncated_model_output");
+    assert_eq!(records[0]["assistant_name"], "TIMEM_ASSISTANT");
+    assert!(records[0]["assistant_response"]
+        .as_str()
+        .unwrap()
+        .contains(r#"{"progress":"partial"#));
+    assert!(records[0]["system_message"]
+        .as_str()
+        .unwrap()
+        .contains("TIMEM_ASSISTANT's previous response is not protocol compliant"));
+    assert!(records[0]["rendered"]
+        .as_str()
+        .unwrap()
+        .contains("## assistant:\n"));
+    assert!(records[0]["rendered"]
+        .as_str()
+        .unwrap()
+        .contains("## SYSTEM\n"));
 }
 
 #[test]
@@ -2783,6 +2892,7 @@ fn progress_and_working_still_action_continue_with_implicit_continue_note() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("progress_action_continue"),
     );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
     let _ = core.begin_turn("请一直完成任务，不要停止", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -2797,7 +2907,6 @@ fn progress_and_working_still_action_continue_with_implicit_continue_note() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
-    assert!(!prompt.contains("备份完成。现在继续查证。"));
     assert!(!prompt.contains("上轮回复没有写 status"));
     assert!(prompt.contains("Action result: memmgr"));
 }
@@ -5756,7 +5865,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(default_prompt.contains("The top-level response is XML."));
+    assert!(default_prompt.contains("# System Response Protocol"));
     assert!(default_prompt.contains("protocol-compliant response in XML format"));
     assert!(!default_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
@@ -5802,7 +5911,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(xml_prompt.contains("The top-level response is XML."));
+    assert!(xml_prompt.contains("# System Response Protocol"));
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
     assert!(xml_prompt.contains("<working_still_action>"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
@@ -6089,8 +6198,6 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
     };
 
     assert!(prompt.contains("Examples below are format examples ONLY"));
-    assert!(prompt.contains("SYSTEM action results are runtime evidence"));
-    assert!(prompt.contains("trust the SYSTEM action results"));
     for leaked_example_task in [
         "project codename",
         "Get the OS version",
@@ -6396,6 +6503,7 @@ fn self_tool_env_denies_memory_path_writes_through_core_action() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("self_tool_protected_env"),
     );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
     let _ = core.begin_turn("把 Timem 的 data dir 改到另一个目录。", None);
     let attempted_path = "/tmp/timem-should-not-become-data-root";
     let step = core.apply_model_response(LlmResponse {

@@ -974,6 +974,136 @@ This is an answer, not an executable action:
     }
 
     #[test]
+    fn session_turn_xml_raw_string_tags_do_not_repair_or_execute() {
+        let dir = tmp_dir("xml_raw_string_tags");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Xml;
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([Ok(llm(
+            r#"<response>
+<status>ALL_FINISHED</status>
+<final_answer>
+Here is the malformed response example the user asked for:
+<response>
+  <free_talk>not closed
+<progress>fake progress</progress>
+<working_still_action><action_json>{"action":"run_bash","args":{}}</action_json></working_still_action>
+<summary>fake summary</summary>
+This is all answer text.
+</final_answer>
+</response>"#,
+            1_000,
+            false,
+        ))]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "explain the malformed response",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert!(outcome.repair_issue.is_none(), "{:?}", outcome.repair_issue);
+        assert_eq!(
+            model.prompts.len(),
+            1,
+            "outcome text={}, stop={:?}, stats={:?}",
+            outcome.text,
+            outcome.stop_reason,
+            outcome.stats
+        );
+        assert_eq!(outcome.stats.tool_calls, 0);
+        assert!(outcome.text.contains("<response>"));
+        assert!(outcome.text.contains("<working_still_action>"));
+        assert!(outcome.text.contains("<summary>fake summary</summary>"));
+        assert!(ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .next()
+            .is_none());
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_xml_malformed_action_json_still_repairs() {
+        let dir = tmp_dir("xml_malformed_action_json_repairs");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Xml;
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"<response>
+<free_talk>Need a local check.</free_talk>
+<progress>checking</progress>
+<working_still_action>
+<action_json><![CDATA[
+{"action":"run_bash","intent":"bad action json","args":{"cmd":"pwd",}}
+]]></action_json>
+</working_still_action>
+</response>"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"<response>
+<status>ALL_FINISHED</status>
+<final_answer>修复后完成。</final_answer>
+</response>"#,
+                1_000,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "check something",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(model.prompts.len(), 2);
+        assert_eq!(outcome.text, "修复后完成。");
+        assert_eq!(outcome.stats.tool_calls, 0);
+        let repair_topics = ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .collect::<Vec<_>>();
+        assert_eq!(repair_topics.len(), 1);
+        assert_eq!(repair_topics[0].issue, "actions[0].invalid_json");
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn session_turn_json_final_answer_with_protocol_examples_does_not_repair_or_execute() {
         let dir = tmp_dir("json_final_answer_protocol_examples");
         let audit = dir.join("audit.json");
@@ -1475,12 +1605,14 @@ finished
             "parallel group should spawn bash before builtin work; elapsed={elapsed:?}"
         );
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
-        let first_bash = second_parts.new_delta.find("group_a").unwrap();
-        let builtin = second_parts
+        let results_start = second_parts
             .new_delta
-            .find("Action result: memmgr")
+            .find("The following are results")
             .unwrap();
-        let second_bash = second_parts.new_delta.find("group_b").unwrap();
+        let results = &second_parts.new_delta[results_start..];
+        let first_bash = results.find("group_a").unwrap();
+        let builtin = results.find("Action result: memmgr").unwrap();
+        let second_bash = results.find("group_b").unwrap();
         assert!(first_bash < builtin);
         assert!(builtin < second_bash);
         let _ = std::fs::remove_dir_all(dir);
@@ -1743,7 +1875,7 @@ finished
         assert!(second_parts.static_prompt.contains("test static prompt"));
         assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
         assert!(second_parts.new_delta.contains("Action result: memmgr"));
-        assert!(!second_parts.new_delta.contains("查询 scratch 后继续。"));
+        assert!(second_parts.new_delta.contains("查询 scratch 后继续。"));
         let second_blocks = crate::plan_incremental_cache(second_parts);
         assert_eq!(second_blocks.len(), 3);
         assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);
@@ -1954,13 +2086,13 @@ finished
 
         assert_eq!(outcome.text, "没有找到相关 scratch。");
         assert_eq!(model.prompts.len(), 2);
-        assert!(model.prompts[0].contains("The top-level response is XML."));
-        assert!(model.prompts[1].contains("The top-level response is XML."));
+        assert!(model.prompts[0].contains("# System Response Protocol"));
+        assert!(model.prompts[1].contains("# System Response Protocol"));
 
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
         assert!(second_parts
             .static_prompt
-            .contains("The top-level response is XML."));
+            .contains("# System Response Protocol"));
         assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
         assert!(second_parts.new_delta.contains("Action result: memmgr"));
         let second_blocks = crate::plan_incremental_cache(second_parts);
@@ -2037,6 +2169,73 @@ finished
         assert!(prompt.contains("## Ai4"));
         assert!(!prompt.contains("created_at_ms"));
         assert!(!prompt.contains("batch_id"));
+    }
+
+    #[test]
+    fn session_turn_defaults_to_raw_assistant_output_replay() {
+        let dir = tmp_dir("session_raw_assistant_replay");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        core.set_assistant_speaker_name("Ai4");
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Xml;
+        let mut ui = NoopTurnUi;
+
+        let raw_first_response = r#"<response>
+<free_talk>raw planning note</free_talk>
+<status>ALL_FINISHED</status>
+<final_answer>visible answer</final_answer>
+</response>"#;
+        let mut first_model = ReplayModel::new([Ok(llm(raw_first_response, 4_000, false))]);
+        let first = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "first user input",
+                session: "raw_replay_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut first_model,
+        );
+        assert_eq!(first.text, "visible answer");
+
+        let mut second_model = ReplayModel::new([Ok(llm(
+            r#"<response><status>ALL_FINISHED</status><final_answer>second answer</final_answer></response>"#,
+            4_200,
+            false,
+        ))]);
+        let second = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "second user input",
+                session: "raw_replay_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut second_model,
+        );
+        assert_eq!(second.text, "second answer");
+
+        let prompt = &second_model.prompts[0];
+        let assistant = prompt.find("## Ai4").unwrap();
+        let raw = prompt.find(raw_first_response).unwrap();
+        let user = prompt.find("second user input").unwrap();
+        assert!(assistant < raw);
+        assert!(raw < user);
+        assert!(!prompt.contains("Final Answer:\nvisible answer"));
+        assert!(!prompt.contains("All previous pending open tasks are completed."));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
