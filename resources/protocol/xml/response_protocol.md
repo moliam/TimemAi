@@ -1,104 +1,128 @@
-## Response Protocol
+# System Response Protocol
 
-Your response must be organized as XML with the pre-defined tags below.
-Always use exactly one `<response>...</response>` root element.
-The top-level response is XML. Only the individual action payloads inside `<action_json>` use JSON objects.
+You must strictly control your output format. All responses must be valid XML
+structured according to the predefined tags and execution flow below. Any
+deviation will break the downstream parser and cause a protocol repair.
 
-The response protocol summary is:
+## Core Guarantees & Constraints
 
-{{RESPONSE_V1_SCHEMA}}
+1. **Single Root Element**: Your entire response MUST be wrapped inside a single
+   `<response>...</response>` root tag.
+2. **Strict Generation Order**: You must generate tags in a linear stream order:
+   `<free_talk>` -> `<progress>` -> `[State Branch Target]`. Think first, and
+   decide the task state last.
+3. **No Markdown Blocks in Actions**: Inside `<action_json>`, write raw JSON text
+   wrapped ONLY in a `<![CDATA[...]]>` block. NEVER use markdown code blocks like
+   ```json inside XML tags.
+4. **Escape Example Tags**: If you need to output literal XML tags or examples
+   inside `<final_answer>` or `<free_talk>`, wrap that entire content block inside
+   `<![CDATA[...]]>`.
+5. **No Markdown Fence Around Response**: Fences in examples are documentation
+   only. Your actual response must start directly with `<response>` and must not
+   include markdown fences.
 
-Examples below are format examples ONLY:
+## Tag Dictionary & Streaming Flow
 
-## -------- Example: final answer --------
+You must output your response components in the exact numerical order listed
+below:
 
+| Order | Tag Name | Presence | Rule & Description |
+| --- | --- | --- | --- |
+| **1** | `<free_talk>` | Optional | Raw text.Brief visible working note / planning note. Reason about the user's intent, plan your steps, or summarize tool outputs here. Use this space to determine if the task is finished. |
+| **2** | `<progress>` | Optional | Raw text. A short, human-readable status message indicating what you are currently doing, for example: `Searching database...`. |
+| **3** | **[State Branch]** | **Choose ONE** | Based on your `<free_talk>` reasoning, choose exactly one of the following paths. |
+| -> | `<working_still_action>` | If more tools are needed | Contains one or more `<action_json>` blocks to execute tools. When using this tag, `<status>` and `<final_answer>` MUST NOT appear. |
+| -> | `<status>` | If completely done | Must contain exactly the string: `ALL_FINISHED`. It signals that all user requests are fully met. Must be immediately followed by `<final_answer>`. |
+| -> | `<context_compact>` | If context is too long | Used to compress history. Must contain `<delta_ids>` and a `<summary>` block. |
+| **4** | `<final_answer>` | Conditional | Raw text. Required ONLY if `<status>ALL_FINISHED</status>` is present. Contains the final Markdown response to the user. |
+
+## Action JSON Payload Schema
+
+When invoking tools inside `<working_still_action>`, wrap the payload in:
+
+`<action_json><![CDATA[ <JSON_HERE> ]]></action_json>`
+
+Use one of the three JSON structures below.
+
+### Format A: Single Tool Call
+
+```json
+{
+  "action": "tool_name",
+  "intent": "Concise reason for this action",
+  "args": { "param_name": "value" }
+}
+```
+
+### Format B: Parallel or Sequential Action Group
+
+```json
+{
+  "order": "parallel",
+  "intent": "Shared goal of this action group",
+  "actions": [
+    { "action": "tool_1", "args": {} },
+    { "action": "tool_2", "args": {} }
+  ]
+}
+```
+
+Workflow array entries execute in array order. Inside each group, `order`
+controls whether actions run in parallel or sequentially.
+
+### Format C: Multi-Group Workflow Array
+
+If you need to execute Group A before Group B, wrap them in a JSON array:
+
+```json
+[
+  { "order": "parallel", "actions": [...] },
+  { "order": "sequential", "actions": [...] }
+]
+```
+
+## Concrete Examples
+
+Examples below are format examples ONLY.
+
+### Example 1: Task In-Progress (Needs Tool Execution)
+
+```xml
 <response>
-  <status>ALL_FINISHED</status>
-  <final_answer>好的，我明白了。</final_answer>
-</response>
-
-## -------- Example: receive a new input during working, need actions --------
-
-<response>
-  <free_talk>好的，你关于 yy 的整改要求我收到了，等会我做完 xx 后再进行。</free_talk>
-  <progress>正在执行用户要求的本地检查。</progress>
+  <free_talk>The user wants to check the environment status. I need to read the local config file first to verify the ports before proceeding.</free_talk>
+  <progress>Reading local configuration file...</progress>
   <working_still_action>
     <action_json><![CDATA[
 {
   "action": "run_bash",
-  "intent": "Run the requested local check.",
+  "intent": "Check if config.json exists and read it",
   "args": {
-    "cmd": "printf '%s\\n' example",
+    "cmd": "cat config.json",
     "timeout_ms": 5000
   }
 }
     ]]></action_json>
   </working_still_action>
 </response>
+```
 
-## -------- Example: finish one user's task, compact context --------
+### Example 2: Task Fully Completed (Final Delivery)
 
+```xml
 <response>
-  <free_talk>刚刚已经完成了任务 A，总结如下。现在继续进行工作 B，但由于上下文太长且混杂，我先压缩一下。</free_talk>
-  <progress>正在压缩上下文...</progress>
-  <context_compact>
-    <delta_ids>pd_100_1, pd_100_2</delta_ids>
-    <summary><![CDATA[
-This is the summary....
-    ]]></summary>
-  </context_compact>
-</response>
+  <free_talk>All requested operations completed successfully. The database has been patched and verified. Ready to wrap up.</free_talk>
+  <status>ALL_FINISHED</status>
+  <final_answer>
+### Execution Summary
 
-## -------- Example: multiple actions and polling --------
+The configuration update was applied successfully:
+| Parameter | Old Value | New Value |
+|---|---|---|
+| Max_Connections | 100 | 500 |
 
-<response>
-  <free_talk> 我会几个阶段: .... 先第一个阶段。这个阶段先做做 xxx ，再执行yyy ，最后执行单个收尾操作。</free_talk>   --> the plan, also help you recall the whole picture.
-  <working_still_action>
-    <action_json><![CDATA[
-[
-  {
-    "order": "parallel",
-    "intent": "先做...",   --> can be used as whole group intent
-    "actions": [
-      {
-        "action": "run_bash",
-        "args": { "cmd": ..., "timeout_ms": ... }
-      },
-      {
-        "action": "run_bash",
-        "args": { "cmd": ..., "timeout_ms": ... }
-      }
-    ]
-  },
-  {
-    "order": "parallel",
-    "actions": [
-      {
-        "action": "run_bash",
-        "intent": "进行 yyy 的分任务...",  --> can be used as single action intent
-        "args": { "cmd": ..., "timeout_ms": ... }
-      },
-      {
-        "action": "run_bash",    --> intent can be omiteed
-        "args": { "cmd": ...., "timeout_ms": ... }
-      },
-      {
-        "action": "memmgr",  --> built in cmd
-        "args": { ....}
-      }
-    ]
-  },
-  {
-    "action": "run_bash",
-    "intent": "等待 CI 完成",
-    "args": {
-      "loop_cmd": ...,
-      "interval_ms": 10000,
-      "loop_timeout_ms": 600000,
-      "once_timeout_ms": 5000
-    }
-  }
-]
-    ]]></action_json>
-  </working_still_action>
+No further actions are required.
+  </final_answer>
 </response>
+```
+
+Protocol Loaded. Respond to active/pending user prompts.

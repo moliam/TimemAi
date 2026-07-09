@@ -77,8 +77,8 @@ validate_one markdown "$TMP_MARKDOWN" \
   '`## Working_Still_Action`'
 validate_one json "$TMP_JSON"
 validate_one xml "$TMP_XML" \
-  "XML response tags." \
-  "The top-level response is XML." \
+  "# System Response Protocol" \
+  "Protocol Loaded. Respond to active/pending user prompts." \
   '`<response>`' \
   "<status>ALL_FINISHED</status>" \
   '`<working_still_action>`'

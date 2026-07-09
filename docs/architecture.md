@@ -231,12 +231,20 @@ define runtime behavior, repair boundaries, and tests; they must stay aligned
 with the resource text and generated expanded prompt output from
 `scripts/update_static_prompt_snapshot.sh`.
 
-The XML suite uses `quick-xml` to parse the outer response tree. Runtime control
-sections are only read from direct children of the root `<response>` node.
-Display-text fields such as `<final_answer>` and `<free_talk>` are treated as
-opaque text, so XML examples inside those fields are not re-parsed as actions.
-Nested XML-looking text in those fields preserves element attributes and
-self-closing tags when it is carried forward as display/context text.
+The XML suite uses `quick-xml` to parse the outer response tree. Before parsing,
+string-like fields (`free_talk`, `progress`, `final_answer`, and compact
+`summary`) are protected as raw text so unescaped XML examples inside them do
+not break the structural parser. Runtime control sections are only read from
+direct children of the root `<response>` node. Display-text fields such as
+`<final_answer>` and `<free_talk>` are treated as opaque text, so XML examples
+inside those fields are not re-parsed as actions. Nested XML-looking text in
+those fields preserves element attributes and self-closing tags when it is
+carried forward as display/context text.
+The XML parser also accepts a whole model response wrapped in a single
+documentation-style ```xml fence, then parses the inner `<response>` with the
+same `quick-xml` path. XML state branches are strict: `working_still_action`,
+`status`/`final_answer`, and `context_compact` are mutually exclusive in one
+response.
 
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
 `--response-protocol`. The default is `xml`; `markdown` and `json` remain
@@ -540,7 +548,7 @@ time: 1782200000000
 new user input or mid-turn supplement
 
 ## {{CURRENT_ASSISTANT_NAME}}
-free_talk or final_answer already recorded for continuity
+raw model output recorded for continuity by default
 
 ## SYSTEM
 The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
@@ -552,6 +560,14 @@ runtime notes such as response repair, compaction result, or work instructions
 
 [END DELTA]
 ```
+
+The assistant replay policy is explicit. By default, successful model output is
+replayed into the next delta verbatim under the current assistant role, so the
+model can see exactly what it wrote last round. `AssistantReplayMode::ExtractedFields`
+keeps the older behavior for hosts/tests that need it: replay only parsed
+`free_talk` plus a normalized final-answer note. Protocol repair deltas are
+separate temporary deltas and still include the malformed response plus SYSTEM
+repair feedback.
 
 There are two broad model-visible prompt classes:
 
@@ -918,8 +934,23 @@ error: actions[0].intent_required
 
 Repair is retried a bounded number of times for one model response failure. Each
 repair attempt emits a structured repair topic for hosts to render, and each
-attempt is audited. If all repair attempts fail, the shell blocks raw model text
-and shows a safe fallback instead.
+attempt is audited. In addition to the generic `model_repair_request` API audit
+event, core appends a realtime diagnostic record to
+`audit/api_output_repair.json`. That record contains the session/turn id, issue,
+malformed assistant response, SYSTEM repair message shown to the model, and a
+human-readable rendered block:
+
+```text
+---- <time_ms> / <turn_id> ----
+## assistant:
+<malformed model response>
+
+## SYSTEM
+<repair message>
+```
+
+If all repair attempts fail, the shell blocks raw model text and shows a safe
+fallback instead.
 
 ## Tool Surface
 
