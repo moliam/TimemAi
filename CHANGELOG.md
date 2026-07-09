@@ -62,6 +62,12 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - XML response parsing now ignores protocol-looking tags inside CDATA action
   strings, so valid action args containing examples such as `<status>` or
   `<working_still_action>` are kept as data instead of parsed as control tags.
+- XML response parsing now uses `quick-xml` for the outer response tree, so
+  XML examples inside `final_answer`/`free_talk` text are opaque display text
+  instead of being mistaken for executable protocol sections, while preserving
+  nested element attributes and self-closing tags in display text.
+- Action parsing now accepts a single action-group object as well as action
+  arrays/group arrays, matching the XML prompt examples and model output shape.
 - Cross-protocol response tests now assert full action-group structure, not
   only flattened action order, for complex valid JSON/Markdown/XML responses.
 

@@ -3,6 +3,8 @@ use super::{
     ResponseProtocolSuite,
 };
 use crate::capability::CapabilityRegistry;
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 
 pub struct XmlSuiteV1;
 
@@ -59,7 +61,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         return malformed_xml_response("external_tool_call_protocol");
     }
 
-    let Some(response_body) = extract_response_body(trimmed) else {
+    let Some(response) = parse_xml_response_node(trimmed) else {
         if trimmed.starts_with('<') {
             return malformed_xml_response("invalid_xml_response_root");
         }
@@ -81,14 +83,11 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         };
     };
 
-    let control_body = strip_display_tag_blocks(response_body);
-    let status_raw = tag_text(&control_body, "status").to_ascii_lowercase();
-    let report_job_progress = first_non_empty_tag_text(
-        response_body,
-        &["progress", "report", "report_job_progress"],
-    );
-    let final_answer = tag_text(response_body, "final_answer");
-    let thought = first_non_empty_tag_text(response_body, &["free_talk", "free-talk", "freetalk"]);
+    let status_raw = response.first_child_text(&["status"]).to_ascii_lowercase();
+    let report_job_progress =
+        response.first_child_inner_xml(&["progress", "report", "report_job_progress"]);
+    let final_answer = response.first_child_inner_xml(&["final_answer"]);
+    let thought = response.first_child_inner_xml(&["free_talk", "free-talk", "freetalk"]);
     let thought_keep_in_context = !thought.trim().is_empty();
 
     let mut repair_issue = None;
@@ -96,7 +95,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         "all_finished" => false,
         "working" | "in_progress" | "in progress" => true,
         "" => {
-            if has_actions(&control_body) {
+            if response.has_child("working_still_action") {
                 true
             } else if !final_answer.trim().is_empty() {
                 false
@@ -110,9 +109,9 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         }
     };
 
-    let context_compacts = parse_context_compacts(&control_body, &mut repair_issue);
+    let context_compacts = parse_context_compacts_from_node(&response, &mut repair_issue);
     let (next_actions, action_groups) =
-        parse_actions(&control_body, capabilities, &mut repair_issue);
+        parse_actions_from_node(&response, capabilities, &mut repair_issue);
 
     if repair_issue.is_none() && !continue_work && final_answer.trim().is_empty() {
         repair_issue = Some("final_answer_required_when_status_finished".to_string());
@@ -176,135 +175,188 @@ fn looks_like_external_tool_call_protocol(text: &str) -> bool {
         || lower.contains("</function_call>")
 }
 
-fn extract_response_body(text: &str) -> Option<&str> {
-    let start = text.find("<response")?;
-    let after_tag = text[start..].find('>')? + start + 1;
-    let end = find_xml_close_outside_cdata(&text[after_tag..], "</response>")? + after_tag;
-    Some(text[after_tag..end].trim())
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum XmlFragment {
+    Text(String),
+    CData(String),
+    Node(XmlNode),
 }
 
-fn extract_tags<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
-    let mut result = Vec::new();
-    let mut rest = text;
-    let open_prefix = format!("<{tag}");
-    let close = format!("</{tag}>");
-    while let Some(open_idx) = find_xml_open_outside_cdata(rest, &open_prefix) {
-        let after_open_start = open_idx + open_prefix.len();
-        let Some(open_end_rel) = rest[after_open_start..].find('>') else {
-            break;
-        };
-        let body_start = after_open_start + open_end_rel + 1;
-        let Some(close_idx_rel) = find_xml_close_outside_cdata(&rest[body_start..], &close) else {
-            break;
-        };
-        let body_end = body_start + close_idx_rel;
-        result.push(rest[body_start..body_end].trim());
-        rest = &rest[body_end + close.len()..];
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct XmlNode {
+    name: String,
+    attributes: Vec<(String, String)>,
+    self_closing: bool,
+    fragments: Vec<XmlFragment>,
+}
+
+impl XmlNode {
+    fn new(name: String, attributes: Vec<(String, String)>, self_closing: bool) -> Self {
+        Self {
+            name,
+            attributes,
+            self_closing,
+            fragments: Vec::new(),
+        }
     }
-    result
-}
 
-fn strip_display_tag_blocks(text: &str) -> String {
-    strip_xml_tag_blocks(
-        text,
-        &[
-            "final_answer",
-            "free_talk",
-            "free-talk",
-            "freetalk",
-            "progress",
-            "report",
-            "report_job_progress",
-        ],
-    )
-}
-
-fn strip_xml_tag_blocks(text: &str, tags: &[&str]) -> String {
-    tags.iter().fold(text.to_string(), |current, tag| {
-        strip_xml_tag_blocks_for_tag(&current, tag)
-    })
-}
-
-fn strip_xml_tag_blocks_for_tag(text: &str, tag: &str) -> String {
-    let mut result = String::new();
-    let mut rest = text;
-    let open_prefix = format!("<{tag}");
-    let close = format!("</{tag}>");
-    while let Some(open_idx) = find_xml_open_outside_cdata(rest, &open_prefix) {
-        let after_open_start = open_idx + open_prefix.len();
-        let Some(open_end_rel) = rest[after_open_start..].find('>') else {
-            break;
-        };
-        let body_start = after_open_start + open_end_rel + 1;
-        let Some(close_idx_rel) = find_xml_close_outside_cdata(&rest[body_start..], &close) else {
-            break;
-        };
-        let body_end = body_start + close_idx_rel;
-        result.push_str(&rest[..open_idx]);
-        rest = &rest[body_end + close.len()..];
+    fn has_child(&self, name: &str) -> bool {
+        self.children()
+            .any(|child| child.name.eq_ignore_ascii_case(name))
     }
-    result.push_str(rest);
-    result
-}
 
-fn find_xml_close_outside_cdata(text: &str, close: &str) -> Option<usize> {
-    let mut idx = 0;
-    while idx < text.len() {
-        let rest = &text[idx..];
-        if rest.starts_with("<![CDATA[") {
-            if let Some(end_rel) = rest.find("]]>") {
-                idx += end_rel + 3;
-                continue;
+    fn first_child_text(&self, names: &[&str]) -> String {
+        self.first_child(names)
+            .map(XmlNode::text_content)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    fn first_child_inner_xml(&self, names: &[&str]) -> String {
+        self.first_child(names)
+            .map(XmlNode::inner_xml)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    fn first_child(&self, names: &[&str]) -> Option<&XmlNode> {
+        self.children().find(|child| {
+            names
+                .iter()
+                .any(|name| child.name.eq_ignore_ascii_case(name))
+        })
+    }
+
+    fn children(&self) -> impl Iterator<Item = &XmlNode> {
+        self.fragments.iter().filter_map(|fragment| match fragment {
+            XmlFragment::Node(node) => Some(node),
+            XmlFragment::Text(_) => None,
+            XmlFragment::CData(_) => None,
+        })
+    }
+
+    fn text_content(&self) -> String {
+        let mut out = String::new();
+        for fragment in &self.fragments {
+            match fragment {
+                XmlFragment::Text(text) => out.push_str(&decode_xml_text(text)),
+                XmlFragment::CData(text) => out.push_str(text),
+                XmlFragment::Node(node) => out.push_str(&node.text_content()),
             }
-            return None;
         }
-        if rest.starts_with(close) {
-            return Some(idx);
-        }
-        idx += rest.chars().next()?.len_utf8();
+        out
     }
-    None
-}
 
-fn find_xml_open_outside_cdata(text: &str, open_prefix: &str) -> Option<usize> {
-    let mut idx = 0;
-    while idx < text.len() {
-        let rest = &text[idx..];
-        if rest.starts_with("<![CDATA[") {
-            if let Some(end_rel) = rest.find("]]>") {
-                idx += end_rel + 3;
-                continue;
+    fn inner_xml(&self) -> String {
+        let mut out = String::new();
+        for fragment in &self.fragments {
+            match fragment {
+                XmlFragment::Text(text) => out.push_str(&decode_xml_text(text)),
+                XmlFragment::CData(text) => out.push_str(text),
+                XmlFragment::Node(node) => out.push_str(&node.to_xml()),
             }
-            return None;
         }
-        if rest.starts_with(open_prefix) {
-            return Some(idx);
-        }
-        idx += rest.chars().next()?.len_utf8();
+        out
     }
-    None
+
+    fn to_xml(&self) -> String {
+        let attrs = self
+            .attributes
+            .iter()
+            .map(|(key, value)| format!(r#" {key}="{value}""#))
+            .collect::<String>();
+        if self.self_closing && self.fragments.is_empty() {
+            return format!("<{}{} />", self.name, attrs);
+        }
+        format!(
+            "<{}{}>{}</{}>",
+            self.name,
+            attrs,
+            self.inner_xml(),
+            self.name
+        )
+    }
 }
 
-fn tag_text(text: &str, tag: &str) -> String {
-    extract_tags(text, tag)
-        .first()
-        .map(|raw| decode_xml_text(strip_cdata(raw).trim()))
-        .unwrap_or_default()
+fn xml_node_from_start(start: &BytesStart<'_>, self_closing: bool) -> Option<XmlNode> {
+    let name = String::from_utf8_lossy(start.name().as_ref()).to_string();
+    let mut attributes = Vec::new();
+    for attr in start.attributes().with_checks(false) {
+        let attr = attr.ok()?;
+        attributes.push((
+            String::from_utf8_lossy(attr.key.as_ref()).to_string(),
+            String::from_utf8_lossy(attr.value.as_ref()).to_string(),
+        ));
+    }
+    Some(XmlNode::new(name, attributes, self_closing))
 }
 
-fn first_non_empty_tag_text(text: &str, tags: &[&str]) -> String {
-    tags.iter()
-        .map(|tag| tag_text(text, tag))
-        .find(|value| !value.trim().is_empty())
-        .unwrap_or_default()
-}
+fn parse_xml_response_node(text: &str) -> Option<XmlNode> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    let mut stack: Vec<XmlNode> = Vec::new();
+    let mut root: Option<XmlNode> = None;
 
-fn strip_cdata(text: &str) -> &str {
-    let trimmed = text.trim();
-    trimmed
-        .strip_prefix("<![CDATA[")
-        .and_then(|inner| inner.strip_suffix("]]>"))
-        .unwrap_or(trimmed)
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                stack.push(xml_node_from_start(&start, false)?);
+            }
+            Ok(Event::Empty(start)) => {
+                let node = xml_node_from_start(&start, true)?;
+                if let Some(parent) = stack.last_mut() {
+                    parent.fragments.push(XmlFragment::Node(node));
+                } else if root.is_none() {
+                    root = Some(node);
+                }
+            }
+            Ok(Event::Text(text)) => {
+                if let Some(node) = stack.last_mut() {
+                    node.fragments.push(XmlFragment::Text(
+                        String::from_utf8_lossy(text.as_ref()).to_string(),
+                    ));
+                }
+            }
+            Ok(Event::CData(text)) => {
+                if let Some(node) = stack.last_mut() {
+                    node.fragments.push(XmlFragment::CData(
+                        String::from_utf8_lossy(text.as_ref()).to_string(),
+                    ));
+                }
+            }
+            Ok(Event::End(_)) => {
+                let node = stack.pop()?;
+                if let Some(parent) = stack.last_mut() {
+                    parent.fragments.push(XmlFragment::Node(node));
+                } else if root.is_none() {
+                    root = Some(node);
+                } else {
+                    return None;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(Event::Comment(_))
+            | Ok(Event::Decl(_))
+            | Ok(Event::PI(_))
+            | Ok(Event::DocType(_)) => {}
+            Ok(Event::GeneralRef(reference)) => {
+                if let Some(node) = stack.last_mut() {
+                    node.fragments.push(XmlFragment::Text(format!(
+                        "&{};",
+                        String::from_utf8_lossy(reference.as_ref())
+                    )));
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+
+    if !stack.is_empty() {
+        return None;
+    }
+    root.filter(|node| node.name.eq_ignore_ascii_case("response"))
 }
 
 fn decode_xml_text(text: &str) -> String {
@@ -315,32 +367,42 @@ fn decode_xml_text(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-fn has_actions(response_body: &str) -> bool {
-    !extract_tags(response_body, "working_still_action").is_empty()
-}
-
-fn parse_actions(
-    response_body: &str,
+fn parse_actions_from_node(
+    response: &XmlNode,
     capabilities: &CapabilityRegistry,
     repair_issue: &mut Option<String>,
 ) -> (Vec<ParsedAction>, Vec<ParsedActionGroup>) {
     let mut action_blocks = Vec::new();
-    for body in extract_tags(response_body, "working_still_action") {
-        let nested = extract_tags(body, "action_json");
+    for action_section in response
+        .children()
+        .filter(|child| child.name.eq_ignore_ascii_case("working_still_action"))
+    {
+        let nested = action_section
+            .children()
+            .filter(|child| child.name.eq_ignore_ascii_case("action_json"))
+            .collect::<Vec<_>>();
         if nested.is_empty() {
-            let direct = decode_xml_text(strip_cdata(body).trim());
+            let direct = action_section.text_content();
             if !direct.trim().is_empty() {
                 action_blocks.push(direct);
             }
         } else {
             for item in nested {
-                let decoded = decode_xml_text(strip_cdata(item).trim());
+                let decoded = item.text_content();
                 if !decoded.trim().is_empty() {
                     action_blocks.push(decoded);
                 }
             }
         }
     }
+    parse_action_blocks(action_blocks, capabilities, repair_issue)
+}
+
+fn parse_action_blocks(
+    action_blocks: Vec<String>,
+    capabilities: &CapabilityRegistry,
+    repair_issue: &mut Option<String>,
+) -> (Vec<ParsedAction>, Vec<ParsedActionGroup>) {
     if action_blocks.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -359,17 +421,18 @@ fn parse_actions(
     (parsed.next_actions, parsed.action_groups)
 }
 
-fn parse_context_compacts(
-    response_body: &str,
+fn parse_context_compacts_from_node(
+    response: &XmlNode,
     repair_issue: &mut Option<String>,
 ) -> Vec<ParsedContextCompact> {
     let mut compacts = Vec::new();
-    for (idx, body) in extract_tags(response_body, "context_compact")
-        .into_iter()
+    for (idx, node) in response
+        .children()
+        .filter(|child| child.name.eq_ignore_ascii_case("context_compact"))
         .enumerate()
     {
-        let delta_ids = split_id_list(&tag_text(body, "delta_ids"));
-        let summary = tag_text(body, "summary").trim().to_string();
+        let delta_ids = split_id_list(&node.first_child_text(&["delta_ids"]));
+        let summary = node.first_child_inner_xml(&["summary"]).trim().to_string();
         if delta_ids.is_empty() {
             if repair_issue.is_none() {
                 *repair_issue = Some(format!("context_compact[{idx}].ids_required"));
@@ -511,6 +574,78 @@ This is only a user-facing example:
     }
 
     #[test]
+    fn final_answer_raw_xml_code_block_is_opaque_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <status>ALL_FINISHED</status>
+  <final_answer>
+Found the original malformed response:
+
+```xml
+<response>
+  <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
+  <working_still_action>
+    <action_json>
+{
+  "order": "parallel",
+  "intent": "并行拉起 3 个 sleep 15 后台任务",
+  "actions": [
+    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
+    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
+    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } }
+  ]
+}
+    </action_json>
+  </working_still_action>
+</response>
+```
+
+The issue was the bare group object inside action_json.
+  </final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+        assert!(env
+            .final_answer
+            .contains("Found the original malformed response"));
+        assert!(env.final_answer.contains("<working_still_action>"));
+        assert!(env.final_answer.contains(r#""order": "parallel""#));
+    }
+
+    #[test]
+    fn final_answer_nested_xml_preserves_attributes_and_escaped_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <status>ALL_FINISHED</status>
+  <final_answer>
+Report:
+<diagnostic level="warn" source="unit-test"><message>ok</message><empty marker="1" /></diagnostic>
+Escaped literal: &lt;response&gt;not protocol&lt;/response&gt;
+  </final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env
+            .final_answer
+            .contains(r#"<diagnostic level="warn" source="unit-test">"#));
+        assert!(env.final_answer.contains("<message>ok</message>"));
+        assert!(env.final_answer.contains(r#"<empty marker="1" />"#));
+        assert!(env
+            .final_answer
+            .contains("<response>not protocol</response>"));
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+    }
+
+    #[test]
     fn free_talk_xml_action_examples_do_not_hide_real_actions() {
         let env = parse_xml_envelope(
             r#"<response>
@@ -533,6 +668,30 @@ Example text only:
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].intent, "Check cwd.");
         assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+        assert!(env.thought.contains("<working_still_action>"));
+    }
+
+    #[test]
+    fn free_talk_nested_xml_is_opaque_and_real_action_still_parses() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<progress>checking</progress>
+<free_talk>
+This is only a note:
+<note priority="high"><working_still_action><action_json>{"action":"run_bash","args":{}}</action_json></working_still_action></note>
+</free_talk>
+<working_still_action>
+<action_json><![CDATA[{"action":"run_bash","intent":"Check real action.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.next_actions.len(), 1);
+        assert_eq!(env.next_actions[0].intent, "Check real action.");
+        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+        assert!(env.thought.contains(r#"<note priority="high">"#));
         assert!(env.thought.contains("<working_still_action>"));
     }
 
@@ -570,6 +729,89 @@ Example text only:
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].action, "run_bash");
         assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+    }
+
+    #[test]
+    fn parses_single_group_object_from_action_json() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[
+{
+  "order": "parallel",
+  "intent": "并行拉起 3 个 sleep 15 后台任务",
+  "actions": [
+    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
+    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
+    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } }
+  ]
+}
+    ]]></action_json>
+  </working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 1);
+        assert_eq!(
+            env.action_groups[0].order,
+            crate::ActionGroupOrder::Parallel
+        );
+        assert_eq!(env.action_groups[0].actions.len(), 3);
+        assert_eq!(env.next_actions.len(), 3);
+        assert_eq!(env.next_actions[0].input_str("cmd"), "sleep 15");
+        assert!(env.next_actions[0].input_bool("background"));
+    }
+
+    #[test]
+    fn action_intent_and_args_can_contain_xml_like_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<progress>checking</progress>
+<working_still_action>
+<action_json><![CDATA[
+{
+  "order": "parallel",
+  "intent": "Group intent mentions <response><status>ALL_FINISHED</status></response> only as text.",
+  "actions": [
+    {
+      "action": "run_bash",
+      "args": {
+        "cmd": "printf group",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "action": "run_bash",
+      "intent": "Print XML-like payload <payload id=\"42\">ok</payload> as data.",
+      "args": {
+        "cmd": "printf '%s\n' '<working_still_action><action_json>{\"action\":\"run_bash\"}</action_json></working_still_action>'",
+        "timeout_ms": 5000
+      }
+    }
+  ]
+}
+]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 1);
+        assert_eq!(
+            env.action_groups[0].actions[0].parent_intent.as_deref(),
+            Some("Group intent mentions <response><status>ALL_FINISHED</status></response> only as text.")
+        );
+        assert_eq!(env.next_actions[0].input_str("cmd"), "printf group");
+        assert!(env.next_actions[1]
+            .intent
+            .contains(r#"<payload id="42">ok</payload>"#));
+        assert!(env.next_actions[1]
+            .input_str("cmd")
+            .contains("<working_still_action>"));
     }
 
     #[test]

@@ -231,6 +231,13 @@ define runtime behavior, repair boundaries, and tests; they must stay aligned
 with the resource text and generated expanded prompt output from
 `scripts/update_static_prompt_snapshot.sh`.
 
+The XML suite uses `quick-xml` to parse the outer response tree. Runtime control
+sections are only read from direct children of the root `<response>` node.
+Display-text fields such as `<final_answer>` and `<free_talk>` are treated as
+opaque text, so XML examples inside those fields are not re-parsed as actions.
+Nested XML-looking text in those fields preserves element attributes and
+self-closing tags when it is carried forward as display/context text.
+
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
 `--response-protocol`. The default is `xml`; `markdown` and `json` remain
 available. All suites must produce the same internal `ParsedEnvelope` semantics
@@ -780,6 +787,11 @@ result is visible. Every action needs a top-level `intent`; the shell
 displays it while the action runs. The parser also tolerates common provider
 drift such as a valid JSON envelope embedded in Markdown text, but it never
 shows raw protocol fragments to the user.
+
+Action sections accept the equivalent runtime shapes across JSON, Markdown, and
+XML suites: a single action object, an array of actions, a single action-group
+object with `order`/`actions`, or an array mixing action groups and ordinary
+actions. Order is preserved; groups are executed in model-provided order.
 
 ### Context Compact
 

@@ -253,6 +253,30 @@ fn parse_action_groups_value(
             actions: vec![parse_single_action(value, 0, capabilities)?],
         }]);
     }
+    if value.is_object() && (value.get("actions").is_some() || value.get("order").is_some()) {
+        let order = value
+            .get("order")
+            .and_then(Value::as_str)
+            .map(ActionGroupOrder::from_name)
+            .unwrap_or(ActionGroupOrder::Sequential);
+        let group_intent = value.get("intent").and_then(Value::as_str);
+        let Some(actions) = value.get("actions").and_then(Value::as_array) else {
+            return Err("action_groups[0].actions_required".to_string());
+        };
+        let mut parsed_actions = Vec::new();
+        for (action_idx, action) in actions.iter().enumerate() {
+            parsed_actions.push(parse_single_action_with_fallback(
+                action,
+                action_idx,
+                capabilities,
+                group_intent,
+            )?);
+        }
+        return Ok(vec![ParsedActionGroup {
+            order,
+            actions: parsed_actions,
+        }]);
+    }
     let Some(items) = value.as_array() else {
         return Err("actions_section_must_be_action_or_array".to_string());
     };
@@ -954,6 +978,36 @@ checking
         assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
         assert_eq!(env.action_groups[0].actions.len(), 2);
         assert_eq!(env.action_groups[1].order, ActionGroupOrder::Sequential);
+        assert_eq!(env.next_actions.len(), 3);
+    }
+
+    #[test]
+    fn actions_section_accepts_single_group_object() {
+        let input = r#"## Progress
+checking
+
+## Working_Still_Action
+```action
+{
+  "order": "parallel",
+  "intent": "Run three sleeps in parallel.",
+  "actions": [
+    {"action":"run_bash","args":{"cmd":"sleep 15","background":true}},
+    {"action":"run_bash","args":{"cmd":"sleep 15","background":true}},
+    {"action":"run_bash","args":{"cmd":"sleep 15","background":true}}
+  ]
+}
+```"#;
+        let env = parse_markdown_envelope(input, &caps());
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 1);
+        assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
+        assert_eq!(env.action_groups[0].actions.len(), 3);
+        assert_eq!(
+            env.action_groups[0].actions[0].parent_intent.as_deref(),
+            Some("Run three sleeps in parallel.")
+        );
         assert_eq!(env.next_actions.len(), 3);
     }
 
