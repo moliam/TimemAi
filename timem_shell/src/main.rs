@@ -364,18 +364,36 @@ fn main() {
             Some(&mut profiler),
         );
         drop(turn_ui);
-        status.finish();
-        print_final_response(
-            &render_turn_outcome_text(&outcome),
-            &outcome.stats,
-            outcome.latest_usage.as_ref(),
-            &config.provider,
-            &config.model,
-            outcome.elapsed,
-            config.max_llm_input_tokens,
-        );
-        last_dialog_activity = Instant::now();
+        let is_cancelled =
+            outcome.stop_reason == Some(timem_shell::TurnStopReason::CancelledByUser);
+        if is_cancelled {
+            let stats = status.accumulated_stats();
+            let latest = status.accumulated_latest_usage();
+            status.finish_cancelled();
+            println!();
+            print_final_response(
+                &render_turn_outcome_text(&outcome),
+                &stats,
+                latest.as_ref(),
+                &config.provider,
+                &config.model,
+                outcome.elapsed,
+                config.max_llm_input_tokens,
+            );
+        } else {
+            status.finish();
+            print_final_response(
+                &render_turn_outcome_text(&outcome),
+                &outcome.stats,
+                outcome.latest_usage.as_ref(),
+                &config.provider,
+                &config.model,
+                outcome.elapsed,
+                config.max_llm_input_tokens,
+            );
+        }
     }
+    last_dialog_activity = Instant::now();
 }
 
 fn consume_turn_cancel_request() -> bool {
@@ -721,6 +739,30 @@ impl ThinkingStatus {
         self.running.store(false, Ordering::Relaxed);
         self.stop_renderer_thread();
         clear_thinking_block(&self.rendered_lines);
+    }
+
+    fn finish_cancelled(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        self.stop_renderer_thread();
+        if let Ok(mut state) = self.state.lock() {
+            state.status.intent = "已取消".to_string();
+            state.status.elapsed_secs = active_elapsed_secs(self.started_at, &self.paused_total);
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn accumulated_stats(&self) -> UsageStats {
+        self.state
+            .lock()
+            .map(|s| s.status.usage.clone())
+            .unwrap_or_else(|_| UsageStats::zero())
+    }
+
+    fn accumulated_latest_usage(&self) -> Option<UsageStats> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.status.latest_usage.clone())
     }
 
     fn pause_for_user_approval(&mut self) {
@@ -3773,6 +3815,28 @@ mod static_prompt_tests {
         assert!(!rendered.contains("x2"));
 
         status.finish();
+    }
+
+    #[test]
+    fn thinking_status_finish_cancelled_preserves_display_and_stats() {
+        let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+        status.set_usage(super::UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 5000,
+            completion_tokens: 200,
+            total_tokens: 5200,
+            ..super::UsageStats::zero()
+        });
+        status.finish_cancelled();
+        let rendered_lines = *status.rendered_lines.lock().unwrap();
+        assert!(
+            rendered_lines > 0,
+            "finish_cancelled should keep rendered lines"
+        );
+        let snapshot = status.state.lock().unwrap();
+        assert_eq!(snapshot.status.intent, "已取消");
+        assert_eq!(snapshot.status.usage.prompt_tokens, 5000);
+        assert_eq!(snapshot.status.usage.completion_tokens, 200);
     }
 
     #[test]
