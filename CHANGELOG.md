@@ -28,6 +28,9 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Reorganized capability tools into resources/capabilities/tools/.
 - Renamed working action section to working_still_action.
 - Renamed foreground bash mode to normal mode.
+- Successful assistant responses are now replayed into the next prompt delta as
+  raw model output by default; the previous extracted free_talk/final-answer
+  replay remains available through `AssistantReplayMode::ExtractedFields`.
 
 - The Thought / Action panel now renders model `free_talk` and progress from a
   single model-response topic before action rows, keeping UI updates coherent.
@@ -66,6 +69,15 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   XML examples inside `final_answer`/`free_talk` text are opaque display text
   instead of being mistaken for executable protocol sections, while preserving
   nested element attributes and self-closing tags in display text.
+- XML response parsing now protects string-like tags before structural parsing,
+  so unescaped XML examples inside `final_answer`, `free_talk`, `progress`, or
+  context compact `summary` are treated as text instead of causing repair loops.
+- XML response prompt guidance now uses a single strict System Response Protocol
+  section, including explicit stream order, mutually exclusive state branches,
+  CDATA action JSON, and a final `Protocol Loaded` marker.
+- XML response parsing now accepts a whole response wrapped in a documentation
+  ```xml fence while still parsing the inner `<response>` through the same
+  `quick-xml` path, and rejects XML replies that mix multiple state branches.
 - Action parsing now accepts a single action-group object as well as action
   arrays/group arrays, matching the XML prompt examples and model output shape.
 - Cross-protocol response tests now assert full action-group structure, not
@@ -206,8 +218,10 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Thinking and final status lines now show repair round overhead as
   `⇌N (⚠M)` when protocol repair consumed model calls.
 - Protocol repair requests now write structured `model_repair_request` audit
-  events with issue, usage, truncation, and repair-count metadata for later
-  diagnosis without storing raw malformed responses.
+  events with issue, usage, truncation, and repair-count metadata, and also
+  append realtime diagnostics to `audit/api_output_repair.json` with the
+  malformed assistant response plus the SYSTEM repair message shown to the
+  model.
 - API payload audit now stores a structured `api_audit.json` document with a
   `version` field and `events` array, while chat-history readers still accept
   legacy JSONL audit files.
