@@ -281,7 +281,7 @@ impl FileShellJobStore {
         let output_file = self.dir.join(format!("{id}.out"));
         let status_file = self.dir.join(format!("{id}.status"));
         let script = format!(
-            "({}) > {} 2>&1; printf '%s' \"$?\" > {}",
+            "{{\n{}\n}} > {} 2>&1; printf '%s' \"$?\" > {}",
             clean,
             shell_quote_path(&output_file),
             shell_quote_path(&status_file)
@@ -1736,6 +1736,58 @@ mod tests {
         assert_eq!(updates[0].description(), "old timeout job");
         assert_eq!(updates[0].status, "0");
         assert_eq!(updates[0].output, "starteddone");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn timeout_job_supports_heredoc_with_backticks() {
+        let dir = tmp_memory_dir("timeout_heredoc_backticks");
+        let store = FileShellJobStore::new(&dir);
+        let mut runtime = NeverCancelRuntime;
+        let result = store.run_with_timeout(
+            "cat <<'EOF'\nline with `ShellJobWatcher` backticks\nEOF",
+            &dir,
+            5000,
+            "session_a",
+            "turn_a",
+            &mut runtime,
+        );
+        assert!(result.contains("Exit code: 0"), "{result}");
+        assert!(
+            result.contains("line with `ShellJobWatcher` backticks"),
+            "{result}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_job_supports_heredoc_with_backticks() {
+        let dir = tmp_memory_dir("background_heredoc_backticks");
+        let store = FileShellJobStore::new(&dir);
+        let started = store.spawn_background(
+            "cat <<'EOF'\nbackground `ShellJobWatcher` output\nEOF",
+            &dir,
+            "session_a",
+            "turn_a",
+        );
+        assert!(
+            started.contains("now keeps running in background"),
+            "{started}"
+        );
+
+        let mut updates = Vec::new();
+        let wait_started = Instant::now();
+        while wait_started.elapsed() < Duration::from_secs(3) {
+            let (running_now, updates_now) = store.refresh_for_session("session_a");
+            updates = updates_now;
+            if running_now.is_empty() && !updates.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, "0");
+        assert_eq!(updates[0].output, "background `ShellJobWatcher` output");
         let _ = fs::remove_dir_all(&dir);
     }
 
