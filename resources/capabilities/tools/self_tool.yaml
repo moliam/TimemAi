@@ -90,8 +90,7 @@ output_schema: |
   }
 example_json: |
   {
-    "action": "self_tool",
-    "args": {
+    "self_tool": {
       "type": "mem_path",
       "op": "read"
     }

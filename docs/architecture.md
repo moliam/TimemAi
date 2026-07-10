@@ -801,9 +801,11 @@ valid JSON envelope embedded in Markdown text, but it never shows raw protocol
 fragments to the user.
 
 Action sections accept the equivalent runtime shapes across JSON, Markdown, and
-XML suites: a single action object, an array of actions, a single action-group
-object with `order`/`actions`, or an array mixing action groups and ordinary
-actions. Order is preserved; groups are executed in model-provided order.
+XML suites: a single tool-name action object, a direct array of action objects
+as one parallel group, or an outer workflow array mixing inner parallel arrays
+and single sequential action objects. Old `{ "action": ..., "args": ... }` and
+`{ "order": ..., "actions": ... }` objects are rejected for protocol repair.
+Order is preserved; outer workflow entries execute in model-provided order.
 
 ### Context Compact
 

@@ -47,8 +47,7 @@ Use one of the three JSON structures below.
 
 ```json
 {
-  "action": "tool_name",
-  "args": { "param_name": "value" }
+  "tool_name": { "param_name": "value" }
 }
 ```
 
@@ -56,8 +55,8 @@ Use one of the three JSON structures below.
 
 ```json
 [
-  { "action": "tool_1", "args": {} },
-  { "action": "tool_2", "args": {} }
+  { "tool_1": {} },
+  { "tool_2": {} }
 ]
 ```
 
@@ -72,14 +71,14 @@ sequential step.
 ```json
 [
   [
-    { "action": "tool_1", "args": {} },
-    { "action": "tool_2", "args": {} }
+    { "tool_1": {} },
+    { "tool_2": {} }
   ],
   [
-    { "action": "tool_3", "args": {} },
-    { "action": "tool_4", "args": {} }
+    { "tool_3": {} },
+    { "tool_4": {} }
   ],
-  { "action": "tool_5", "args": {} }
+  { "tool_5": {} }
 ]
 ```
 
@@ -95,8 +94,7 @@ Examples below are format examples ONLY.
   <working_still_action>
     <action_json><![CDATA[
 {
-  "action": "run_bash",
-  "args": {
+  "run_bash": {
     "cmd": "cat config.json",
     "timeout_ms": 5000
   }
@@ -134,23 +132,20 @@ No further actions are required.
     <action_json><![CDATA[
 [
   {
-    "action": "run_bash",
-    "args": {
+    "run_bash": {
       "cmd": "git status --short",
       "timeout_ms": 5000
     }
   },
   [
     {
-      "action": "run_bash",
-      "args": {
+      "run_bash": {
         "cmd": "git log --oneline -5",
         "timeout_ms": 5000
       }
     },
     {
-      "action": "run_bash",
-      "args": {
+      "run_bash": {
         "cmd": "python3 -m pytest -q",
         "timeout_ms": 120000
       }

@@ -24,11 +24,13 @@ Required section rules:
   context that should remain visible to you in later prompt context. Runtime
   keeps it for you in future context. User may input many questions in a turn, you can use
   free talk to answer intermediately and keep working.
-- `## Working_Still_Action` contains a single action object, an array of action
-  objects, or an array of action groups. Each action object must match the tool
-  catalog exactly. A group has `order` (`sequential` or `parallel`) and
-  `actions`. Groups execute one after another; actions in a sequential group run
-  in order, actions in a parallel group may run concurrently when safe.
+- `## Working_Still_Action` contains a single action object, a direct array of
+  action objects, or an outer workflow array. Each action object is an object
+  with exactly one key: the tool name from the catalog. Its value is the tool
+  parameter object. A direct array of action objects is one parallel group. An
+  outer array may contain inner arrays and single action objects; outer entries
+  execute in array order, and inner arrays execute in parallel.
+  Do not use `action`/`args` fields or `{ "order": "...", "actions": [...] }`.
   DO NOT include `## Working_Still_Action` when `## Status` is `finished`.
 - `## Context Compact` lets you replace old dynamic context with a concise
   summary. Provide delta_ids plus a summary. Runtime will hide the referenced
@@ -62,8 +64,7 @@ finished
 ## Working_Still_Action
 ```action
 {
-  "action": "run_bash",
-  "args": {
+  "run_bash": {
     "cmd": "printf '%s\\n' example",
     "timeout_ms": 5000
   }
@@ -78,8 +79,7 @@ finished
 ## Working_Still_Action
 ```action
 {
-  "action": "run_bash",
-  "args": {
+  "run_bash": {
     "cmd": "ls -al",
     "timeout_ms": 1000
   }
@@ -109,28 +109,22 @@ This is the summary....
 ## Working_Still_Action
 ```action
 [
-  {
-    "order": "parallel",
-    "actions": [
-      {
-        "action": "run_bash",
-        "args": {
-          "cmd": "git branch --show-current",
-          "timeout_ms": 3000
-        }
-      },
-      {
-        "action": "run_bash",
-        "args": {
-          "cmd": "git status --short",
-          "timeout_ms": 3000
-        }
+  [
+    {
+      "run_bash": {
+        "cmd": "git branch --show-current",
+        "timeout_ms": 3000
       }
-    ]
-  },
+    },
+    {
+      "run_bash": {
+        "cmd": "git status --short",
+        "timeout_ms": 3000
+      }
+    }
+  ],
   {
-    "action": "run_bash",
-    "args": {
+    "run_bash": {
       "loop_cmd": "gh run list --branch $(git branch --show-current) --limit 1 --json status,conclusion | grep -q 'completed'",
       "interval_ms": 10000,
       "loop_timeout_ms": 600000,

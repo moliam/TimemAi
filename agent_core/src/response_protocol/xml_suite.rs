@@ -1,6 +1,6 @@
 use super::{
-    markdown_suite, ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompact,
-    ParsedEnvelope, ResponseProtocolSuite,
+    markdown_suite, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
+    ResponseProtocolSuite,
 };
 use crate::capability::CapabilityRegistry;
 use quick_xml::events::{BytesStart, Event};
@@ -581,7 +581,11 @@ fn parse_action_blocks(
     let mut action_groups = Vec::new();
     for (block_idx, block) in action_blocks.iter().enumerate() {
         match serde_json::from_str::<Value>(block.trim()) {
-            Ok(value) => match parse_xml_action_json_value(&value, capabilities, block_idx) {
+            Ok(value) => match super::parse_action_workflow_value(
+                &value,
+                &format!("actions[{block_idx}]"),
+                capabilities,
+            ) {
                 Ok(groups) => action_groups.extend(groups),
                 Err(issue) => {
                     *repair_issue = Some(issue);
@@ -599,144 +603,6 @@ fn parse_action_blocks(
         .flat_map(|group| group.actions.clone())
         .collect::<Vec<_>>();
     (next_actions, action_groups)
-}
-
-fn parse_xml_action_json_value(
-    value: &Value,
-    capabilities: &CapabilityRegistry,
-    block_idx: usize,
-) -> Result<Vec<ParsedActionGroup>, String> {
-    if is_action_object(value) {
-        return Ok(vec![ParsedActionGroup {
-            order: ActionGroupOrder::Sequential,
-            actions: vec![parse_xml_single_action(
-                value,
-                &format!("actions[{block_idx}]"),
-                capabilities,
-            )?],
-        }]);
-    }
-
-    if is_explicit_group_object(value) {
-        return parse_xml_group_object(value, &format!("action_groups[{block_idx}]"), capabilities)
-            .map(|group| vec![group]);
-    }
-
-    let Some(items) = value.as_array() else {
-        return Err("actions_section_must_be_action_or_array".to_string());
-    };
-
-    if items.iter().all(is_action_object) {
-        return parse_xml_parallel_array(items, &format!("actions[{block_idx}]"), capabilities)
-            .map(|group| vec![group]);
-    }
-
-    let mut groups = Vec::new();
-    for (item_idx, item) in items.iter().enumerate() {
-        let label = format!("actions[{block_idx}][{item_idx}]");
-        if is_action_object(item) {
-            groups.push(ParsedActionGroup {
-                order: ActionGroupOrder::Sequential,
-                actions: vec![parse_xml_single_action(item, &label, capabilities)?],
-            });
-        } else if is_explicit_group_object(item) {
-            groups.push(parse_xml_group_object(item, &label, capabilities)?);
-        } else if let Some(inner) = item.as_array() {
-            groups.push(parse_xml_parallel_array(inner, &label, capabilities)?);
-        } else {
-            return Err(format!("{label}.action_missing"));
-        }
-    }
-    Ok(groups)
-}
-
-fn is_action_object(value: &Value) -> bool {
-    value.is_object() && value.get("action").is_some()
-}
-
-fn is_explicit_group_object(value: &Value) -> bool {
-    value.is_object() && (value.get("actions").is_some() || value.get("order").is_some())
-}
-
-fn parse_xml_group_object(
-    value: &Value,
-    label: &str,
-    capabilities: &CapabilityRegistry,
-) -> Result<ParsedActionGroup, String> {
-    let order = value
-        .get("order")
-        .and_then(Value::as_str)
-        .map(ActionGroupOrder::from_name)
-        .unwrap_or(ActionGroupOrder::Sequential);
-    let Some(actions) = value.get("actions").and_then(Value::as_array) else {
-        return Err(format!("{label}.actions_required"));
-    };
-    parse_xml_actions_with_order(actions, order, label, capabilities)
-}
-
-fn parse_xml_parallel_array(
-    actions: &[Value],
-    label: &str,
-    capabilities: &CapabilityRegistry,
-) -> Result<ParsedActionGroup, String> {
-    parse_xml_actions_with_order(actions, ActionGroupOrder::Parallel, label, capabilities)
-}
-
-fn parse_xml_actions_with_order(
-    actions: &[Value],
-    order: ActionGroupOrder,
-    label: &str,
-    capabilities: &CapabilityRegistry,
-) -> Result<ParsedActionGroup, String> {
-    if actions.is_empty() {
-        return Err(format!("{label}.actions_required"));
-    }
-    let mut parsed_actions = Vec::new();
-    for (action_idx, action) in actions.iter().enumerate() {
-        parsed_actions.push(parse_xml_single_action(
-            action,
-            &format!("{label}.actions[{action_idx}]"),
-            capabilities,
-        )?);
-    }
-    Ok(ParsedActionGroup {
-        order,
-        actions: parsed_actions,
-    })
-}
-
-fn parse_xml_single_action(
-    value: &Value,
-    label: &str,
-    capabilities: &CapabilityRegistry,
-) -> Result<ParsedAction, String> {
-    let name = value
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if name.is_empty() {
-        return Err(format!("{label}.action_missing"));
-    }
-
-    let input = match value.get("args") {
-        Some(Value::Object(_)) => value.get("args").cloned().unwrap_or(Value::Null),
-        Some(_) => return Err(format!("{label}.args_must_be_object")),
-        None => return Err(format!("{label}.args_required")),
-    };
-
-    if !capabilities.contains_tool(&name) {
-        return Err(format!("unsupported_action:{name}"));
-    }
-    if let Err(issue) = capabilities.validate_action_input(&name, &input) {
-        return Err(format!("{label}.{issue}"));
-    }
-
-    Ok(ParsedAction {
-        action: name,
-        raw_input: input,
-    })
 }
 
 fn parse_context_compacts_from_node(
@@ -873,9 +739,7 @@ Example response delta:
 This is only a user-facing example:
 
 <working_still_action>
-  <action_json>{
-    "action": "run_bash",
-    "args": {} // missing cmd in the example on purpose
+  <action_json>{"run_bash": {} // missing cmd in the example on purpose
   }</action_json>
 </working_still_action>
   ]]></final_answer>
@@ -888,7 +752,7 @@ This is only a user-facing example:
         assert!(env.next_actions.is_empty());
         assert!(env.action_groups.is_empty());
         assert!(env.final_answer.contains("<working_still_action>"));
-        assert!(env.final_answer.contains("\"args\": {}"));
+        assert!(env.final_answer.contains("\"run_bash\": {}"));
     }
 
     #[test]
@@ -907,9 +771,9 @@ Found the original malformed response:
 {
   "order": "parallel",
   "actions": [
-    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
-    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
-    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } }
+    {"run_bash": { "cmd": "sleep 15", "background": true } },
+    {"run_bash": { "cmd": "sleep 15", "background": true } },
+    {"run_bash": { "cmd": "sleep 15", "background": true } }
   ]
 }
     </action_json>
@@ -1007,7 +871,7 @@ Here is the malformed response example the user asked for:
 <response>
   <free_talk>not closed
 <legacy_note>fake note</legacy_note>
-<working_still_action><action_json>{"action":"run_bash","args":{}}</action_json></working_still_action>
+<working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action>
 <summary>fake summary</summary>
 This is all answer text.
 </final_answer>
@@ -1057,11 +921,11 @@ Escaped literal: &lt;response&gt;not protocol&lt;/response&gt;
 <free_talk><![CDATA[
 Example text only:
 <working_still_action>
-  <action_json>{"action":"run_bash","args":{}}</action_json>
+  <action_json>{"run_bash":{}}</action_json>
 </working_still_action>
 ]]></free_talk>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -1080,10 +944,10 @@ Example text only:
             r#"<response>
 <free_talk>
 This is only a note:
-<note priority="high"><working_still_action><action_json>{"action":"run_bash","args":{}}</action_json></working_still_action></note>
+<note priority="high"><working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action></note>
 </free_talk>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -1105,7 +969,7 @@ I am explaining a malformed example:
 <response><working_still_action><action_json>{ bad
 </free_talk>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -1124,7 +988,7 @@ I am explaining a malformed example:
 <free_talk>text field can mention {"action":"run_bash"}</free_talk>
 <working_still_action>
 <action_json><![CDATA[
-{"action":"run_bash","args":{"cmd":"pwd",}}
+{"run_bash":{"cmd":"pwd",}}
 ]]></action_json>
 </working_still_action>
 </response>"#,
@@ -1156,7 +1020,7 @@ I am explaining a malformed example:
             r#"<response>
 <free_talk>state</free_talk>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -1171,7 +1035,7 @@ I am explaining a malformed example:
     }
 
     #[test]
-    fn parses_single_group_object_from_action_json() {
+    fn rejects_old_group_object_from_action_json() {
         let env = parse_xml_envelope(
             r#"<response>
   <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
@@ -1180,9 +1044,9 @@ I am explaining a malformed example:
 {
   "order": "parallel",
   "actions": [
-    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
-    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } },
-    { "action": "run_bash", "args": { "cmd": "sleep 15", "background": true } }
+    {"run_bash": { "cmd": "sleep 15", "background": true } },
+    {"run_bash": { "cmd": "sleep 15", "background": true } },
+    {"run_bash": { "cmd": "sleep 15", "background": true } }
   ]
 }
     ]]></action_json>
@@ -1191,16 +1055,12 @@ I am explaining a malformed example:
             &caps(),
         );
 
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(env.action_groups.len(), 1);
         assert_eq!(
-            env.action_groups[0].order,
-            crate::ActionGroupOrder::Parallel
+            env.repair_issue.as_deref(),
+            Some("actions[0].old_group_object_not_supported")
         );
-        assert_eq!(env.action_groups[0].actions.len(), 3);
-        assert_eq!(env.next_actions.len(), 3);
-        assert_eq!(env.next_actions[0].input_str("cmd"), "sleep 15");
-        assert!(env.next_actions[0].input_bool("background"));
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
     }
 
     #[test]
@@ -1211,8 +1071,8 @@ I am explaining a malformed example:
 <working_still_action>
 <action_json><![CDATA[
 [
-  { "action": "run_bash", "args": { "cmd": "printf a", "timeout_ms": 5000 } },
-  { "action": "run_bash", "args": { "cmd": "printf b", "timeout_ms": 5000 } }
+  {"run_bash": { "cmd": "printf a", "timeout_ms": 5000 } },
+  {"run_bash": { "cmd": "printf b", "timeout_ms": 5000 } }
 ]
 ]]></action_json>
 </working_still_action>
@@ -1240,11 +1100,11 @@ I am explaining a malformed example:
 <action_json><![CDATA[
 [
   [
-    { "action": "run_bash", "args": { "cmd": "printf a1", "timeout_ms": 5000 } },
-    { "action": "run_bash", "args": { "cmd": "printf a2", "timeout_ms": 5000 } }
+    {"run_bash": { "cmd": "printf a1", "timeout_ms": 5000 } },
+    {"run_bash": { "cmd": "printf a2", "timeout_ms": 5000 } }
   ],
   [
-    { "action": "run_bash", "args": { "cmd": "printf b1", "timeout_ms": 5000 } }
+    {"run_bash": { "cmd": "printf b1", "timeout_ms": 5000 } }
   ]
 ]
 ]]></action_json>
@@ -1276,25 +1136,18 @@ I am explaining a malformed example:
             r#"<response>
 <working_still_action>
 <action_json><![CDATA[
-{
-  "order": "parallel",
-  "actions": [
-    {
-      "action": "run_bash",
-      "args": {
-        "cmd": "printf group",
-        "timeout_ms": 5000
-      }
-    },
-    {
-      "action": "run_bash",
-      "args": {
-        "cmd": "printf '%s\n' '<working_still_action><action_json>{\"action\":\"run_bash\"}</action_json></working_still_action>'",
-        "timeout_ms": 5000
-      }
+[
+  {"run_bash": {
+      "cmd": "printf group",
+      "timeout_ms": 5000
     }
-  ]
-}
+  },
+  {"run_bash": {
+      "cmd": "printf '%s\n' '<working_still_action><action_json>{\"action\":\"run_bash\"}</action_json></working_still_action>'",
+      "timeout_ms": 5000
+    }
+  }
+]
 ]]></action_json>
 </working_still_action>
 </response>"#,
@@ -1317,16 +1170,12 @@ I am explaining a malformed example:
 <working_still_action>
 <action_json><![CDATA[
 [
-  {
-    "action": "run_bash",
-    "args": {
+  {"run_bash": {
       "cmd": "printf '%s\n' '<response><status>ALL_FINISHED</status><final_answer>not real</final_answer></response>' && printf '%s\n' '{\"working_still_action\":[{\"action\":\"run_bash\"}]}'",
       "timeout_ms": 5000
     }
   },
-  {
-    "action": "memmgr",
-    "args": {
+  {"memmgr": {
       "type": "raw_chat",
       "op": "sql",
       "sql": "SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5",
@@ -1428,7 +1277,7 @@ Keep this protocol example:
 <summary>keep state</summary>
 </context_compact>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","args":{"cmd":"pwd"}}]]></action_json>
+<action_json><![CDATA[{"run_bash":{"cmd":"pwd"}}]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),

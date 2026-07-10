@@ -53,8 +53,7 @@ class Handler(BaseHTTPRequestHandler):
                 + "\n\n## Working_Still_Action\n```action\n"
                 + json.dumps(
                     {
-                        "action": "run_bash",
-                        "args": {
+                        "run_bash": {
                             "cmd": (
                                 "printf 'STRESS_ACTION_DONE\\n'; "
                                 "sleep 1; "

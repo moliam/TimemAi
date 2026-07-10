@@ -75,8 +75,7 @@ output_schema: |
   }
 example_json: |
   {
-    "action": "capmgr",
-    "args": {
+    "capmgr": {
       "op": "load",
       "kind": "skill",
       "id": "xx_skill_id"

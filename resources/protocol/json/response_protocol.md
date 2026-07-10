@@ -21,8 +21,7 @@ Examples below are format examples ONLY:
 {
   "free_talk": "好的，你关于 yy 的整改要求我收到了，等会我做完 xx 后再进行。",
   "working_still_action": {
-    "action": "run_bash",
-    "args": {
+    "run_bash": {
       "cmd": "printf '%s\\n' example",
       "timeout_ms": 5000
     }
@@ -44,39 +43,17 @@ Examples below are format examples ONLY:
 {
   "free_talk": "我会几个阶段: .... 先第一个阶段。这个阶段先做做 xxx ，再执行yyy ，最后执行单个收尾操作。",
   "working_still_action": [
+    [
+      { "run_bash": { "cmd": "...", "timeout_ms": 5000 } },
+      { "run_bash": { "cmd": "...", "timeout_ms": 5000 } }
+    ],
+    [
+      { "run_bash": { "cmd": "...", "timeout_ms": 5000 } },
+      { "run_bash": { "cmd": "...", "timeout_ms": 5000 } },
+      { "memmgr": { "type": "durable", "op": "sql", "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5", "params": ["%...%"], "limit": 5 } }
+    ],
     {
-      "order": "parallel",
-      "actions": [
-        {
-          "action": "run_bash",
-          "args": { "cmd": "...", "timeout_ms": 5000 }
-        },
-        {
-          "action": "run_bash",
-          "args": { "cmd": "...", "timeout_ms": 5000 }
-        }
-      ]
-    },
-    {
-      "order": "parallel",
-      "actions": [
-        {
-          "action": "run_bash",
-          "args": { "cmd": "...", "timeout_ms": 5000 }
-        },
-        {
-          "action": "run_bash",
-          "args": { "cmd": "...", "timeout_ms": 5000 }
-        },
-        {
-          "action": "memmgr",
-          "args": { "type": "durable", "op": "sql", "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5", "params": ["%...%"], "limit": 5 }
-        }
-      ]
-    },
-    {
-      "action": "run_bash",
-      "args": {
+      "run_bash": {
         "loop_cmd": "...",
         "interval_ms": 10000,
         "loop_timeout_ms": 600000,

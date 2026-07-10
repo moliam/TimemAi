@@ -178,7 +178,7 @@ mod tests {
     fn notification_events_are_protocol_independent_core_data() {
         let suite = ResponseProtocolKind::Json.suite();
         let envelope = suite.parse(
-            r#"{"status":"working","free_talk":"先说明一下我的判断。","next_actions":[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"action":"run_bash","args":{"cmd":"pwd"}},{"action":"self_tool","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","free_talk":"先说明一下我的判断。","next_actions":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd"}},{"self_tool":{"type":"about_me","op":"read"}}]}"#,
             &crate::capability::CapabilityRegistry::builtin(),
         );
         let events = notifications_from_envelope(&envelope);
@@ -244,7 +244,7 @@ mod tests {
     fn capmgr_job_status_notification_uses_job_id_as_capability_id() {
         let suite = ResponseProtocolKind::Json.suite();
         let envelope = suite.parse(
-            r#"{"free_talk":"检查后台工具任务。","next_actions":[{"action":"capmgr","args":{"op":"job_status","job_id":"tool_job_42","timeout_ms":1000}}]}"#,
+            r#"{"free_talk":"检查后台工具任务。","next_actions":[{"capmgr":{"op":"job_status","job_id":"tool_job_42","timeout_ms":1000}}]}"#,
             &crate::capability::CapabilityRegistry::builtin(),
         );
         let events = notifications_from_envelope(&envelope);
@@ -264,7 +264,7 @@ mod tests {
     fn grouped_actions_emit_each_action_without_intent_metadata() {
         let suite = ResponseProtocolKind::Json.suite();
         let envelope = suite.parse(
-            r#"{"free_talk":"checking","next_actions":[{"order":"parallel","actions":[{"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},{"action":"run_bash","args":{"cmd":"printf b","timeout_ms":5000}}]}]}"#,
+            r#"{"free_talk":"checking","next_actions":[[{"run_bash":{"cmd":"printf a","timeout_ms":5000}},{"run_bash":{"cmd":"printf b","timeout_ms":5000}}]]}"#,
             &crate::capability::CapabilityRegistry::builtin(),
         );
         let events = notifications_from_envelope(&envelope);

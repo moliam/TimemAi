@@ -30,7 +30,7 @@ validate_one() {
     '#### `memmgr`'
     "**Usage**"
     "**Result**"
-    '"args": {'
+    '"run_bash": {'
     '"cmd": "'
   )
   local forbidden=(

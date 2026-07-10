@@ -1,9 +1,6 @@
 use serde_json::Value;
 
-use super::{
-    ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
-    ResponseProtocolSuite,
-};
+use super::{ParsedActionGroup, ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite};
 use crate::capability::CapabilityRegistry;
 
 pub struct MarkdownSuiteV1;
@@ -175,101 +172,11 @@ fn extract_markdown_protocol_candidate(text: &str) -> Option<&str> {
     None
 }
 
-fn parse_single_action(
-    value: &Value,
-    idx: usize,
-    capabilities: &CapabilityRegistry,
-) -> Result<ParsedAction, String> {
-    let name = value
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    if name.is_empty() {
-        return Err(format!("actions[{idx}].action_missing"));
-    }
-
-    let action_args = value.get("args");
-    let input = match action_args {
-        Some(Value::Object(_)) => action_args.cloned().unwrap_or(Value::Null),
-        Some(_) => return Err(format!("actions[{idx}].args_must_be_object")),
-        None => return Err(format!("actions[{idx}].args_required")),
-    };
-
-    if !capabilities.contains_tool(&name) {
-        return Err(format!("unsupported_action:{name}"));
-    }
-
-    if let Err(issue) = capabilities.validate_action_input(&name, &input) {
-        return Err(format!("actions[{idx}].{issue}"));
-    }
-
-    Ok(ParsedAction {
-        action: name,
-        raw_input: input,
-    })
-}
-
 fn parse_action_groups_value(
     value: &Value,
     capabilities: &CapabilityRegistry,
 ) -> Result<Vec<ParsedActionGroup>, String> {
-    if value.is_object() && value.get("action").is_some() {
-        return Ok(vec![ParsedActionGroup {
-            order: ActionGroupOrder::Sequential,
-            actions: vec![parse_single_action(value, 0, capabilities)?],
-        }]);
-    }
-    if value.is_object() && (value.get("actions").is_some() || value.get("order").is_some()) {
-        let order = value
-            .get("order")
-            .and_then(Value::as_str)
-            .map(ActionGroupOrder::from_name)
-            .unwrap_or(ActionGroupOrder::Sequential);
-        let Some(actions) = value.get("actions").and_then(Value::as_array) else {
-            return Err("action_groups[0].actions_required".to_string());
-        };
-        let mut parsed_actions = Vec::new();
-        for (action_idx, action) in actions.iter().enumerate() {
-            parsed_actions.push(parse_single_action(action, action_idx, capabilities)?);
-        }
-        return Ok(vec![ParsedActionGroup {
-            order,
-            actions: parsed_actions,
-        }]);
-    }
-    let Some(items) = value.as_array() else {
-        return Err("actions_section_must_be_action_or_array".to_string());
-    };
-    let mut groups = Vec::new();
-    for (group_idx, group) in items.iter().enumerate() {
-        if group.get("actions").is_some() || group.get("order").is_some() {
-            let order = group
-                .get("order")
-                .and_then(Value::as_str)
-                .map(ActionGroupOrder::from_name)
-                .unwrap_or(ActionGroupOrder::Sequential);
-            let Some(actions) = group.get("actions").and_then(Value::as_array) else {
-                return Err(format!("action_groups[{group_idx}].actions_required"));
-            };
-            let mut parsed_actions = Vec::new();
-            for (action_idx, action) in actions.iter().enumerate() {
-                parsed_actions.push(parse_single_action(action, action_idx, capabilities)?);
-            }
-            groups.push(ParsedActionGroup {
-                order,
-                actions: parsed_actions,
-            });
-        } else {
-            groups.push(ParsedActionGroup {
-                order: ActionGroupOrder::Sequential,
-                actions: vec![parse_single_action(group, group_idx, capabilities)?],
-            });
-        }
-    }
-    Ok(groups)
+    super::parse_action_workflow_value(value, "actions", capabilities)
 }
 
 fn extract_fenced_json(text: &str) -> Option<String> {
@@ -300,15 +207,9 @@ fn fenced_json_looks_like_response_protocol(text: &str) -> bool {
         return false;
     };
     super::json_suite::is_likely_response_envelope(&value)
-        || value
-            .as_object()
-            .is_some_and(|object| object.contains_key("action"))
+        || super::is_tool_action_object(&value)
         || value.as_array().is_some_and(|items| {
-            !items.is_empty()
-                && items.iter().all(|item| {
-                    item.as_object()
-                        .is_some_and(|object| object.contains_key("action"))
-                })
+            !items.is_empty() && items.iter().all(super::is_tool_action_object)
         })
 }
 
@@ -681,6 +582,7 @@ pub fn md_can_show_plain_text_after_repair_failure(content: &str) -> bool {
 mod tests {
     use super::*;
     use crate::capability::CapabilityRegistry;
+    use crate::ActionGroupOrder;
 
     fn caps() -> CapabilityRegistry {
         CapabilityRegistry::builtin()
@@ -772,7 +674,7 @@ Example only:
 
 ## Working_Still_Action
 ```action
-{"action":"run_bash","args":{}}
+{"run_bash":{}}
 ```
 
 ## Free_talk
@@ -867,7 +769,7 @@ not a real progress section
 
     #[test]
     fn parses_context_compact_section() {
-        let input = "## Free_talk\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "## Free_talk\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -880,7 +782,7 @@ not a real progress section
 
     #[test]
     fn actions_section_json_fence_still_parses_action() {
-        let input = "## Free_talk\nchecking\n\n## Working_Still_Action\n```json\n{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "## Free_talk\nchecking\n\n## Working_Still_Action\n```json\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -891,26 +793,20 @@ not a real progress section
     }
 
     #[test]
-    fn actions_section_accepts_group_array() {
+    fn actions_section_accepts_nested_parallel_arrays() {
         let input = r#"## Free_talk
 checking
 
 ## Working_Still_Action
 ```action
 [
-  {
-    "order": "parallel",
-    "actions": [
-      {"action":"run_bash","args":{"cmd":"printf a"}},
-      {"action":"run_bash","args":{"cmd":"printf b"}}
-    ]
-  },
-  {
-    "order": "sequential",
-    "actions": [
-      {"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}}
-    ]
-  }
+  [
+    {"run_bash":{"cmd":"printf a"}},
+    {"run_bash":{"cmd":"printf b"}}
+  ],
+  [
+    {"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}}
+  ]
 ]
 ```"#;
         let env = parse_markdown_envelope(input, &caps());
@@ -919,12 +815,12 @@ checking
         assert_eq!(env.action_groups.len(), 2);
         assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
         assert_eq!(env.action_groups[0].actions.len(), 2);
-        assert_eq!(env.action_groups[1].order, ActionGroupOrder::Sequential);
+        assert_eq!(env.action_groups[1].order, ActionGroupOrder::Parallel);
         assert_eq!(env.next_actions.len(), 3);
     }
 
     #[test]
-    fn actions_section_accepts_single_group_object() {
+    fn actions_section_rejects_old_group_object() {
         let input = r#"## Free_talk
 checking
 
@@ -933,19 +829,19 @@ checking
 {
   "order": "parallel",
   "actions": [
-    {"action":"run_bash","args":{"cmd":"sleep 15","background":true}},
-    {"action":"run_bash","args":{"cmd":"sleep 15","background":true}},
-    {"action":"run_bash","args":{"cmd":"sleep 15","background":true}}
+    {"run_bash":{"cmd":"sleep 15","background":true}},
+    {"run_bash":{"cmd":"sleep 15","background":true}},
+    {"run_bash":{"cmd":"sleep 15","background":true}}
   ]
 }
 ```"#;
         let env = parse_markdown_envelope(input, &caps());
 
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(env.action_groups.len(), 1);
-        assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
-        assert_eq!(env.action_groups[0].actions.len(), 3);
-        assert_eq!(env.next_actions.len(), 3);
+        assert_eq!(
+            env.repair_issue.as_deref(),
+            Some("actions.old_group_object_not_supported")
+        );
+        assert!(env.next_actions.is_empty());
     }
 
     #[test]
@@ -956,14 +852,11 @@ checking
 ## Working_Still_Action
 ```action
 [
-  {
-    "order": "parallel",
-    "actions": [
-      {"action":"run_bash","args":{"cmd":"printf a","timeout_ms":5000}},
-      {"action":"run_bash","args":{"cmd":"printf b","timeout_ms":5000}}
-    ]
-  },
-  {"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}
+  [
+    {"run_bash":{"cmd":"printf a","timeout_ms":5000}},
+    {"run_bash":{"cmd":"printf b","timeout_ms":5000}}
+  ],
+  {"run_bash":{"cmd":"pwd","timeout_ms":5000}}
 ]
 ```"#;
         let env = parse_markdown_envelope(input, &caps());
@@ -983,15 +876,12 @@ checking
 ## Working_Still_Action
 ```action
 [
-  {"action":"run_bash","args":{"cmd":"printf first","timeout_ms":5000}},
-  {
-    "order": "parallel",
-    "actions": [
-      {"action":"run_bash","args":{"cmd":"printf middle-a","timeout_ms":5000}},
-      {"action":"run_bash","args":{"cmd":"printf middle-b","timeout_ms":5000}}
-    ]
-  },
-  {"action":"run_bash","args":{"cmd":"printf last","timeout_ms":5000}}
+  {"run_bash":{"cmd":"printf first","timeout_ms":5000}},
+  [
+    {"run_bash":{"cmd":"printf middle-a","timeout_ms":5000}},
+    {"run_bash":{"cmd":"printf middle-b","timeout_ms":5000}}
+  ],
+  {"run_bash":{"cmd":"printf last","timeout_ms":5000}}
 ]
 ```"#;
         let env = parse_markdown_envelope(input, &caps());
@@ -1035,7 +925,7 @@ checking
 
     #[test]
     fn extracts_markdown_protocol_after_preface() {
-        let input = "我先说明一下处理计划。\n\n## Free_talk\nchecking\n\n## Working_Still_Action\n```action\n{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "我先说明一下处理计划。\n\n## Free_talk\nchecking\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -1047,7 +937,7 @@ checking
 
     #[test]
     fn action_block_without_sections_is_working_protocol() {
-        let input = "```action\n{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "```action\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -1058,7 +948,7 @@ checking
 
     #[test]
     fn actions_section_accepts_bare_json_array() {
-        let input = "## Free_talk\nchecking\n\n## Working_Still_Action\n[{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\"}},{\"action\":\"memmgr\",\"args\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}}]";
+        let input = "## Free_talk\nchecking\n\n## Working_Still_Action\n[{\"run_bash\":{\"cmd\":\"pwd\"}},{\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}}]";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
@@ -1082,12 +972,12 @@ checking
 
     #[test]
     fn malformed_action_block_is_not_downgraded_to_plain_answer() {
-        let input = "some preface\n```action\n{\"action\":\"run_bash\"}\n```";
+        let input = "some preface\n```action\n{\"run_bash\":\"cmd=pwd\"}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert_eq!(
             env.repair_issue.as_deref(),
-            Some("actions[0].args_required")
+            Some("actions.args_must_be_object")
         );
         assert!(env.final_answer.is_empty());
     }

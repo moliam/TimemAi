@@ -69,8 +69,7 @@ output_schema: |
   }
 example_json: |
   {
-    "action": "run_bash",
-    "args": {
+    "run_bash": {
       "cmd": "rg --files | wc -l",
       "timeout_ms": 5000
     }

@@ -24,10 +24,9 @@ Actions:
 
 - `<working_still_action>` contains one or more `<action_json>` blocks.
 - Each `<action_json>` block contains raw JSON, not markdown fences.
-- JSON may be a single action object, an action group object, or an array of
-  action/group objects.
-- Action object fields: `action` required, `args` required object.
-- Group object fields: `order` is `parallel` or `sequential`; `actions` is a
-  required array of action objects. Workflow array entries execute in array
-  order; inside each group, `order` controls whether actions run in parallel or
-  sequentially.
+- A single action object is `{ "tool_name": { ...tool parameters... } }`.
+- A direct array of action objects is one parallel group.
+- An outer workflow array may contain inner arrays and single action objects;
+  entries execute in array order, inner arrays execute in parallel.
+- Do not use `action`/`args` fields or `{ "order": "...", "actions": [...] }`
+  group objects.

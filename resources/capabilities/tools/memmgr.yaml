@@ -87,8 +87,7 @@ output_schema: |
   }
 example_json: |
   {
-    "action": "memmgr",
-    "args": {
+    "memmgr": {
       "type": "durable",
       "op": "sql",
       "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
