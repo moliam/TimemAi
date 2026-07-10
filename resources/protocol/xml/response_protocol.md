@@ -11,9 +11,8 @@ deviation will break the downstream parser and cause a protocol repair.
 2. **Strict Generation Order**: You must generate tags in a linear stream order:
    `<free_talk>` -> `[State Branch Target]`. Think first, and decide the task
    state last.
-3. **No Markdown Blocks in Actions**: Inside `<action_json>`, write raw JSON text
-   wrapped ONLY in a `<![CDATA[...]]>` block. NEVER use markdown code blocks like
-   ```json inside XML tags.
+3. **Action JSON Payload**: Inside `<action_json>`, put the JSON payload directly,
+   preferably wrapped in `<![CDATA[...]]>` so special characters stay intact.
 4. **Escape Example Tags**: If you need to output literal XML tags or examples
    inside `<final_answer>` or `<free_talk>`, wrap that entire content block inside
    `<![CDATA[...]]>`.

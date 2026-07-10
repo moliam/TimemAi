@@ -23,7 +23,9 @@ Text fields:
 Actions:
 
 - `<working_still_action>` contains one or more `<action_json>` blocks.
-- Each `<action_json>` block contains raw JSON, not markdown fences.
+- Each `<action_json>` block contains the JSON payload directly. CDATA is
+  recommended so string values can safely contain punctuation, Markdown, or XML-
+  looking text.
 - A single action object is `{ "tool_name": { ...tool parameters... } }`.
 - A direct array of action objects is one parallel group.
 - An outer workflow array may contain inner arrays and single action objects;
