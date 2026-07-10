@@ -10,10 +10,10 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::MutexGuard;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -96,7 +96,134 @@ pub struct FileShellJobStore {
     dir: PathBuf,
     index_file: PathBuf,
     guard: MemGuard,
-    children: Arc<Mutex<HashMap<u32, Child>>>,
+    watcher: ShellJobWatcher,
+}
+
+#[derive(Debug, Clone)]
+struct ShellJobWatcher {
+    state: Arc<ShellJobWatcherState>,
+}
+
+#[derive(Debug)]
+struct ShellJobWatcherState {
+    jobs: Mutex<HashMap<u32, WatchedShellChild>>,
+    changed: Condvar,
+    started: AtomicBool,
+}
+
+#[derive(Debug)]
+struct WatchedShellChild {
+    child: Child,
+    status_file: PathBuf,
+}
+
+impl ShellJobWatcher {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(ShellJobWatcherState {
+                jobs: Mutex::new(HashMap::new()),
+                changed: Condvar::new(),
+                started: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    fn register(&self, pid: u32, child: Child, status_file: PathBuf) {
+        self.ensure_started();
+        if let Ok(mut jobs) = self.state.jobs.lock() {
+            jobs.insert(pid, WatchedShellChild { child, status_file });
+            self.state.changed.notify_one();
+        }
+    }
+
+    fn is_watching(&self, pid: u32) -> bool {
+        self.state
+            .jobs
+            .lock()
+            .ok()
+            .map(|jobs| jobs.contains_key(&pid))
+            .unwrap_or(false)
+    }
+
+    fn refresh_pid(&self, pid: u32) {
+        let Ok(mut jobs) = self.state.jobs.lock() else {
+            return;
+        };
+        let Some(watched) = jobs.get_mut(&pid) else {
+            return;
+        };
+        let status = match watched.child.try_wait() {
+            Ok(Some(status)) => Some(status.code().unwrap_or(-1).to_string()),
+            Ok(None) => None,
+            Err(_) => Some("unknown".to_string()),
+        };
+        if let Some(status) = status {
+            if let Some(watched) = jobs.remove(&pid) {
+                write_status_if_empty(&watched.status_file, &status);
+            }
+        }
+    }
+
+    fn ensure_started(&self) {
+        if self
+            .state
+            .started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || shell_job_watcher_loop(state));
+    }
+}
+
+fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
+    let mut jobs = match state.jobs.lock() {
+        Ok(jobs) => jobs,
+        Err(_) => return,
+    };
+    loop {
+        while jobs.is_empty() {
+            jobs = match state.changed.wait(jobs) {
+                Ok(jobs) => jobs,
+                Err(_) => return,
+            };
+        }
+
+        let mut finished = Vec::new();
+        for (pid, watched) in jobs.iter_mut() {
+            match watched.child.try_wait() {
+                Ok(Some(status)) => finished.push((*pid, status.code().unwrap_or(-1).to_string())),
+                Ok(None) => {}
+                Err(_) => finished.push((*pid, "unknown".to_string())),
+            }
+        }
+        for (pid, status) in finished {
+            if let Some(watched) = jobs.remove(&pid) {
+                write_status_if_empty(&watched.status_file, &status);
+            }
+        }
+
+        if jobs.is_empty() {
+            continue;
+        }
+        jobs = match state.changed.wait_timeout(jobs, Duration::from_millis(100)) {
+            Ok((jobs, _)) => jobs,
+            Err(_) => return,
+        };
+    }
+}
+
+fn write_status_if_empty(path: &Path, status: &str) {
+    if fs::read_to_string(path)
+        .ok()
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let _ = fs::write(path, status);
 }
 
 impl FileShellJobStore {
@@ -107,7 +234,7 @@ impl FileShellJobStore {
             index_file: dir.join("jobs.jsonl"),
             dir,
             guard: MemGuard::for_memory_dir(memory_dir),
-            children: Arc::new(Mutex::new(HashMap::new())),
+            watcher: ShellJobWatcher::new(),
         }
     }
 
@@ -173,9 +300,7 @@ impl FileShellJobStore {
         }
         let child = command.spawn()?;
         let pid = child.id();
-        if let Ok(mut children) = self.children.lock() {
-            children.insert(pid, child);
-        }
+        self.watcher.register(pid, child, status_file.clone());
         Ok(ShellJobRecord {
             id,
             created_at_ms: now_ms(),
@@ -226,7 +351,7 @@ impl FileShellJobStore {
         loop {
             if runtime.should_cancel() {
                 terminate_process(record.pid);
-                let _ = fs::write(&record.status_file, "cancelled");
+                write_status_if_empty(Path::new(&record.status_file), "cancelled");
                 return bash_error(clean, "cancelled");
             }
             if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
@@ -238,7 +363,7 @@ impl FileShellJobStore {
                 };
                 if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
                     terminate_process(record.pid);
-                    let _ = fs::write(&record.status_file, "cancelled");
+                    write_status_if_empty(Path::new(&record.status_file), "cancelled");
                     return bash_error(clean, "cancelled_by_user");
                 }
                 next_long_running_check =
@@ -282,7 +407,7 @@ impl FileShellJobStore {
                 continue;
             }
             terminate_process(record.pid);
-            let _ = fs::write(&record.status_file, "cancelled");
+            write_status_if_empty(Path::new(&record.status_file), "cancelled");
             cancelled.push(record.id);
         }
         cancelled
@@ -379,14 +504,26 @@ impl FileShellJobStore {
     }
 
     fn refresh_record_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
-        if let Some(refresh) = self.refresh_child_handle_unlocked(&record) {
-            return refresh;
-        }
         if self.record_finished(&record) {
             return self.exit_update_once_unlocked(record);
         }
+        if self.watcher.is_watching(record.pid) {
+            self.watcher.refresh_pid(record.pid);
+            if self.record_finished(&record) {
+                return self.exit_update_once_unlocked(record);
+            }
+            return ShellJobRefresh::Running(RunningShellJob {
+                pid: record.pid,
+                kind: record.kind,
+                command: record.command,
+                cwd: record.cwd,
+                session_id: record.session_id,
+                turn_id: record.turn_id,
+                created_at_ms: record.created_at_ms,
+            });
+        }
         if !process_running(record.pid) {
-            let _ = fs::write(&record.status_file, "exited");
+            write_status_if_empty(Path::new(&record.status_file), "exited");
             return self.exit_update_once_unlocked(record);
         }
         ShellJobRefresh::Running(RunningShellJob {
@@ -426,32 +563,6 @@ impl FileShellJobStore {
                 4000,
             ),
         })
-    }
-
-    fn refresh_child_handle_unlocked(&self, record: &ShellJobRecord) -> Option<ShellJobRefresh> {
-        let mut children = self.children.lock().ok()?;
-        let child = children.get_mut(&record.pid)?;
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let code = status.code().unwrap_or(-1).to_string();
-                let _ = fs::write(&record.status_file, code);
-                children.remove(&record.pid);
-                Some(self.exit_update_once_unlocked(record.clone()))
-            }
-            Ok(None) => Some(ShellJobRefresh::Running(RunningShellJob {
-                pid: record.pid,
-                kind: record.kind.clone(),
-                command: record.command.clone(),
-                cwd: record.cwd.clone(),
-                session_id: record.session_id.clone(),
-                turn_id: record.turn_id.clone(),
-                created_at_ms: record.created_at_ms,
-            })),
-            Err(_) => {
-                children.remove(&record.pid);
-                None
-            }
-        }
     }
 }
 
@@ -1121,14 +1232,17 @@ fn process_running(pid: u32) -> bool {
         if wait == 0 {
             return true;
         }
-        if let Ok(output) = Command::new("/bin/ps")
+        match Command::new("/bin/ps")
             .arg("-o")
             .arg("stat=")
             .arg("-p")
             .arg(pid.to_string())
             .output()
         {
-            if output.status.success() {
+            Ok(output) => {
+                if !output.status.success() {
+                    return false;
+                }
                 let stat = String::from_utf8_lossy(&output.stdout);
                 let state = stat.trim();
                 if state.starts_with('Z') || state.contains('Z') {
@@ -1136,6 +1250,7 @@ fn process_running(pid: u32) -> bool {
                 }
                 return !state.is_empty();
             }
+            Err(_) => {}
         }
     }
     Command::new("/bin/kill")
@@ -1621,6 +1736,43 @@ mod tests {
         assert_eq!(updates[0].description(), "old timeout job");
         assert_eq!(updates[0].status, "0");
         assert_eq!(updates[0].output, "starteddone");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn watcher_reaps_background_job_without_refresh_polling() {
+        let dir = tmp_memory_dir("watcher_reaps_background");
+        let store = FileShellJobStore::new(&dir);
+        let started =
+            store.spawn_background("printf watcher_reaped", &dir, "session_watch", "turn_watch");
+        assert!(
+            started.contains("now keeps running in background"),
+            "{started}"
+        );
+        let record = store
+            .guard
+            .with_read(|| store.records_unlocked().into_iter().next())
+            .unwrap()
+            .expect("job record");
+
+        let started_wait = Instant::now();
+        while started_wait.elapsed() < Duration::from_secs(3) && !store.record_finished(&record) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            store.record_finished(&record),
+            "shared watcher should write the status file without refresh polling"
+        );
+
+        let (running, updates) = store.refresh_for_session("session_watch");
+        assert!(running.is_empty());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, "0");
+        assert_eq!(updates[0].output, "watcher_reaped");
+        assert!(
+            !process_running(record.pid),
+            "reaped child should not be reported as running"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
