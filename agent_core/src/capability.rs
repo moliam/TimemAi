@@ -129,7 +129,7 @@ impl CapabilityHostProfile {
 fn local_command_execution_available() -> bool {
     #[cfg(unix)]
     {
-        Path::new("/bin/sh").is_file()
+        Path::new("/bin/bash").is_file()
     }
     #[cfg(not(unix))]
     {

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::os::unix::process::CommandExt;
 
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+const BASH_EXECUTABLE: &str = "/bin/bash";
 #[cfg(test)]
 static LONG_RUNNING_COMMAND_PROMPT_AFTER_MS: AtomicU64 = AtomicU64::new(60_000);
 #[cfg(test)]
@@ -280,20 +281,20 @@ impl FileShellJobStore {
         let id = unique_shell_id("job");
         let output_file = self.dir.join(format!("{id}.out"));
         let status_file = self.dir.join(format!("{id}.status"));
-        let script = format!(
-            "{{\n{}\n}} > {} 2>&1; printf '%s' \"$?\" > {}",
-            clean,
-            shell_quote_path(&output_file),
-            shell_quote_path(&status_file)
-        );
-        let mut command = Command::new("/bin/sh");
+        let output = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&output_file)?;
+        let stderr = output.try_clone()?;
+        let mut command = Command::new(BASH_EXECUTABLE);
         command
             .arg("-lc")
-            .arg(script)
+            .arg(clean)
             .current_dir(cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(stderr));
         #[cfg(unix)]
         {
             command.process_group(0);
@@ -1040,7 +1041,7 @@ fn execute_one_bash_structured_with_prompt_after(
     if timeout_ms <= 0 {
         return bash_error(command, "invalid_timeout");
     }
-    let spawn = Command::new("/bin/sh")
+    let spawn = Command::new(BASH_EXECUTABLE)
         .arg("-lc")
         .arg(command)
         .current_dir(cwd)
@@ -1263,6 +1264,7 @@ fn process_running(pid: u32) -> bool {
         .is_some_and(|status| status.success())
 }
 
+#[cfg(test)]
 fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
@@ -1624,7 +1626,7 @@ mod tests {
         let flag_path = shell_quote_path(&flag);
         let mut runtime = NeverCancelRuntime;
         let _ = fs::remove_file(&flag);
-        let mut child = Command::new("/bin/sh")
+        let mut child = Command::new(BASH_EXECUTABLE)
             .arg("-lc")
             .arg(format!("sleep 0.3; touch {flag_path}"))
             .stdin(Stdio::null())
@@ -1792,6 +1794,47 @@ mod tests {
     }
 
     #[test]
+    fn tracked_job_preserves_complex_shell_syntax_without_runtime_wrapper() {
+        let dir = tmp_memory_dir("tracked_complex_shell_syntax");
+        let store = FileShellJobStore::new(&dir);
+        let mut runtime = NeverCancelRuntime;
+        let result = store.run_with_timeout(
+            "x='brace ok'; (printf '%s\\n' \"$x\"); { printf '%s\\n' group; }; cat <<'EOF'\nliteral `backticks` and $(not expanded)\nEOF",
+            &dir,
+            5000,
+            "session_a",
+            "turn_a",
+            &mut runtime,
+        );
+        assert!(result.contains("Exit code: 0"), "{result}");
+        assert!(result.contains("brace ok"), "{result}");
+        assert!(result.contains("group"), "{result}");
+        assert!(
+            result.contains("literal `backticks` and $(not expanded)"),
+            "{result}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tracked_job_runs_real_bash_syntax() {
+        let dir = tmp_memory_dir("tracked_real_bash_syntax");
+        let store = FileShellJobStore::new(&dir);
+        let mut runtime = NeverCancelRuntime;
+        let result = store.run_with_timeout(
+            "arr=(alpha beta); [[ ${arr[1]} == beta ]] && printf '%s\\n' \"${arr[1]}\"",
+            &dir,
+            5000,
+            "session_a",
+            "turn_a",
+            &mut runtime,
+        );
+        assert!(result.contains("Exit code: 0"), "{result}");
+        assert!(result.contains("beta"), "{result}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn watcher_reaps_background_job_without_refresh_polling() {
         let dir = tmp_memory_dir("watcher_reaps_background");
         let store = FileShellJobStore::new(&dir);
@@ -1830,7 +1873,7 @@ mod tests {
 
     #[test]
     fn process_running_treats_zombie_as_not_running() {
-        let mut child = Command::new("/bin/sh")
+        let mut child = Command::new(BASH_EXECUTABLE)
             .arg("-lc")
             .arg("exit 0")
             .stdin(Stdio::null())
