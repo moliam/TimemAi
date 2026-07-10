@@ -645,6 +645,48 @@ mod tests {
         CapabilityRegistry::builtin()
     }
 
+    fn extract_response_examples(text: &str) -> Vec<String> {
+        let mut examples = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(start_rel) = text[cursor..].find("<response>") {
+            let start = cursor + start_rel;
+            let search_from = start + "<response>".len();
+            let Some(end_rel) = text[search_from..].find("</response>") else {
+                break;
+            };
+            let end = search_from + end_rel + "</response>".len();
+            examples.push(text[start..end].to_string());
+            cursor = end;
+        }
+        examples
+    }
+
+    #[test]
+    fn documented_xml_response_examples_parse_with_runtime_parser() {
+        let examples = extract_response_examples(XML_RESPONSE_PROTOCOL_SECTION);
+        assert!(
+            examples.len() >= 4,
+            "expected protocol doc to contain concrete XML response examples"
+        );
+
+        for (idx, example) in examples.iter().enumerate() {
+            let env = parse_xml_envelope(example, &caps());
+            assert!(
+                env.repair_issue.is_none(),
+                "documented XML example #{idx} did not parse: {:?}\n{}",
+                env.repair_issue,
+                example
+            );
+            assert!(
+                !env.final_answer.trim().is_empty()
+                    || !env.next_actions.is_empty()
+                    || !env.context_compacts.is_empty(),
+                "documented XML example #{idx} produced no runtime-visible result:\n{}",
+                example
+            );
+        }
+    }
+
     #[test]
     fn parses_final_answer() {
         let env = parse_xml_envelope(
@@ -935,6 +977,23 @@ I am explaining a malformed example:
 [{"run_bash":{"cmd":"pwd",}}]
 ]]></action_json>
 </working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+    }
+
+    #[test]
+    fn adjacent_top_level_action_arrays_request_repair_instead_of_execution() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <free_talk>two stage command plan</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"sleep 10","timeout_ms":1000}}],[{"run_bash":{"cmd":"sleep 10","background":true}}]]]></action_json>
+  </working_still_action>
 </response>"#,
             &caps(),
         );

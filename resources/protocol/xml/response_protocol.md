@@ -71,7 +71,7 @@ The payload must be ONLY ONE top-level JSON array `[...]` representing a multi-s
 <response>
   <free_talk>Checking git status before running parallel logging and tests.</free_talk>
   <working_still_action>
-    <action_json><![CDATA[[{"run_bash":{"cmd":"git status --short","timeout_ms":5000}},[{"run_bash":{"cmd":"git log --oneline -5"}},{"run_bash":{"cmd":"python3 -m pytest -q"}}]]]></action_json>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"git status --short","timeout_ms":5000}},[{"run_bash":{"cmd":"git log --oneline -5"}},{"run_bash":{"cmd":"python3 -m pytest -q"}}]]]]></action_json>
   </working_still_action>
 </response>
 
