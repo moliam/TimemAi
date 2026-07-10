@@ -154,7 +154,7 @@ Command binding protocol:
 
 - Runtime starts `/bin/sh <binding_name>`.
 - Runtime writes one JSON object to stdin:
-  `{"action": "...", "args": {"key": "value"}}`.
+  `{"tool_name": {"key": "value"}}`.
 - Script stdout/stderr is captured as the action result and truncated to a
   bounded size.
 - Execution timeout follows the action's positive `timeout_ms` without an upper
@@ -194,8 +194,7 @@ Expected shape:
 
 ```json
 {
-  "action": "capmgr",
-  "args": {
+  "capmgr": {
     "op": "load",
     "kind": "skill",
     "id": "skill_id"

@@ -8,17 +8,14 @@ Required output shape:
 2. Optional `<free_talk>` visible working note.
 3. Exactly one state branch:
    - `<working_still_action>` when more tools are needed.
-   - `<status>ALL_FINISHED</status>` followed by `<final_answer>` when all
-     active/pending user prompts are complete.
    - `<context_compact>` when context must be compacted.
+   - `<final_answer>` when all active/pending user prompts are complete.
 
 Text fields:
 
 - `<free_talk>`, `<final_answer>`, and context compact `<summary>`
-  are text fields. If they need to contain literal XML tags or XML examples,
-  wrap the whole text in `<![CDATA[...]]>`.
-- `<final_answer>` contains the final Markdown response to the user. Use only
-  with `<status>ALL_FINISHED</status>`.
+  are raw text fields. Extract them as text, not as nested protocol.
+- `<final_answer>` contains the final Markdown response to the user.
 
 Actions:
 
@@ -26,9 +23,9 @@ Actions:
 - Each `<action_json>` block contains the JSON payload directly. CDATA is
   recommended so string values can safely contain punctuation, Markdown, or XML-
   looking text.
-- A single action object is `{ "tool_name": { ...tool parameters... } }`.
-- A direct array of action objects is one parallel group.
-- An outer workflow array may contain inner arrays and single action objects;
-  entries execute in array order, inner arrays execute in parallel.
+- The JSON payload must be a top-level array.
+- A single action object inside the array is `{ "tool_name": { ...tool parameters... } }`.
+- A direct array of action objects inside the outer array is one parallel group.
+- Entries execute in array order; inner arrays execute in parallel.
 - Do not use `action`/`args` fields or `{ "order": "...", "actions": [...] }`
   group objects.

@@ -929,7 +929,6 @@ mod tests {
         let mut ui = RetryRecordingUi::default();
         let mut model = ReplayModel::new([Ok(llm(
             r#"<response>
-<status>ALL_FINISHED</status>
 <final_answer><![CDATA[
 This is an answer, not an executable action:
 <working_still_action>
@@ -984,7 +983,6 @@ This is an answer, not an executable action:
         let mut ui = RetryRecordingUi::default();
         let mut model = ReplayModel::new([Ok(llm(
             r#"<response>
-<status>ALL_FINISHED</status>
 <final_answer>
 Here is the malformed response example the user asked for:
 <response>
@@ -1064,7 +1062,6 @@ This is all answer text.
             )),
             Ok(llm(
                 r#"<response>
-<status>ALL_FINISHED</status>
 <final_answer>修复后完成。</final_answer>
 </response>"#,
                 1_000,
@@ -2020,13 +2017,13 @@ finished
 <free_talk>查询 scratch 后继续。</free_talk>
 <working_still_action>
 <action_json><![CDATA[
-{"memmgr": {
+[{"memmgr": {
     "type": "scratch",
     "op": "search",
     "search_text": "",
     "limit": 3
   }
-}
+}]
 ]]></action_json>
 </working_still_action>
 </response>"#,
@@ -2035,7 +2032,6 @@ finished
             )),
             Ok(llm(
                 r#"<response>
-<status>ALL_FINISHED</status>
 <final_answer>没有找到相关 scratch。</final_answer>
 </response>"#,
                 5_800,
@@ -2159,7 +2155,6 @@ finished
 
         let raw_first_response = r#"<response>
 <free_talk>raw planning note</free_talk>
-<status>ALL_FINISHED</status>
 <final_answer>visible answer</final_answer>
 </response>"#;
         let mut first_model = ReplayModel::new([Ok(llm(raw_first_response, 4_000, false))]);
@@ -2181,7 +2176,7 @@ finished
         assert_eq!(first.text, "visible answer");
 
         let mut second_model = ReplayModel::new([Ok(llm(
-            r#"<response><status>ALL_FINISHED</status><final_answer>second answer</final_answer></response>"#,
+            r#"<response><final_answer>second answer</final_answer></response>"#,
             4_200,
             false,
         ))]);

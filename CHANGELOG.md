@@ -65,21 +65,19 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - XML response parsing now ignores protocol-looking tags inside CDATA action
   strings, so valid action args containing examples such as `<status>` or
   `<working_still_action>` are kept as data instead of parsed as control tags.
-- XML response parsing now uses `quick-xml` for the outer response tree, so
-  XML examples inside `final_answer`/`free_talk` text are opaque display text
-  instead of being mistaken for executable protocol sections, while preserving
-  nested element attributes and self-closing tags in display text.
-- XML response parsing now protects string-like tags before structural parsing,
-  so unescaped XML examples inside `final_answer`, `free_talk`, `progress`, or
-  context compact `summary` are treated as text instead of causing repair loops.
+- XML response parsing now uses a protocol-specific tag scanner for the small
+  `<response>` vocabulary. `final_answer`, `free_talk`, and context compact
+  `summary` are extracted as raw text and are not scanned for nested protocol
+  tags.
 - XML response prompt guidance now uses a single strict System Response Protocol
   section, including explicit stream order, mutually exclusive state branches,
   CDATA action JSON, and a final `Protocol Loaded` marker.
 - XML response parsing now accepts a whole response wrapped in a documentation
   ```xml fence while still parsing the inner `<response>` through the same
-  `quick-xml` path, and rejects XML replies that mix multiple state branches.
-- Action parsing now accepts a single action-group object as well as action
-  arrays/group arrays, matching the XML prompt examples and model output shape.
+  protocol scanner, and rejects XML replies that mix multiple state branches.
+- XML `<action_json>` now passes the extracted JSON text directly to the JSON
+  parser and requires a top-level workflow array; old `{ "action": ..., "args":
+  ... }` and `{ "order": ..., "actions": ... }` objects are rejected for repair.
 - Cross-protocol response tests now assert full action-group structure, not
   only flattened action order, for complex valid JSON/Markdown/XML responses.
 

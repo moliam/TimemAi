@@ -477,7 +477,7 @@ mod tests {
         assert_protocols_equivalent(
             r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
             "## Status\nfinished\n\n## Final_Answer\ndone",
-            "<response><status>ALL_FINISHED</status><final_answer>done</final_answer></response>",
+            "<response><final_answer>done</final_answer></response>",
         );
     }
 
@@ -486,7 +486,7 @@ mod tests {
         assert_protocols_equivalent(
             r#"{"status":"ALL_FINISHED","final_answer":"Example only:\n<working_still_action><action_json>{\"run_bash\":{}}</action_json></working_still_action>\n{\"working_still_action\":{\"run_bash\":{}}}\n## Working_Still_Action\n```action\n{\"run_bash\":{}}\n```"}"#,
             "## Status\nfinished\n\n## Final_Answer\nExample only:\n<working_still_action><action_json>{\"run_bash\":{}}</action_json></working_still_action>\n{\"working_still_action\":{\"run_bash\":{}}}\n## Working_Still_Action\n```action\n{\"run_bash\":{}}\n```",
-            r#"<response><status>ALL_FINISHED</status><final_answer><![CDATA[Example only:
+            r#"<response><final_answer><![CDATA[Example only:
 <working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action>
 {"working_still_action":{"run_bash":{}}}
 ## Working_Still_Action
@@ -510,7 +510,7 @@ mod tests {
         assert_protocols_equivalent(
             r#"{"free_talk":"checking","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Free_talk\nchecking\n\n## Working_Still_Action\n[{\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}},{\"run_bash\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]",
-            r#"<response><free_talk>checking</free_talk><working_still_action><![CDATA[[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></working_still_action></response>"#,
+            r#"<response><free_talk>checking</free_talk><working_still_action><action_json><![CDATA[[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json></working_still_action></response>"#,
         );
     }
 
@@ -573,7 +573,7 @@ mod tests {
             "## Status\nfinished\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```\n\n## Final_Answer\ndone",
         );
         let xml_env = parse_xml(
-            r#"<response><status>ALL_FINISHED</status><final_answer>done</final_answer><working_still_action><action_json><![CDATA[{"run_bash":{"cmd":"test -s output.txt","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
+            r#"<response><final_answer>done</final_answer><working_still_action><action_json><![CDATA[[{"run_bash":{"cmd":"test -s output.txt","timeout_ms":5000}}]]]></action_json></working_still_action></response>"#,
         );
         assert_eq!(
             json_env.repair_issue.as_deref(),
@@ -593,16 +593,16 @@ mod tests {
             Some("final_answer_requires_status_finished")
         );
         assert_eq!(markdown_env.repair_issue, json_env.repair_issue);
-        assert_eq!(xml_env.repair_issue, json_env.repair_issue);
+        assert_eq!(xml_env.repair_issue, None);
+        assert!(!xml_env.continue_work);
+        assert_eq!(xml_env.final_answer, "done");
     }
 
     #[test]
     fn json_markdown_xml_protocols_repair_same_working_without_actions() {
         let json_env = parse_json(r#"{"status":"working"}"#);
         let markdown_env = parse_markdown("## Status\nworking\n\n## Free_talk\nchecking");
-        let xml_env = parse_xml(
-            "<response><status>working</status><free_talk>checking</free_talk></response>",
-        );
+        let xml_env = parse_xml("<response><free_talk>checking</free_talk></response>");
         assert_eq!(
             json_env.repair_issue.as_deref(),
             Some("next_actions_required_when_status_working")
@@ -621,7 +621,7 @@ mod tests {
             action
         ));
         let xml_env = parse_xml(&format!(
-            "<response><working_still_action><action_json><![CDATA[{}]]></action_json></working_still_action></response>",
+            "<response><working_still_action><action_json><![CDATA[[{}]]]></action_json></working_still_action></response>",
             action
         ));
         assert_eq!(json_env.repair_issue, None);

@@ -230,20 +230,18 @@ define runtime behavior, repair boundaries, and tests; they must stay aligned
 with the resource text and generated expanded prompt output from
 `scripts/update_static_prompt_snapshot.sh`.
 
-The XML suite uses `quick-xml` to parse the outer response tree. Before parsing,
-string-like fields (`free_talk`, `final_answer`, and compact `summary`) are
-protected as raw text so unescaped XML examples inside them do
-not break the structural parser. Runtime control sections are only read from
-direct children of the root `<response>` node. Display-text fields such as
-`<final_answer>` and `<free_talk>` are treated as opaque text, so XML examples
-inside those fields are not re-parsed as actions. Nested XML-looking text in
-those fields preserves element attributes and self-closing tags when it is
-carried forward as display/context text.
+The XML suite uses a protocol-specific tag scanner rather than a general XML
+tree parser. It recognizes only the small response vocabulary under the single
+`<response>` root. Once it enters a raw text field (`free_talk`,
+`final_answer`, or compact `summary`), it extracts that field as text and does
+not scan its contents for nested protocol tags. This prevents XML/JSON/Markdown
+examples inside user-visible text from being re-parsed as runtime actions.
 The XML parser also accepts a whole model response wrapped in a single
 documentation-style ```xml fence, then parses the inner `<response>` with the
-same `quick-xml` path. XML state branches are strict: `working_still_action`,
-`status`/`final_answer`, and `context_compact` are mutually exclusive in one
-response.
+same protocol scanner. XML state branches are strict:
+`working_still_action`, `final_answer`, and `context_compact` are mutually
+exclusive in one response; `<status>` is rejected by the XML suite because
+completion is represented by the `<final_answer>` branch.
 
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
 `--response-protocol`. The default is `xml`; `markdown` and `json` remain
@@ -732,17 +730,18 @@ is separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape
 
 Each response parses into the same runtime envelope: optional `status`, optional
 `free_talk`, optional `next_actions`, optional `context_compact`, and
-optional `final_answer`.
+optional `final_answer`. Protocols may express completion differently: JSON and
+Markdown use their status field/section, while XML uses `<final_answer>` as the
+completion branch.
 `free_talk` is the visible working note for the Thought/Action panel while
 the job is working. It is emitted to the host/UI as part of the accepted model
 response topic; replay context keeps command/input, action results, runtime
-notes, compact summaries, free_talk, and final answers. Missing `status`
-defaults to `working`. `status:"finished"`
-means the current task is complete: after that envelope, runtime ends the
-current model/action interaction and shows `final_answer` as the closing
-user-visible answer. `final_answer` and `status:"finished"` must appear
-together; if one appears without the other, runtime returns a protocol-repair
-slice.
+notes, compact summaries, free_talk, and final answers. For protocols with a
+status field, missing `status` defaults to `working`; `status:"finished"` means
+the current task is complete and must be paired with `final_answer`. In XML,
+`<final_answer>` directly means the current task is complete. After a completion
+envelope, runtime ends the current model/action interaction and shows the final
+answer as the closing user-visible answer.
 
 ```mermaid
 stateDiagram-v2
@@ -778,8 +777,7 @@ remain JSON objects inside `<action_json>` blocks.
   "free_talk": "optional context-visible free talk or plan",
   "next_actions": [
     {
-      "action": "run_bash",
-      "args": {
+      "run_bash": {
         "cmd": "rg --files -g '*.rs' | xargs wc -l",
         "timeout_ms": 5000
       }
@@ -788,24 +786,25 @@ remain JSON objects inside `<action_json>` blocks.
 }
 ```
 
-With omitted `status` or `status:"working"`, `next_actions` or
-`context_compact` is required and
-`free_talk` is shown in the Thought/Action panel. With
-`status:"finished"`, `final_answer` is required and is
-shown as the closing answer before runtime stops this task's action/model
-loop; `final_answer` without `status:"finished"` is also rejected for repair.
-`status:"finished"` must not include `next_actions`; if the model still needs
-evidence, it must stay `working`, run actions, and answer after the action
-result is visible. The parser also tolerates common provider drift such as a
-valid JSON envelope embedded in Markdown text, but it never shows raw protocol
-fragments to the user.
+With omitted `status` or `status:"working"` in status-based protocols,
+`next_actions` or `context_compact` is required and `free_talk` is shown in the
+Thought/Action panel. With `status:"finished"`, `final_answer` is required and
+shown as the closing answer before runtime stops this task's action/model loop.
+In XML, `<final_answer>` is the completion branch and must not appear together
+with `<working_still_action>` or `<context_compact>`. If the model still needs
+evidence, it must stay working, run actions, and answer after the action result
+is visible. The parser also tolerates common provider drift such as a valid JSON
+envelope embedded in Markdown text, but it never shows raw protocol fragments to
+the user.
 
 Action sections accept the equivalent runtime shapes across JSON, Markdown, and
-XML suites: a single tool-name action object, a direct array of action objects
-as one parallel group, or an outer workflow array mixing inner parallel arrays
-and single sequential action objects. Old `{ "action": ..., "args": ... }` and
-`{ "order": ..., "actions": ... }` objects are rejected for protocol repair.
-Order is preserved; outer workflow entries execute in model-provided order.
+XML suites: tool-name action objects such as `{ "run_bash": { ... } }`, direct
+arrays of action objects as one parallel group, and outer workflow arrays mixing
+inner parallel arrays and single sequential action objects. XML `<action_json>`
+requires the payload to be a top-level JSON array. Old `{ "action": ..., "args":
+... }` and `{ "order": ..., "actions": ... }` objects are rejected for protocol
+repair. Order is preserved; outer workflow entries execute in model-provided
+order.
 
 ### Context Compact
 
@@ -822,8 +821,7 @@ model response:
   },
   "next_actions": [
     {
-      "action": "run_bash",
-      "args": {
+      "run_bash": {
         "cmd": "rg -n 'retry_notice|render_thinking' timem_shell/src",
         "timeout_ms": 5000
       }
@@ -839,12 +837,11 @@ repairable action result and does not silently discard context.
 
 ### Action Object
 
-Each `next_actions` item is a structured command:
+Each action item is a structured command object with exactly one tool-name key:
 
 ```json
 {
-  "action": "memmgr",
-  "args": {
+  "memmgr": {
     "type": "raw_chat",
     "op": "sql",
     "sql": "SELECT created_at_ms, role, content FROM chat_messages ORDER BY created_at_ms DESC",
@@ -855,19 +852,20 @@ Each `next_actions` item is a structured command:
 
 Fields:
 
-- `action`: canonical tool name, such as `memmgr`, `run_bash`, `capmgr`, or
-  `self_tool`. `memmgr` is the single model-facing interface for durable
-  memory, raw chat history, scratch memory, and dynamic context discard.
-- `args`: action-specific arguments as a JSON object. Put each parameter in its
-  own JSON field. The top-level parser only validates this generic object
-  against the manifest registry; concrete option meaning and validation
-  belong to the manifest-backed executor for that tool.
+- The object key is the canonical tool name, such as `memmgr`, `run_bash`,
+  `capmgr`, or `self_tool`. `memmgr` is the single model-facing interface for
+  durable memory, raw chat history, scratch memory, and dynamic context discard.
+- The object value is the action-specific argument object. Put each parameter
+  in its own JSON field. The top-level parser validates this object against the
+  manifest registry; concrete option meaning and validation belong to the
+  manifest-backed executor for that tool.
 
 The selected response protocol controls the outer envelope syntax only. Action
-arguments stay JSON objects across protocols: Markdown responses still put each
-action's parameters under `args` as JSON, and JSON responses use the same
-`args` object. This keeps capability manifests, executor validation, and
-cross-host tooling independent from the model-facing response style.
+arguments stay JSON objects across protocols: Markdown and XML responses embed
+the same tool-name action objects inside their action sections, and JSON
+responses use the same shape directly. This keeps capability manifests,
+executor validation, and cross-host tooling independent from the model-facing
+response style.
 
 The runtime does not execute hidden compatibility aliases. Unknown action names
 produce a protocol repair slice instead of being bridged to an old tool.
@@ -1093,8 +1091,7 @@ slices:
 
 ```json
 {
-  "action": "memmgr",
-  "args": {
+  "memmgr": {
     "type": "context",
     "op": "discard",
     "delta_ids": ["pd_1782200000000_2"]
@@ -1122,8 +1119,7 @@ ids:
   "status": "working",
   "next_actions": [
     {
-      "action": "memmgr",
-      "args": {
+      "memmgr": {
         "type": "scratch",
         "op": "write",
         "kind": "context_offload",
@@ -1132,8 +1128,7 @@ ids:
       }
     },
     {
-      "action": "memmgr",
-      "args": {
+      "memmgr": {
         "type": "context",
         "op": "discard",
         "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]

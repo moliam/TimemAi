@@ -2002,10 +2002,7 @@ mod tests {
                 )
             }
             ResponseProtocolKind::Xml => {
-                format!(
-                    "<response><free_talk>{}</free_talk><status>ALL_FINISHED</status><final_answer>{}</final_answer></response>",
-                    free_talk, answer
-                )
+                format!("<response><free_talk>{free_talk}</free_talk><final_answer>{answer}</final_answer></response>")
             }
         }
     }

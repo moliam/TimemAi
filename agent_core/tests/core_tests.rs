@@ -2779,13 +2779,13 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
   <free_talk>用 SQL 列出 durable memory 最近记录来确认现状。</free_talk>
   <working_still_action>
     <action_json><![CDATA[
-{"memmgr": {
+[{"memmgr": {
     "type": "durable",
     "op": "sql",
     "sql": "SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 10",
     "limit": 10
   }
-}
+}]
     ]]></action_json>
   </working_still_action>
 </response>"#,
@@ -6133,7 +6133,7 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
 
-    assert!(prompt.contains("Examples below are format examples ONLY"));
+    assert!(prompt.contains("EXAMPLES ONLY"));
     for leaked_example_task in [
         "project codename",
         "Get the OS version",

@@ -30,8 +30,8 @@ validate_one() {
     '#### `memmgr`'
     "**Usage**"
     "**Result**"
-    '"run_bash": {'
-    '"cmd": "'
+    '"run_bash":'
+    '"cmd":'
   )
   local forbidden=(
     "Runtime info:"
@@ -78,9 +78,9 @@ validate_one markdown "$TMP_MARKDOWN" \
 validate_one json "$TMP_JSON"
 validate_one xml "$TMP_XML" \
   "# System Response Protocol" \
-  "Protocol Loaded. Respond to active/pending user prompts." \
+  "All responses must be valid XML wrapped in a single" \
   '`<response>`' \
-  "<status>ALL_FINISHED</status>" \
+  '`<final_answer>`' \
   '`<working_still_action>`'
 
 if [ "${1:-}" = "--check" ]; then
