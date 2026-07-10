@@ -81,6 +81,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Cross-protocol response tests now assert full action-group structure, not
   only flattened action order, for complex valid JSON/Markdown/XML responses.
 
+- Finished background and timeout job exit updates now include exit status code and
+  final output, so the model receives the complete job result without a separate
+  follow-up command.
+- Tracked shell jobs are reaped by a shared ShellJobWatcher thread using
+  Child::try_wait instead of per-pid kill -0 polling, preventing zombie processes
+  and improving reliability on macOS and Linux.
+
 ## [0.8.1] - 2026-07-03
 
 ### Added
