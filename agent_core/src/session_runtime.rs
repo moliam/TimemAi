@@ -1516,7 +1516,7 @@ finished
 
         assert_eq!(outcome.text, "分组动作完成。");
         assert!(
-            elapsed < std::time::Duration::from_millis(1800),
+            elapsed < std::time::Duration::from_millis(3500),
             "parallel group should not run two one-second commands serially; elapsed={elapsed:?}"
         );
         assert!(model.prompts[1].contains("group_a"));

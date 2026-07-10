@@ -1683,9 +1683,17 @@ mod tests {
         assert_eq!(running[0].pid, pid);
         assert_eq!(running[0].kind, "background");
 
-        thread::sleep(Duration::from_millis(1300));
-        let (running, updates) = store.refresh_for_session("session_a");
-        assert!(running.is_empty());
+        let mut running = Vec::new();
+        let mut updates = Vec::new();
+        let wait_started = Instant::now();
+        while wait_started.elapsed() < Duration::from_secs(5) {
+            (running, updates) = store.refresh_for_session("session_a");
+            if running.is_empty() && !updates.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(running.is_empty(), "background job should have exited");
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].pid, pid);
         assert_eq!(updates[0].description(), "background job");
