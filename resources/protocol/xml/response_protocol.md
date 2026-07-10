@@ -15,19 +15,22 @@ All responses must be valid XML wrapped in a single `<response>` root.
 | **1** | `<free_talk>` | Optional | Raw literal text. Thought process, step planning, or planned-tool use. Should be as brief as possible. |
 | **2** | **[State Branch]** | **Choose ONE** | Select exactly one path below based on current state. The chosen tag ends the response stream. |
 | -> | `<working_still_action>` | If tools needed | Contains `<action_json>` blocks.  |
-| -> | `<context_compact>` | If context long | History compression block. Provide `<delta_ids>` plus `<summary>`. Runtime hides those dynamic prompt deltas and appends your summary as a new dynamic prompt delta. |
+| -> | `<context_compact>` | If context long | History compression block. Provide `<discard>` and/or `<offload>`, plus `<summary>`. Runtime discards discarded deltas, writes offloaded deltas to scratch, and appends your summary as a new dynamic prompt delta. |
 | -> | `<final_answer>` | If work is done | Raw literal text. Deliver final summary/report of the work. This will STOP round interaction, so make sure all work is done or cannot be continued any further. Prefer Markdown style. |
 
 ## Context Compact
 
 Use `<context_compact>` when old dynamic context is too long or stale but the
-current work should continue. Do not put the compact summary into a
-`memmgr type=context` action.
+current work should continue. Do not use `memmgr` for context discard/offload.
 
 Required child tags:
 
-- `<delta_ids>`: comma-separated prompt delta ids to hide from active context.
+- `<discard>`: optional. comma-separated prompt delta ids to drop from active context.
+- `<offload>`: optional. comma-separated prompt delta ids to offload into scratch memory.
 - `<summary>`: raw literal text summary that replaces those deltas.
+
+Use at least one of `<discard>` or `<offload>`. Runtime will return the scratch
+id for offloaded deltas in the next `## SYSTEM` feedback.
 
 A good summary keeps the active task description, working environment facts,
 current progress, todo/next steps, and only the few high-level work principles
@@ -35,7 +38,7 @@ that still guide the task.
 
 ## Action JSON Payload Schema
 
-The payload must be a top-level JSON array `[...]` representing a multi-stage workflow executed sequentially. Objects within a same stage will be executed parallelly.
+The payload must be ONLY ONE top-level JSON array `[...]` representing a multi-stage workflow executed sequentially. Objects within a same stage will be executed parallelly.
 
 * **Sequential Step (Object)**: `{"tool_name": {"param": "value"}}`
 * **Parallel Group (Array)**: `[{"tool_1": {}}, {"tool_2": {}}]`
@@ -49,7 +52,6 @@ The payload must be a top-level JSON array `[...]` representing a multi-stage wo
   ],
   { "tool3": {} }
 ]
-
 ```
 
 ## Concrete Examples. EXAMPLES ONLY!
@@ -95,7 +97,8 @@ No further actions are required.
 <response>
   <free_talk>Context is long and old task details are mixed with the current work. I will compact completed deltas before continuing.</free_talk>
   <context_compact>
-    <delta_ids>pd_100_1, pd_100_2</delta_ids>
+    <discard>pd_1</discard>
+    <offload>pd_2</offload>
     <summary><![CDATA[
 Task A is complete. Keep only: output path is ..., current workspace is ..., next task is to continue B, todo is ...
     ]]></summary>

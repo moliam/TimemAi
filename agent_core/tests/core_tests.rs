@@ -125,10 +125,6 @@ fn first_field_value(prompt: &str, field: &str) -> String {
         .to_string()
 }
 
-fn action_result_field(prompt: &str, field: &str) -> String {
-    first_field_value(prompt, field)
-}
-
 fn field_values(prompt: &str, field: &str) -> Vec<String> {
     let prefix = format!("{field}: ");
     prompt
@@ -694,7 +690,7 @@ fn one_prompt_delta_can_render_to_multiple_slices() {
     };
 
     assert!(prompt.contains("[BEGIN DELTA]"));
-    assert!(prompt.contains("delta_id: pd_"));
+    assert!(prompt.contains("delta_id: pd_1"));
     assert!(!prompt.contains("slice_id: ps_"));
     assert!(!prompt.contains("prompt_type: user_question"));
     assert_eq!(prompt.matches("[BEGIN DELTA]").count(), 1);
@@ -719,7 +715,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     let prompt = core.render_prompt();
     let delta_ids = field_values(&prompt, "delta_id");
 
-    assert_eq!(delta_ids.len(), 1);
+    assert_eq!(delta_ids, vec!["pd_1"]);
     assert!(!prompt.contains("## TIMEM_ASSISTANT"));
     assert!(!prompt.contains("先分析"));
     assert!(!prompt.contains("Final Answer:\n结论"));
@@ -729,7 +725,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     };
     let delta_ids = field_values(&prompt, "delta_id");
 
-    assert_eq!(delta_ids.len(), 2);
+    assert_eq!(delta_ids, vec!["pd_1", "pd_2"]);
     assert!(prompt.contains("## TIMEM_ASSISTANT"));
     assert!(prompt.contains("先分析"));
     assert!(
@@ -861,7 +857,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"working_still_action":[{{"memmgr":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"remove stale test delta"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -872,7 +868,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("removed_delta_count: 1"));
     let shrunk_tokens_estimate = first_field_value(&prompt, "shrunk_tokens_estimate")
         .parse::<u32>()
@@ -893,24 +889,33 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
 }
 
 #[test]
-fn memmgr_context_discard_removes_whole_delta_by_delta_id() {
+fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("memmgr_context_discard"),
+        tmp_dir("delta_id_global_sequence"),
     );
-    let prompt = match core.begin_turn("REMOVE_THIS_MEMMGR_DELTA", None) {
+    let prompt = match core.begin_turn("first delta", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let delta_id = first_field_value(&prompt, "delta_id");
-    assert!(!delta_id.is_empty());
+    assert_eq!(field_values(&prompt, "delta_id"), vec!["pd_1"]);
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(
-            r#"{{"working_still_action":[{{"memmgr":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = match core.begin_turn("second delta", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(field_values(&prompt, "delta_id"), vec!["pd_1", "pd_2"]);
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"context_compact":{"discard":["pd_1"],"summary":"drop first delta"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -919,11 +924,37 @@ fn memmgr_context_discard_removes_whole_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: context"));
-    assert!(prompt.contains("op: discard"));
-    assert!(prompt.contains("removed_delta_count: 1"));
-    assert!(!prompt.contains("REMOVE_THIS_MEMMGR_DELTA"));
+    assert_eq!(field_values(&prompt, "delta_id"), vec!["pd_2", "pd_3"]);
+    assert!(!prompt.contains("delta_id: pd_1"));
+}
+
+#[test]
+fn memmgr_context_discard_is_not_executable() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("memmgr_context_discard"),
+    );
+    let _prompt = match core.begin_turn("REMOVE_THIS_MEMMGR_DELTA", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"working_still_action":[{"memmgr":{"type":"context","op":"discard","delta_ids":["pd_missing"]}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("delta_ids_unsupported"));
+    assert!(prompt.contains("REMOVE_THIS_MEMMGR_DELTA"));
 }
 
 #[test]
@@ -942,7 +973,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndelta_ids: {delta_id}\nsummary:\n旧任务已经完成，只保留 compact 后的测试摘要。"
+            "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndiscard: {delta_id}\nsummary:\n旧任务已经完成，只保留 compact 后的测试摘要。"
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -979,7 +1010,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"working_still_action":[{{"memmgr":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"remove visible test delta"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -990,7 +1021,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("removed_delta_count: 1"));
     let shrunk_tokens_estimate = first_field_value(&prompt, "shrunk_tokens_estimate")
         .parse::<u32>()
@@ -1179,9 +1210,9 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     assert!(prompt.contains("current progress"));
     assert!(prompt.contains("todo/next steps"));
     assert!(prompt.contains("high-level work principles"));
-    assert!(prompt.contains("memmgr type=scratch op=write kind=context_offload"));
-    assert!(prompt.contains("kind=notes"));
-    assert!(prompt.contains("memmgr type=context op=discard"));
+    assert!(prompt.contains("response protocol's context_compact block"));
+    assert!(prompt.contains("offload important but lengthy delta ids"));
+    assert!(prompt.contains("discard stale delta ids"));
     assert!(!prompt.contains("use scratch_write"));
     assert!(!prompt.contains("use prompt_shrink"));
     assert!(!prompt.contains("shrink_review_threshold_tokens"));
@@ -1218,7 +1249,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!delta_ids.is_empty());
 
     let shrink_response = format!(
-        r#"{{"working_still_action":[{{"memmgr":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
+        r#"{{"context_compact":{{"discard":{},"summary":"compact old prompt context and keep current task state"}}}}"#,
         serde_json::to_string(&delta_ids).unwrap()
     );
     let step = core.apply_model_response(LlmResponse {
@@ -1232,9 +1263,8 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(next_prompt.contains("Action result: memmgr"));
-    assert!(next_prompt.contains("type: context"));
-    assert!(next_prompt.contains("op: discard"));
+    assert!(next_prompt.contains("Action result: context_compact"));
+    assert!(next_prompt.contains("removed_delta_count"));
     assert!(!next_prompt.contains("mode=force_shrink_required"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -1644,7 +1674,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("上下文收缩", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"context_offload","label":"test offload","delta_ids":"pd_001,pd_002"}},{"memmgr":{"type":"context","op":"discard","delta_ids":"pd_001,pd_002"}}]}"#,
+            r#"{"status":"working","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"context_compact":{"discard":["pd_001"],"offload":["pd_002"],"summary":"保留测试状态摘要"}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1653,7 +1683,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected context maintenance action results, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("pd_001"));
     assert!(prompt.contains("pd_002"));
 
@@ -3184,7 +3214,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 }
 
 #[test]
-fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
+fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -3202,7 +3232,7 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"working_still_action":[{{"memmgr":{{"type":"scratch","op":"write","kind":"context_offload","label":"large investigation context","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -3213,17 +3243,19 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("label: large investigation context"));
-    assert!(prompt.contains("type: context_offload"));
-    assert!(prompt.contains(&format!("prompt_delta_ids: {delta_id}")));
-    assert!(prompt.contains("content_preview: [BEGIN SCRATCH OFFLOAD DELTA"));
-    let scratch_id = action_result_field(&prompt, "id");
+    assert!(prompt.contains("Action result: context_compact"));
+    assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
+    let scratch_id = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("The scratch id for offloaded deltas is: "))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     assert!(scratch_id.starts_with("scratch_"));
 
     let stored = fs::read_to_string(core.scratch_file()).unwrap();
     assert!(stored.contains("\"scratch_type\":\"context_offload\""));
-    assert!(stored.contains("\"label\":\"large investigation context\""));
+    assert!(stored.contains("\"label\":\"context compact offload\""));
     assert!(stored.contains("large investigation context that should move to scratch"));
     assert!(stored.contains(&delta_id));
 
@@ -3246,7 +3278,7 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
 }
 
 #[test]
-fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
+fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -3254,7 +3286,7 @@ fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
     );
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"context_offload","label":"bad refs","delta_ids":["pd_missing"]}}]}"#),
+        content: scored(r#"{"context_compact":{"offload":["pd_missing"],"summary":"bad refs should not write scratch"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3263,13 +3295,14 @@ fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("error: invalid_prompt_refs missing_ids=pd_missing"));
+    assert!(prompt.contains("Action result: context_compact"));
+    assert!(prompt.contains("error: invalid_prompt_refs"));
+    assert!(prompt.contains("missing_ids: pd_missing"));
     assert!(!core.scratch_file().exists());
 }
 
 #[test]
-fn scratch_context_offload_requires_prompt_refs_in_protocol() {
+fn context_compact_requires_prompt_refs_in_protocol() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -3277,7 +3310,7 @@ fn scratch_context_offload_requires_prompt_refs_in_protocol() {
     );
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"context_offload","label":"missing refs"}}]}"#),
+        content: scored(r#"{"context_compact":{"summary":"missing refs should repair"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3287,7 +3320,7 @@ fn scratch_context_offload_requires_prompt_refs_in_protocol() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("input.any_required_when_delta_ids"));
+    assert!(prompt.contains("context_compact[0].ids_required"));
 }
 
 #[test]
@@ -4653,7 +4686,7 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"working_still_action":[{{"memmgr":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -4664,7 +4697,10 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"), "{prompt}");
+    assert!(
+        prompt.contains("Action result: context_compact"),
+        "{prompt}"
+    );
     assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
     assert!(prompt.contains("background job"), "{prompt}");
     assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
@@ -4717,7 +4753,7 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"working_still_action":[{{"memmgr":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
             user_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -4728,7 +4764,10 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"), "{prompt}");
+    assert!(
+        prompt.contains("Action result: context_compact"),
+        "{prompt}"
+    );
     assert!(!prompt.contains("RUNNING JOB LIST:"), "{prompt}");
 
     #[cfg(unix)]
@@ -4778,7 +4817,7 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"working_still_action":[{{"memmgr":{{"type":"scratch","op":"write","kind":"context_offload","label":"running job context","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -4789,7 +4828,10 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("type: context_offload"), "{prompt}");
+    assert!(
+        prompt.contains("The scratch id for offloaded deltas is: scratch_"),
+        "{prompt}"
+    );
     assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
     assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
 
@@ -4840,7 +4882,7 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            "## Free_talk\n压缩旧上下文。\n\n## Context Compact\ndelta_ids: {running_delta_id}\nsummary:\n后台任务仍在运行，需要保留运行状态。"
+            "## Free_talk\n压缩旧上下文。\n\n## Context Compact\ndiscard: {running_delta_id}\nsummary:\n后台任务仍在运行，需要保留运行状态。"
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5690,7 +5732,7 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(prompt.find("`## Status`").unwrap() < prompt.find("`## Free_talk`").unwrap());
     assert!(!prompt.contains("`## Progress`"));
     assert!(prompt.contains("`## Context Compact`"));
-    assert!(prompt.contains("`delta_ids`"));
+    assert!(prompt.contains("`discard:`"));
     assert!(!prompt.contains("`slice_ids`"));
     assert!(!prompt.contains("\"context_compact?\""));
     assert!(!prompt.contains("object or array<object>"));
@@ -5856,9 +5898,10 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
     assert!(xml_prompt.contains("<working_still_action>"));
     assert!(xml_prompt.contains("<context_compact>"));
-    assert!(xml_prompt.contains("<delta_ids>"));
+    assert!(xml_prompt.contains("<discard>"));
+    assert!(xml_prompt.contains("<offload>"));
     assert!(xml_prompt.contains("<summary>"));
-    assert!(xml_prompt.contains("Runtime hides those dynamic prompt deltas"));
+    assert!(xml_prompt.contains("Runtime discards discarded deltas"));
     assert!(xml_prompt.contains("Example 4: Compact Context Response Output"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }

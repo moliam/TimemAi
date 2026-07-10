@@ -13,15 +13,18 @@ Required output shape:
 
 Context compact:
 
-- `<context_compact>` contains `<delta_ids>` and `<summary>`.
-- `delta_ids` is a comma-separated list of prompt delta ids to hide from active
+- `<context_compact>` contains `<discard>` and/or `<offload>`, plus `<summary>`.
+- `discard` is a comma-separated list of prompt delta ids to drop from active
   context.
+- `offload` is a comma-separated list of prompt delta ids to write into scratch
+  before dropping from active context. Runtime reports the scratch id in the next
+  SYSTEM prompt delta.
 - `summary` is the compacted replacement state. Keep active task description,
   working environment facts, progress, todo/next steps, and only still-relevant
   high-level work principles.
-- Runtime hides the referenced dynamic prompt deltas and appends the summary as
-  a new dynamic prompt delta.
-- Do not put the compact summary into a `memmgr type=context` action.
+- Runtime hides the referenced dynamic prompt deltas, stores offloaded deltas in
+  scratch, and appends the summary as a new dynamic prompt delta.
+- Do not use `memmgr` for context discard/offload.
 
 Text fields:
 

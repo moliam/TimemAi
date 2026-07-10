@@ -5,25 +5,23 @@ binding_name: memmgr
 summary: Unified local memory manager.
 description: |
   Unified local memory manager. Use type=durable for long-lived user facts,
-  type=raw_chat for UI-visible chat transcript, type=scratch for notes/context
-  offload, and type=context for dynamic prompt context maintenance.
+  type=raw_chat for UI-visible chat transcript, type=scratch for temporary notes.
 prompt_synopsis: |
   memmgr type=durable op=<schema|sql|insert|update|upsert|delete> ...
   memmgr type=raw_chat op=<search|sql|delete> ...
   memmgr type=scratch op=<search|write|read|delete> ...
-  memmgr type=context op=discard delta_ids=<list>
 prompt_input: |
   Always include type and op. Choose one synopsis line above and fill only the
   arguments needed for that operation as fields in the args object. Use arrays
-  for delta_ids and params. Use sql for durable reads. Use search_text for
-  raw_chat and scratch search ops. Use sql and optional params for sql ops,
+  for params. Use sql for durable reads. Use search_text for raw_chat and
+  scratch search ops. Use sql and optional params for sql ops,
   content for durable writes and scratch notes, id for read/update/delete, and
   expected_version from a previous durable sql result before updating or
   deleting an existing durable row. SQL ops are read-only and limited to
   memories/chat_messages table inspection/search.
 prompt_result: |
   Returns matching records, ids/versions for writes, conflict/error strings for
-  unsafe writes, scratch ids for notes/offload, or discard counts for context.
+  unsafe writes, scratch ids for notes.
   memory_conflict means the durable row version changed; usually read the row
   again with durable sql
   before deciding whether to retry, merge, or report the conflict.
@@ -34,12 +32,12 @@ input_schema: |
     "properties": {
       "type": {
         "type": "string",
-        "enum": ["durable", "raw_chat", "scratch", "context"],
-        "description": "Memory surface: durable user facts, UI-visible raw chat, scratch notes/offload, or dynamic context maintenance."
+        "enum": ["durable", "raw_chat", "scratch"],
+        "description": "Memory surface: durable user facts, UI-visible raw chat, scratch notes"
       },
       "op": {
         "type": "string",
-        "description": "Operation. durable: schema|sql|insert|update|upsert|delete; raw_chat: search|sql|delete; scratch: search|write|read|delete; context: discard."
+        "description": "Operation. durable: schema|sql|insert|update|upsert|delete; raw_chat: search|sql|delete; scratch: search|write|read|delete"
       },
       "search_text": {"type": "string", "description": "Search text; empty is allowed for raw_chat/scratch recent listing."},
       "sql": {"type": "string", "description": "SELECT/WITH SELECT/PRAGMA table_info(memories|chat_messages) only."},
@@ -47,9 +45,8 @@ input_schema: |
       "id": {"type": "string", "description": "Memory id, chat turn_id, or scratch id depending on type/op."},
       "expected_version": {"type": "integer", "description": "Durable row version from sql results; required when modifying/deleting an existing durable row."},
       "content": {"type": "string", "description": "Required for durable insert/update/upsert and scratch kind=notes."},
-      "kind": {"type": "string", "enum": ["notes", "context_offload"], "description": "Scratch write mode."},
+      "kind": {"type": "string", "enum": ["notes"], "description": "Scratch write mode."},
       "label": {"type": "string", "description": "Short retrieval label for scratch write."},
-      "delta_ids": {"type": "array", "items": {"type": "string"}, "description": "Prompt delta ids for scratch context_offload or context discard. can be found in BEGIN DELTA header"},
       "after_ms": {"type": "integer", "description": "Inclusive lower created_at_ms bound for raw_chat."},
       "before_ms": {"type": "integer", "description": "Exclusive upper created_at_ms bound for raw_chat."},
       "limit": {"type": "integer", "description": "Result cap."}
@@ -65,9 +62,7 @@ input_schema: |
       {"when": {"type": "scratch", "op": ["read", "delete"]}, "required": ["id"]}
     ],
     "x-required-any-when": [
-      {"when": {"type": "raw_chat", "op": "delete"}, "required": ["id", "search_text"]},
-      {"when": {"type": "scratch", "kind": "context_offload"}, "required": ["delta_ids"]},
-      {"when": {"type": "context", "op": "discard"}, "required": ["delta_ids"]}
+      {"when": {"type": "raw_chat", "op": "delete"}, "required": ["id", "search_text"]}
     ]
   }
 output_schema: |
@@ -80,8 +75,6 @@ output_schema: |
       "id": {"type": "string", "description": "Durable memory id, chat turn id, or scratch id."},
       "version": {"type": "integer", "description": "Durable memory version after write/update/delete."},
       "deleted": {"type": "boolean", "description": "Delete result."},
-      "hidden_slices": {"type": "integer", "description": "Context discard hidden slice count."},
-      "removed_deltas": {"type": "integer", "description": "Context discard removed delta count."},
       "error": {"type": "string", "description": "Validation/storage/conflict message."}
     }
   }

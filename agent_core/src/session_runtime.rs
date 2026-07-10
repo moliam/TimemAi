@@ -2327,15 +2327,14 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"free_talk":"","working_still_action":[{{"memmgr":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
+                    r#"{{"free_talk":"","context_compact":{{"discard":{},"summary":"discard stale context and keep current task state"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 13_253, false));
             }
             assert_eq!(self.prompts.len(), 2);
-            assert!(prompt.contains("Action result: memmgr"));
-            assert!(prompt.contains("type: context"));
-            assert!(prompt.contains("op: discard"));
+            assert!(prompt.contains("Action result: context_compact"));
+            assert!(prompt.contains("Context compact summary"));
             assert!(!prompt.contains("mode=force_shrink_required"));
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
@@ -3321,17 +3320,14 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"free_talk":"","working_still_action":[{{"memmgr":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}]}}"#,
+                    r#"{{"free_talk":"","context_compact":{{"offload":{},"summary":"offload old context and keep the current task active"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 4_000, false));
             }
             assert_eq!(self.prompts.len(), 2);
-            assert!(prompt.contains("Action result: memmgr"));
-            assert!(prompt.contains("type: scratch"));
-            assert!(prompt.contains("op: write"));
-            assert!(prompt.contains("id: scratch_"));
-            assert!(prompt.contains("label: session e2e offload"));
+            assert!(prompt.contains("Action result: context_compact"));
+            assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"scratch 已记录，可以继续。"}"#,
                 4_100,
@@ -3371,7 +3367,7 @@ finished
         assert_eq!(model.prompts.len(), 2);
         let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
         assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
-        assert!(scratch_text.contains(r#""label":"session e2e offload""#));
+        assert!(scratch_text.contains(r#""label":"context compact offload""#));
         assert!(scratch_text.contains("extra context that should be offloaded"));
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "turn_final"), 1);
@@ -3547,34 +3543,16 @@ Markdown 协议动作已执行。"#,
                         "forced discard prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"free_talk":"","working_still_action":[{{"memmgr":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}]}}"#,
+                        r#"{{"free_talk":"","context_compact":{{"discard":{},"offload":{},"summary":"offload important long story context, discard stale visible deltas, and keep active task state"}}}}"#,
+                        serde_json::to_string(&delta_ids).unwrap(),
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_650, false))
                 }
                 9 => {
-                    assert!(prompt.contains("mode=force_shrink_required"));
-                    assert!(prompt.contains("Action result: memmgr"));
-                    assert!(prompt.contains("type: scratch"));
-                    assert!(prompt.contains("op: write"));
-                    assert!(prompt.contains("id: scratch_"));
-                    let mut delta_ids = prompt_field_values(prompt, "delta_id");
-                    delta_ids.sort();
-                    delta_ids.dedup();
-                    assert!(
-                        !delta_ids.is_empty(),
-                        "post-scratch forced discard prompt should expose delta ids"
-                    );
-                    let content = format!(
-                        r#"{{"free_talk":"","working_still_action":[{{"memmgr":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
-                        serde_json::to_string(&delta_ids).unwrap()
-                    );
-                    Ok(llm(content, 7_700, false))
-                }
-                10 => {
-                    assert!(prompt.contains("Action result: memmgr"));
-                    assert!(prompt.contains("type: context"));
-                    assert!(prompt.contains("op: discard"));
+                    assert!(prompt.contains("Action result: context_compact"));
+                    assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
+                    assert!(prompt.contains("Context compact summary"));
                     assert!(!prompt.contains("mode=force_shrink_required"));
                     Ok(llm(
                         r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
@@ -3636,7 +3614,7 @@ Markdown 协议动作已执行。"#,
         }
 
         assert_eq!(outputs, expected_outputs);
-        assert_eq!(model.calls, 10);
+        assert_eq!(model.calls, 9);
         assert!(
             model
                 .prompts
@@ -3650,15 +3628,15 @@ Markdown 协议动作已执行。"#,
                 .iter()
                 .filter(|prompt| prompt.contains("mode=force_shrink_required"))
                 .count()
-                >= 2,
-            "story should force shrink through scratch offload then context discard"
+                >= 1,
+            "story should force shrink through context compact"
         );
 
         let memory_text = std::fs::read_to_string(dir.join("memory.jsonl")).unwrap();
         assert!(memory_text.contains("测试项目代号是 OMEGA-7"));
         let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
         assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
-        assert!(scratch_text.contains(r#""label":"story replay context offload""#));
+        assert!(scratch_text.contains(r#""label":"context compact offload""#));
 
         let action_topics: Vec<_> = ui
             .events
@@ -3677,20 +3655,6 @@ Markdown 协议动作已执行。"#,
                 == CoreActionKind::Memory {
                     surface: "durable".to_string(),
                     operation: "sql".to_string(),
-                }
-        }));
-        assert!(action_topics.iter().any(|topic| {
-            topic.kind
-                == CoreActionKind::Memory {
-                    surface: "scratch".to_string(),
-                    operation: "write".to_string(),
-                }
-        }));
-        assert!(action_topics.iter().any(|topic| {
-            topic.kind
-                == CoreActionKind::Memory {
-                    surface: "context".to_string(),
-                    operation: "discard".to_string(),
                 }
         }));
 

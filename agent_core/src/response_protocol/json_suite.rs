@@ -277,10 +277,21 @@ fn parse_context_compacts(
             }
             break;
         };
-        let delta_ids = object
-            .get("delta_ids")
+        let discard_delta_ids = object
+            .get("discard")
+            .or_else(|| object.get("discard_delta_ids"))
+            .or_else(|| object.get("delta_ids"))
             .map(super::json_string_list)
             .unwrap_or_default();
+        let offload_delta_ids = object
+            .get("offload")
+            .or_else(|| object.get("offload_delta_ids"))
+            .map(super::json_string_list)
+            .unwrap_or_default();
+        let mut delta_ids = discard_delta_ids.clone();
+        delta_ids.extend(offload_delta_ids.iter().cloned());
+        delta_ids.sort();
+        delta_ids.dedup();
         let summary = object
             .get("summary")
             .and_then(Value::as_str)
@@ -300,6 +311,8 @@ fn parse_context_compacts(
             break;
         }
         compacts.push(ParsedContextCompact {
+            discard_delta_ids,
+            offload_delta_ids,
             delta_ids,
             slice_ids: Vec::new(),
             summary,
@@ -345,8 +358,24 @@ mod tests {
         assert!(env.repair_issue.is_none());
         assert_eq!(env.context_compacts.len(), 1);
         assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a"]);
+        assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
+        assert!(env.context_compacts[0].offload_delta_ids.is_empty());
         assert!(env.context_compacts[0].slice_ids.is_empty());
         assert_eq!(env.context_compacts[0].summary, "keep important state");
+    }
+
+    #[test]
+    fn parses_context_compact_discard_and_offload_fields() {
+        let env = parse_envelope(
+            r#"{"free_talk":"整理上下文","context_compact":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none());
+        assert_eq!(env.context_compacts.len(), 1);
+        assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
+        assert_eq!(env.context_compacts[0].offload_delta_ids, vec!["pd_b"]);
+        assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a", "pd_b"]);
     }
 
     #[test]

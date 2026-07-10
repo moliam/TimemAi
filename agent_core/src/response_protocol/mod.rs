@@ -198,7 +198,19 @@ pub(crate) fn is_tool_action_object(value: &Value) -> bool {
         return false;
     }
     let (name, input) = object.iter().next().expect("checked len");
-    !matches!(name.as_str(), "order" | "actions") && input.is_object()
+    !matches!(
+        name.as_str(),
+        "order"
+            | "actions"
+            | "status"
+            | "final_answer"
+            | "free_talk"
+            | "working_still_action"
+            | "next_actions"
+            | "context_compact"
+            | "context_compacts"
+            | "memory_candidates"
+    ) && input.is_object()
 }
 
 pub(crate) fn parse_action_workflow_value(
@@ -336,6 +348,8 @@ impl ParsedEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedContextCompact {
+    pub discard_delta_ids: Vec<String>,
+    pub offload_delta_ids: Vec<String>,
     pub delta_ids: Vec<String>,
     pub slice_ids: Vec<String>,
     pub summary: String,
@@ -558,9 +572,9 @@ mod tests {
     #[test]
     fn json_markdown_xml_protocols_parse_same_context_compact() {
         assert_protocols_equivalent(
-            r#"{"free_talk":"compact","context_compact":{"delta_ids":["pd_a"],"summary":"keep state"}}"#,
-            "## Free_talk\ncompact\n\n## Context Compact\ndelta_ids: pd_a\nsummary:\nkeep state",
-            r#"<response><free_talk>compact</free_talk><context_compact><delta_ids>pd_a</delta_ids><summary>keep state</summary></context_compact></response>"#,
+            r#"{"free_talk":"compact","context_compact":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
+            "## Free_talk\ncompact\n\n## Context Compact\ndiscard: pd_a\noffload: pd_b\nsummary:\nkeep state",
+            r#"<response><free_talk>compact</free_talk><context_compact><discard>pd_a</discard><offload>pd_b</offload><summary>keep state</summary></context_compact></response>"#,
         );
     }
 

@@ -538,7 +538,7 @@ keeps `delta_id` as the stable maintenance handle:
 
 ```text
 [BEGIN DELTA]
-delta_id: pd_1782200000000_2
+delta_id: pd_1
 time: 1782200000000
 
 ## USER
@@ -557,6 +557,10 @@ runtime notes such as response repair, compaction result, or work instructions
 
 [END DELTA]
 ```
+
+Runtime assigns normal dynamic delta ids as a simple monotonic sequence:
+`pd_1`, `pd_2`, `pd_3`, ... . The sequence is not derived from timestamps and is
+not reused after compact/discard hides older deltas.
 
 The assistant replay policy is explicit. By default, successful model output is
 replayed into the next delta verbatim under the current assistant role, so the
@@ -587,10 +591,10 @@ Runtime shrink review and context maintenance should use `delta_id`:
   text that has not yet gone through the provider is estimated as roughly
   `chars / 4`.
 - At that 90% threshold, runtime marks shrink as required. The model should
-  compact before continuing: summarize useful dynamic prompt deltas to about
-  10%-20% of their current token footprint, discard stale details, put important
-  but lengthy state into scratch memory, and then use `memmgr type=context
-  op=discard` on covered `delta_id` ranges.
+  compact before continuing with the response protocol's `context_compact`
+  branch: summarize useful dynamic prompt deltas to about 10%-20% of their
+  current token footprint, discard stale delta ids, and offload important but
+  lengthy delta ids into scratch.
 
 Prompt deltas are append-only in normal operation. Later provider requests
 render the same static prefix plus all retained dynamic deltas, so the
@@ -625,7 +629,7 @@ static prompt
 [END SYSTEM PROMPT]
 
 [BEGIN DELTA]
-delta_id: pd_1782200000000_1
+delta_id: pd_1
 time: 1782200000000
 
 ## USER
@@ -816,7 +820,8 @@ model response:
 {
   "free_talk": "Compacting stale context before continuing.",
   "context_compact": {
-    "delta_ids": ["pd_100_1", "pd_100_2"],
+    "discard": ["pd_1"],
+    "offload": ["pd_2"],
     "summary": "Earlier work identified the retry redraw issue. Preserve the fix direction and test requirements."
   },
   "next_actions": [
@@ -830,9 +835,11 @@ model response:
 }
 ```
 
-Runtime validates `delta_ids` against currently visible dynamic prompt refs. If
-all refs exist, it hides those dynamic refs and appends the summary as a new
-`context_compact` dynamic delta. If any ref is missing, runtime returns a
+Runtime validates `discard` and `offload` delta ids against currently visible
+dynamic prompt refs. If all refs exist, it writes offloaded deltas into scratch,
+hides discarded/offloaded refs, and appends the summary as a new
+`context_compact` dynamic delta. The next prompt delta records the scratch id for
+offloaded deltas. If any ref is missing, runtime returns a
 repairable action result and does not silently discard context.
 
 ### Action Object
@@ -880,7 +887,7 @@ Example:
 
 ```text
 [BEGIN DELTA]
-delta_id: pd_1782200001000_4
+delta_id: pd_4
 time: 1782200001000
 
 ## SYSTEM
@@ -1083,73 +1090,37 @@ It does not automatically terminate them on normal timeout, final answer, or
 context compact; the model/user must explicitly inspect or stop a still-running
 pid when cleanup is desired.
 
-### Context Discard Action
+### Context Compact Execution
 
-`memmgr` with `type=context, op=discard` is the structured action that actually
-removes dynamic prompt context. It accepts ids that came from rendered prompt
-slices:
+Context shrink is a response-level protocol branch, not a `memmgr` tool action.
+The model chooses which prompt deltas to discard and which to offload:
 
-```json
-{
-  "memmgr": {
-    "type": "context",
-    "op": "discard",
-    "delta_ids": ["pd_1782200000000_2"]
-  }
-}
+```xml
+<context_compact>
+  <discard>pd_2</discard>
+  <offload>pd_3</offload>
+  <summary>Keep the active task, workspace facts, progress, todo, and relevant principles.</summary>
+</context_compact>
 ```
 
-Rules:
+Runtime behavior:
 
-- `delta_ids` removes whole logical prompt deltas.
+- `discard` removes whole visible dynamic prompt deltas from future rendering.
+- `offload` first copies the referenced visible dynamic prompt deltas into
+  scratch, then removes them from future rendering.
+- `summary` is appended as a new system prompt component so the model keeps the
+  essential abstract state.
+- The next prompt delta includes `The scratch id for offloaded deltas is: ...`
+  when offload wrote scratch.
 - `prompt_0` is never removable.
-- Hidden deltas are not rendered in later prompts and are not returned by
-  prompt fallback search.
+- Missing refs fail the compact action without silently discarding context.
 
-Forced compaction uses the same response envelope and action protocol; it does
-not introduce a separate `compressed_delta` schema. The model decides what
-should be offloaded and supplies ids; runtime owns validation and copies actual
-prompt delta content into scratch. A typical forced context reduction response
-first asks runtime to offload covered prompt context, then discards those dynamic
-ids:
+`memmgr type=scratch op=write` remains for model-written notes only
+(`kind=notes`). The model can later use `memmgr type=scratch op=read` with a
+scratch id returned by context compact to retrieve offloaded details.
 
-```json
-{
-  "free_talk": "Preparing to compact dynamic context before continuing.",
-  "status": "working",
-  "next_actions": [
-    {
-      "memmgr": {
-        "type": "scratch",
-        "op": "write",
-        "kind": "context_offload",
-        "label": "release validation context",
-        "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
-      }
-    },
-    {
-      "memmgr": {
-        "type": "context",
-        "op": "discard",
-        "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
-      }
-    }
-  ]
-}
-```
-
-Scratch write has two modes under `memmgr type=scratch op=write`:
-
-- `kind=notes`: model provides `label` and `content`; runtime stores the note and
-  returns `id`, `label`, `type`, and a short preview.
-- `kind=context_offload`: model provides `label` and `delta_ids`;
-  runtime verifies the ids are visible dynamic prompt context, rejects `prompt_0`,
-  copies the real content into scratch, and returns only index metadata plus a
-  preview. The model later uses `memmgr type=scratch op=read` with the returned
-  id to retrieve full details when needed.
-
-This keeps the boundary explicit: the model reasons over labels and ids, while
-runtime performs trusted prompt-context transfer.
+This keeps the boundary explicit: the model reasons over delta ids and summary,
+while runtime performs trusted prompt-context transfer and scratch storage.
 
 ## Provider Layer
 

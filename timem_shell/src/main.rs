@@ -3649,7 +3649,7 @@ mod static_prompt_tests {
         assert!(!STATIC_PROMPT.contains("\"durable_ctx_score\""));
         assert!(!STATIC_PROMPT.contains("Every model response must score"));
         assert!(STATIC_PROMPT.contains("Context maintenance"));
-        assert!(STATIC_PROMPT.contains("`memmgr` actions"));
+        assert!(STATIC_PROMPT.contains("response protocol's context compact branch"));
         assert!(STATIC_PROMPT.contains("do not target this system prompt"));
         assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
         assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));

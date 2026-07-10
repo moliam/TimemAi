@@ -1919,8 +1919,8 @@ mod tests {
         assert!(rendered.contains("Use sql for durable reads"));
         assert!(!rendered.contains("durable: query|schema"));
         assert!(!rendered.contains("empty is allowed for durable/raw_chat/scratch recent listing"));
-        assert!(rendered.contains("Conditional one of:"));
-        assert!(rendered.contains("(type=context, op=discard) requires one of delta_ids"));
+        assert!(!rendered.contains("type=context"));
+        assert!(!rendered.contains("context_offload"));
         assert!(!rendered.contains("when `` is"));
         assert!(rendered.contains("**Result**"));
         assert!(!rendered.contains("```"));
@@ -2017,23 +2017,7 @@ mod tests {
                     ("label", Value::String("large context".to_string())),
                 ])
             )
-            .unwrap_err()
-            .contains("input.any_required_when_delta_ids_when_kind=context_offload,type=scratch"));
-        assert!(registry
-            .validate_action_input(
-                "memmgr",
-                &json_object([
-                    ("type", Value::String("scratch".to_string())),
-                    ("op", Value::String("write".to_string())),
-                    ("kind", Value::String("context_offload".to_string())),
-                    ("label", Value::String("large context".to_string())),
-                    (
-                        "delta_ids",
-                        Value::Array(vec![Value::String("pd_1".to_string())])
-                    ),
-                ])
-            )
-            .is_ok());
+            .is_err());
         assert!(registry
             .validate_action_input(
                 "memmgr",
@@ -2042,8 +2026,7 @@ mod tests {
                     ("op", Value::String("discard".to_string())),
                 ])
             )
-            .unwrap_err()
-            .contains("input.any_required_when_delta_ids_when_op=discard,type=context"));
+            .is_err());
         assert!(registry
             .validate_action_input(
                 "shell_job_status",

@@ -52,7 +52,7 @@ compact or offload old dynamic context.
 ---- Prompt delta example -----
 
 [BEGIN DELTA]   --> a delta begins with BEGIN DELTA
-delta_id: xxx    --> the system generated identity for this delta
+delta_id: pd_1    --> the system generated identity for this delta. It is a simple globally increasing sequence: pd_1, pd_2, ...
 time: 123        --> time of creation
 
 ## USER
@@ -91,7 +91,7 @@ Refer to memmgr tool spec for usage.
 Prompt context is actually the current working memory.
 
 Shrink timely if there are stale/wrong/oversized/temporary prompt. Frequently ask yourself. Do this through
- `memmgr` actions as mentioned below.
+ the response protocol's context compact branch.
 
 Target dynamic prompt deltas by `delta_id`; do not target this system prompt.
 

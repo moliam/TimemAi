@@ -488,13 +488,20 @@ fn parse_context_compact_section(
     if body.trim().is_empty() {
         return Vec::new();
     }
-    let mut delta_ids = Vec::new();
+    let mut discard_delta_ids = Vec::new();
+    let mut offload_delta_ids = Vec::new();
     let mut summary_lines = Vec::new();
     let mut in_summary = false;
     for line in body.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("delta_ids:") {
-            delta_ids = split_id_list(rest);
+        if let Some(rest) = trimmed.strip_prefix("discard:") {
+            discard_delta_ids = split_id_list(rest);
+            in_summary = false;
+        } else if let Some(rest) = trimmed.strip_prefix("offload:") {
+            offload_delta_ids = split_id_list(rest);
+            in_summary = false;
+        } else if let Some(rest) = trimmed.strip_prefix("delta_ids:") {
+            discard_delta_ids = split_id_list(rest);
             in_summary = false;
         } else if let Some(rest) = trimmed.strip_prefix("summary:") {
             in_summary = true;
@@ -506,6 +513,10 @@ fn parse_context_compact_section(
         }
     }
     let summary = summary_lines.join("\n").trim().to_string();
+    let mut delta_ids = discard_delta_ids.clone();
+    delta_ids.extend(offload_delta_ids.iter().cloned());
+    delta_ids.sort();
+    delta_ids.dedup();
     if delta_ids.is_empty() {
         if repair_issue.is_none() {
             *repair_issue = Some("context_compact.ids_required".to_string());
@@ -519,6 +530,8 @@ fn parse_context_compact_section(
         return Vec::new();
     }
     vec![ParsedContextCompact {
+        discard_delta_ids,
+        offload_delta_ids,
         delta_ids,
         slice_ids: Vec::new(),
         summary,
@@ -769,12 +782,14 @@ not a real progress section
 
     #[test]
     fn parses_context_compact_section() {
-        let input = "## Free_talk\n整理上下文\n\n## Context Compact\ndelta_ids: pd_a, pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```";
+        let input = "## Free_talk\n整理上下文\n\n## Context Compact\ndiscard: pd_a\noffload: pd_b\nsummary:\n保留当前任务结论。\n下一步继续验证。\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```";
         let env = parse_markdown_envelope(input, &caps());
 
         assert!(env.repair_issue.is_none());
         assert_eq!(env.context_compacts.len(), 1);
         assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a", "pd_b"]);
+        assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
+        assert_eq!(env.context_compacts[0].offload_delta_ids, vec!["pd_b"]);
         assert!(env.context_compacts[0].slice_ids.is_empty());
         assert!(env.context_compacts[0].summary.contains("保留当前任务结论"));
         assert_eq!(env.next_actions.len(), 1);

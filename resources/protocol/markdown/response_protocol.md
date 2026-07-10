@@ -33,12 +33,12 @@ Required section rules:
   Do not use `action`/`args` fields or `{ "order": "...", "actions": [...] }`.
   DO NOT include `## Working_Still_Action` when `## Status` is `finished`.
 - `## Context Compact` lets you replace old dynamic context with a concise
-  summary. Provide delta_ids plus a summary. Runtime will hide the referenced
-  dynamic prompt deltas and append your summary as a new dynamic prompt delta. A
-  good compact summary keeps the active task description, working
+  summary. Provide `discard:` and/or `offload:` plus a summary. Runtime will
+  drop discarded deltas, write offloaded deltas into scratch, and append your
+  summary as a new dynamic prompt delta. A good compact summary keeps the active task description, working
   environment facts, current progress, todo/next steps, and only the few
-  high-level work principles that still guide the task. Do not put the compact
-  summary into a `memmgr type=context` action. If compact completes the current
+  high-level work principles that still guide the task. Do not use `memmgr` for
+  context discard/offload. If compact completes the current
   user request, use `## Status` finished with `## Final_Answer`.
 
 The response protocol summary is:
@@ -96,7 +96,8 @@ finished
 正在压缩上下文...
 
 ## Context Compact
-delta_ids: pd_100_1, pd_100_2
+discard: pd_1
+offload: pd_2
 summary:
 This is the summary....
 

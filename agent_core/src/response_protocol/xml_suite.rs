@@ -164,7 +164,8 @@ struct ResponseFields {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ContextCompactFields {
-    delta_ids: String,
+    discard: String,
+    offload: String,
     summary: String,
 }
 
@@ -286,7 +287,10 @@ fn scan_response_body(body: &str) -> ResponseFields {
 
 fn parse_context_compact_fields(body: &str) -> ContextCompactFields {
     ContextCompactFields {
-        delta_ids: extract_tag_text(body, "delta_ids", false).unwrap_or_default(),
+        discard: extract_tag_text(body, "discard", false)
+            .or_else(|| extract_tag_text(body, "delta_ids", false))
+            .unwrap_or_default(),
+        offload: extract_tag_text(body, "offload", false).unwrap_or_default(),
         summary: extract_tag_text(body, "summary", true).unwrap_or_default(),
     }
 }
@@ -556,7 +560,12 @@ fn parse_context_compacts_from_fields(
 ) -> Vec<ParsedContextCompact> {
     let mut compacts = Vec::new();
     for (idx, item) in response.context_compacts.iter().enumerate() {
-        let delta_ids = split_id_list(&item.delta_ids);
+        let discard_delta_ids = split_id_list(&item.discard);
+        let offload_delta_ids = split_id_list(&item.offload);
+        let mut delta_ids = discard_delta_ids.clone();
+        delta_ids.extend(offload_delta_ids.iter().cloned());
+        delta_ids.sort();
+        delta_ids.dedup();
         let summary = item.summary.trim().to_string();
         if delta_ids.is_empty() {
             if repair_issue.is_none() {
@@ -571,6 +580,8 @@ fn parse_context_compacts_from_fields(
             break;
         }
         compacts.push(ParsedContextCompact {
+            discard_delta_ids,
+            offload_delta_ids,
             delta_ids,
             slice_ids: Vec::new(),
             summary,
@@ -1142,7 +1153,8 @@ I am explaining a malformed example:
             r#"<response>
 <free_talk>need compact</free_talk>
 <context_compact>
-<delta_ids>pd_a, pd_b</delta_ids>
+<discard>pd_a</discard>
+<offload>pd_b</offload>
 <summary><![CDATA[keep state]]></summary>
 </context_compact>
 </response>"#,
@@ -1152,6 +1164,8 @@ I am explaining a malformed example:
         assert!(env.repair_issue.is_none());
         assert_eq!(env.context_compacts.len(), 1);
         assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a", "pd_b"]);
+        assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
+        assert_eq!(env.context_compacts[0].offload_delta_ids, vec!["pd_b"]);
         assert_eq!(env.context_compacts[0].summary, "keep state");
     }
 
