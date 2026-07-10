@@ -5855,6 +5855,11 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("# System Response Protocol"));
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
     assert!(xml_prompt.contains("<working_still_action>"));
+    assert!(xml_prompt.contains("<context_compact>"));
+    assert!(xml_prompt.contains("<delta_ids>"));
+    assert!(xml_prompt.contains("<summary>"));
+    assert!(xml_prompt.contains("Runtime hides those dynamic prompt deltas"));
+    assert!(xml_prompt.contains("Example 4: Compact Context Response Output"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }
 

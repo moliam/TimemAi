@@ -11,6 +11,18 @@ Required output shape:
    - `<context_compact>` when context must be compacted.
    - `<final_answer>` when all active/pending user prompts are complete.
 
+Context compact:
+
+- `<context_compact>` contains `<delta_ids>` and `<summary>`.
+- `delta_ids` is a comma-separated list of prompt delta ids to hide from active
+  context.
+- `summary` is the compacted replacement state. Keep active task description,
+  working environment facts, progress, todo/next steps, and only still-relevant
+  high-level work principles.
+- Runtime hides the referenced dynamic prompt deltas and appends the summary as
+  a new dynamic prompt delta.
+- Do not put the compact summary into a `memmgr type=context` action.
+
 Text fields:
 
 - `<free_talk>`, `<final_answer>`, and context compact `<summary>`
