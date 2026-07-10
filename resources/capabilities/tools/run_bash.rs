@@ -289,7 +289,7 @@ impl FileShellJobStore {
         let stderr = output.try_clone()?;
         let mut command = Command::new(BASH_EXECUTABLE);
         command
-            .arg("-lc")
+            .arg("-c")
             .arg(clean)
             .current_dir(cwd)
             .stdin(Stdio::null())
