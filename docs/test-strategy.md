@@ -97,7 +97,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time user supplement capture | real TTY multiline/paste/config/workspace smokes plus local fake-provider supplement smoke and stress smoke | real TTY smoke/stress in CI |
 | Observation panel | observation event/rendering tests | thinking view tests including retry, repair-count status, model-response topics, and global working-worker count | full CI |
 | Profiling | profiler aggregation and storage tests | `session_turn_records_cached_tokens_in_profiler_and_latest_usage`, `/prof` real TTY smoke | real TTY smoke |
-| Runtime performance | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded` | real TTY stress covers redraw under fake-provider delay and mid-turn supplement | `scripts/performance_guard.sh` in full CI |
+| Runtime performance | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_many_overlay_capabilities_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded` | real TTY stress covers redraw under fake-provider delay and mid-turn supplement | `scripts/performance_guard.sh` in full CI |
 | Audit and secrets | append audit, action grouping, redaction tests, sensitive scan | session tests assert turn/action/retry/repair audit records | sensitive scan + full CI |
 | Install/update scripts | install logic tests, install run-hint contract | CI script syntax and install logic | full CI |
 

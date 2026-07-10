@@ -117,7 +117,9 @@ impl CapabilityHostProfile {
         if !self.supports(manifest.requires_host.as_deref()) {
             return false;
         }
-        if manifest.binding.binding_type == "command" {
+        if manifest.binding.binding_type == "command"
+            || (manifest.binding.binding_type == "builtin" && manifest.binding.name == "run_bash")
+        {
             return self.local_command_execution;
         }
         true
@@ -2477,6 +2479,151 @@ example_json: |
         assert!(!registry
             .render_tool_catalog_markdown()
             .contains("local_echo"));
+    }
+
+    #[test]
+    fn no_local_command_profile_filters_run_bash_builtin_alias_even_without_requires_host() {
+        let dir = temp_capability_dir("no_local_command_builtin_alias_overlay");
+        let tools_dir = dir.join("tools");
+        fs::create_dir_all(&tools_dir).unwrap();
+        fs::write(
+            tools_dir.join("local_shell_alias.yaml"),
+            r#"kind: tool
+id: local_shell_alias
+binding_type: builtin
+binding_name: run_bash
+summary: Alias for local shell execution.
+description: |
+  This intentionally omits requires_host to prove the target binding is filtered.
+input_properties:
+  cmd: string
+required:
+  - cmd
+example_json: |
+  {
+    "action": "local_shell_alias",
+    "args": {
+      "cmd": "pwd"
+    }
+  }
+"#,
+        )
+        .unwrap();
+
+        let registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+            &dir,
+            CapabilityHostProfile::without_local_command_execution(),
+        )
+        .unwrap();
+
+        assert!(!registry.contains_tool("run_bash"));
+        assert!(!registry.contains_tool("local_shell_alias"));
+        assert!(!registry
+            .render_tool_catalog_markdown()
+            .contains("local_shell_alias"));
+        assert!(registry
+            .validate_action_input(
+                "local_shell_alias",
+                &json_object([("cmd", Value::String("pwd".to_string()))])
+            )
+            .unwrap_err()
+            .contains("unsupported_action:local_shell_alias"));
+    }
+
+    #[test]
+    fn registry_stress_loads_many_overlay_tools_and_skills_and_filters_removals() {
+        let dir = temp_capability_dir("many_runtime_overlay");
+        let tools_dir = dir.join("tools");
+        let skills_dir = dir.join("skills");
+        fs::create_dir_all(&tools_dir).unwrap();
+        fs::create_dir_all(&skills_dir).unwrap();
+        for i in 0..80 {
+            fs::write(
+                tools_dir.join(format!("overlay_tool_{i:03}.yaml")),
+                format!(
+                    r#"kind: tool
+id: overlay_tool_{i:03}
+binding_type: builtin
+binding_name: self_tool
+summary: Runtime overlay self inspection tool {i}.
+description: |
+  Runtime-added test tool {i} for capability registry stress coverage.
+input_properties:
+  type: string
+  op: string
+required:
+  - type
+  - op
+example_json: |
+  {{
+    "action": "overlay_tool_{i:03}",
+    "args": {{
+      "type": "about_me",
+      "op": "read"
+    }}
+  }}
+"#
+                ),
+            )
+            .unwrap();
+        }
+        for i in 0..25 {
+            let skill_dir = skills_dir.join(format!("skill_{i:03}"));
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("skill.yaml"),
+                format!(
+                    r#"kind: skill
+id: skill_{i:03}
+title: Overlay Skill {i}
+summary: Runtime overlay skill {i}.
+entry: instructions.md
+when_to_use: |
+  Use this synthetic skill {i} during capability stress tests.
+"#
+                ),
+            )
+            .unwrap();
+            fs::write(
+                skill_dir.join("instructions.md"),
+                format!("# Overlay Skill {i}\n\nStress body {i}.\n"),
+            )
+            .unwrap();
+        }
+
+        let registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+            &dir,
+            CapabilityHostProfile::with_local_command_execution(),
+        )
+        .unwrap();
+        assert!(registry.tool_count() >= 84);
+        assert_eq!(registry.skill_count(), 25);
+        assert!(registry.contains_tool("overlay_tool_000"));
+        assert!(registry.contains_tool("overlay_tool_079"));
+        assert!(registry
+            .validate_action_input(
+                "overlay_tool_079",
+                &json_object([
+                    ("type", Value::String("about_me".to_string())),
+                    ("op", Value::String("read".to_string())),
+                ])
+            )
+            .is_ok());
+        let rendered = registry.render_tool_catalog_markdown();
+        assert!(rendered.contains("#### `overlay_tool_000`"));
+        assert!(rendered.contains("#### `overlay_tool_079`"));
+        assert!(registry
+            .load_text("skill", "skill_024")
+            .contains("# Overlay Skill 24"));
+
+        let filtered = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+            &dir,
+            CapabilityHostProfile::without_local_command_execution(),
+        )
+        .unwrap();
+        assert!(filtered.contains_tool("overlay_tool_000"));
+        assert!(!filtered.contains_tool("run_bash"));
+        assert_eq!(filtered.skill_count(), 25);
     }
 
     #[test]

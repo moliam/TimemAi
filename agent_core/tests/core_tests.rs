@@ -6740,6 +6740,134 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
 }
 
 #[test]
+fn runtime_overlay_add_remove_keeps_prompt_executor_and_repair_consistent() {
+    let overlay_dir = tmp_dir("overlay_add_remove_consistency");
+    let tools_dir = overlay_dir.join("tools");
+    let scripts_dir = overlay_dir.join("scripts");
+    fs::create_dir_all(&tools_dir).unwrap();
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::write(
+        tools_dir.join("cap_echo.yaml"),
+        r#"kind: tool
+id: cap_echo
+binding_type: command
+binding_name: scripts/cap_echo.sh
+summary: Echo a capability payload.
+description: |
+  Runtime-added command tool used to verify capability add/remove behavior.
+input_properties:
+  text: string
+required:
+  - text
+example_json: |
+  {
+    "action": "cap_echo",
+    "args": {
+      "text": "hello"
+    }
+  }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        tools_dir.join("shell_alias.yaml"),
+        r#"kind: tool
+id: shell_alias
+binding_type: builtin
+binding_name: run_bash
+summary: Alias for local shell.
+description: |
+  Runtime-added builtin alias for run_bash.
+input_properties:
+  cmd: string
+required:
+  - cmd
+example_json: |
+  {
+    "action": "shell_alias",
+    "args": {
+      "cmd": "pwd"
+    }
+  }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        scripts_dir.join("cap_echo.sh"),
+        "payload=$(cat)\nprintf 'cap_echo_ok %s\\n' \"$payload\"\n",
+    )
+    .unwrap();
+
+    let registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+        &overlay_dir,
+        CapabilityHostProfile::with_local_command_execution(),
+    )
+    .unwrap();
+    let mut core = AgentCore::new(
+        "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("overlay_add_remove_active"),
+    );
+    core.set_capability_registry(registry);
+    let prompt = match core.begin_turn("use overlay", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected prompt, got {other:?}"),
+    };
+    assert!(prompt.contains("#### `cap_echo`"));
+    assert!(prompt.contains("#### `shell_alias`"));
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"working_still_action":[{"action":"cap_echo","args":{"text":"hello"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected overlay command result, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: cap_echo"));
+    assert!(prompt.contains("cap_echo_ok"));
+    assert!(prompt.contains(r#""text":"hello""#));
+    assert!(!prompt.contains("response is not protocol compliant"));
+
+    let filtered_registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+        &overlay_dir,
+        CapabilityHostProfile::without_local_command_execution(),
+    )
+    .unwrap();
+    let mut filtered_core = AgentCore::new(
+        "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("overlay_add_remove_filtered"),
+    );
+    filtered_core.set_capability_registry(filtered_registry);
+    let prompt = match filtered_core.begin_turn("use overlay after removal", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected filtered prompt, got {other:?}"),
+    };
+    assert!(!prompt.contains("#### `run_bash`"));
+    assert!(!prompt.contains("#### `cap_echo`"));
+    assert!(!prompt.contains("#### `shell_alias`"));
+
+    let prompt = match filtered_core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"working_still_action":[{"action":"shell_alias","args":{"cmd":"pwd"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected unsupported action repair, got {other:?}"),
+    };
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("unsupported_action:shell_alias"));
+    assert!(!prompt.contains("Action result: shell_alias"));
+}
+
+#[test]
 fn runtime_overlay_command_tool_executes_with_json_input() {
     let memory_dir = tmp_dir("overlay_command_memory");
     let overlay_dir = tmp_dir("overlay_command_capabilities");
@@ -7301,6 +7429,89 @@ fn assert_perf_under(label: &str, started: Instant, budget: Duration) {
             "{label} took {elapsed:?}, expected <= {budget:?}"
         );
     }
+}
+
+#[test]
+fn performance_guard_many_overlay_capabilities_render_is_bounded() {
+    let overlay_dir = tmp_dir("perf_many_overlay_capabilities");
+    let tools_dir = overlay_dir.join("tools");
+    let skills_dir = overlay_dir.join("skills");
+    fs::create_dir_all(&tools_dir).unwrap();
+    fs::create_dir_all(&skills_dir).unwrap();
+    for i in 0..120 {
+        fs::write(
+            tools_dir.join(format!("perf_tool_{i:03}.yaml")),
+            format!(
+                r#"kind: tool
+id: perf_tool_{i:03}
+binding_type: builtin
+binding_name: self_tool
+summary: Performance overlay tool {i}.
+description: |
+  Synthetic overlay tool {i} used for capability prompt render performance.
+input_properties:
+  type: string
+  op: string
+required:
+  - type
+  - op
+example_json: |
+  {{
+    "action": "perf_tool_{i:03}",
+    "args": {{
+      "type": "about_me",
+      "op": "read"
+    }}
+  }}
+"#
+            ),
+        )
+        .unwrap();
+    }
+    for i in 0..40 {
+        let skill_dir = skills_dir.join(format!("perf_skill_{i:03}"));
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("skill.yaml"),
+            format!(
+                r#"kind: skill
+id: perf_skill_{i:03}
+title: Performance Skill {i}
+summary: Synthetic performance skill {i}.
+entry: instructions.md
+when_to_use: |
+  Use synthetic skill {i} only in performance tests.
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("instructions.md"),
+            format!("# Performance Skill {i}\n\nBody {i}.\n"),
+        )
+        .unwrap();
+    }
+
+    let registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+        &overlay_dir,
+        CapabilityHostProfile::with_local_command_execution(),
+    )
+    .unwrap();
+    assert!(registry.contains_tool("perf_tool_119"));
+    assert_eq!(registry.skill_count(), 40);
+
+    let started = Instant::now();
+    let mut rendered_len = 0usize;
+    for _ in 0..80 {
+        rendered_len += registry.render_tool_catalog_markdown().len();
+        rendered_len += registry.render_skill_headers_markdown().len();
+    }
+    assert!(rendered_len > 1_000_000);
+    assert_perf_under(
+        "many overlay capability render x80",
+        started,
+        Duration::from_millis(750),
+    );
 }
 
 #[test]
