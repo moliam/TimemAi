@@ -23,7 +23,7 @@ deviation will break the downstream parser and cause a protocol repair.
 
 ## Tag Dictionary & Streaming Flow
 
-You must output your response components in the exact numerical order listed
+Your non-label output must be enclosed in the following labels. You must output your response components in the exact numerical order listed
 below:
 
 | Order | Tag Name | Presence | Rule & Description |

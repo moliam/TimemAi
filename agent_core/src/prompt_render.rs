@@ -4,10 +4,11 @@ use crate::response_protocol::ResponseProtocolSuite;
 use crate::{PromptDelta, PromptSlice};
 
 pub(crate) fn formatted_response_trailer(protocol_language: &str) -> String {
-    format!(
-        "Follow the system prompt, give your {} formatted response:",
-        protocol_language.trim()
-    )
+    let protocol_language = protocol_language.trim();
+    if protocol_language.eq_ignore_ascii_case("XML") {
+        return "Follow the system prompt, give your XML formatted response. It must start with <response>:".to_string();
+    }
+    format!("Follow the system prompt, give your {protocol_language} formatted response:")
 }
 
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
@@ -17,8 +18,8 @@ pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, 
     };
     let candidate = trimmed[line_start + 1..].trim();
     if candidate.starts_with("Follow the system prompt, give your ")
-        && candidate.ends_with(" formatted response:")
-        && candidate.len() > "Follow the system prompt, give your  formatted response:".len()
+        && candidate.contains(" formatted response")
+        && candidate.ends_with(':')
     {
         let prefix = trimmed[..line_start].trim_end();
         return (prefix, Some(candidate.to_string()));
@@ -231,13 +232,15 @@ mod tests {
 
     #[test]
     fn formatted_response_trailer_parser_preserves_protocol_name() {
-        let prompt =
-            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nFollow the system prompt, give your XML formatted response:";
-        let (prefix, trailer) = split_formatted_response_trailer(prompt);
+        let prompt = format!(
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\n{}",
+            formatted_response_trailer("XML")
+        );
+        let (prefix, trailer) = split_formatted_response_trailer(&prompt);
         assert_eq!(prefix, "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]");
         assert_eq!(
             trailer.as_deref(),
-            Some("Follow the system prompt, give your XML formatted response:")
+            Some("Follow the system prompt, give your XML formatted response. It must start with <response>:")
         );
     }
 

@@ -940,13 +940,13 @@ mod tests {
 
         assert_eq!(
             content.last().unwrap()["text"],
-            "Follow the system prompt, give your XML formatted response:"
+            "Follow the system prompt, give your XML formatted response. It must start with <response>:"
         );
         assert_eq!(content.last().unwrap().get("cache_control"), None);
         assert!(!content[0]["text"]
             .as_str()
             .unwrap()
-            .contains("Follow the system prompt, give your XML formatted response:"));
+            .contains("Follow the system prompt, give your XML formatted response"));
     }
 
     #[test]

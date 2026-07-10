@@ -1868,7 +1868,7 @@ finished
         assert_eq!(first_blocks[2].cache, crate::CacheControl::None);
         assert_eq!(
             first_blocks[2].text,
-            "Follow the system prompt, give your XML formatted response:"
+            crate::prompt_render::formatted_response_trailer("XML")
         );
 
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);

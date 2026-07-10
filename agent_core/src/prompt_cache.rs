@@ -290,18 +290,18 @@ mod tests {
         assert!(parts.new_delta.contains("delta1"));
         assert!(!parts
             .new_delta
-            .contains("Follow the system prompt, give your XML formatted response:"));
+            .contains("Follow the system prompt, give your XML formatted response"));
 
         let blocks = plan_prompt_cache(&prompt);
         assert_eq!(blocks.len(), 3);
         assert!(blocks[1].text.contains("delta1"));
         assert!(!blocks[1]
             .text
-            .contains("Follow the system prompt, give your XML formatted response:"));
+            .contains("Follow the system prompt, give your XML formatted response"));
         assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
         assert_eq!(
             blocks[2].text,
-            "Follow the system prompt, give your XML formatted response:"
+            "Follow the system prompt, give your XML formatted response. It must start with <response>:"
         );
         assert_eq!(blocks[2].cache, CacheControl::None);
     }
