@@ -1015,11 +1015,13 @@ impl AgentCore {
             .into_iter()
             .map(|update| {
                 format!(
-                    "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms",
+                    "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}",
                     update.pid,
                     update.description(),
                     compact_text(&update.command, 500),
                     update.elapsed_ms,
+                    update.status,
+                    compact_text(&update.output, 4000),
                 )
             })
             .collect::<Vec<_>>()

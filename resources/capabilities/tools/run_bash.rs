@@ -69,6 +69,8 @@ pub struct ShellJobExitUpdate {
     pub turn_id: String,
     pub created_at_ms: i64,
     pub elapsed_ms: i64,
+    pub status: String,
+    pub output: String,
 }
 
 impl ShellJobExitUpdate {
@@ -413,6 +415,16 @@ impl FileShellJobStore {
             turn_id: record.turn_id,
             created_at_ms: record.created_at_ms,
             elapsed_ms: now_ms().saturating_sub(record.created_at_ms),
+            status: fs::read_to_string(&record.status_file)
+                .unwrap_or_else(|_| "unknown".to_string())
+                .trim()
+                .to_string(),
+            output: compact_text(
+                &normalized_shell_output(
+                    &fs::read_to_string(&record.output_file).unwrap_or_default(),
+                ),
+                4000,
+            ),
         })
     }
 
@@ -1099,6 +1111,33 @@ fn normalized_shell_output(output: &str) -> String {
 }
 
 fn process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let mut status = 0;
+        let wait = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if wait == pid as libc::pid_t {
+            return false;
+        }
+        if wait == 0 {
+            return true;
+        }
+        if let Ok(output) = Command::new("/bin/ps")
+            .arg("-o")
+            .arg("stat=")
+            .arg("-p")
+            .arg(pid.to_string())
+            .output()
+        {
+            if output.status.success() {
+                let stat = String::from_utf8_lossy(&output.stdout);
+                let state = stat.trim();
+                if state.starts_with('Z') || state.contains('Z') {
+                    return false;
+                }
+                return !state.is_empty();
+            }
+        }
+    }
     Command::new("/bin/kill")
         .arg("-0")
         .arg(pid.to_string())
@@ -1533,6 +1572,8 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].pid, pid);
         assert_eq!(updates[0].description(), "background job");
+        assert_eq!(updates[0].status, "0");
+        assert_eq!(updates[0].output, "background_ok");
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1578,7 +1619,31 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].pid, pid);
         assert_eq!(updates[0].description(), "old timeout job");
+        assert_eq!(updates[0].status, "0");
+        assert_eq!(updates[0].output, "starteddone");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_running_treats_zombie_as_not_running() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-lc")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn short child");
+        let pid = child.id();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) && process_running(pid) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !process_running(pid),
+            "exited child pid {pid} should not be reported as running"
+        );
+        let _ = child.wait();
     }
 
     #[test]

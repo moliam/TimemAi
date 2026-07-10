@@ -4605,6 +4605,9 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
     assert!(prompt.contains("background job"), "{prompt}");
     assert!(prompt.contains("now exits"), "{prompt}");
+    assert!(prompt.contains("Exit status: 0"), "{prompt}");
+    assert!(prompt.contains("Final output:"), "{prompt}");
+    assert!(prompt.contains("background-ok"), "{prompt}");
 }
 
 #[test]
@@ -4931,6 +4934,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
     assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
     assert!(prompt.contains("old timeout job"), "{prompt}");
     assert!(prompt.contains("now exits"), "{prompt}");
+    assert!(prompt.contains("Final output:"), "{prompt}");
 }
 
 #[test]
