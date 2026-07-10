@@ -394,7 +394,7 @@ mod tests {
         assert_protocols_equivalent(
             r#"{"free_talk":"checking","working_still_action":[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Free_talk\nchecking\n\n## Working_Still_Action\n[{\"action\":\"memmgr\",\"args\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}},{\"action\":\"run_bash\",\"args\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]",
-            r#"<response><free_talk>checking</free_talk><working_still_action><![CDATA[[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]]]></working_still_action></response>"#,
+            r#"<response><free_talk>checking</free_talk><working_still_action><![CDATA[[{"order":"sequential","actions":[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}}]},{"order":"sequential","actions":[{"action":"run_bash","args":{"cmd":"pwd","timeout_ms":5000}}]}]]]></working_still_action></response>"#,
         );
     }
 

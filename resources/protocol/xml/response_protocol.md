@@ -52,29 +52,34 @@ Use one of the three JSON structures below.
 }
 ```
 
-### Format B: Parallel or Sequential Action Group
-
-```json
-{
-  "order": "parallel",
-  "actions": [
-    { "action": "tool_1", "args": {} },
-    { "action": "tool_2", "args": {} }
-  ]
-}
-```
-
-Workflow array entries execute in array order. Inside each group, `order`
-controls whether actions run in parallel or sequentially.
-
-### Format C: Multi-Group Workflow Array
-
-If you need to execute Group A before Group B, wrap them in a JSON array:
+### Format B: Parallel Action Group
 
 ```json
 [
-  { "order": "parallel", "actions": [...] },
-  { "order": "sequential", "actions": [...] }
+  { "action": "tool_1", "args": {} },
+  { "action": "tool_2", "args": {} }
+]
+```
+
+This direct array is one parallel group.
+
+### Format C: Multi-Group/action Workflow Array
+
+If you need Group A before Action B, use an outer array. Entries execute in
+array order. An inner array is one parallel group; a single action is its own
+sequential step.
+
+```json
+[
+  [
+    { "action": "tool_1", "args": {} },
+    { "action": "tool_2", "args": {} }
+  ],
+  [
+    { "action": "tool_3", "args": {} },
+    { "action": "tool_4", "args": {} }
+  ],
+  { "action": "tool_5", "args": {} }
 ]
 ```
 
@@ -119,5 +124,43 @@ No further actions are required.
   </final_answer>
 </response>
 ```
+
+### Example 3: Sequential Step Then Parallel Step
+
+```xml
+<response>
+  <free_talk>I need to inspect git state first. After that, I can inspect recent commits and run a Python validation script in parallel.</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[
+[
+  {
+    "action": "run_bash",
+    "args": {
+      "cmd": "git status --short",
+      "timeout_ms": 5000
+    }
+  },
+  [
+    {
+      "action": "run_bash",
+      "args": {
+        "cmd": "git log --oneline -5",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "action": "run_bash",
+      "args": {
+        "cmd": "python3 -m pytest -q",
+        "timeout_ms": 120000
+      }
+    }
+  ]
+]
+    ]]></action_json>
+  </working_still_action>
+</response>
+```
+
 
 Protocol Loaded. Respond to active/pending user prompts.
