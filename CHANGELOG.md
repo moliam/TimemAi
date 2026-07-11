@@ -6,6 +6,18 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- Provider request JSON is streamed to `curl` through stdin instead of being
+  placed in the process argument list, preventing large prompts from failing
+  locally with `Argument list too long (os error 7)` before any HTTP request.
+- Provider transport now drains stdout and stderr concurrently while retaining
+  cancellation polling, avoiding pipe backpressure on unusually large provider
+  responses or error bodies.
+- SIGINT handler registration now uses an explicit function-pointer conversion,
+  eliminating the newer Rust `function_casts_as_integer` warning on Linux while
+  preserving macOS behavior.
+
 ## [0.9.9] - 2026-07-11
 
 ### Added

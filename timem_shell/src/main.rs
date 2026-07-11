@@ -2360,7 +2360,7 @@ impl SigintGuard {
         unsafe {
             let mut previous: libc::sigaction = std::mem::zeroed();
             let mut next: libc::sigaction = std::mem::zeroed();
-            next.sa_sigaction = handle_sigint as usize;
+            next.sa_sigaction = handle_sigint as *const () as usize;
             libc::sigemptyset(&mut next.sa_mask);
             next.sa_flags = 0;
             if libc::sigaction(libc::SIGINT, &next, &mut previous) != 0 {
