@@ -1,5 +1,6 @@
 use crate::{
-    append_audit_event, model_retry_audit_event, model_retry_decision, normalize_user_supplements,
+    append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
+    model_retry_audit_event, model_retry_decision, normalize_user_supplements,
     turn_supporting_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
     HostDecisionRequest, LlmResponse, LongRunningCommandContinueRequest,
     LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome, ModelSystemRetryPolicy,
@@ -174,6 +175,22 @@ pub fn run_session_turn_with_model_client(
                     Err(err) => {
                         if ui.take_cancel_request() {
                             break cancelled_turn_parts();
+                        }
+                        if is_model_input_too_large_error(&err) {
+                            if let Some(recovery) = core.recover_from_model_input_too_large(&err) {
+                                let _ = append_audit_event(
+                                    request.audit_file,
+                                    &model_input_overflow_recovery_audit_event(
+                                        request.session,
+                                        &turn_id,
+                                        &recovery.removed_delta_id,
+                                        recovery.removed_action_output_bytes,
+                                        &err,
+                                    ),
+                                );
+                                step = recovery.step;
+                                continue;
+                            }
                         }
                         ui.on_model_error(&err);
                         core.record_turn_error_audit(
@@ -915,6 +932,184 @@ mod tests {
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "model_retry"), 0);
         assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
+        let dir = tmp_dir("sudden_large_action_delta_e2e");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
+        core.set_max_llm_input_tokens(3_000);
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Json;
+        config.max_llm_input_tokens = 3_000;
+        let mut ui = NoopTurnUi;
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"{"working_still_action":{"run_bash":{"cmd":"printf '%04096d' 0","timeout_ms":5000}}}"#,
+                2_700,
+                false,
+            )),
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"已根据上下文预算停止回填大输出。"}"#,
+                2_800,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "运行一个会突然产生大量输出的动作",
+                session: "large_delta_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "已根据上下文预算停止回填大输出。");
+        assert_eq!(model.prompts.len(), 2);
+        assert!(model.prompts[1].contains("Your action's output is too large:"));
+        assert!(model.prompts[1].contains("optimize your action or compact context"));
+        assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_recovers_from_provider_input_overflow_variants() {
+        for (case, error) in [
+            ("argv", "Argument list too long (os error 7)"),
+            ("http_413", "provider_http_413: payload too large"),
+            (
+                "context_limit",
+                "provider_http_400: context_length_exceeded: too many input tokens",
+            ),
+        ] {
+            let dir = tmp_dir(&format!("provider_input_overflow_{case}"));
+            let audit = dir.join("audit.json");
+            let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+            core.set_response_protocol(crate::ResponseProtocolKind::Json);
+            core.set_bash_approval_mode(BashApprovalMode::Approve);
+            let mut config = test_config();
+            config.response_protocol = crate::ResponseProtocolKind::Json;
+            let mut ui = NoopTurnUi;
+            let mut model = ReplayModel::new([
+                Ok(llm(
+                    r#"{"working_still_action":{"run_bash":{"cmd":"printf RECOVERABLE_RESULT","timeout_ms":5000}}}"#,
+                    2_000,
+                    false,
+                )),
+                Err(error.to_string()),
+                Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"输入越界已恢复。"}"#,
+                    2_100,
+                    false,
+                )),
+            ]);
+
+            let outcome = run_session_turn_with_model_client(
+                &mut core,
+                &mut config,
+                TurnInput {
+                    input: "执行动作后继续",
+                    session: "overflow_recovery_session",
+                    audit_file: &audit,
+                    runtime: "timem_native_shell",
+                    run_bash_target: "user_local_machine",
+                    additional_context: None,
+                },
+                &mut ui,
+                None,
+                &mut model,
+            );
+
+            assert_eq!(outcome.text, "输入越界已恢复。", "case={case}");
+            assert_eq!(model.prompts.len(), 3, "case={case}");
+            assert!(
+                model.prompts[1].contains("RECOVERABLE_RESULT"),
+                "case={case}"
+            );
+            assert!(
+                !model.prompts[2].contains("RECOVERABLE_RESULT"),
+                "case={case}"
+            );
+            assert!(
+                model.prompts[2].contains("Your action's output is too large:"),
+                "case={case}"
+            );
+            assert!(model.prompts[2].contains(error), "case={case}");
+            let events = read_audit_events(&audit);
+            assert_eq!(
+                audit_event_count(&events, "model_input_overflow_recovery"),
+                1,
+                "case={case}"
+            );
+            let recovery = audit_event(&events, "model_input_overflow_recovery").unwrap();
+            assert!(recovery["removed_delta_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("pd_")));
+            assert!(recovery["removed_action_output_bytes"].as_u64().unwrap() > 0);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn repeated_provider_overflow_stops_after_single_delta_recovery() {
+        let dir = tmp_dir("provider_overflow_does_not_loop");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Json);
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Json;
+        let mut ui = NoopTurnUi;
+        let error = "provider_http_400: context_length_exceeded";
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"{"working_still_action":{"run_bash":{"cmd":"printf ONE_SHOT_RESULT","timeout_ms":5000}}}"#,
+                2_000,
+                false,
+            )),
+            Err(error.to_string()),
+            Err(error.to_string()),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "验证输入越界不会无限恢复",
+                session: "overflow_no_loop_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(model.prompts.len(), 3);
+        assert!(outcome.stop_reason.is_some());
+        let events = read_audit_events(&audit);
+        assert_eq!(
+            audit_event_count(&events, "model_input_overflow_recovery"),
+            1
+        );
+        assert_eq!(audit_event_count(&events, "turn_error"), 1);
+        assert!(events
+            .iter()
+            .any(|event| event.to_string().contains("context_length_exceeded")));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -8,6 +8,14 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Fixed
 
+- Action results are now budgeted before their prompt Delta is committed. If a
+  sudden result would push estimated input beyond 95% of
+  `TIMEM_MAX_LLM_INPUT`, the large output is omitted and a bounded SYSTEM note
+  asks the model to narrow the action or compact context.
+- Explicit local `E2BIG` and provider input/context-too-large failures now
+  remove the most recent action-result Delta once, append a compact SYSTEM
+  recovery note, and continue the same turn instead of immediately stopping or
+  retrying forever. The recovery is recorded in the API audit.
 - Provider request JSON is streamed to `curl` through stdin instead of being
   placed in the process argument list, preventing large prompts from failing
   locally with `Argument list too long (os error 7)` before any HTTP request.

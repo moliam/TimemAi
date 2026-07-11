@@ -399,6 +399,23 @@ pub fn model_retry_audit_event(
     })
 }
 
+pub fn model_input_overflow_recovery_audit_event(
+    session: &str,
+    turn_id: &str,
+    removed_delta_id: &str,
+    removed_action_output_bytes: usize,
+    error: &str,
+) -> Value {
+    json!({
+        "type": "model_input_overflow_recovery",
+        "session": session,
+        "turn_id": turn_id,
+        "removed_delta_id": removed_delta_id,
+        "removed_action_output_bytes": removed_action_output_bytes,
+        "error": error,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +437,23 @@ mod tests {
         assert_eq!(events[0]["type"], "turn_final");
         assert_eq!(events[1]["type"], "llm_request");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn model_input_overflow_recovery_event_keeps_delta_and_size_evidence() {
+        let event = model_input_overflow_recovery_audit_event(
+            "session_1",
+            "turn_1",
+            "pd_7",
+            131_072,
+            "provider_http_413: payload too large",
+        );
+        assert_eq!(event["type"], "model_input_overflow_recovery");
+        assert_eq!(event["session"], "session_1");
+        assert_eq!(event["turn_id"], "turn_1");
+        assert_eq!(event["removed_delta_id"], "pd_7");
+        assert_eq!(event["removed_action_output_bytes"], 131_072);
+        assert_eq!(event["error"], "provider_http_413: payload too large");
     }
 
     #[test]

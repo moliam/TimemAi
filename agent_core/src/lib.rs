@@ -56,11 +56,11 @@ pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
     append_audit_event, append_repair_output_event, host_start_audit_event,
-    max_llm_output_increased_audit_event, model_repair_output_event,
-    model_repair_request_audit_event, model_retry_audit_event, read_audit_doc,
-    round_limit_audit_event, stale_context_choice_audit_event, turn_error_audit_event,
-    turn_final_audit_event, turn_start_audit_event, user_approval_audit_event,
-    user_supplement_audit_event,
+    max_llm_output_increased_audit_event, model_input_overflow_recovery_audit_event,
+    model_repair_output_event, model_repair_request_audit_event, model_retry_audit_event,
+    read_audit_doc, round_limit_audit_event, stale_context_choice_audit_event,
+    turn_error_audit_event, turn_final_audit_event, turn_start_audit_event,
+    user_approval_audit_event, user_supplement_audit_event,
 };
 pub use config_edit::{
     apply_runtime_config_value, bash_approval_mode_from_sources, capabilities_dir_from_sources,
@@ -131,9 +131,9 @@ pub use redaction::{redact_value, REDACTED};
 pub use response_protocol::ResponseProtocolKind;
 use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};
 pub use retry_policy::{
-    is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
-    ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
-    DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
+    is_model_input_too_large_error, is_retryable_model_system_error, model_retry_decision,
+    ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
+    DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
 };
 pub use runtime_context::{
     format_supporting_context, local_time_label, runtime_info_context, runtime_time_context,
@@ -178,6 +178,8 @@ pub use workspace::{
 };
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+const ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT: u32 = 95;
+const PROMPT_DELTA_RENDER_OVERHEAD_TOKENS: u32 = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreProfile {
@@ -339,6 +341,12 @@ pub enum CoreStep {
         max_rounds: u32,
     },
     Final(TurnFinal),
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelInputOverflowRecovery {
+    pub step: CoreStep,
+    pub removed_delta_id: String,
+    pub removed_action_output_bytes: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptDelta {
@@ -1655,7 +1663,7 @@ impl AgentCore {
                             result_lines.join("\n\n"),
                         ));
                     }
-                    self.append_delta(slices);
+                    self.append_delta_with_action_output_budget(slices);
                     let request = pending.request.clone();
                     self.pending_approval = Some(pending);
                     return CoreStep::NeedsUserApproval { request };
@@ -1672,7 +1680,7 @@ impl AgentCore {
             } else {
                 self.submit_running_job_updates_for_session(&self.current_session_id());
             }
-            self.append_delta(slices);
+            self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
                 return CoreStep::RoundLimitReached {
@@ -1690,7 +1698,7 @@ impl AgentCore {
             } else {
                 self.submit_running_job_updates_for_session(&self.current_session_id());
             }
-            self.append_delta(slices);
+            self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
                 return CoreStep::RoundLimitReached {
@@ -1929,7 +1937,7 @@ impl AgentCore {
         runtime: &mut dyn ActionRuntime,
     ) -> CoreStep {
         let Some(pending) = self.pending_approval.take() else {
-            self.append_delta(vec![(
+            self.append_delta_with_action_output_budget(vec![(
                 "result_of_llm_action".to_string(),
                 format!(
                     "Action result: user_approval\napproval_id: {}\nerror: no_pending_approval",
@@ -1990,7 +1998,10 @@ impl AgentCore {
             )
         };
         self.record_pending_approval_audit(&pending, approved, &result);
-        self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
+        self.append_delta_with_action_output_budget(vec![(
+            "result_of_llm_action".to_string(),
+            result,
+        )]);
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
             return CoreStep::RoundLimitReached {
@@ -2113,7 +2124,7 @@ impl AgentCore {
             Ok(results) => results,
             Err((partial, pending)) => {
                 self.pending_approval = Some(pending.clone());
-                self.append_delta(vec![(
+                self.append_delta_with_action_output_budget(vec![(
                     "result_of_llm_action".to_string(),
                     partial.join("\n\n"),
                 )]);
@@ -2123,7 +2134,7 @@ impl AgentCore {
             }
         };
 
-        self.append_delta(vec![(
+        self.append_delta_with_action_output_budget(vec![(
             "result_of_llm_action".to_string(),
             result_lines.join("\n\n"),
         )]);
@@ -2278,8 +2289,63 @@ impl AgentCore {
     }
 
     pub fn build_next_prompt(&mut self) -> String {
+        self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
         self.render_prompt()
+    }
+
+    fn guard_pending_action_output_budget(&mut self) -> bool {
+        let action_output_bytes = self
+            .pending_prompt_components
+            .iter()
+            .filter(|component| component.prompt_type() == "result_of_llm_action")
+            .map(|component| component.content.len())
+            .fold(0usize, usize::saturating_add);
+        if action_output_bytes == 0 {
+            return false;
+        }
+        let pending_tokens = self
+            .pending_prompt_components
+            .iter()
+            .map(|component| {
+                if component.prompt_type() == "result_of_llm_action" {
+                    estimate_action_output_tokens(&component.content)
+                } else {
+                    estimate_prompt_tokens(&component.content)
+                }
+            })
+            .fold(0u32, u32::saturating_add);
+        let base_tokens = self.current_prompt_token_baseline();
+        let projected_tokens = base_tokens
+            .saturating_add(pending_tokens)
+            .saturating_add(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS);
+        let safety_limit = self
+            .max_llm_input_tokens
+            .saturating_mul(ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT)
+            / 100;
+        if projected_tokens <= safety_limit {
+            return false;
+        }
+
+        self.pending_prompt_components
+            .retain(|component| component.prompt_type() != "result_of_llm_action");
+        let retained_pending_tokens = self
+            .pending_prompt_components
+            .iter()
+            .map(|component| estimate_prompt_tokens(&component.content))
+            .fold(0u32, u32::saturating_add);
+        let remaining_tokens = self.max_llm_input_tokens.saturating_sub(
+            base_tokens
+                .saturating_add(retained_pending_tokens)
+                .saturating_add(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS),
+        );
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "runtime_note",
+            action_output_too_large_note(action_output_bytes, remaining_tokens),
+            "runtime_context_budget",
+        );
+        true
     }
 
     fn render_prompt_slices(&self) -> Vec<PromptSlice> {
@@ -2466,6 +2532,141 @@ impl AgentCore {
         }
         self.submit_prompt_components_from_slice_texts(slice_texts, "runtime", logical_time_ms);
         self.flush_pending_prompt_components();
+    }
+
+    fn append_delta_with_action_output_budget(
+        &mut self,
+        mut slice_texts: Vec<(String, String)>,
+    ) -> bool {
+        let action_output_bytes = slice_texts
+            .iter()
+            .filter(|(prompt_type, _)| prompt_type == "result_of_llm_action")
+            .map(|(_, text)| text.len())
+            .fold(0usize, usize::saturating_add)
+            .saturating_add(
+                self.pending_prompt_components
+                    .iter()
+                    .filter(|component| component.prompt_type() == "result_of_llm_action")
+                    .map(|component| component.content.len())
+                    .fold(0usize, usize::saturating_add),
+            );
+        if action_output_bytes == 0 {
+            self.append_delta(slice_texts);
+            return false;
+        }
+
+        let pending_tokens = self
+            .pending_prompt_components
+            .iter()
+            .map(|component| {
+                if component.prompt_type() == "result_of_llm_action" {
+                    estimate_action_output_tokens(&component.content)
+                } else {
+                    estimate_prompt_tokens(&component.content)
+                }
+            })
+            .fold(0u32, u32::saturating_add);
+        let candidate_tokens = slice_texts
+            .iter()
+            .map(|(prompt_type, text)| {
+                if prompt_type == "result_of_llm_action" {
+                    estimate_action_output_tokens(text)
+                } else {
+                    estimate_prompt_tokens(text)
+                }
+            })
+            .fold(0u32, u32::saturating_add);
+        let base_tokens = self.current_prompt_token_baseline();
+        let current_tokens = base_tokens.saturating_add(pending_tokens);
+        let projected_tokens = current_tokens
+            .saturating_add(candidate_tokens)
+            .saturating_add(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS);
+        let safety_limit = self
+            .max_llm_input_tokens
+            .saturating_mul(ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT)
+            / 100;
+        if projected_tokens <= safety_limit {
+            self.append_delta(slice_texts);
+            return false;
+        }
+
+        let retained_pending_tokens = self
+            .pending_prompt_components
+            .iter()
+            .filter(|component| component.prompt_type() != "result_of_llm_action")
+            .map(|component| estimate_prompt_tokens(&component.content))
+            .fold(0u32, u32::saturating_add);
+        let remaining_tokens = self.max_llm_input_tokens.saturating_sub(
+            base_tokens
+                .saturating_add(retained_pending_tokens)
+                .saturating_add(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS),
+        );
+        self.pending_prompt_components
+            .retain(|component| component.prompt_type() != "result_of_llm_action");
+        slice_texts.clear();
+        slice_texts.push((
+            "runtime_note".to_string(),
+            action_output_too_large_note(action_output_bytes, remaining_tokens),
+        ));
+        self.append_delta(slice_texts);
+        true
+    }
+
+    fn current_prompt_token_baseline(&self) -> u32 {
+        if self.last_observed_prompt_tokens > 0 {
+            self.last_observed_prompt_tokens
+        } else {
+            estimate_prompt_tokens(&self.render_prompt())
+        }
+    }
+
+    pub fn recover_from_model_input_too_large(
+        &mut self,
+        error: &str,
+    ) -> Option<ModelInputOverflowRecovery> {
+        let delta_index = self.deltas.len().checked_sub(1)?;
+        if !prompt_render::render_delta_slices(&self.deltas[delta_index])
+            .iter()
+            .any(|slice| slice.prompt_type == "result_of_llm_action")
+        {
+            return None;
+        }
+        let removed_output_bytes = self.deltas[delta_index]
+            .slices
+            .iter()
+            .filter(|slice| {
+                slice.prompt_type == "result_of_llm_action"
+                    && !self.deltas[delta_index]
+                        .hidden_slice_ids
+                        .contains(&slice.slice_id)
+            })
+            .map(|slice| slice.text.len())
+            .sum::<usize>();
+        if removed_output_bytes == 0 {
+            return None;
+        }
+
+        let removed_delta_id = self.deltas[delta_index].delta_id.clone();
+        self.deltas.remove(delta_index);
+        self.last_observed_prompt_tokens = 0;
+        let current_tokens = estimate_prompt_tokens(&self.render_prompt());
+        let remaining_tokens = self.max_llm_input_tokens.saturating_sub(current_tokens);
+        self.append_delta(vec![(
+            "runtime_note".to_string(),
+            format!(
+                "{}\nThe previous model request was rejected because its input was too large: {}",
+                action_output_too_large_note(removed_output_bytes, remaining_tokens),
+                compact_text(error, 500)
+            ),
+        )]);
+        Some(ModelInputOverflowRecovery {
+            step: CoreStep::NeedModel {
+                prompt: self.render_prompt(),
+                rounds_remaining: self.remaining_rounds(),
+            },
+            removed_delta_id,
+            removed_action_output_bytes: removed_output_bytes,
+        })
     }
 
     fn flush_pending_prompt_components(&mut self) {
@@ -4334,6 +4535,28 @@ fn estimate_prompt_tokens(text: &str) -> u32 {
     text.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
 
+fn estimate_action_output_tokens(text: &str) -> u32 {
+    let (ascii_chars, non_ascii_chars) = text.chars().fold((0usize, 0usize), |counts, ch| {
+        if ch.is_ascii() {
+            (counts.0 + 1, counts.1)
+        } else {
+            (counts.0, counts.1 + 1)
+        }
+    });
+    ascii_chars
+        .div_ceil(4)
+        .saturating_add(non_ascii_chars)
+        .min(u32::MAX as usize) as u32
+}
+
+fn action_output_too_large_note(output_bytes: usize, remaining_tokens: u32) -> String {
+    let output_kb = output_bytes.div_ceil(1024);
+    let remaining_kb = (remaining_tokens as usize).saturating_mul(4).div_ceil(1024);
+    format!(
+        "Your action's output is too large: {output_kb} KB, while the context window has only {remaining_kb} KB left. You need to optimize your action or compact context."
+    )
+}
+
 fn search_terms(query: &str) -> Vec<String> {
     let lowered = query.to_lowercase();
     let mut seen = HashSet::new();
@@ -4827,6 +5050,210 @@ mod prompt_component_tests {
         let user = prompt.find("next user input").unwrap();
         assert!(free_talk < user);
         assert!(final_answer < user);
+    }
+
+    #[test]
+    fn sudden_large_action_output_is_replaced_before_crossing_safety_limit() {
+        let mut core = test_core("large_action_output_guard");
+        core.set_max_llm_input_tokens(10_000);
+        core.last_observed_prompt_tokens = 9_400;
+        let oversized_marker = "OVERSIZED_ACTION_MARKER";
+        let oversized = format!("{oversized_marker}{}", "x".repeat(8_000));
+
+        let rejected = core.append_delta_with_action_output_budget(vec![
+            (
+                "llm_free_talk".to_string(),
+                "I inspected the output.".to_string(),
+            ),
+            ("result_of_llm_action".to_string(), oversized),
+        ]);
+        let prompt = core.render_prompt();
+
+        assert!(rejected);
+        assert!(!prompt.contains(oversized_marker));
+        assert!(prompt.contains("Your action's output is too large:"));
+        assert!(prompt.contains("You need to optimize your action or compact context."));
+        assert!(!prompt.contains("I inspected the output."));
+    }
+
+    #[test]
+    fn combined_multi_action_output_is_budgeted_as_one_delta() {
+        let mut core = test_core("multi_action_output_guard");
+        core.set_max_llm_input_tokens(10_000);
+        core.last_observed_prompt_tokens = 9_300;
+        let result = [
+            format!("Action result: first\nFIRST_BURST{}", "a".repeat(2_000)),
+            format!("Action result: second\nSECOND_BURST{}", "b".repeat(2_000)),
+        ]
+        .join("\n\n");
+
+        assert!(core.append_delta_with_action_output_budget(vec![(
+            "result_of_llm_action".to_string(),
+            result,
+        )]));
+        let prompt = core.render_prompt();
+        assert!(!prompt.contains("FIRST_BURST"));
+        assert!(!prompt.contains("SECOND_BURST"));
+        assert_eq!(
+            prompt.matches("Your action's output is too large:").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn same_batch_pending_action_updates_are_removed_with_oversized_delta() {
+        let mut core = test_core("pending_action_update_guard");
+        core.set_max_llm_input_tokens(10_000);
+        core.last_observed_prompt_tokens = 9_200;
+        core.submit_prompt_component(
+            PromptComponentRole::system(),
+            "running_job_update",
+            format!("PENDING_JOB_OUTPUT{}", "z".repeat(3_000)),
+            "runtime",
+        );
+
+        assert!(core.append_delta_with_action_output_budget(vec![(
+            "result_of_llm_action".to_string(),
+            "Action result: run_bash\nsmall result".to_string(),
+        )]));
+        let prompt = core.render_prompt();
+        assert!(!prompt.contains("PENDING_JOB_OUTPUT"));
+        assert!(!prompt.contains("small result"));
+        assert!(prompt.contains("Your action's output is too large:"));
+    }
+
+    #[test]
+    fn build_next_prompt_guards_pending_precheck_output_without_losing_user_input() {
+        let mut core = test_core("pending_precheck_output_guard");
+        core.set_max_llm_input_tokens(10_000);
+        core.last_observed_prompt_tokens = 9_100;
+        core.submit_prompt_component(
+            PromptComponentRole::user(),
+            "user_question",
+            "Keep this new user question",
+            "user_input",
+        );
+        core.submit_prompt_component(
+            PromptComponentRole::system(),
+            "result_of_llm_action",
+            format!("MEMORY_PRECHECK_BURST{}", "记".repeat(1_000)),
+            "runtime_memory_precheck",
+        );
+
+        let prompt = core.build_next_prompt();
+        assert!(prompt.contains("Keep this new user question"));
+        assert!(!prompt.contains("MEMORY_PRECHECK_BURST"));
+        assert!(prompt.contains("Your action's output is too large:"));
+    }
+
+    #[test]
+    fn action_output_at_or_below_safety_limit_is_preserved() {
+        let mut core = test_core("action_output_below_limit");
+        core.set_max_llm_input_tokens(10_000);
+        core.last_observed_prompt_tokens = 1_000;
+
+        assert!(!core.append_delta_with_action_output_budget(vec![(
+            "result_of_llm_action".to_string(),
+            "Action result: run_bash\nSAFE_RESULT".to_string(),
+        )]));
+        let prompt = core.render_prompt();
+        assert!(prompt.contains("SAFE_RESULT"));
+        assert!(!prompt.contains("Your action's output is too large:"));
+    }
+
+    #[test]
+    fn action_output_budget_accepts_exact_95_percent_and_rejects_the_next_token() {
+        let mut at_limit = test_core("action_output_exact_95");
+        at_limit.set_max_llm_input_tokens(10_000);
+        let current_tokens = estimate_prompt_tokens(&at_limit.render_prompt());
+        let available_tokens = 9_500u32
+            .saturating_sub(current_tokens)
+            .saturating_sub(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS);
+        assert!(available_tokens > 10);
+        let exact_output = "x".repeat(available_tokens as usize * 4);
+        assert!(!at_limit.append_delta_with_action_output_budget(vec![(
+            "result_of_llm_action".to_string(),
+            exact_output,
+        )]));
+
+        let mut over_limit = test_core("action_output_over_95");
+        over_limit.set_max_llm_input_tokens(10_000);
+        let current_tokens = estimate_prompt_tokens(&over_limit.render_prompt());
+        let available_tokens = 9_500u32
+            .saturating_sub(current_tokens)
+            .saturating_sub(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS);
+        let one_token_over = "x".repeat(available_tokens as usize * 4 + 1);
+        assert!(over_limit.append_delta_with_action_output_budget(vec![(
+            "result_of_llm_action".to_string(),
+            one_token_over,
+        )]));
+    }
+
+    #[test]
+    fn non_ascii_action_burst_uses_conservative_token_estimation() {
+        let mut core = test_core("non_ascii_action_burst");
+        core.set_max_llm_input_tokens(10_000);
+        core.last_observed_prompt_tokens = 8_500;
+        let chinese_output = format!("中文突发输出标记{}", "数".repeat(1_100));
+
+        assert!(core.append_delta_with_action_output_budget(vec![(
+            "result_of_llm_action".to_string(),
+            chinese_output,
+        )]));
+        let prompt = core.render_prompt();
+        assert!(!prompt.contains("中文突发输出标记"));
+        assert!(prompt.contains("Your action's output is too large:"));
+    }
+
+    #[test]
+    fn provider_overflow_recovery_removes_only_latest_action_results() {
+        let mut core = test_core("provider_overflow_recovery");
+        core.set_max_llm_input_tokens(20_000);
+        core.append_delta(vec![
+            (
+                "llm_free_talk".to_string(),
+                "keep this assistant state".to_string(),
+            ),
+            (
+                "result_of_llm_action".to_string(),
+                "Action result: run_bash\nREMOVE_THIS_OUTPUT".to_string(),
+            ),
+        ]);
+
+        let recovery = core
+            .recover_from_model_input_too_large("provider_http_400: context_length_exceeded")
+            .expect("latest action result should be recoverable");
+        let step = recovery.step;
+        let CoreStep::NeedModel { prompt, .. } = step else {
+            panic!("overflow recovery should continue with a model request");
+        };
+        assert!(!prompt.contains("keep this assistant state"));
+        assert!(!prompt.contains("REMOVE_THIS_OUTPUT"));
+        assert!(prompt.contains("Your action's output is too large:"));
+        assert!(prompt.contains("context_length_exceeded"));
+        assert!(core
+            .recover_from_model_input_too_large("provider_http_413")
+            .is_none());
+    }
+
+    #[test]
+    fn provider_overflow_does_not_delete_older_action_history() {
+        let mut core = test_core("provider_overflow_keeps_old_history");
+        core.append_delta(vec![(
+            "result_of_llm_action".to_string(),
+            "Action result: run_bash\nOLDER_RESULT".to_string(),
+        )]);
+        core.append_delta(vec![(
+            "user_question".to_string(),
+            "A newer user message that is not an action result".to_string(),
+        )]);
+
+        assert!(core
+            .recover_from_model_input_too_large("provider_http_413")
+            .is_none());
+        let prompt = core.render_prompt();
+        assert!(prompt.contains("OLDER_RESULT"));
+        assert!(prompt.contains("A newer user message"));
     }
 
     #[test]

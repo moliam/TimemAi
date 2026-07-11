@@ -595,10 +595,31 @@ Runtime shrink review and context maintenance should use `delta_id`:
   branch: summarize useful dynamic prompt deltas to about 10%-20% of their
   current token footprint, discard stale delta ids, and offload important but
   lengthy delta ids into scratch.
+- Action-result Deltas have a second, stricter commit boundary. Before an
+  action result is added, core combines the latest observed provider input,
+  pending prompt components, the candidate Delta, and conservative render
+  overhead. If that projection exceeds 95% of `TIMEM_MAX_LLM_INPUT`, core does
+  not commit that candidate Delta or same-batch action-result components. It
+  commits a bounded SYSTEM note reporting the output size and remaining
+  context budget instead. Non-ASCII action output is conservatively estimated at no
+  less than one token per character instead of using the general `chars / 4`
+  approximation. `build_next_prompt` applies the same guard to pending runtime
+  action results such as memory precheck output while retaining the new USER
+  input and unrelated SYSTEM metadata.
+- A provider may still reject input because its tokenizer or effective limit
+  differs from the local estimate. For explicit `E2BIG`, HTTP 413, or
+  input/context-length errors, session runtime removes the newest Delta that
+  contains action results, replaces it with the same bounded SYSTEM guidance,
+  records `model_input_overflow_recovery`, and retries the model once through
+  the normal turn loop. If no action-result Delta remains, the error stops the
+  turn; this prevents an unbounded recovery loop and avoids silently deleting
+  the user's question.
 
 Prompt deltas are append-only in normal operation. Later provider requests
 render the same static prefix plus all retained dynamic deltas, so the
 model can see what it asked the runtime to do and what the runtime returned.
+The input-overflow recovery above is the deliberate exception to append-only
+operation.
 
 The relationship is:
 

@@ -80,6 +80,31 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
     false
 }
 
+pub fn is_model_input_too_large_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let input_subject =
+        lower.contains("input") || lower.contains("prompt") || lower.contains("context");
+    let size_subject = lower.contains("token") || lower.contains("length");
+    let exceeds_limit = lower.contains("too long")
+        || lower.contains("too large")
+        || lower.contains("too many")
+        || lower.contains("exceed");
+    lower.contains("argument list too long")
+        || lower.contains("os error 7")
+        || lower.contains("e2big")
+        || lower.starts_with("provider_http_413")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("maximum context length")
+        || lower.contains("max context length")
+        || lower.contains("input context is too long")
+        || lower.contains("input is too long")
+        || lower.contains("input too long")
+        || lower.contains("too many input tokens")
+        || lower.contains("request body too large")
+        || lower.contains("payload too large")
+        || (input_subject && size_subject && exceeds_limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +149,30 @@ mod tests {
             "next_actions[0].args_required",
         ] {
             assert!(!is_retryable_model_system_error(error), "{error}");
+        }
+    }
+
+    #[test]
+    fn input_too_large_errors_are_detected_without_matching_unrelated_failures() {
+        for error in [
+            "Argument list too long (os error 7)",
+            "E2BIG while spawning provider transport",
+            "provider_http_413: payload too large",
+            "provider_http_400: context_length_exceeded",
+            "provider_http_400: maximum context length is 100000 tokens",
+            "provider_http_400: too many input tokens",
+            "provider_http_400: prompt is too long: 200001 tokens > 200000 maximum",
+            "provider_http_400: input token length exceeds the model limit",
+        ] {
+            assert!(is_model_input_too_large_error(error), "{error}");
+        }
+        for error in [
+            "provider_http_400: invalid model",
+            "provider_http_401: unauthorized",
+            "provider_http_500: overloaded",
+            "output token limit exceeded",
+        ] {
+            assert!(!is_model_input_too_large_error(error), "{error}");
         }
     }
 
