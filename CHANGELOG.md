@@ -6,6 +6,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-07-11
+
 ### Added
 
 - Added unified `core.model.response` topic events carrying model status,
@@ -43,6 +45,9 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   when response protocol or capability registry changes.
 
 ### Fixed
+- Concrete JSON, Markdown, and XML protocol examples are now executed by
+  their matching runtime parser in tests, so prompt examples cannot silently
+  drift beyond executable runtime behavior.
 - Tracked shell jobs (background and timeout) now execute under `/bin/bash -lc` instead of `/bin/sh -lc`, matching normal `run_bash` execution semantics and enabling bash-specific syntax such as heredoc with backticks.
 - Heredoc delimiters (e.g. `<<'EOF'`) in tracked background and timeout jobs are now preserved correctly; the runtime no longer wraps the command in a shell wrapper that would corrupt multi-line heredoc syntax.
 - Tool job status routed through capmgr.

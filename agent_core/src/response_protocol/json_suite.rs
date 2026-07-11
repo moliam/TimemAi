@@ -336,6 +336,70 @@ mod tests {
         CapabilityRegistry::builtin()
     }
 
+    fn documented_json_examples(text: &str) -> Vec<String> {
+        text.split("## -------- Example")
+            .skip(1)
+            .filter_map(extract_first_json_object)
+            .collect()
+    }
+
+    fn extract_first_json_object(text: &str) -> Option<String> {
+        let start = text.find('{')?;
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (offset, ch) in text[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(text[start..start + offset + ch.len_utf8()].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn documented_json_response_examples_parse_with_runtime_parser() {
+        let examples = documented_json_examples(JSON_RESPONSE_PROTOCOL_SECTION);
+        assert!(
+            examples.len() >= 4,
+            "expected protocol document to contain concrete JSON response examples"
+        );
+
+        for (idx, example) in examples.iter().enumerate() {
+            let env = parse_envelope(example, &caps());
+            assert!(
+                env.repair_issue.is_none(),
+                "documented JSON example #{idx} did not parse: {:?}\n{}",
+                env.repair_issue,
+                example
+            );
+            assert!(
+                !env.final_answer.trim().is_empty()
+                    || !env.next_actions.is_empty()
+                    || !env.context_compacts.is_empty(),
+                "documented JSON example #{idx} produced no runtime-visible result:\n{}",
+                example
+            );
+        }
+    }
+
     #[test]
     fn unwraps_common_fields_envelope_without_repair() {
         let env = parse_envelope(

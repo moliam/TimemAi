@@ -601,6 +601,45 @@ mod tests {
         CapabilityRegistry::builtin()
     }
 
+    fn documented_markdown_examples(text: &str) -> Vec<String> {
+        text.split("## -------- Example")
+            .skip(1)
+            .filter_map(|section| {
+                ["## Status", "## Free_Talk", "## Context Compact"]
+                    .iter()
+                    .filter_map(|marker| section.find(marker))
+                    .min()
+                    .map(|start| section[start..].trim().to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn documented_markdown_response_examples_parse_with_runtime_parser() {
+        let examples = documented_markdown_examples(MARKDOWN_RESPONSE_PROTOCOL_SECTION);
+        assert!(
+            examples.len() >= 4,
+            "expected protocol document to contain concrete Markdown response examples"
+        );
+
+        for (idx, example) in examples.iter().enumerate() {
+            let env = parse_markdown_envelope(example, &caps());
+            assert!(
+                env.repair_issue.is_none(),
+                "documented Markdown example #{idx} did not parse: {:?}\n{}",
+                env.repair_issue,
+                example
+            );
+            assert!(
+                !env.final_answer.trim().is_empty()
+                    || !env.next_actions.is_empty()
+                    || !env.context_compacts.is_empty(),
+                "documented Markdown example #{idx} produced no runtime-visible result:\n{}",
+                example
+            );
+        }
+    }
+
     #[test]
     fn plain_prose_becomes_final_answer() {
         let env = parse_markdown_envelope("Hello world", &caps());
