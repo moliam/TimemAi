@@ -25,6 +25,7 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   topic fan-out, and long Thought / Action panel rendering hot paths.
 
 ### Changed
+- Improved `self_tool` prompt description to remind the model to use `chg_cwd` instead of repeating `cd` in every `run_bash` command, reducing redundant output.
 - Default response protocol changed from JSON to XML.
 - Consolidated core protocol and shell runtime into agent_core.
 - Reorganized capability tools into resources/capabilities/tools/.
