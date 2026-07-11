@@ -357,7 +357,6 @@ static TOPIC_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub struct CoreModelResponseTopic {
     pub status: String,
     pub free_talk: String,
-    pub progress: String,
     pub final_answer: String,
     pub continue_work: bool,
     pub global: CoreGlobalWorkerStatus,
@@ -401,8 +400,6 @@ impl Default for CoreGlobalWorkerStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreActionTopic {
-    pub intent: Option<String>,
-    pub parent_intent: Option<String>,
     pub action: String,
     pub input: Value,
     pub kind: CoreActionKind,
@@ -415,7 +412,6 @@ pub struct CoreActionTopic {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreTopicStatusHint {
-    pub intent: Option<String>,
     pub action: String,
     pub input: Value,
     pub memory_activity: CoreMemoryActivity,
@@ -609,10 +605,6 @@ impl CoreTopicEvent {
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
-            progress: self.payload["progress"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
             final_answer: self.payload["final_answer"]
                 .as_str()
                 .unwrap_or_default()
@@ -658,16 +650,6 @@ impl CoreTopicEvent {
             return None;
         }
         Some(CoreActionTopic {
-            intent: self.payload["intent"]
-                .as_str()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(str::to_string),
-            parent_intent: self.payload["parent_intent"]
-                .as_str()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(str::to_string),
             action: self.payload["action"]
                 .as_str()
                 .unwrap_or_default()
@@ -1237,7 +1219,6 @@ pub(crate) fn notification_topic_event(
         CoreNotification::ModelResponse {
             status,
             free_talk,
-            progress,
             final_answer,
             continue_work,
         } => {
@@ -1254,7 +1235,6 @@ pub(crate) fn notification_topic_event(
                 json!({
                     "status": status,
                     "free_talk": free_talk,
-                    "progress": progress,
                     "final_answer": final_answer,
                     "continue_work": continue_work,
                     "global": global_worker_status_payload(CoreGlobalWorkerStatus::new(direct_turn_worker_count)),
@@ -1262,8 +1242,6 @@ pub(crate) fn notification_topic_event(
             )
         }
         CoreNotification::Action {
-            intent,
-            parent_intent,
             action,
             input,
             kind,
@@ -1282,8 +1260,6 @@ pub(crate) fn notification_topic_event(
             ),
             CoreSessionState::Running,
             json!({
-                "intent": intent,
-                "parent_intent": parent_intent,
                 "action": action,
                 "input": input,
                 "kind": action_kind_topic_payload(kind),
@@ -1299,11 +1275,10 @@ pub(crate) fn notification_topic_event(
 pub fn topic_event_status_hint(events: &[CoreTopicEvent]) -> Option<CoreTopicStatusHint> {
     events.iter().find_map(|event| {
         let action_topic = event.as_action()?;
-        if action_topic.intent.is_none() && action_topic.action.trim().is_empty() {
+        if action_topic.action.trim().is_empty() {
             return None;
         }
         Some(CoreTopicStatusHint {
-            intent: action_topic.intent,
             action: action_topic.action,
             input: action_topic.input,
             memory_activity: action_topic.memory_activity,
@@ -1433,7 +1408,6 @@ fn decision_request_payload(request: &HostDecisionRequest) -> Value {
             "command": approval.command,
             "reason": approval.reason,
             "risk": approval.risk,
-            "intent": approval.intent,
         }),
         HostDecisionRequest::RoundLimitContinue(round) => json!({
             "max_rounds": round.max_rounds,
@@ -1481,7 +1455,6 @@ fn host_decision_request_from_payload(kind: &str, payload: &Value) -> Option<Hos
             command: payload["command"].as_str()?.to_string(),
             reason: payload["reason"].as_str()?.to_string(),
             risk: payload["risk"].as_str()?.to_string(),
-            intent: payload["intent"].as_str()?.to_string(),
         })),
         "round_limit_continue" => Some(HostDecisionRequest::RoundLimitContinue(
             RoundLimitDecisionRequest {
@@ -1657,7 +1630,6 @@ mod tests {
             command: "printf ok".to_string(),
             reason: "requires_approval".to_string(),
             risk: "local_command".to_string(),
-            intent: "Check local evidence.".to_string(),
         };
         let round = RoundLimitDecisionRequest::new(20);
         let expansion = OutputExpansionRequest::new(10_000);
@@ -1703,7 +1675,6 @@ mod tests {
             command: "printf ok".to_string(),
             reason: "requires_approval".to_string(),
             risk: "local_command".to_string(),
-            intent: "Check local evidence.".to_string(),
         };
 
         assert!(!ui.request_user_approval(&approval));
@@ -1824,7 +1795,6 @@ mod tests {
                 command: "printf ok".to_string(),
                 reason: "requires_approval".to_string(),
                 risk: "local_command".to_string(),
-                intent: "Check local evidence.".to_string(),
             }),
             HostDecisionRequest::RoundLimitContinue(RoundLimitDecisionRequest::new(20)),
             HostDecisionRequest::OutputExpansion(OutputExpansionRequest::new(10_000)),
@@ -2000,7 +1970,6 @@ mod tests {
                 command: "printf ok".to_string(),
                 reason: "requires_approval".to_string(),
                 risk: "local_command".to_string(),
-                intent: "Check local evidence.".to_string(),
             }),
             HostDecisionRequest::RoundLimitContinue(RoundLimitDecisionRequest::new(20)),
             HostDecisionRequest::OutputExpansion(OutputExpansionRequest::new(10_000)),
@@ -2082,7 +2051,6 @@ mod tests {
             &CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: String::new(),
-                progress: "not waiting".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
@@ -2129,7 +2097,6 @@ mod tests {
             &CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: String::new(),
-                progress: "not waiting".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
@@ -2146,13 +2113,10 @@ mod tests {
             CoreNotification::ModelResponse {
                 status: "working".to_string(),
                 free_talk: "planning next step".to_string(),
-                progress: "checking context".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
             },
             CoreNotification::Action {
-                intent: Some("Inspect local files.".to_string()),
-                parent_intent: None,
                 action: "run_bash".to_string(),
                 input: serde_json::json!({"cmd": "pwd"}),
                 kind: crate::CoreActionKind::Bash {
@@ -2191,7 +2155,6 @@ mod tests {
                 "payload": {
                     "status": "working",
                     "free_talk": "planning next step",
-                    "progress": "checking context",
                     "final_answer": "",
                     "continue_work": true,
                     "global": {
@@ -2206,7 +2169,6 @@ mod tests {
             Some(CoreModelResponseTopic {
                 status: "working".to_string(),
                 free_talk: "planning next step".to_string(),
-                progress: "checking context".to_string(),
                 final_answer: String::new(),
                 continue_work: true,
                 global: CoreGlobalWorkerStatus::new(1),
@@ -2234,8 +2196,6 @@ mod tests {
                     "name": "running",
                 },
                 "payload": {
-                    "intent": "Inspect local files.",
-                    "parent_intent": null,
                     "action": "run_bash",
                     "input": {
                         "cmd": "pwd",
@@ -2259,8 +2219,6 @@ mod tests {
         assert_eq!(
             events[1].as_action(),
             Some(CoreActionTopic {
-                intent: Some("Inspect local files.".to_string()),
-                parent_intent: None,
                 action: "run_bash".to_string(),
                 input: serde_json::json!({"cmd": "pwd"}),
                 kind: CoreActionKind::Bash {
@@ -2281,7 +2239,6 @@ mod tests {
         assert_eq!(
             topic_event_status_hint(&events),
             Some(CoreTopicStatusHint {
-                intent: Some("Inspect local files.".to_string()),
                 action: "run_bash".to_string(),
                 input: serde_json::json!({"cmd": "pwd"}),
                 memory_activity: CoreMemoryActivity::None,
@@ -2486,8 +2443,6 @@ mod tests {
     #[test]
     fn topic_callbacks_can_copy_owned_snapshots_for_async_hosts() {
         let notifications = vec![CoreNotification::Action {
-            intent: Some("Inspect local files.".to_string()),
-            parent_intent: None,
             action: "run_bash".to_string(),
             input: serde_json::json!({"cmd": "pwd"}),
             kind: CoreActionKind::Bash {

@@ -45,6 +45,7 @@ pub struct SelfToolInput<'a> {
     pub op: &'a str,
     pub key: &'a str,
     pub value: &'a str,
+    pub new_path: &'a str,
 }
 
 impl SelfToolState {
@@ -64,11 +65,11 @@ impl SelfToolState {
 
     pub fn execute(&mut self, input: SelfToolInput<'_>) -> String {
         if input.self_type.trim().is_empty() {
-            return "Action result: self_tool\nerror: invalid_input\nmessage: Missing `type`. Use env, mem_path, or about_me.".to_string();
+            return "Action result: self_tool\nerror: invalid_input\nmessage: Missing `type`. Use env, mem_path, about_me, or cwd.".to_string();
         }
         if input.op.trim().is_empty() {
             return format!(
-                "Action result: self_tool\ntype: {}\nerror: invalid_input\nmessage: Missing `op`. Use read or write.",
+                "Action result: self_tool\ntype: {}\nerror: invalid_input\nmessage: Missing `op`. Use read, write, or chg_cwd.",
                 input.self_type
             );
         }
@@ -174,12 +175,38 @@ impl SelfToolState {
 }
 
 pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> String {
+    let self_type = action.input_lower("type");
+    let op = action.input_lower("op");
+    if self_type == "cwd" {
+        return execute_cwd_action(core, &op, &action.input_str("new_path"));
+    }
     core.self_tool.execute(SelfToolInput {
-        self_type: &action.input_lower("type"),
-        op: &action.input_lower("op"),
+        self_type: &self_type,
+        op: &op,
         key: &action.input_str("key"),
         value: &action.input_raw_str("value"),
+        new_path: &action.input_raw_str("new_path"),
     })
+}
+
+fn execute_cwd_action(core: &mut AgentCore, op: &str, new_path: &str) -> String {
+    match op {
+        "read" => format!(
+            "Action result: self_tool\ntype: cwd\nop: read\ncwd: {}",
+            core.current_prompt_cwd().display()
+        ),
+        "chg_cwd" => match core.change_prompt_cwd(new_path) {
+            Ok(path) => format!(
+                "Action result: self_tool\ntype: cwd\nop: chg_cwd\nstatus: updated_prompt_context_cwd\ncwd: {}\nnote: Future run_bash actions in this prompt context will execute from this cwd.",
+                path.display()
+            ),
+            Err(error) => format!(
+                "Action result: self_tool\ntype: cwd\nop: chg_cwd\nerror: {error}\nnew_path: {}",
+                new_path.trim()
+            ),
+        },
+        other => format!("Action result: self_tool\ntype: cwd\nop: {other}\nerror: unsupported_type_or_op"),
+    }
 }
 
 pub fn is_sensitive_env_key(key: &str) -> bool {
@@ -231,6 +258,7 @@ mod tests {
             op: "write",
             key: "TIMEM_TEST_FLAG",
             value: "enabled",
+            new_path: "",
         });
         assert!(write.contains("status: updated_current_process_env"));
 
@@ -239,6 +267,7 @@ mod tests {
             op: "read",
             key: "TIMEM_TEST_FLAG",
             value: "",
+            new_path: "",
         });
         assert!(read.contains("value: enabled"));
     }
@@ -252,6 +281,7 @@ mod tests {
             op: "read",
             key: "TIMEM_API_KEY",
             value: "",
+            new_path: "",
         });
         assert!(read.contains("error: sensitive_env_denied"));
 
@@ -260,6 +290,7 @@ mod tests {
             op: "write",
             key: "AWS_SECRET_ACCESS_KEY",
             value: "secret",
+            new_path: "",
         });
         assert!(write.contains("error: sensitive_env_denied"));
         assert!(!write.contains("secret"));
@@ -275,6 +306,7 @@ mod tests {
                 op: "write",
                 key,
                 value: "/tmp/should-not-leak",
+                new_path: "",
             });
             assert!(write.contains("error: protected_env_denied"));
             assert!(write.contains("reason: memory_path_env_is_startup_only"));
@@ -287,6 +319,7 @@ mod tests {
             op: "read",
             key: "TIMEM_SPACE",
             value: "",
+            new_path: "",
         });
         assert!(read.contains("value: .test_mem"));
     }
@@ -300,6 +333,7 @@ mod tests {
             op: "read",
             key: "",
             value: "",
+            new_path: "",
         });
         assert!(paths.contains("memory_file: /tmp/timem/memory/memory.jsonl"));
         assert!(paths.contains("api_audit_file: /tmp/timem/audit/api_audit.json"));
@@ -309,6 +343,7 @@ mod tests {
             op: "read",
             key: "",
             value: "",
+            new_path: "",
         });
         assert!(about.contains("name: TimemAi"));
         assert!(about.contains("author: TimemAi <phylimo@163.com>"));

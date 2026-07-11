@@ -35,15 +35,14 @@ use timem_shell::{
     work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
     work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
     CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
-    LongRunningCommandContinueRequest, ModelDirection, NoopTurnUi, ObservationEvent,
-    ObservationPanel, OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
-    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
-    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot,
-    StaleContextDecisionRequest, ThinkingViewSnapshot, TurnInput, TurnUi,
-    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
-    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
-    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, SPINNER_ICONS,
-    TIMEM_LOGO,
+    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
+    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
+    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
+    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
+    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
+    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
+    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
+    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -365,16 +364,34 @@ fn main() {
             Some(&mut profiler),
         );
         drop(turn_ui);
-        status.finish();
-        print_final_response(
-            &render_turn_outcome_text(&outcome),
-            &outcome.stats,
-            outcome.latest_usage.as_ref(),
-            &config.provider,
-            &config.model,
-            outcome.elapsed,
-            config.max_llm_input_tokens,
-        );
+        let is_cancelled =
+            outcome.stop_reason == Some(timem_shell::TurnStopReason::CancelledByUser);
+        if is_cancelled {
+            let stats = status.accumulated_stats();
+            let latest = status.accumulated_latest_usage();
+            status.finish_cancelled();
+            println!();
+            print_final_response(
+                &render_turn_outcome_text(&outcome),
+                &stats,
+                latest.as_ref(),
+                &config.provider,
+                &config.model,
+                outcome.elapsed,
+                config.max_llm_input_tokens,
+            );
+        } else {
+            status.finish();
+            print_final_response(
+                &render_turn_outcome_text(&outcome),
+                &outcome.stats,
+                outcome.latest_usage.as_ref(),
+                &config.provider,
+                &config.model,
+                outcome.elapsed,
+                config.max_llm_input_tokens,
+            );
+        }
         last_dialog_activity = Instant::now();
     }
 }
@@ -492,8 +509,7 @@ impl TurnUi for CliTurnUi<'_> {
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         if let Some(status) = self.status.as_deref_mut() {
             if let Some(hint) = topic_event_status_hint(events) {
-                let intent = hint.intent.as_deref().unwrap_or(&hint.action);
-                status.set_intent(intent, hint.memory_activity);
+                status.set_intent(&hint.action, hint.memory_activity);
             }
             status.apply_observation_events(observation_events_from_core_topic_events(events));
         }
@@ -547,9 +563,7 @@ impl TurnUi for CliTurnUi<'_> {
             HostDecisionRequest::WorkInstructionLoad(request) => {
                 choose_work_instructions_load(&request) == ApprovalChoice::Allow
             }
-            HostDecisionRequest::LongRunningCommandContinue(request) => {
-                request_long_running_command_continue(&request)
-            }
+            HostDecisionRequest::LongRunningCommandContinue(_) => true,
         };
         if accepted {
             HostDecision::Accept
@@ -726,6 +740,30 @@ impl ThinkingStatus {
         clear_thinking_block(&self.rendered_lines);
     }
 
+    fn finish_cancelled(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        self.stop_renderer_thread();
+        if let Ok(mut state) = self.state.lock() {
+            state.status.intent = "已取消".to_string();
+            state.status.elapsed_secs = active_elapsed_secs(self.started_at, &self.paused_total);
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn accumulated_stats(&self) -> UsageStats {
+        self.state
+            .lock()
+            .map(|s| s.status.usage.clone())
+            .unwrap_or_else(|_| UsageStats::zero())
+    }
+
+    fn accumulated_latest_usage(&self) -> Option<UsageStats> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.status.latest_usage.clone())
+    }
+
     fn pause_for_user_approval(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         self.stop_renderer_thread();
@@ -831,13 +869,6 @@ fn request_stale_context_continue(request: StaleContextDecisionRequest) -> bool 
     }
 }
 
-fn request_long_running_command_continue(request: &LongRunningCommandContinueRequest) -> bool {
-    match choose_long_running_command_continue(request) {
-        ApprovalChoice::Allow => true,
-        ApprovalChoice::Deny => false,
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApprovalChoice {
     Allow,
@@ -870,14 +901,9 @@ struct PasteRecoveryOutcome {
 }
 
 fn render_user_approval_prompt(request: &ApprovalRequest) -> String {
-    let intent_line = if request.intent.trim().is_empty() {
-        String::new()
-    } else {
-        format!("  intent: {}\n", request.intent)
-    };
     format!(
-        "\n需要确认执行这个命令（超出低风险自动执行范围）。\n  command: {}\n{}使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
-        request.command, intent_line
+        "\n需要确认执行这个命令（超出低风险自动执行范围）。\n  command: {}\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
+        request.command
     )
 }
 
@@ -1061,6 +1087,18 @@ fn pop_last_utf8_char_bytes(buffer: &mut Vec<u8>) {
     }
 }
 
+fn format_idle_duration(duration: std::time::Duration) -> String {
+    let total_minutes = duration.as_secs() / 60;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    if hours > 0 && minutes > 0 {
+        format!("{hours} 小时 {minutes} 分钟")
+    } else if hours > 0 {
+        format!("{hours} 小时")
+    } else {
+        format!("{minutes} 分钟")
+    }
+}
 fn render_stale_context_prompt(request: StaleContextDecisionRequest) -> String {
     let no_effect = if request.decline_clears_dynamic_context {
         "选择 NO 会清空旧动态上下文，从当前问题重新开始。"
@@ -1079,49 +1117,6 @@ fn render_stale_context_choices(selected: ApprovalChoice) -> String {
     match selected {
         ApprovalChoice::Allow => "\x1b[7m[ YES ]\x1b[0m   NO".to_string(),
         ApprovalChoice::Deny => "  YES   \x1b[7m[ NO ]\x1b[0m".to_string(),
-    }
-}
-
-fn render_long_running_command_prompt(request: &LongRunningCommandContinueRequest) -> String {
-    let timeout_text = request.timeout_ms.map_or_else(
-        || "未提供 timeout_ms".to_string(),
-        |timeout_ms| {
-            let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
-            let remaining = timeout.saturating_sub(request.elapsed);
-            format!(
-                "{}，剩余约 {}",
-                format_idle_duration(timeout),
-                format_idle_duration(remaining)
-            )
-        },
-    );
-    format!(
-        "\n命令仍在执行，已运行 {}，timeout={}。\ncommand: {}\n是否继续等待？选择“停止等待”会取消当前命令，并把这次取消作为用户补充交给模型继续判断。\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
-        format_idle_duration(request.elapsed),
-        timeout_text,
-        request.command
-    )
-}
-
-fn render_long_running_command_choices(selected: ApprovalChoice) -> String {
-    let allow_label = "继续等待";
-    let deny_label = "停止等待";
-    match selected {
-        ApprovalChoice::Allow => format!("\x1b[7m[ {} ]\x1b[0m   {}", allow_label, deny_label),
-        ApprovalChoice::Deny => format!("  {}   \x1b[7m[ {} ]\x1b[0m", allow_label, deny_label),
-    }
-}
-
-fn format_idle_duration(duration: Duration) -> String {
-    let total_minutes = duration.as_secs() / 60;
-    let hours = total_minutes / 60;
-    let minutes = total_minutes % 60;
-    if hours > 0 && minutes > 0 {
-        format!("{hours} 小时 {minutes} 分钟")
-    } else if hours > 0 {
-        format!("{hours} 小时")
-    } else {
-        format!("{minutes} 分钟")
     }
 }
 
@@ -1258,13 +1253,6 @@ fn choose_expand_output_tokens(request: OutputExpansionRequest) -> ApprovalChoic
 fn choose_stale_context_continue(request: StaleContextDecisionRequest) -> ApprovalChoice {
     print!("{}", render_stale_context_prompt(request));
     choose_with_keyboard(render_stale_context_choices, ApprovalChoice::Allow)
-}
-
-fn choose_long_running_command_continue(
-    request: &LongRunningCommandContinueRequest,
-) -> ApprovalChoice {
-    print!("{}", render_long_running_command_prompt(request));
-    choose_with_keyboard(render_long_running_command_choices, ApprovalChoice::Allow)
 }
 
 fn load_work_instructions_for_shell(
@@ -3577,9 +3565,8 @@ mod static_prompt_tests {
         read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
         reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
         render_approval_choices, render_config_apply_report, render_config_menu,
-        render_expand_output_choices, render_expand_output_prompt,
-        render_long_running_command_choices, render_long_running_command_prompt,
-        render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
+        render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
+        render_paste_recovery_choices, render_paste_recovery_prompt,
         render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
         render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
         render_stale_context_prompt, render_startup_banner, render_startup_status_block,
@@ -3599,11 +3586,11 @@ mod static_prompt_tests {
     };
     use agent_core::{
         stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
-        LongRunningCommandContinueRequest, OutputExpansionRequest, ResponseProtocolKind,
-        RoundLimitDecisionRequest, RuntimeConfigApplyError, StaleContextDecisionRequest,
-        WorkInstructionLoadMode, WorkInstructionLoadReport, WorkInstructionLoadRequest,
-        WorkInstructionLoadStatus, WorkspaceChange, WorkspaceCommandOutcome,
-        WorkspaceCommandReport, DEFAULT_STALE_CONTEXT_IDLE as STALE_CONTEXT_IDLE,
+        OutputExpansionRequest, ResponseProtocolKind, RoundLimitDecisionRequest,
+        RuntimeConfigApplyError, StaleContextDecisionRequest, WorkInstructionLoadMode,
+        WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
+        WorkspaceChange, WorkspaceCommandOutcome, WorkspaceCommandReport,
+        DEFAULT_STALE_CONTEXT_IDLE as STALE_CONTEXT_IDLE,
         DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD as STALE_CONTEXT_TOKEN_THRESHOLD,
     };
     use crossterm::event::Event;
@@ -3662,7 +3649,7 @@ mod static_prompt_tests {
         assert!(!STATIC_PROMPT.contains("\"durable_ctx_score\""));
         assert!(!STATIC_PROMPT.contains("Every model response must score"));
         assert!(STATIC_PROMPT.contains("Context maintenance"));
-        assert!(STATIC_PROMPT.contains("`memmgr` actions"));
+        assert!(STATIC_PROMPT.contains("response protocol's context compact branch"));
         assert!(STATIC_PROMPT.contains("do not target this system prompt"));
         assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
         assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));
@@ -3825,6 +3812,28 @@ mod static_prompt_tests {
     }
 
     #[test]
+    fn thinking_status_finish_cancelled_preserves_display_and_stats() {
+        let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+        status.set_usage(super::UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 5000,
+            completion_tokens: 200,
+            total_tokens: 5200,
+            ..super::UsageStats::zero()
+        });
+        status.finish_cancelled();
+        let rendered_lines = *status.rendered_lines.lock().unwrap();
+        assert!(
+            rendered_lines > 0,
+            "finish_cancelled should keep rendered lines"
+        );
+        let snapshot = status.state.lock().unwrap();
+        assert_eq!(snapshot.status.intent, "已取消");
+        assert_eq!(snapshot.status.usage.prompt_tokens, 5000);
+        assert_eq!(snapshot.status.usage.completion_tokens, 200);
+    }
+
+    #[test]
     fn cancelable_tty_line_reader_understands_utf8_widths() {
         assert_eq!(utf8_expected_len(b'a'), 1);
         assert_eq!(utf8_expected_len("é".as_bytes()[0]), 2);
@@ -3893,31 +3902,6 @@ mod static_prompt_tests {
         assert_eq!(
             render_stale_context_choices(ApprovalChoice::Deny),
             "  YES   \x1b[7m[ NO ]\x1b[0m"
-        );
-    }
-
-    #[test]
-    fn long_running_command_prompt_is_keyboard_driven_and_defaults_to_wait() {
-        let request = LongRunningCommandContinueRequest::new(
-            "run_bash",
-            "sleep 120",
-            Duration::from_secs(65),
-            Some(180_000),
-        );
-
-        let prompt = render_long_running_command_prompt(&request);
-        assert!(prompt.contains("已运行 1 分钟"));
-        assert!(prompt.contains("timeout=3 分钟，剩余约 1 分钟"));
-        assert!(prompt.contains("command: sleep 120"));
-        assert!(prompt.contains("作为用户补充交给模型"));
-        assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
-        assert_eq!(
-            render_long_running_command_choices(ApprovalChoice::Allow),
-            "\x1b[7m[ 继续等待 ]\x1b[0m   停止等待"
-        );
-        assert_eq!(
-            render_long_running_command_choices(ApprovalChoice::Deny),
-            "  继续等待   \x1b[7m[ 停止等待 ]\x1b[0m"
         );
     }
 
@@ -4716,12 +4700,10 @@ mod static_prompt_tests {
             command: "uname -s".to_string(),
             reason: "run_bash_requires_user_approval".to_string(),
             risk: "local_command_execution".to_string(),
-            intent: "Inspect OS identity.".to_string(),
         });
 
         assert!(prompt.contains("需要确认执行这个命令"));
         assert!(prompt.contains("command: uname -s"));
-        assert!(prompt.contains("intent: Inspect OS identity."));
         assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
         assert!(!prompt.contains("输入 yes"));
         assert!(!prompt.contains("action: run_bash"));

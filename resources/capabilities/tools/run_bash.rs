@@ -10,10 +10,10 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::MutexGuard;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::os::unix::process::CommandExt;
 
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+const BASH_EXECUTABLE: &str = "/bin/bash";
 #[cfg(test)]
 static LONG_RUNNING_COMMAND_PROMPT_AFTER_MS: AtomicU64 = AtomicU64::new(60_000);
 #[cfg(test)]
@@ -38,6 +39,8 @@ pub struct ShellJobRecord {
     pub turn_id: String,
     pub pid: u32,
     pub command: String,
+    #[serde(default)]
+    pub cwd: String,
     pub output_file: String,
     pub status_file: String,
 }
@@ -51,6 +54,7 @@ pub struct RunningShellJob {
     pub pid: u32,
     pub kind: String,
     pub command: String,
+    pub cwd: String,
     pub session_id: String,
     pub turn_id: String,
     pub created_at_ms: i64,
@@ -61,10 +65,13 @@ pub struct ShellJobExitUpdate {
     pub pid: u32,
     pub kind: String,
     pub command: String,
+    pub cwd: String,
     pub session_id: String,
     pub turn_id: String,
     pub created_at_ms: i64,
     pub elapsed_ms: i64,
+    pub status: String,
+    pub output: String,
 }
 
 impl ShellJobExitUpdate {
@@ -90,7 +97,134 @@ pub struct FileShellJobStore {
     dir: PathBuf,
     index_file: PathBuf,
     guard: MemGuard,
-    children: Arc<Mutex<HashMap<u32, Child>>>,
+    watcher: ShellJobWatcher,
+}
+
+#[derive(Debug, Clone)]
+struct ShellJobWatcher {
+    state: Arc<ShellJobWatcherState>,
+}
+
+#[derive(Debug)]
+struct ShellJobWatcherState {
+    jobs: Mutex<HashMap<u32, WatchedShellChild>>,
+    changed: Condvar,
+    started: AtomicBool,
+}
+
+#[derive(Debug)]
+struct WatchedShellChild {
+    child: Child,
+    status_file: PathBuf,
+}
+
+impl ShellJobWatcher {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(ShellJobWatcherState {
+                jobs: Mutex::new(HashMap::new()),
+                changed: Condvar::new(),
+                started: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    fn register(&self, pid: u32, child: Child, status_file: PathBuf) {
+        self.ensure_started();
+        if let Ok(mut jobs) = self.state.jobs.lock() {
+            jobs.insert(pid, WatchedShellChild { child, status_file });
+            self.state.changed.notify_one();
+        }
+    }
+
+    fn is_watching(&self, pid: u32) -> bool {
+        self.state
+            .jobs
+            .lock()
+            .ok()
+            .map(|jobs| jobs.contains_key(&pid))
+            .unwrap_or(false)
+    }
+
+    fn refresh_pid(&self, pid: u32) {
+        let Ok(mut jobs) = self.state.jobs.lock() else {
+            return;
+        };
+        let Some(watched) = jobs.get_mut(&pid) else {
+            return;
+        };
+        let status = match watched.child.try_wait() {
+            Ok(Some(status)) => Some(status.code().unwrap_or(-1).to_string()),
+            Ok(None) => None,
+            Err(_) => Some("unknown".to_string()),
+        };
+        if let Some(status) = status {
+            if let Some(watched) = jobs.remove(&pid) {
+                write_status_if_empty(&watched.status_file, &status);
+            }
+        }
+    }
+
+    fn ensure_started(&self) {
+        if self
+            .state
+            .started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || shell_job_watcher_loop(state));
+    }
+}
+
+fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
+    let mut jobs = match state.jobs.lock() {
+        Ok(jobs) => jobs,
+        Err(_) => return,
+    };
+    loop {
+        while jobs.is_empty() {
+            jobs = match state.changed.wait(jobs) {
+                Ok(jobs) => jobs,
+                Err(_) => return,
+            };
+        }
+
+        let mut finished = Vec::new();
+        for (pid, watched) in jobs.iter_mut() {
+            match watched.child.try_wait() {
+                Ok(Some(status)) => finished.push((*pid, status.code().unwrap_or(-1).to_string())),
+                Ok(None) => {}
+                Err(_) => finished.push((*pid, "unknown".to_string())),
+            }
+        }
+        for (pid, status) in finished {
+            if let Some(watched) = jobs.remove(&pid) {
+                write_status_if_empty(&watched.status_file, &status);
+            }
+        }
+
+        if jobs.is_empty() {
+            continue;
+        }
+        jobs = match state.changed.wait_timeout(jobs, Duration::from_millis(100)) {
+            Ok((jobs, _)) => jobs,
+            Err(_) => return,
+        };
+    }
+}
+
+fn write_status_if_empty(path: &Path, status: &str) {
+    if fs::read_to_string(path)
+        .ok()
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let _ = fs::write(path, status);
 }
 
 impl FileShellJobStore {
@@ -101,11 +235,17 @@ impl FileShellJobStore {
             index_file: dir.join("jobs.jsonl"),
             dir,
             guard: MemGuard::for_memory_dir(memory_dir),
-            children: Arc::new(Mutex::new(HashMap::new())),
+            watcher: ShellJobWatcher::new(),
         }
     }
 
-    pub fn spawn_background(&self, command: &str, session_id: &str, turn_id: &str) -> String {
+    pub fn spawn_background(
+        &self,
+        command: &str,
+        cwd: &Path,
+        session_id: &str,
+        turn_id: &str,
+    ) -> String {
         let clean = command.trim();
         if clean.is_empty() {
             return bash_action_not_executed(
@@ -113,7 +253,7 @@ impl FileShellJobStore {
                 "The background command was not started because no shell command was provided.",
             );
         }
-        let record = match self.spawn_record(clean, "background", session_id, turn_id) {
+        let record = match self.spawn_record(clean, cwd, "background", session_id, turn_id) {
             Ok(record) => record,
             Err(_) => {
                 return bash_action_not_executed(
@@ -132,6 +272,7 @@ impl FileShellJobStore {
     fn spawn_record(
         &self,
         clean: &str,
+        cwd: &Path,
         kind: &str,
         session_id: &str,
         turn_id: &str,
@@ -140,28 +281,27 @@ impl FileShellJobStore {
         let id = unique_shell_id("job");
         let output_file = self.dir.join(format!("{id}.out"));
         let status_file = self.dir.join(format!("{id}.status"));
-        let script = format!(
-            "({}) > {} 2>&1; printf '%s' \"$?\" > {}",
-            clean,
-            shell_quote_path(&output_file),
-            shell_quote_path(&status_file)
-        );
-        let mut command = Command::new("/bin/sh");
+        let output = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&output_file)?;
+        let stderr = output.try_clone()?;
+        let mut command = Command::new(BASH_EXECUTABLE);
         command
-            .arg("-lc")
-            .arg(script)
+            .arg("-c")
+            .arg(clean)
+            .current_dir(cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(stderr));
         #[cfg(unix)]
         {
             command.process_group(0);
         }
         let child = command.spawn()?;
         let pid = child.id();
-        if let Ok(mut children) = self.children.lock() {
-            children.insert(pid, child);
-        }
+        self.watcher.register(pid, child, status_file.clone());
         Ok(ShellJobRecord {
             id,
             created_at_ms: now_ms(),
@@ -170,6 +310,7 @@ impl FileShellJobStore {
             turn_id: turn_id.trim().to_string(),
             pid,
             command: clean.to_string(),
+            cwd: cwd.to_string_lossy().to_string(),
             output_file: output_file.to_string_lossy().to_string(),
             status_file: status_file.to_string_lossy().to_string(),
         })
@@ -178,19 +319,21 @@ impl FileShellJobStore {
     pub fn run_with_timeout(
         &self,
         command: &str,
+        cwd: &Path,
         timeout_ms: i64,
         session_id: &str,
         turn_id: &str,
         runtime: &mut dyn ActionRuntime,
     ) -> String {
-        let result =
-            self.run_with_timeout_structured(command, timeout_ms, session_id, turn_id, runtime);
+        let result = self
+            .run_with_timeout_structured(command, cwd, timeout_ms, session_id, turn_id, runtime);
         result.to_action_result("run_bash")
     }
 
     pub fn run_with_timeout_structured(
         &self,
         command: &str,
+        cwd: &Path,
         timeout_ms: i64,
         session_id: &str,
         turn_id: &str,
@@ -200,7 +343,7 @@ impl FileShellJobStore {
         if timeout_ms <= 0 {
             return bash_error(clean, "invalid_timeout");
         }
-        let Ok(record) = self.spawn_record(clean, "timeout", session_id, turn_id) else {
+        let Ok(record) = self.spawn_record(clean, cwd, "timeout", session_id, turn_id) else {
             return bash_error(clean, "command_failed");
         };
         let started = Instant::now();
@@ -209,7 +352,7 @@ impl FileShellJobStore {
         loop {
             if runtime.should_cancel() {
                 terminate_process(record.pid);
-                let _ = fs::write(&record.status_file, "cancelled");
+                write_status_if_empty(Path::new(&record.status_file), "cancelled");
                 return bash_error(clean, "cancelled");
             }
             if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
@@ -221,7 +364,7 @@ impl FileShellJobStore {
                 };
                 if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
                     terminate_process(record.pid);
-                    let _ = fs::write(&record.status_file, "cancelled");
+                    write_status_if_empty(Path::new(&record.status_file), "cancelled");
                     return bash_error(clean, "cancelled_by_user");
                 }
                 next_long_running_check =
@@ -265,7 +408,7 @@ impl FileShellJobStore {
                 continue;
             }
             terminate_process(record.pid);
-            let _ = fs::write(&record.status_file, "cancelled");
+            write_status_if_empty(Path::new(&record.status_file), "cancelled");
             cancelled.push(record.id);
         }
         cancelled
@@ -312,9 +455,10 @@ impl FileShellJobStore {
         let mut out = String::from("RUNNING JOB LIST:");
         for job in jobs {
             out.push_str(&format!(
-                "\npid={}, {}, cmd={}, still running",
+                "\npid={}, {}, cwd={}, cmd={}, still running",
                 job.pid,
                 job.description(),
+                job.cwd,
                 compact_text(&job.command, 500)
             ));
         }
@@ -361,20 +505,33 @@ impl FileShellJobStore {
     }
 
     fn refresh_record_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
-        if let Some(refresh) = self.refresh_child_handle_unlocked(&record) {
-            return refresh;
-        }
         if self.record_finished(&record) {
             return self.exit_update_once_unlocked(record);
         }
+        if self.watcher.is_watching(record.pid) {
+            self.watcher.refresh_pid(record.pid);
+            if self.record_finished(&record) {
+                return self.exit_update_once_unlocked(record);
+            }
+            return ShellJobRefresh::Running(RunningShellJob {
+                pid: record.pid,
+                kind: record.kind,
+                command: record.command,
+                cwd: record.cwd,
+                session_id: record.session_id,
+                turn_id: record.turn_id,
+                created_at_ms: record.created_at_ms,
+            });
+        }
         if !process_running(record.pid) {
-            let _ = fs::write(&record.status_file, "exited");
+            write_status_if_empty(Path::new(&record.status_file), "exited");
             return self.exit_update_once_unlocked(record);
         }
         ShellJobRefresh::Running(RunningShellJob {
             pid: record.pid,
             kind: record.kind,
             command: record.command,
+            cwd: record.cwd,
             session_id: record.session_id,
             turn_id: record.turn_id,
             created_at_ms: record.created_at_ms,
@@ -391,36 +548,22 @@ impl FileShellJobStore {
             pid: record.pid,
             kind: record.kind,
             command: record.command,
+            cwd: record.cwd,
             session_id: record.session_id,
             turn_id: record.turn_id,
             created_at_ms: record.created_at_ms,
             elapsed_ms: now_ms().saturating_sub(record.created_at_ms),
+            status: fs::read_to_string(&record.status_file)
+                .unwrap_or_else(|_| "unknown".to_string())
+                .trim()
+                .to_string(),
+            output: compact_text(
+                &normalized_shell_output(
+                    &fs::read_to_string(&record.output_file).unwrap_or_default(),
+                ),
+                4000,
+            ),
         })
-    }
-
-    fn refresh_child_handle_unlocked(&self, record: &ShellJobRecord) -> Option<ShellJobRefresh> {
-        let mut children = self.children.lock().ok()?;
-        let child = children.get_mut(&record.pid)?;
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let code = status.code().unwrap_or(-1).to_string();
-                let _ = fs::write(&record.status_file, code);
-                children.remove(&record.pid);
-                Some(self.exit_update_once_unlocked(record.clone()))
-            }
-            Ok(None) => Some(ShellJobRefresh::Running(RunningShellJob {
-                pid: record.pid,
-                kind: record.kind.clone(),
-                command: record.command.clone(),
-                session_id: record.session_id.clone(),
-                turn_id: record.turn_id.clone(),
-                created_at_ms: record.created_at_ms,
-            })),
-            Err(_) => {
-                children.remove(&record.pid);
-                None
-            }
-        }
     }
 }
 
@@ -434,9 +577,6 @@ pub fn validate_bash_request(command: &str) -> Result<(), String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Err("command_required".to_string());
-    }
-    if trimmed.len() > 2000 {
-        return Err("command_too_long".to_string());
     }
     Ok(())
 }
@@ -467,14 +607,15 @@ pub(crate) fn execute_run_bash_action(
     };
     let session_id = core.current_session_id();
     let turn_id = core.current_action_turn_id();
+    let cwd = core.current_prompt_cwd().to_path_buf();
     execute_run_bash(
         &command_to_run,
+        &cwd,
         action.background(),
         timeout_ms,
         interval_ms,
         action.input_u64("once_timeout_ms").unwrap_or(5000),
         core.bash_approval_mode,
-        &action.intent,
         &core.shell_jobs,
         &session_id,
         &turn_id,
@@ -485,12 +626,12 @@ pub(crate) fn execute_run_bash_action(
 
 pub(crate) fn execute_run_bash(
     command: &str,
+    cwd: &Path,
     background: bool,
     timeout_ms: i64,
     interval_ms: Option<u64>,
     once_timeout_ms: u64,
     approval_mode: BashApprovalMode,
-    intent: &str,
     shell_jobs: &FileShellJobStore,
     session_id: &str,
     turn_id: &str,
@@ -554,7 +695,6 @@ pub(crate) fn execute_run_bash(
                 command: command_to_run.to_string(),
                 reason: "run_bash_requires_user_approval".to_string(),
                 risk: "local_command_execution".to_string(),
-                intent: intent.to_string(),
             },
             approved_action: PendingApprovedAction::RunBash {
                 command: command_to_run.to_string(),
@@ -564,14 +704,15 @@ pub(crate) fn execute_run_bash(
                 once_timeout_ms,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
+                cwd: cwd.to_path_buf(),
             },
-            intent: intent.to_string(),
             continuation: None,
         });
     }
     if background {
         return ActionExecution::Completed(shell_jobs.spawn_background(
             command_to_run,
+            cwd,
             session_id,
             turn_id,
         ));
@@ -579,6 +720,7 @@ pub(crate) fn execute_run_bash(
     if let Some(interval_ms) = interval_ms {
         return ActionExecution::Completed(execute_polling_bash(
             command_to_run,
+            cwd,
             interval_ms,
             timeout_ms,
             once_timeout_ms,
@@ -587,6 +729,7 @@ pub(crate) fn execute_run_bash(
     }
     ActionExecution::Completed(shell_jobs.run_with_timeout(
         command_to_run,
+        cwd,
         timeout_ms,
         session_id,
         turn_id,
@@ -596,6 +739,7 @@ pub(crate) fn execute_run_bash(
 
 pub(crate) fn execute_approved_bash(
     command: &str,
+    cwd: &Path,
     background: bool,
     timeout_ms: i64,
     interval_ms: Option<u64>,
@@ -608,17 +752,25 @@ pub(crate) fn execute_approved_bash(
     runtime: &mut dyn ActionRuntime,
 ) -> String {
     let mut result = if background {
-        shell_jobs.spawn_background(command.trim(), session_id, turn_id)
+        shell_jobs.spawn_background(command.trim(), cwd, session_id, turn_id)
     } else if let Some(interval_ms) = interval_ms {
         execute_polling_bash(
             command.trim(),
+            cwd,
             interval_ms,
             timeout_ms,
             once_timeout_ms,
             runtime,
         )
     } else {
-        shell_jobs.run_with_timeout(command.trim(), timeout_ms, session_id, turn_id, runtime)
+        shell_jobs.run_with_timeout(
+            command.trim(),
+            cwd,
+            timeout_ms,
+            session_id,
+            turn_id,
+            runtime,
+        )
     };
     result.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
@@ -628,11 +780,13 @@ pub(crate) fn execute_approved_bash(
 }
 
 pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn ActionRuntime) -> String {
-    execute_one_bash_structured(command, timeout_ms, runtime).to_action_result("run_bash")
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    execute_one_bash_structured(command, &cwd, timeout_ms, runtime).to_action_result("run_bash")
 }
 
 pub(crate) fn execute_polling_bash(
     command: &str,
+    cwd: &Path,
     interval_ms: u64,
     timeout_ms: i64,
     once_timeout_ms: u64,
@@ -693,7 +847,7 @@ pub(crate) fn execute_polling_bash(
         }
 
         attempts = attempts.saturating_add(1);
-        let result = execute_one_bash_structured(command, once_timeout_ms as i64, runtime);
+        let result = execute_one_bash_structured(command, cwd, once_timeout_ms as i64, runtime);
         last_status = result.status;
         last_output = result.output;
         last_error = result.error;
@@ -864,11 +1018,13 @@ impl BashCommandOutput {
 
 pub fn execute_one_bash_structured(
     command: &str,
+    cwd: &Path,
     timeout_ms: i64,
     runtime: &mut dyn ActionRuntime,
 ) -> BashCommandOutput {
     execute_one_bash_structured_with_prompt_after(
         command,
+        cwd,
         timeout_ms,
         runtime,
         long_running_command_prompt_after(),
@@ -877,6 +1033,7 @@ pub fn execute_one_bash_structured(
 
 fn execute_one_bash_structured_with_prompt_after(
     command: &str,
+    cwd: &Path,
     timeout_ms: i64,
     runtime: &mut dyn ActionRuntime,
     long_running_prompt_after: Duration,
@@ -884,9 +1041,10 @@ fn execute_one_bash_structured_with_prompt_after(
     if timeout_ms <= 0 {
         return bash_error(command, "invalid_timeout");
     }
-    let spawn = Command::new("/bin/sh")
+    let spawn = Command::new(BASH_EXECUTABLE)
         .arg("-lc")
         .arg(command)
+        .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
@@ -1025,9 +1183,6 @@ fn bash_action_not_executed(command: Option<&str>, reason: &str) -> String {
 fn bash_validation_message(reason: &str) -> &'static str {
     match reason {
         "command_required" => "No shell command was provided.",
-        "command_too_long" => {
-            "The shell command is too long for a single run_bash action. Split the work into smaller commands or write a short script file first."
-        }
         _ => "The shell command request did not pass runtime validation.",
     }
 }
@@ -1068,6 +1223,37 @@ fn normalized_shell_output(output: &str) -> String {
 }
 
 fn process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let mut status = 0;
+        let wait = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if wait == pid as libc::pid_t {
+            return false;
+        }
+        if wait == 0 {
+            return true;
+        }
+        match Command::new("/bin/ps")
+            .arg("-o")
+            .arg("stat=")
+            .arg("-p")
+            .arg(pid.to_string())
+            .output()
+        {
+            Ok(output) => {
+                if !output.status.success() {
+                    return false;
+                }
+                let stat = String::from_utf8_lossy(&output.stdout);
+                let state = stat.trim();
+                if state.starts_with('Z') || state.contains('Z') {
+                    return false;
+                }
+                return !state.is_empty();
+            }
+            Err(_) => {}
+        }
+    }
     Command::new("/bin/kill")
         .arg("-0")
         .arg(pid.to_string())
@@ -1078,6 +1264,7 @@ fn process_running(pid: u32) -> bool {
         .is_some_and(|status| status.success())
 }
 
+#[cfg(test)]
 fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
@@ -1199,6 +1386,10 @@ mod tests {
         dir
     }
 
+    fn tmp_cwd(name: &str) -> PathBuf {
+        tmp_memory_dir(&format!("cwd_{name}"))
+    }
+
     #[test]
     fn normal_bash_reports_status_and_output() {
         let mut runtime = NeverCancelRuntime;
@@ -1253,14 +1444,15 @@ mod tests {
     #[test]
     fn normal_run_bash_rejects_long_sleep_commands() {
         let store = FileShellJobStore::new(&tmp_memory_dir("long_sleep_guard"));
+        let cwd = tmp_cwd("long_sleep_guard");
         let result = execute_run_bash(
             "sleep 90 && printf done",
+            &cwd,
             false,
             5000,
             None,
             5000,
             BashApprovalMode::Approve,
-            "Wait then check.",
             &store,
             "session_a",
             "turn_a",
@@ -1281,14 +1473,15 @@ mod tests {
     #[test]
     fn normal_run_bash_allows_short_sleep_commands() {
         let store = FileShellJobStore::new(&tmp_memory_dir("short_sleep_guard"));
+        let cwd = tmp_cwd("short_sleep_guard");
         let result = execute_run_bash(
             "sleep 1; printf done",
+            &cwd,
             false,
             3000,
             None,
             5000,
             BashApprovalMode::Approve,
-            "Short wait.",
             &store,
             "session_a",
             "turn_a",
@@ -1314,7 +1507,7 @@ mod tests {
             shell_quote_path(&marker)
         );
         let mut runtime = NeverCancelRuntime;
-        let result = execute_polling_bash(&command, 1000, 5000, 1000, &mut runtime);
+        let result = execute_polling_bash(&command, &dir, 1000, 5000, 1000, &mut runtime);
         assert!(result.contains("Action result: run_bash"), "{result}");
         assert!(result.contains("Polling state: finished"), "{result}");
         assert!(result.contains("Attempts: 2"), "{result}");
@@ -1324,7 +1517,15 @@ mod tests {
     #[test]
     fn run_bash_poll_mode_times_out_when_command_stays_nonzero() {
         let mut runtime = NeverCancelRuntime;
-        let result = execute_polling_bash("printf waiting; exit 7", 1000, 1100, 1000, &mut runtime);
+        let cwd = tmp_cwd("poll_timeout");
+        let result = execute_polling_bash(
+            "printf waiting; exit 7",
+            &cwd,
+            1000,
+            1100,
+            1000,
+            &mut runtime,
+        );
         assert!(result.contains("Polling state: timeout"), "{result}");
         assert!(result.contains("Last observed exit code: 7"), "{result}");
         assert!(result.contains("waiting"), "{result}");
@@ -1336,21 +1537,23 @@ mod tests {
         let mut runtime = ToggleCancelRuntime {
             cancelled: &cancelled,
         };
-        let result = execute_polling_bash("exit 1", 1000, 10_000, 1000, &mut runtime);
+        let cwd = tmp_cwd("poll_cancel");
+        let result = execute_polling_bash("exit 1", &cwd, 1000, 10_000, 1000, &mut runtime);
         assert!(result.contains("Polling state: cancelled"), "{result}");
     }
 
     #[test]
     fn run_bash_poll_mode_requests_user_approval_in_ask_mode() {
         let store = FileShellJobStore::new(&tmp_memory_dir("poll_approval"));
+        let cwd = tmp_cwd("poll_approval");
         let result = execute_run_bash(
             "test -f /tmp/timem_poll_marker",
+            &cwd,
             false,
             5000,
             Some(1000),
             1000,
             BashApprovalMode::Ask,
-            "等待外部状态完成",
             &store,
             "session_a",
             "turn_a",
@@ -1361,7 +1564,6 @@ mod tests {
             ActionExecution::NeedsApproval(pending) => {
                 assert_eq!(pending.request.action, "run_bash");
                 assert_eq!(pending.request.risk, "local_command_execution");
-                assert_eq!(pending.request.intent, "等待外部状态完成");
             }
             other => panic!("expected run_bash approval request, got {other:?}"),
         }
@@ -1370,14 +1572,15 @@ mod tests {
     #[test]
     fn run_bash_polling_requires_loop_cmd_and_interval_pair() {
         let store = FileShellJobStore::new(&tmp_memory_dir("poll_pairing"));
+        let cwd = tmp_cwd("poll_pairing");
         let cmd_with_interval = execute_run_bash(
             "test -f /tmp/timem_poll_marker",
+            &cwd,
             false,
             5000,
             Some(1000),
             1000,
             BashApprovalMode::Approve,
-            "等待外部状态完成",
             &store,
             "session_a",
             "turn_a",
@@ -1396,12 +1599,12 @@ mod tests {
 
         let loop_without_interval = execute_run_bash(
             "test -f /tmp/timem_poll_marker",
+            &cwd,
             false,
             5000,
             None,
             1000,
             BashApprovalMode::Approve,
-            "等待外部状态完成",
             &store,
             "session_a",
             "turn_a",
@@ -1423,7 +1626,7 @@ mod tests {
         let flag_path = shell_quote_path(&flag);
         let mut runtime = NeverCancelRuntime;
         let _ = fs::remove_file(&flag);
-        let mut child = Command::new("/bin/sh")
+        let mut child = Command::new(BASH_EXECUTABLE)
             .arg("-lc")
             .arg(format!("sleep 0.3; touch {flag_path}"))
             .stdin(Stdio::null())
@@ -1435,6 +1638,7 @@ mod tests {
         let started = Instant::now();
         let result = execute_polling_bash(
             &format!("test -f {flag_path}"),
+            &dir,
             100,
             2000,
             1000,
@@ -1463,7 +1667,7 @@ mod tests {
         let dir = tmp_memory_dir("background_job");
         let store = FileShellJobStore::new(&dir);
         let started =
-            store.spawn_background("sleep 1; printf background_ok", "session_a", "turn_a");
+            store.spawn_background("sleep 1; printf background_ok", &dir, "session_a", "turn_a");
         assert!(
             started.contains("now keeps running in background"),
             "{started}"
@@ -1479,12 +1683,22 @@ mod tests {
         assert_eq!(running[0].pid, pid);
         assert_eq!(running[0].kind, "background");
 
-        thread::sleep(Duration::from_millis(1300));
-        let (running, updates) = store.refresh_for_session("session_a");
-        assert!(running.is_empty());
+        let mut running = Vec::new();
+        let mut updates = Vec::new();
+        let wait_started = Instant::now();
+        while wait_started.elapsed() < Duration::from_secs(5) {
+            (running, updates) = store.refresh_for_session("session_a");
+            if running.is_empty() && !updates.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(running.is_empty(), "background job should have exited");
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].pid, pid);
         assert_eq!(updates[0].description(), "background job");
+        assert_eq!(updates[0].status, "0");
+        assert_eq!(updates[0].output, "background_ok");
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1495,6 +1709,7 @@ mod tests {
         let mut runtime = NeverCancelRuntime;
         let result = store.run_with_timeout(
             "printf started; sleep 1; printf done",
+            &dir,
             100,
             "session_a",
             "turn_a",
@@ -1529,7 +1744,161 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].pid, pid);
         assert_eq!(updates[0].description(), "old timeout job");
+        assert_eq!(updates[0].status, "0");
+        assert_eq!(updates[0].output, "starteddone");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn timeout_job_supports_heredoc_with_backticks() {
+        let dir = tmp_memory_dir("timeout_heredoc_backticks");
+        let store = FileShellJobStore::new(&dir);
+        let mut runtime = NeverCancelRuntime;
+        let result = store.run_with_timeout(
+            "cat <<'EOF'\nline with `ShellJobWatcher` backticks\nEOF",
+            &dir,
+            5000,
+            "session_a",
+            "turn_a",
+            &mut runtime,
+        );
+        assert!(result.contains("Exit code: 0"), "{result}");
+        assert!(
+            result.contains("line with `ShellJobWatcher` backticks"),
+            "{result}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_job_supports_heredoc_with_backticks() {
+        let dir = tmp_memory_dir("background_heredoc_backticks");
+        let store = FileShellJobStore::new(&dir);
+        let started = store.spawn_background(
+            "cat <<'EOF'\nbackground `ShellJobWatcher` output\nEOF",
+            &dir,
+            "session_a",
+            "turn_a",
+        );
+        assert!(
+            started.contains("now keeps running in background"),
+            "{started}"
+        );
+
+        let mut updates = Vec::new();
+        let wait_started = Instant::now();
+        while wait_started.elapsed() < Duration::from_secs(3) {
+            let (running_now, updates_now) = store.refresh_for_session("session_a");
+            updates = updates_now;
+            if running_now.is_empty() && !updates.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, "0");
+        assert_eq!(updates[0].output, "background `ShellJobWatcher` output");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tracked_job_preserves_complex_shell_syntax_without_runtime_wrapper() {
+        let dir = tmp_memory_dir("tracked_complex_shell_syntax");
+        let store = FileShellJobStore::new(&dir);
+        let mut runtime = NeverCancelRuntime;
+        let result = store.run_with_timeout(
+            "x='brace ok'; (printf '%s\\n' \"$x\"); { printf '%s\\n' group; }; cat <<'EOF'\nliteral `backticks` and $(not expanded)\nEOF",
+            &dir,
+            5000,
+            "session_a",
+            "turn_a",
+            &mut runtime,
+        );
+        assert!(result.contains("Exit code: 0"), "{result}");
+        assert!(result.contains("brace ok"), "{result}");
+        assert!(result.contains("group"), "{result}");
+        assert!(
+            result.contains("literal `backticks` and $(not expanded)"),
+            "{result}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tracked_job_runs_real_bash_syntax() {
+        let dir = tmp_memory_dir("tracked_real_bash_syntax");
+        let store = FileShellJobStore::new(&dir);
+        let mut runtime = NeverCancelRuntime;
+        let result = store.run_with_timeout(
+            "arr=(alpha beta); [[ ${arr[1]} == beta ]] && printf '%s\\n' \"${arr[1]}\"",
+            &dir,
+            5000,
+            "session_a",
+            "turn_a",
+            &mut runtime,
+        );
+        assert!(result.contains("Exit code: 0"), "{result}");
+        assert!(result.contains("beta"), "{result}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn watcher_reaps_background_job_without_refresh_polling() {
+        let dir = tmp_memory_dir("watcher_reaps_background");
+        let store = FileShellJobStore::new(&dir);
+        let started =
+            store.spawn_background("printf watcher_reaped", &dir, "session_watch", "turn_watch");
+        assert!(
+            started.contains("now keeps running in background"),
+            "{started}"
+        );
+        let record = store
+            .guard
+            .with_read(|| store.records_unlocked().into_iter().next())
+            .unwrap()
+            .expect("job record");
+
+        let started_wait = Instant::now();
+        while started_wait.elapsed() < Duration::from_secs(3) && !store.record_finished(&record) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            store.record_finished(&record),
+            "shared watcher should write the status file without refresh polling"
+        );
+
+        let (running, updates) = store.refresh_for_session("session_watch");
+        assert!(running.is_empty());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, "0");
+        assert_eq!(updates[0].output, "watcher_reaped");
+        assert!(
+            !process_running(record.pid),
+            "reaped child should not be reported as running"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_running_treats_zombie_as_not_running() {
+        let mut child = Command::new(BASH_EXECUTABLE)
+            .arg("-lc")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn short child");
+        let pid = child.id();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) && process_running(pid) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !process_running(pid),
+            "exited child pid {pid} should not be reported as running"
+        );
+        let _ = child.wait();
     }
 
     #[test]
@@ -1537,8 +1906,8 @@ mod tests {
         let dir = tmp_memory_dir("running_context");
         let store = FileShellJobStore::new(&dir);
 
-        let _ = store.spawn_background("sleep 10", "session_owned", "turn_a");
-        let _ = store.spawn_background("sleep 10", "session_other", "turn_a");
+        let _ = store.spawn_background("sleep 10", &dir, "session_owned", "turn_a");
+        let _ = store.spawn_background("sleep 10", &dir, "session_other", "turn_a");
         let context = store
             .running_job_list_context("session_owned")
             .expect("running context");
@@ -1557,16 +1926,13 @@ mod tests {
     }
 
     #[test]
-    fn bash_validation_rejects_empty_and_huge_commands() {
+    fn bash_validation_rejects_empty_and_allows_long_commands() {
         assert_eq!(
             validate_bash_request(""),
             Err("command_required".to_string())
         );
         let huge = "x".repeat(2001);
-        assert_eq!(
-            validate_bash_request(&huge),
-            Err("command_too_long".to_string())
-        );
+        assert!(validate_bash_request(&huge).is_ok());
         assert!(validate_bash_request("printf ok").is_ok());
     }
 }

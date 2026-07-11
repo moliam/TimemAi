@@ -8,7 +8,7 @@ structured core/UI topic protocol.
 ## Goals
 
 - Keep agent behavior in Rust and independent from iOS or any cloud service.
-- Let the model decide intent through explicit structured actions.
+- Let the model choose concrete structured actions when runtime work is needed.
 - Keep runtime responsibilities mechanical: protocol validation, persistence,
   provider IO, local command execution, and safety boundaries.
 - Preserve local-first operation. API keys, audit logs, memory, and chat history
@@ -94,8 +94,8 @@ flowchart LR
   `agent_core::status_view`, including structured retry status. Hosts may render
   retry countdowns, details, colors, or notifications differently, but should
   not store retry state as scattered UI strings.
-- Normalizes model progress/actions into UI-neutral topic events after model
-  response parsing: job progress, user-visible intent, activity state, memory
+- Normalizes model free_talk/actions into UI-neutral topic events after model
+  response parsing: visible working notes, activity state, memory
   read/write activity, and structured `CoreActionKind` values such as Bash,
   memory, capability, or self-tool activity. Core may include raw action/input
   as evidence, but hosts should render from the structured kind instead of
@@ -140,9 +140,8 @@ Key shell-side modules:
   the CLI implementation of the turn UI callbacks.
 - `observation.rs`: modular Thought / Action observation events and rendering.
   It consumes `CoreTopicEvent` values instead of parsing model responses in the
-  shell production path, renders user-facing intent as top-level `·` rows, and
-  renders `CoreActionKind` values as concrete Bash/memory/context activity child
-  rows using `├─`/`└─` prefixes.
+  shell production path, and renders `CoreActionKind` values as concrete
+  Bash/memory/context activity rows.
 - thinking status hints use `agent_core::topic_event_status_hint`; shell only
   maps the returned memory activity to a terminal marker.
 - `profiler.rs`: shell rendering for `/prof` from `RuntimeProfileReport`;
@@ -231,11 +230,24 @@ define runtime behavior, repair boundaries, and tests; they must stay aligned
 with the resource text and generated expanded prompt output from
 `scripts/update_static_prompt_snapshot.sh`.
 
+The XML suite uses a protocol-specific tag scanner rather than a general XML
+tree parser. It recognizes only the small response vocabulary under the single
+`<response>` root. Once it enters a raw text field (`free_talk`,
+`final_answer`, or compact `summary`), it extracts that field as text and does
+not scan its contents for nested protocol tags. This prevents XML/JSON/Markdown
+examples inside user-visible text from being re-parsed as runtime actions.
+The XML parser also accepts a whole model response wrapped in a single
+documentation-style ```xml fence, then parses the inner `<response>` with the
+same protocol scanner. XML state branches are strict:
+`working_still_action`, `final_answer`, and `context_compact` are mutually
+exclusive in one response; `<status>` is rejected by the XML suite because
+completion is represented by the `<final_answer>` branch.
+
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
 `--response-protocol`. The default is `xml`; `markdown` and `json` remain
 available. All suites must produce the same internal `ParsedEnvelope` semantics
-for the same user-visible capability: status/final answer, progress, free_talk
-retention, actions, and `context_compact`.
+for the same user-visible capability: status/final answer, free_talk retention,
+actions, and `context_compact`.
 
 The prompt must not tell the model that multiple suites exist. It should only
 show the currently selected response protocol. This keeps provider-facing text
@@ -245,7 +257,7 @@ Markdown protocol recovery is intentionally bounded:
 
 - If the model emits a natural-language preface before a valid Markdown
   protocol section, the parser may recover from the first recognized protocol
-  heading such as `## Status`, `## Progress`, `## Final_Answer`,
+  heading such as `## Status`, `## Free_talk`, `## Final_Answer`,
   `## Working_Still_Action`, or `## Context Compact`.
 - A standalone fenced `action` block is treated as working protocol output.
 - Ordinary Markdown headings such as `## Notes` are not protocol. They remain a
@@ -526,14 +538,14 @@ keeps `delta_id` as the stable maintenance handle:
 
 ```text
 [BEGIN DELTA]
-delta_id: pd_1782200000000_2
+delta_id: pd_1
 time: 1782200000000
 
 ## USER
 new user input or mid-turn supplement
 
 ## {{CURRENT_ASSISTANT_NAME}}
-free_talk or final_answer already recorded for continuity
+raw model output recorded for continuity by default
 
 ## SYSTEM
 The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
@@ -545,6 +557,18 @@ runtime notes such as response repair, compaction result, or work instructions
 
 [END DELTA]
 ```
+
+Runtime assigns normal dynamic delta ids as a simple monotonic sequence:
+`pd_1`, `pd_2`, `pd_3`, ... . The sequence is not derived from timestamps and is
+not reused after compact/discard hides older deltas.
+
+The assistant replay policy is explicit. By default, successful model output is
+replayed into the next delta verbatim under the current assistant role, so the
+model can see exactly what it wrote last round. `AssistantReplayMode::ExtractedFields`
+keeps the older behavior for hosts/tests that need it: replay only parsed
+`free_talk` plus a normalized final-answer note. Protocol repair deltas are
+separate temporary deltas and still include the malformed response plus SYSTEM
+repair feedback.
 
 There are two broad model-visible prompt classes:
 
@@ -567,10 +591,10 @@ Runtime shrink review and context maintenance should use `delta_id`:
   text that has not yet gone through the provider is estimated as roughly
   `chars / 4`.
 - At that 90% threshold, runtime marks shrink as required. The model should
-  compact before continuing: summarize useful dynamic prompt deltas to about
-  10%-20% of their current token footprint, discard stale details, put important
-  but lengthy state into scratch memory, and then use `memmgr type=context
-  op=discard` on covered `delta_id` ranges.
+  compact before continuing with the response protocol's `context_compact`
+  branch: summarize useful dynamic prompt deltas to about 10%-20% of their
+  current token footprint, discard stale delta ids, and offload important but
+  lengthy delta ids into scratch.
 
 Prompt deltas are append-only in normal operation. Later provider requests
 render the same static prefix plus all retained dynamic deltas, so the
@@ -605,7 +629,7 @@ static prompt
 [END SYSTEM PROMPT]
 
 [BEGIN DELTA]
-delta_id: pd_1782200000000_1
+delta_id: pd_1
 time: 1782200000000
 
 ## USER
@@ -709,18 +733,19 @@ model response protocol (`xml` by default; `markdown` and `json` optional). This
 is separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
 
 Each response parses into the same runtime envelope: optional `status`, optional
-`report_job_progress`, optional `next_actions`, optional `context_compact`, and
-optional `final_answer`.
-`report_job_progress` is progress text for the Thought/Action panel while
-the job is working. It is emitted to the host/UI as a job-progress notification
-and is not replayed into later prompt deltas; replay context keeps action
-intent, command/input, action results, runtime notes, compact summaries, and
-final answers. Missing `status` defaults to `working`. `status:"finished"`
-means the current task is complete: after that envelope, runtime ends the
-current model/action interaction and shows `final_answer` as the closing
-user-visible answer. `final_answer` and `status:"finished"` must appear
-together; if one appears without the other, runtime returns a protocol-repair
-slice.
+`free_talk`, optional `next_actions`, optional `context_compact`, and
+optional `final_answer`. Protocols may express completion differently: JSON and
+Markdown use their status field/section, while XML uses `<final_answer>` as the
+completion branch.
+`free_talk` is the visible working note for the Thought/Action panel while
+the job is working. It is emitted to the host/UI as part of the accepted model
+response topic; replay context keeps command/input, action results, runtime
+notes, compact summaries, free_talk, and final answers. For protocols with a
+status field, missing `status` defaults to `working`; `status:"finished"` means
+the current task is complete and must be paired with `final_answer`. In XML,
+`<final_answer>` directly means the current task is complete. After a completion
+envelope, runtime ends the current model/action interaction and shows the final
+answer as the closing user-visible answer.
 
 ```mermaid
 stateDiagram-v2
@@ -754,12 +779,9 @@ remain JSON objects inside `<action_json>` blocks.
 ```json
 {
   "free_talk": "optional context-visible free talk or plan",
-  "report_job_progress": "Checking the project files.",
   "next_actions": [
     {
-      "action": "run_bash",
-      "intent": "Count Rust source lines",
-      "args": {
+      "run_bash": {
         "cmd": "rg --files -g '*.rs' | xargs wc -l",
         "timeout_ms": 5000
       }
@@ -768,18 +790,25 @@ remain JSON objects inside `<action_json>` blocks.
 }
 ```
 
-With omitted `status` or `status:"working"`, `next_actions` or
-`context_compact` is required and
-`report_job_progress` is shown in the Thought/Action panel with a runtime
-progress marker. With `status:"finished"`, `final_answer` is required and is
-shown as the closing answer before runtime stops this task's action/model
-loop; `final_answer` without `status:"finished"` is also rejected for repair.
-`status:"finished"` must not include `next_actions`; if the model still needs
-evidence, it must stay `working`, run actions, and answer after the action
-result is visible. Every action needs a top-level `intent`; the shell
-displays it while the action runs. The parser also tolerates common provider
-drift such as a valid JSON envelope embedded in Markdown text, but it never
-shows raw protocol fragments to the user.
+With omitted `status` or `status:"working"` in status-based protocols,
+`next_actions` or `context_compact` is required and `free_talk` is shown in the
+Thought/Action panel. With `status:"finished"`, `final_answer` is required and
+shown as the closing answer before runtime stops this task's action/model loop.
+In XML, `<final_answer>` is the completion branch and must not appear together
+with `<working_still_action>` or `<context_compact>`. If the model still needs
+evidence, it must stay working, run actions, and answer after the action result
+is visible. The parser also tolerates common provider drift such as a valid JSON
+envelope embedded in Markdown text, but it never shows raw protocol fragments to
+the user.
+
+Action sections accept the equivalent runtime shapes across JSON, Markdown, and
+XML suites: tool-name action objects such as `{ "run_bash": { ... } }`, direct
+arrays of action objects as one parallel group, and outer workflow arrays mixing
+inner parallel arrays and single sequential action objects. XML `<action_json>`
+requires the payload to be a top-level JSON array. Old `{ "action": ..., "args":
+... }` and `{ "order": ..., "actions": ... }` objects are rejected for protocol
+repair. Order is preserved; outer workflow entries execute in model-provided
+order.
 
 ### Context Compact
 
@@ -789,16 +818,15 @@ model response:
 
 ```json
 {
-  "report_job_progress": "Compacting stale context before continuing.",
+  "free_talk": "Compacting stale context before continuing.",
   "context_compact": {
-    "delta_ids": ["pd_100_1", "pd_100_2"],
+    "discard": ["pd_1"],
+    "offload": ["pd_2"],
     "summary": "Earlier work identified the retry redraw issue. Preserve the fix direction and test requirements."
   },
   "next_actions": [
     {
-      "action": "run_bash",
-      "intent": "Inspect the retry renderer.",
-      "args": {
+      "run_bash": {
         "cmd": "rg -n 'retry_notice|render_thinking' timem_shell/src",
         "timeout_ms": 5000
       }
@@ -807,20 +835,20 @@ model response:
 }
 ```
 
-Runtime validates `delta_ids` against currently visible dynamic prompt refs. If
-all refs exist, it hides those dynamic refs and appends the summary as a new
-`context_compact` dynamic delta. If any ref is missing, runtime returns a
+Runtime validates `discard` and `offload` delta ids against currently visible
+dynamic prompt refs. If all refs exist, it writes offloaded deltas into scratch,
+hides discarded/offloaded refs, and appends the summary as a new
+`context_compact` dynamic delta. The next prompt delta records the scratch id for
+offloaded deltas. If any ref is missing, runtime returns a
 repairable action result and does not silently discard context.
 
 ### Action Object
 
-Each `next_actions` item is a structured command:
+Each action item is a structured command object with exactly one tool-name key:
 
 ```json
 {
-  "action": "memmgr",
-  "intent": "Find recent chat messages by created time",
-  "args": {
+  "memmgr": {
     "type": "raw_chat",
     "op": "sql",
     "sql": "SELECT created_at_ms, role, content FROM chat_messages ORDER BY created_at_ms DESC",
@@ -831,21 +859,20 @@ Each `next_actions` item is a structured command:
 
 Fields:
 
-- `action`: canonical tool name, such as `memmgr`, `run_bash`, `capmgr`, or
-  `self_tool`. `memmgr` is the single model-facing interface for durable
-  memory, raw chat history, scratch memory, and dynamic context discard.
-- `intent`: concise human-readable reason. It is required because shell UI uses
-  it as action status.
-- `args`: action-specific arguments as a JSON object. Put each parameter in its
-  own JSON field. The top-level parser only validates this generic object
-  against the manifest registry; concrete option meaning and validation
-  belong to the manifest-backed executor for that tool.
+- The object key is the canonical tool name, such as `memmgr`, `run_bash`,
+  `capmgr`, or `self_tool`. `memmgr` is the single model-facing interface for
+  durable memory, raw chat history, scratch memory, and dynamic context discard.
+- The object value is the action-specific argument object. Put each parameter
+  in its own JSON field. The top-level parser validates this object against the
+  manifest registry; concrete option meaning and validation belong to the
+  manifest-backed executor for that tool.
 
 The selected response protocol controls the outer envelope syntax only. Action
-arguments stay JSON objects across protocols: Markdown responses still put each
-action's parameters under `args` as JSON, and JSON responses use the same
-`args` object. This keeps capability manifests, executor validation, and
-cross-host tooling independent from the model-facing response style.
+arguments stay JSON objects across protocols: Markdown and XML responses embed
+the same tool-name action objects inside their action sections, and JSON
+responses use the same shape directly. This keeps capability manifests,
+executor validation, and cross-host tooling independent from the model-facing
+response style.
 
 The runtime does not execute hidden compatibility aliases. Unknown action names
 produce a protocol repair slice instead of being bridged to an old tool.
@@ -860,7 +887,7 @@ Example:
 
 ```text
 [BEGIN DELTA]
-delta_id: pd_1782200001000_4
+delta_id: pd_4
 time: 1782200001000
 
 ## SYSTEM
@@ -885,10 +912,10 @@ whether to answer or ask for another action.
 Provider output is untrusted. The runtime validates:
 
 - The response is a JSON object or contains an extractable JSON envelope.
-- `status`, `report_job_progress`, `final_answer`, and `context_compact` follow
+- `status`, `free_talk`, `final_answer`, and `context_compact` follow
   the active response protocol contract.
 - `next_actions` is an array when present.
-- Every action has `action`, `intent`, and valid `args`.
+- Every action has `action` and valid `args`.
 - SQL and bash actions pass their own safety checks.
 
 If validation fails, the runtime builds a temporary, non-cache-controlled repair
@@ -901,13 +928,28 @@ the concrete protocol error:
 
 ## SYSTEM
 <CURRENT_ASSISTANT_NAME>'s previous response is not protocol compliant.
-error: actions[0].intent_required
+error: actions[0].args_required
 ```
 
 Repair is retried a bounded number of times for one model response failure. Each
 repair attempt emits a structured repair topic for hosts to render, and each
-attempt is audited. If all repair attempts fail, the shell blocks raw model text
-and shows a safe fallback instead.
+attempt is audited. In addition to the generic `model_repair_request` API audit
+event, core appends a realtime diagnostic record to
+`audit/api_output_repair.json`. That record contains the session/turn id, issue,
+malformed assistant response, SYSTEM repair message shown to the model, and a
+human-readable rendered block:
+
+```text
+---- <time_ms> / <turn_id> ----
+## assistant:
+<malformed model response>
+
+## SYSTEM
+<repair message>
+```
+
+If all repair attempts fail, the shell blocks raw model text and shows a safe
+fallback instead.
 
 ## Tool Surface
 
@@ -965,6 +1007,9 @@ local project work. Current surfaces:
 - `type=about_me, op=read`: report TimemAi name, version, author/contact,
   project/star info, and a short software summary, plus current process id,
   working directory, and executable path.
+- `type=cwd, op=read|chg_cwd`: inspect or change the active prompt context
+  working directory. Relative paths resolve from that prompt context's current
+  cwd. This is prompt-context metadata, not process-global state.
 
 Candidate future surfaces are `config` for runtime config inspection,
 `workspace` for loaded workspace references, `capabilities` for active
@@ -997,6 +1042,14 @@ Current local-command approval is configured at startup:
 
 - `TIMEM_BASH_APPROVAL=ask`: ask before running bash actions.
 - `TIMEM_BASH_APPROVAL=approve`: run bash actions directly.
+
+Each prompt context owns its own `run_bash` cwd. At session start, after
+`self_tool type=cwd op=chg_cwd`, and after context compaction, core injects a
+short `SYSTEM` note such as `[!!!NOTE] cwd now set to: ...` so the model can
+avoid redundant `cd` prefixes. `run_bash` execution uses the same cwd recorded in
+that prompt context, including normal, polling, background, approval, and
+parallel Bash paths. Shell UI only renders the resulting action/status evidence;
+it does not maintain the execution cwd.
 
 The runtime validates structured action shape and command limits. It does not
 infer the user's semantic goal from the natural-language text.
@@ -1037,80 +1090,37 @@ It does not automatically terminate them on normal timeout, final answer, or
 context compact; the model/user must explicitly inspect or stop a still-running
 pid when cleanup is desired.
 
-### Context Discard Action
+### Context Compact Execution
 
-`memmgr` with `type=context, op=discard` is the structured action that actually
-removes dynamic prompt context. It accepts ids that came from rendered prompt
-slices:
+Context shrink is a response-level protocol branch, not a `memmgr` tool action.
+The model chooses which prompt deltas to discard and which to offload:
 
-```json
-{
-  "action": "memmgr",
-  "intent": "Remove stale context by id.",
-  "args": {
-    "type": "context",
-    "op": "discard",
-    "delta_ids": ["pd_1782200000000_2"]
-  }
-}
+```xml
+<context_compact>
+  <discard>pd_2</discard>
+  <offload>pd_3</offload>
+  <summary>Keep the active task, workspace facts, progress, todo, and relevant principles.</summary>
+</context_compact>
 ```
 
-Rules:
+Runtime behavior:
 
-- `delta_ids` removes whole logical prompt deltas.
+- `discard` removes whole visible dynamic prompt deltas from future rendering.
+- `offload` first copies the referenced visible dynamic prompt deltas into
+  scratch, then removes them from future rendering.
+- `summary` is appended as a new system prompt component so the model keeps the
+  essential abstract state.
+- The next prompt delta includes `The scratch id for offloaded deltas is: ...`
+  when offload wrote scratch.
 - `prompt_0` is never removable.
-- Hidden deltas are not rendered in later prompts and are not returned by
-  prompt fallback search.
+- Missing refs fail the compact action without silently discarding context.
 
-Forced compaction uses the same response envelope and action protocol; it does
-not introduce a separate `compressed_delta` schema. The model decides what
-should be offloaded and supplies ids; runtime owns validation and copies actual
-prompt delta content into scratch. A typical forced context reduction response
-first asks runtime to offload covered prompt context, then discards those dynamic
-ids:
+`memmgr type=scratch op=write` remains for model-written notes only
+(`kind=notes`). The model can later use `memmgr type=scratch op=read` with a
+scratch id returned by context compact to retrieve offloaded details.
 
-```json
-{
-  "free_talk": "Compact dynamic context before continuing.",
-  "status": "working",
-  "report_job_progress": "Preparing to compact dynamic context.",
-  "next_actions": [
-    {
-      "action": "memmgr",
-      "intent": "Offload dynamic prompt context before discarding it.",
-      "args": {
-        "type": "scratch",
-        "op": "write",
-        "kind": "context_offload",
-        "label": "release validation context",
-        "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
-      }
-    },
-    {
-      "action": "memmgr",
-      "intent": "Remove dynamic prompt deltas covered by the compact summary.",
-      "args": {
-        "type": "context",
-        "op": "discard",
-        "delta_ids": ["pd_1782200000000_2", "pd_1782200001000_3"]
-      }
-    }
-  ]
-}
-```
-
-Scratch write has two modes under `memmgr type=scratch op=write`:
-
-- `kind=notes`: model provides `label` and `content`; runtime stores the note and
-  returns `id`, `label`, `type`, and a short preview.
-- `kind=context_offload`: model provides `label` and `delta_ids`;
-  runtime verifies the ids are visible dynamic prompt context, rejects `prompt_0`,
-  copies the real content into scratch, and returns only index metadata plus a
-  preview. The model later uses `memmgr type=scratch op=read` with the returned
-  id to retrieve full details when needed.
-
-This keeps the boundary explicit: the model reasons over labels and ids, while
-runtime performs trusted prompt-context transfer.
+This keeps the boundary explicit: the model reasons over delta ids and summary,
+while runtime performs trusted prompt-context transfer and scratch storage.
 
 ## Provider Layer
 

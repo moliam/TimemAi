@@ -161,12 +161,13 @@ for pattern in "${shell_src_forbidden_execution[@]}"; do
 done
 
 for file in resources/capabilities/tools/*.yaml; do
-  if ! awk '/^example_json: \|/{in_example=1; next} /^kind: /{in_example=0} in_example && /"args"[[:space:]]*:/{found=1} END{exit found ? 0 : 1}' "$file"; then
-    echo "tool manifest example_json must include args: $file" >&2
+  if awk '/^example_json: \|/{in_example=1; next} /^kind: /{in_example=0} in_example && /"(action|args|input)"[[:space:]]*:/{found=1} END{exit found ? 0 : 1}' "$file"; then
+    echo "tool manifest example_json must use single-key tool objects, not action/args/input: $file" >&2
     exit 1
   fi
-  if awk '/^example_json: \|/{in_example=1; next} /^kind: /{in_example=0} in_example && /"input"[[:space:]]*:/{found=1} END{exit found ? 0 : 1}' "$file"; then
-    echo "tool manifest example_json must use args, not input: $file" >&2
+  tool_id="$(awk '/^id: /{print $2; exit}' "$file")"
+  if [ -n "$tool_id" ] && ! awk -v id="$tool_id" '/^example_json: \|/{in_example=1; next} /^kind: /{in_example=0} in_example && $0 ~ "\"" id "\"[[:space:]]*:"{found=1} END{exit found ? 0 : 1}' "$file"; then
+    echo "tool manifest example_json must include its tool id as the action object key: $file" >&2
     exit 1
   fi
 done

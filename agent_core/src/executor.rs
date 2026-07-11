@@ -183,7 +183,6 @@ input_properties:
 example_json: |
   {
     "action": "local_echo",
-    "intent": "Echo test input.",
     "args": {
       "message": "hello"
     }

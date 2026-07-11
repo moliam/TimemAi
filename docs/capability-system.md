@@ -154,7 +154,7 @@ Command binding protocol:
 
 - Runtime starts `/bin/sh <binding_name>`.
 - Runtime writes one JSON object to stdin:
-  `{"action": "...", "intent": "...", "args": {"key": "value"}}`.
+  `{"tool_name": {"key": "value"}}`.
 - Script stdout/stderr is captured as the action result and truncated to a
   bounded size.
 - Execution timeout follows the action's positive `timeout_ms` without an upper
@@ -194,9 +194,7 @@ Expected shape:
 
 ```json
 {
-  "action": "capmgr",
-  "intent": "Load the needed skill body before using it.",
-  "args": {
+  "capmgr": {
     "op": "load",
     "kind": "skill",
     "id": "skill_id"
@@ -237,6 +235,9 @@ manifest and executor path as other builtin tools. It is intentionally narrow:
 - `type=mem_path, op=read`: current memory/audit paths.
 - `type=about_me, op=read`: software name, version, author/contact, project/star
   info, summary, current process id, working directory, and executable path.
+- `type=cwd, op=read|chg_cwd`: current prompt context cwd. `chg_cwd` requires
+  `new_path`; relative paths resolve from the current prompt context cwd. Future
+  `run_bash` actions in that same prompt context execute from this cwd.
 
 Do not use `self_tool` for user memory, shell commands, project file edits, or
 provider model calls. Those remain owned by `memmgr`, `run_bash`, and the

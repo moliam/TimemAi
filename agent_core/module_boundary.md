@@ -60,7 +60,9 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   events and dynamic-context clearing.
 - Model-response repair handling after a model response is applied, including
   repair issue classification, repair counter updates, repair prompt-slice
-  injection, and repair audit events.
+  injection, generic repair audit events, and realtime
+  `audit/api_output_repair.json` diagnostics containing malformed output plus
+  the SYSTEM repair message.
 - Turn supporting-context assembly, including runtime identity and host-provided
   additional context. Hosts provide source values; core owns how they are
   combined for the model.

@@ -6,6 +6,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-07-11
+
 ### Added
 
 - Added unified `core.model.response` topic events carrying model status,
@@ -28,6 +30,9 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Reorganized capability tools into resources/capabilities/tools/.
 - Renamed working action section to working_still_action.
 - Renamed foreground bash mode to normal mode.
+- Successful assistant responses are now replayed into the next prompt delta as
+  raw model output by default; the previous extracted free_talk/final-answer
+  replay remains available through `AssistantReplayMode::ExtractedFields`.
 
 - The Thought / Action panel now renders model `free_talk` and progress from a
   single model-response topic before action rows, keeping UI updates coherent.
@@ -40,6 +45,11 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   when response protocol or capability registry changes.
 
 ### Fixed
+- Concrete JSON, Markdown, and XML protocol examples are now executed by
+  their matching runtime parser in tests, so prompt examples cannot silently
+  drift beyond executable runtime behavior.
+- Tracked shell jobs (background and timeout) now execute under `/bin/bash -lc` instead of `/bin/sh -lc`, matching normal `run_bash` execution semantics and enabling bash-specific syntax such as heredoc with backticks.
+- Heredoc delimiters (e.g. `<<'EOF'`) in tracked background and timeout jobs are now preserved correctly; the runtime no longer wraps the command in a shell wrapper that would corrupt multi-line heredoc syntax.
 - Tool job status routed through capmgr.
 - Bash action results naturalized for model readability.
 - Model-visible deltas simplified.
@@ -62,8 +72,28 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - XML response parsing now ignores protocol-looking tags inside CDATA action
   strings, so valid action args containing examples such as `<status>` or
   `<working_still_action>` are kept as data instead of parsed as control tags.
+- XML response parsing now uses a protocol-specific tag scanner for the small
+  `<response>` vocabulary. `final_answer`, `free_talk`, and context compact
+  `summary` are extracted as raw text and are not scanned for nested protocol
+  tags.
+- XML response prompt guidance now uses a single strict System Response Protocol
+  section, including explicit stream order, mutually exclusive state branches,
+  CDATA action JSON, and a final `Protocol Loaded` marker.
+- XML response parsing now accepts a whole response wrapped in a documentation
+  ```xml fence while still parsing the inner `<response>` through the same
+  protocol scanner, and rejects XML replies that mix multiple state branches.
+- XML `<action_json>` now passes the extracted JSON text directly to the JSON
+  parser and requires a top-level workflow array; old `{ "action": ..., "args":
+  ... }` and `{ "order": ..., "actions": ... }` objects are rejected for repair.
 - Cross-protocol response tests now assert full action-group structure, not
   only flattened action order, for complex valid JSON/Markdown/XML responses.
+
+- Finished background and timeout job exit updates now include exit status code and
+  final output, so the model receives the complete job result without a separate
+  follow-up command.
+- Tracked shell jobs are reaped by a shared ShellJobWatcher thread using
+  Child::try_wait instead of per-pid kill -0 polling, preventing zombie processes
+  and improving reliability on macOS and Linux.
 
 ## [0.8.1] - 2026-07-03
 
@@ -200,8 +230,10 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 - Thinking and final status lines now show repair round overhead as
   `⇌N (⚠M)` when protocol repair consumed model calls.
 - Protocol repair requests now write structured `model_repair_request` audit
-  events with issue, usage, truncation, and repair-count metadata for later
-  diagnosis without storing raw malformed responses.
+  events with issue, usage, truncation, and repair-count metadata, and also
+  append realtime diagnostics to `audit/api_output_repair.json` with the
+  malformed assistant response plus the SYSTEM repair message shown to the
+  model.
 - API payload audit now stores a structured `api_audit.json` document with a
   `version` field and `events` array, while chat-history readers still accept
   legacy JSONL audit files.
@@ -214,7 +246,7 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Added
 
-- Model response protocol now uses `report_job_progress` plus `continue`.
+- Model response protocol now uses `free_talk` plus `continue`.
   Progress can be shown in the Thought/Action panel while actions continue,
   and `continue:false` marks the final user-facing summary.
 - Guarded finalize allows `continue:false` plus a final `expect` check to skip

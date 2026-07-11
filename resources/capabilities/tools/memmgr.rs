@@ -7,7 +7,6 @@ use crate::{
 pub fn normalize_scratch_kind(scratch_type: &str) -> String {
     match scratch_type.trim() {
         "note" | "notes" | "scratch" => "notes".to_string(),
-        "context" | "context_offload" | "offload" => "context_offload".to_string(),
         other => other.to_string(),
     }
 }
@@ -22,7 +21,6 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
     let sql = action.input_str("sql");
     let params = action.input_params();
     let id = action.input_str("id");
-    let delta_ids = action.input_list("delta_ids");
     let slice_ids = action.input_list("slice_ids");
     if !slice_ids.is_empty() {
         return "Action result: memmgr\nerror: slice_ids_removed_use_delta_ids".to_string();
@@ -166,21 +164,9 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
         }
         ("scratch", "write") => {
             let scratch_type = normalize_scratch_kind(&scratch_type);
-            let write_result = if scratch_type == "context_offload" {
-                core.collect_prompt_context_for_scratch(&delta_ids, &[])
-                    .and_then(|offload| {
-                        core.scratch.write_record(
-                            &scratch_type,
-                            &label,
-                            &offload.content,
-                            &offload.delta_ids,
-                            &offload.slice_ids,
-                        )
-                    })
-            } else {
-                core.scratch
-                    .write_record(&scratch_type, &label, &content, &[], &[])
-            };
+            let write_result = core
+                .scratch
+                .write_record(&scratch_type, &label, &content, &[], &[]);
             match write_result {
                 Ok(record) => format_scratch_write_result(&record),
                 Err(err) => format!(
@@ -244,11 +230,6 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 err
             ),
         },
-        ("context", "discard") => core.apply_prompt_shrink(
-            "Action result: memmgr\ntype: context\nop: discard",
-            &delta_ids,
-            &[],
-        ),
         _ => format!(
             "Action result: memmgr\ntype: {}\nop: {}\nerror: unsupported_type_or_op",
             mem_type, op
@@ -263,7 +244,6 @@ mod tests {
     #[test]
     fn scratch_kind_aliases_are_normalized() {
         assert_eq!(normalize_scratch_kind("note"), "notes");
-        assert_eq!(normalize_scratch_kind("context"), "context_offload");
         assert_eq!(normalize_scratch_kind("custom"), "custom");
     }
 }

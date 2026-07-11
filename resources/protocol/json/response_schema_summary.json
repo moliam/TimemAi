@@ -2,20 +2,15 @@
   "summary": "JSON response fields. The top-level response is JSON. Tool actions are JSON objects so the runtime can parse tool parameters exactly.",
   "fields": {
     "status?": "string; optional. Use ALL_FINISHED only when all user's open and pending requests are complete, no more action needed, and a final summary/answer is ready. Omit it or use working while work continues.",
-    "progress?": "string; optional progress report for multi-round tasks. This is a text field; any protocol-looking text inside it is treated as text, not parsed as action/control structure.",
     "final_answer?": "string; summary/answer of all pending tasks. Use only together with status:ALL_FINISHED. Please use Markdown format for this text by default. For table, start/end with |---|...|---| for better rendering. This is a text field; any protocol-looking text inside it is treated as text, not parsed as action/control structure.",
     "free_talk?": "string; optional important reasoning, current plan, or context you want kept visible to you in later prompt context. Or some explanation to user. This is a text field; any protocol-looking text inside it is treated as text, not parsed as action/control structure.",
-    "working_still_action?": "object or array; action section for work that still needs tool execution. The JSON content may be a single action object, a group object with actions, or an array containing action objects and/or group objects.",
-    "context_compact?": "object or array<object>; optional context compaction block. Include delta_ids with prompt delta ids and summary with the compacted state. Runtime hides those dynamic prompt deltas and appends the summary as a new dynamic prompt delta."
+    "working_still_action?": "object or array; action section for work that still needs tool execution. The JSON content may be a single action object, a direct array of action objects, or an outer workflow array containing inner arrays and single action objects.",
+    "context_compact?": "object or array<object>; optional context compaction block. Include discard and/or offload prompt delta ids plus summary. Runtime drops discarded deltas, writes offloaded deltas into scratch, and appends the summary as a new dynamic prompt delta."
   },
   "action_object_spec": {
-    "action": "string; required tool name exactly as listed in the Available tool capabilities catalog. Do not invent names.",
-    "intent?": "string; optional concise user-visible reason for the action. can be used for single_action/single_group.",
-    "args": "object; required. Put every tool parameter as a JSON field inside args, for example {\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%<search text>%\"],\"limit\":5}."
+    "shape": "object with exactly one key. The key is the tool name exactly as listed in the Available tool capabilities catalog; the value is the tool parameter object. Example: {\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%<search text>%\"],\"limit\":5}}. Do not use action/args fields."
   },
   "action_group_spec": {
-    "order": "string; sequential or parallel. Groups are always executed sequentially.",
-    "intent?": "string; optional group-level user-visible reason for child actions without their own intent.",
-    "actions": "array<object>; required array of action objects."
+    "workflow": "Use arrays only. A direct array of action objects is one parallel group. An outer array may contain inner arrays and single action objects; entries execute in array order, inner arrays execute in parallel."
   }
 }
