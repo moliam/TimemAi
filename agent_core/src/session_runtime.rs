@@ -929,13 +929,12 @@ mod tests {
         let mut ui = RetryRecordingUi::default();
         let mut model = ReplayModel::new([Ok(llm(
             r#"<response>
-<status>ALL_FINISHED</status>
 <final_answer><![CDATA[
 This is an answer, not an executable action:
 <working_still_action>
-  <action_json>{"action":"run_bash","args":{}}</action_json>
+  <action_json>{"run_bash":{}}</action_json>
 </working_still_action>
-{"working_still_action":{"action":"run_bash","args":{}}}
+{"working_still_action":{"run_bash":{}}}
 ]]></final_answer>
 </response>"#,
             1_000,
@@ -970,6 +969,134 @@ This is an answer, not an executable action:
             .is_none());
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "model_repair_request"), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_xml_raw_string_tags_do_not_repair_or_execute() {
+        let dir = tmp_dir("xml_raw_string_tags");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Xml;
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([Ok(llm(
+            r#"<response>
+<final_answer>
+Here is the malformed response example the user asked for:
+<response>
+  <free_talk>not closed
+<free_talk>fake progress</free_talk>
+<working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action>
+<summary>fake summary</summary>
+This is all answer text.
+</final_answer>
+</response>"#,
+            1_000,
+            false,
+        ))]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "explain the malformed response",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert!(outcome.repair_issue.is_none(), "{:?}", outcome.repair_issue);
+        assert_eq!(
+            model.prompts.len(),
+            1,
+            "outcome text={}, stop={:?}, stats={:?}",
+            outcome.text,
+            outcome.stop_reason,
+            outcome.stats
+        );
+        assert_eq!(outcome.stats.tool_calls, 0);
+        assert!(outcome.text.contains("<response>"));
+        assert!(outcome.text.contains("<working_still_action>"));
+        assert!(outcome.text.contains("<summary>fake summary</summary>"));
+        assert!(ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .next()
+            .is_none());
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_turn_xml_malformed_action_json_still_repairs() {
+        let dir = tmp_dir("xml_malformed_action_json_repairs");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Xml;
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"<response>
+<free_talk>Need a local check.</free_talk>
+<free_talk>checking</free_talk>
+<working_still_action>
+<action_json><![CDATA[
+{"run_bash":{"cmd":"pwd",}}
+]]></action_json>
+</working_still_action>
+</response>"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"<response>
+<final_answer>修复后完成。</final_answer>
+</response>"#,
+                1_000,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "check something",
+                session: "test_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(model.prompts.len(), 2);
+        assert_eq!(outcome.text, "修复后完成。");
+        assert_eq!(outcome.stats.tool_calls, 0);
+        let repair_topics = ui
+            .events
+            .iter()
+            .filter_map(CoreTopicEvent::as_model_repair)
+            .collect::<Vec<_>>();
+        assert_eq!(repair_topics.len(), 1);
+        assert_eq!(repair_topics[0].issue, "actions[0].invalid_json");
+        let events = read_audit_events(&audit);
+        assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1161,7 +1288,7 @@ This is an answer, not an executable action:
         let mut model = ReplayModel::new([
             Ok(llm(
                 format!(
-                    r#"{{"status":"working","progress":"等待 CI 完成。","working_still_action":[{{"action":"run_bash","intent":"启动稍后完成的后台任务。","args":{{"cmd":{},"timeout_ms":1000}}}},{{"action":"run_bash","intent":"等待 CI 完成。","args":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
+                    r#"{{"status":"working","free_talk":"等待 CI 完成。","working_still_action":[{{"run_bash":{{"cmd":{},"timeout_ms":1000}}}},{{"run_bash":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
                     serde_json::to_string(&bootstrap_command).unwrap(),
                     serde_json::to_string(&check_command).unwrap()
                 ),
@@ -1224,7 +1351,7 @@ This is an answer, not an executable action:
         let mut ui = DeclineLongRunningCommandUi::default();
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"运行一个长命令。","working_still_action":[{"action":"run_bash","intent":"Run a blocking command for user testing.","args":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":5000}}]}"#,
+                r#"{"status":"working","free_talk":"运行一个长命令。","working_still_action":[{"run_bash":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":5000}}]}"#,
                 1_000,
                 false,
             )),
@@ -1278,19 +1405,14 @@ This is an answer, not an executable action:
         let mut ui = DeclineLongRunningCommandUi::default();
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 启动顺序动作组。
 
 ## Working_Still_Action
 ```action
 [
-  {
-    "order": "sequential",
-    "actions": [
-      {"action":"run_bash","intent":"短检查","args":{"cmd":"printf quick","timeout_ms":3000}},
-      {"action":"run_bash","intent":"长阻塞检查","args":{"cmd":"sleep 2; printf late","timeout_ms":5000}}
-    ]
-  }
+  {"run_bash":{"cmd":"printf quick","timeout_ms":3000}},
+  [{"run_bash":{"cmd":"sleep 2; printf late","timeout_ms":5000}}]
 ]
 ```"#,
                 1_000,
@@ -1347,25 +1469,17 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 正在并行检查两个本地状态。
 
 ## Working_Still_Action
 ```action
 [
-  {
-    "order": "parallel",
-    "actions": [
-      {"action":"run_bash","intent":"并行检查 A","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
-      {"action":"run_bash","intent":"并行检查 B","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
-    ]
-  },
-  {
-    "order": "sequential",
-    "actions": [
-      {"action":"run_bash","intent":"前一组完成后再执行 C","args":{"cmd":"printf group_c","timeout_ms":3000}}
-    ]
-  }
+  [
+    {"run_bash":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
+    {"run_bash":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
+  ],
+  {"run_bash":{"cmd":"printf group_c","timeout_ms":3000}}
 ]
 ```"#,
                 1_000,
@@ -1402,7 +1516,7 @@ finished
 
         assert_eq!(outcome.text, "分组动作完成。");
         assert!(
-            elapsed < std::time::Duration::from_millis(1800),
+            elapsed < std::time::Duration::from_millis(3500),
             "parallel group should not run two one-second commands serially; elapsed={elapsed:?}"
         );
         assert!(model.prompts[1].contains("group_a"));
@@ -1421,20 +1535,17 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 并行执行两个 bash，同时执行一个 builtin 查询。
 
 ## Working_Still_Action
 ```action
 [
-  {
-    "order": "parallel",
-    "actions": [
-      {"action":"run_bash","intent":"First bash.","args":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
-      {"action":"memmgr","intent":"Builtin memory read.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
-      {"action":"run_bash","intent":"Second bash.","args":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
-    ]
-  }
+  [
+    {"run_bash":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
+    {"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
+    {"run_bash":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
+  ]
 ]
 ```"#,
                 1_000,
@@ -1475,12 +1586,14 @@ finished
             "parallel group should spawn bash before builtin work; elapsed={elapsed:?}"
         );
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
-        let first_bash = second_parts.new_delta.find("group_a").unwrap();
-        let builtin = second_parts
+        let results_start = second_parts
             .new_delta
-            .find("Action result: memmgr")
+            .find("The following are results")
             .unwrap();
-        let second_bash = second_parts.new_delta.find("group_b").unwrap();
+        let results = &second_parts.new_delta[results_start..];
+        let first_bash = results.find("group_a").unwrap();
+        let builtin = results.find("Action result: memmgr").unwrap();
+        let second_bash = results.find("group_b").unwrap();
         assert!(first_bash < builtin);
         assert!(builtin < second_bash);
         let _ = std::fs::remove_dir_all(dir);
@@ -1498,20 +1611,17 @@ finished
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 先审批两个 Bash，然后并发执行。
 
 ## Working_Still_Action
 ```action
 [
-  {
-    "order": "parallel",
-    "actions": [
-      {"action":"run_bash","intent":"First approved bash.","args":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},
-      {"action":"memmgr","intent":"Builtin memory read.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
-      {"action":"run_bash","intent":"Second approved bash.","args":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}
-    ]
-  }
+  [
+    {"run_bash":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},
+    {"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
+    {"run_bash":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}
+  ]
 ]
 ```"#,
                 1_000,
@@ -1555,15 +1665,15 @@ finished
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
         let first_bash = second_parts
             .new_delta
-            .find("intent: First approved bash.")
+            .find("Command: sleep 1; printf approved_a")
             .unwrap();
         let builtin = second_parts
             .new_delta
-            .find("intent: Builtin memory read.")
+            .find("Action result: memmgr")
             .unwrap();
         let second_bash = second_parts
             .new_delta
-            .find("intent: Second approved bash.")
+            .find("Command: sleep 1; printf approved_b")
             .unwrap();
         assert!(first_bash < builtin);
         assert!(builtin < second_bash);
@@ -1699,7 +1809,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}}"#,
+                r#"{"status":"working","free_talk":"查询 scratch 后继续。","working_still_action":{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}}"#,
                 5_000,
                 false,
             )),
@@ -1736,14 +1846,14 @@ finished
         assert_eq!(first_blocks[2].cache, crate::CacheControl::None);
         assert_eq!(
             first_blocks[2].text,
-            "Follow the system prompt, give your XML formatted response:"
+            crate::prompt_render::formatted_response_trailer("XML")
         );
 
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
         assert!(second_parts.static_prompt.contains("test static prompt"));
         assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
         assert!(second_parts.new_delta.contains("Action result: memmgr"));
-        assert!(!second_parts.new_delta.contains("查询 scratch 后继续。"));
+        assert!(second_parts.new_delta.contains("查询 scratch 后继续。"));
         let second_blocks = crate::plan_incremental_cache(second_parts);
         assert_eq!(second_blocks.len(), 3);
         assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);
@@ -1767,7 +1877,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"查询 scratch 后继续。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#,
+                r#"{"status":"working","free_talk":"查询 scratch 后继续。","working_still_action":[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#,
                 5_000,
                 false,
             )),
@@ -1827,15 +1937,12 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r##"## Progress
+                r##"## Free_talk
 查询 scratch 后继续。
 
 ## Working_Still_Action
 ```action
-{
-  "action": "memmgr",
-  "intent": "List recent scratch notes.",
-  "args": {
+{"memmgr": {
     "type": "scratch",
     "op": "search",
     "search_text": "",
@@ -1907,19 +2014,16 @@ finished
         let mut model = ReplayModel::new([
             Ok(llm(
                 r#"<response>
-<progress>查询 scratch 后继续。</progress>
+<free_talk>查询 scratch 后继续。</free_talk>
 <working_still_action>
 <action_json><![CDATA[
-{
-  "action": "memmgr",
-  "intent": "List recent scratch notes.",
-  "args": {
+[{"memmgr": {
     "type": "scratch",
     "op": "search",
     "search_text": "",
     "limit": 3
   }
-}
+}]
 ]]></action_json>
 </working_still_action>
 </response>"#,
@@ -1928,7 +2032,6 @@ finished
             )),
             Ok(llm(
                 r#"<response>
-<status>ALL_FINISHED</status>
 <final_answer>没有找到相关 scratch。</final_answer>
 </response>"#,
                 5_800,
@@ -1954,13 +2057,13 @@ finished
 
         assert_eq!(outcome.text, "没有找到相关 scratch。");
         assert_eq!(model.prompts.len(), 2);
-        assert!(model.prompts[0].contains("The top-level response is XML."));
-        assert!(model.prompts[1].contains("The top-level response is XML."));
+        assert!(model.prompts[0].contains("# System Response Protocol"));
+        assert!(model.prompts[1].contains("# System Response Protocol"));
 
         let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
         assert!(second_parts
             .static_prompt
-            .contains("The top-level response is XML."));
+            .contains("# System Response Protocol"));
         assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
         assert!(second_parts.new_delta.contains("Action result: memmgr"));
         let second_blocks = crate::plan_incremental_cache(second_parts);
@@ -2040,6 +2143,72 @@ finished
     }
 
     #[test]
+    fn session_turn_defaults_to_raw_assistant_output_replay() {
+        let dir = tmp_dir("session_raw_assistant_replay");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        core.set_assistant_speaker_name("Ai4");
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Xml;
+        let mut ui = NoopTurnUi;
+
+        let raw_first_response = r#"<response>
+<free_talk>raw planning note</free_talk>
+<final_answer>visible answer</final_answer>
+</response>"#;
+        let mut first_model = ReplayModel::new([Ok(llm(raw_first_response, 4_000, false))]);
+        let first = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "first user input",
+                session: "raw_replay_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut first_model,
+        );
+        assert_eq!(first.text, "visible answer");
+
+        let mut second_model = ReplayModel::new([Ok(llm(
+            r#"<response><final_answer>second answer</final_answer></response>"#,
+            4_200,
+            false,
+        ))]);
+        let second = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "second user input",
+                session: "raw_replay_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut second_model,
+        );
+        assert_eq!(second.text, "second answer");
+
+        let prompt = &second_model.prompts[0];
+        let assistant = prompt.find("## Ai4").unwrap();
+        let raw = prompt.find(raw_first_response).unwrap();
+        let user = prompt.find("second user input").unwrap();
+        assert!(assistant < raw);
+        assert!(raw < user);
+        assert!(!prompt.contains("Final Answer:\nvisible answer"));
+        assert!(!prompt.contains("All previous pending open tasks are completed."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn session_turn_uses_host_supplied_runtime_context() {
         let dir = tmp_dir("host_runtime_context");
         let audit = dir.join("audit.json");
@@ -2091,7 +2260,7 @@ finished
         second_usage.cached_tokens = 6_500;
         let mut model = ReplayModel::new([
             Ok(LlmResponse {
-                content: r#"{"status":"working","progress":"先查询 scratch。","working_still_action":[{"action":"memmgr","intent":"List recent scratch notes.","args":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#.to_string(),
+                content: r#"{"status":"working","free_talk":"先查询 scratch。","working_still_action":[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#.to_string(),
                 model_name: "test-model".to_string(),
                 usage: first_usage.clone(),
                 truncated: false,
@@ -2158,15 +2327,14 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
+                    r#"{{"free_talk":"","context_compact":{{"discard":{},"summary":"discard stale context and keep current task state"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 13_253, false));
             }
             assert_eq!(self.prompts.len(), 2);
-            assert!(prompt.contains("Action result: memmgr"));
-            assert!(prompt.contains("type: context"));
-            assert!(prompt.contains("op: discard"));
+            assert!(prompt.contains("Action result: context_compact"));
+            assert!(prompt.contains("Context compact summary"));
             assert!(!prompt.contains("mode=force_shrink_required"));
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
@@ -2395,7 +2563,7 @@ finished
         assert!(repair_prompt.contains("## SYSTEM"));
         assert!(repair_prompt.contains("response is not protocol compliant"));
         assert!(repair_prompt.contains("Markdown response protocol"));
-        assert!(repair_prompt.contains("## Progress"));
+        assert!(repair_prompt.contains("## Free_talk"));
         assert!(repair_prompt.contains("## Working_Still_Action"));
         assert!(!repair_prompt.contains("Return exactly one valid JSON object"));
         assert!(!repair_prompt.contains("Do not use markdown fences"));
@@ -2509,7 +2677,7 @@ finished
             last_topic_blocking: false,
         };
         let mut model = ReplayModel::new([
-            Ok(llm(r#"{"progress":"partial""#, 5_000, true)),
+            Ok(llm(r#"{"free_talk":"partial""#, 5_000, true)),
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"扩容后完成。"}"#,
                 5_100,
@@ -2567,7 +2735,7 @@ finished
         config.max_llm_output_tokens = 8192;
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
-            Ok(llm(r#"{"progress":"partial""#, 5_000, true)),
+            Ok(llm(r#"{"free_talk":"partial""#, 5_000, true)),
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"默认扩容后完成。"}"#,
                 5_100,
@@ -2708,7 +2876,7 @@ finished
         };
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence before answering.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit e2e%"],"limit":5}}]}"#,
+                r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit e2e%"],"limit":5}}]}"#,
                 4_000,
                 false,
             )),
@@ -2764,7 +2932,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"working","progress":"","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit noop%"],"limit":5}}]}"#,
+                r#"{"status":"working","free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit noop%"],"limit":5}}]}"#,
                 4_000,
                 false,
             )),
@@ -2829,7 +2997,7 @@ finished
             continue_requests: 0,
         };
         let mut model = ReplayModel::new([Ok(llm(
-            r#"{"status":"working","progress":"先查证据。","working_still_action":[{"action":"memmgr","intent":"Look up evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit stop%"],"limit":5}}]}"#,
+            r#"{"status":"working","free_talk":"先查证据。","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%round limit stop%"],"limit":5}}]}"#,
             4_000,
             false,
         ))]);
@@ -2888,7 +3056,7 @@ finished
         let output_file = dir.join("approved.txt");
         let command = format!("printf approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"run_bash","intent":"Write approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"free_talk":"","working_still_action":[{{"run_bash":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -2977,7 +3145,7 @@ finished
         let output_file = dir.join("cancelled.txt");
         let command = format!("printf cancelled > {}", output_file.display());
         let first_response = format!(
-            r#"{{"status":"working","progress":"需要审批。","working_still_action":[{{"action":"run_bash","intent":"Write cancelled test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"status":"working","free_talk":"需要审批。","working_still_action":[{{"run_bash":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -3036,7 +3204,7 @@ finished
         let output_file = dir.join("approved_by_default.txt");
         let command = format!("printf default-approved > {}", output_file.display());
         let first_response = format!(
-            r#"{{"status":"working","progress":"","working_still_action":[{{"action":"run_bash","intent":"Write default approved test output.","args":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            r#"{{"status":"working","free_talk":"","working_still_action":[{{"run_bash":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
             serde_json::to_string(&command).unwrap()
         );
 
@@ -3094,7 +3262,7 @@ finished
         let mut ui = NoopTurnUi;
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"{"status":"ALL_FINISHED","final_answer":"文件已生成并验证。","working_still_action":[{"action":"run_bash","intent":"Verify output.","args":{"cmd":"true","timeout_ms":5000}}]}"#,
+                r#"{"status":"ALL_FINISHED","final_answer":"文件已生成并验证。","working_still_action":[{"run_bash":{"cmd":"true","timeout_ms":5000}}]}"#,
                 3_000,
                 false,
             )),
@@ -3152,17 +3320,14 @@ finished
                 delta_ids.dedup();
                 assert!(!delta_ids.is_empty());
                 let content = format!(
-                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Offload visible prompt context for later retrieval.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"session e2e offload","delta_ids":{}}}}}]}}"#,
+                    r#"{{"free_talk":"","context_compact":{{"offload":{},"summary":"offload old context and keep the current task active"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 return Ok(llm(content, 4_000, false));
             }
             assert_eq!(self.prompts.len(), 2);
-            assert!(prompt.contains("Action result: memmgr"));
-            assert!(prompt.contains("type: scratch"));
-            assert!(prompt.contains("op: write"));
-            assert!(prompt.contains("id: scratch_"));
-            assert!(prompt.contains("label: session e2e offload"));
+            assert!(prompt.contains("Action result: context_compact"));
+            assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
             Ok(llm(
                 r#"{"status":"ALL_FINISHED","final_answer":"scratch 已记录，可以继续。"}"#,
                 4_100,
@@ -3202,7 +3367,7 @@ finished
         assert_eq!(model.prompts.len(), 2);
         let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
         assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
-        assert!(scratch_text.contains(r#""label":"session e2e offload""#));
+        assert!(scratch_text.contains(r#""label":"context compact offload""#));
         assert!(scratch_text.contains("extra context that should be offloaded"));
         let events = read_audit_events(&audit);
         assert_eq!(audit_event_count(&events, "turn_final"), 1);
@@ -3230,15 +3395,12 @@ finished
         let mut ui = RecordingTopicUi::default();
         let mut model = ReplayModel::new([
             Ok(llm(
-                r#"## Progress
+                r#"## Free_talk
 正在检查本地 shell。
 
 ## Working_Still_Action
 ```action
-{
-  "action": "run_bash",
-  "intent": "验证 shell 命令可执行",
-  "args": {
+{"run_bash": {
     "cmd": "printf markdown-ok",
     "timeout_ms": 5000
   }
@@ -3281,13 +3443,12 @@ Markdown 协议动作已执行。"#,
         assert!(ui.events.iter().any(|event| {
             event
                 .as_model_response()
-                .map(|topic| topic.progress == "正在检查本地 shell。")
+                .map(|topic| topic.free_talk.contains("正在检查本地 shell。"))
                 .unwrap_or(false)
         }));
         assert!(ui.events.iter().any(|event| {
             event.as_action().map_or(false, |topic| {
-                topic.intent.as_deref() == Some("验证 shell 命令可执行")
-                    && topic.action == "run_bash"
+                topic.action == "run_bash"
                     && topic.active
                     && topic.kind
                         == CoreActionKind::Bash {
@@ -3341,7 +3502,7 @@ Markdown 协议动作已执行。"#,
                     Ok(llm("畸形回复已恢复为用户可读文本。", 2_200, false))
                 }
                 4 => Ok(llm(
-                    r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"记录测试项目代号。","args":{"type":"durable","op":"upsert","id":"project_code","content":"测试项目代号是 OMEGA-7"}}]}"#,
+                    r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"project_code","content":"测试项目代号是 OMEGA-7"}}]}"#,
                     2_300,
                     false,
                 )),
@@ -3357,7 +3518,7 @@ Markdown 协议动作已执行。"#,
                     ))
                 }
                 6 => Ok(llm(
-                    r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询测试项目代号记忆。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
+                    r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
                     2_500,
                     false,
                 )),
@@ -3382,34 +3543,16 @@ Markdown 协议动作已执行。"#,
                         "forced discard prompt should expose delta ids"
                     );
                     let content = format!(
-                        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"先把长上下文转存到 scratch。","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"story replay context offload","delta_ids":{}}}}}]}}"#,
+                        r#"{{"free_talk":"","context_compact":{{"discard":{},"offload":{},"summary":"offload important long story context, discard stale visible deltas, and keep active task state"}}}}"#,
+                        serde_json::to_string(&delta_ids).unwrap(),
                         serde_json::to_string(&delta_ids).unwrap()
                     );
                     Ok(llm(content, 7_650, false))
                 }
                 9 => {
-                    assert!(prompt.contains("mode=force_shrink_required"));
-                    assert!(prompt.contains("Action result: memmgr"));
-                    assert!(prompt.contains("type: scratch"));
-                    assert!(prompt.contains("op: write"));
-                    assert!(prompt.contains("id: scratch_"));
-                    let mut delta_ids = prompt_field_values(prompt, "delta_id");
-                    delta_ids.sort();
-                    delta_ids.dedup();
-                    assert!(
-                        !delta_ids.is_empty(),
-                        "post-scratch forced discard prompt should expose delta ids"
-                    );
-                    let content = format!(
-                        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"删除已转存的动态上下文。","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
-                        serde_json::to_string(&delta_ids).unwrap()
-                    );
-                    Ok(llm(content, 7_700, false))
-                }
-                10 => {
-                    assert!(prompt.contains("Action result: memmgr"));
-                    assert!(prompt.contains("type: context"));
-                    assert!(prompt.contains("op: discard"));
+                    assert!(prompt.contains("Action result: context_compact"));
+                    assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
+                    assert!(prompt.contains("Context compact summary"));
                     assert!(!prompt.contains("mode=force_shrink_required"));
                     Ok(llm(
                         r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
@@ -3471,7 +3614,7 @@ Markdown 协议动作已执行。"#,
         }
 
         assert_eq!(outputs, expected_outputs);
-        assert_eq!(model.calls, 10);
+        assert_eq!(model.calls, 9);
         assert!(
             model
                 .prompts
@@ -3485,15 +3628,15 @@ Markdown 协议动作已执行。"#,
                 .iter()
                 .filter(|prompt| prompt.contains("mode=force_shrink_required"))
                 .count()
-                >= 2,
-            "story should force shrink through scratch offload then context discard"
+                >= 1,
+            "story should force shrink through context compact"
         );
 
         let memory_text = std::fs::read_to_string(dir.join("memory.jsonl")).unwrap();
         assert!(memory_text.contains("测试项目代号是 OMEGA-7"));
         let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
         assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
-        assert!(scratch_text.contains(r#""label":"story replay context offload""#));
+        assert!(scratch_text.contains(r#""label":"context compact offload""#));
 
         let action_topics: Vec<_> = ui
             .events
@@ -3501,36 +3644,18 @@ Markdown 协议动作已执行。"#,
             .filter_map(CoreTopicEvent::as_action)
             .collect();
         assert!(action_topics.iter().any(|topic| {
-            topic.intent.as_deref() == Some("记录测试项目代号。")
-                && topic.kind
-                    == CoreActionKind::Memory {
-                        surface: "durable".to_string(),
-                        operation: "upsert".to_string(),
-                    }
+            topic.kind
+                == CoreActionKind::Memory {
+                    surface: "durable".to_string(),
+                    operation: "upsert".to_string(),
+                }
         }));
         assert!(action_topics.iter().any(|topic| {
-            topic.intent.as_deref() == Some("查询测试项目代号记忆。")
-                && topic.kind
-                    == CoreActionKind::Memory {
-                        surface: "durable".to_string(),
-                        operation: "sql".to_string(),
-                    }
-        }));
-        assert!(action_topics.iter().any(|topic| {
-            topic.intent.as_deref() == Some("先把长上下文转存到 scratch。")
-                && topic.kind
-                    == CoreActionKind::Memory {
-                        surface: "scratch".to_string(),
-                        operation: "write".to_string(),
-                    }
-        }));
-        assert!(action_topics.iter().any(|topic| {
-            topic.intent.as_deref() == Some("删除已转存的动态上下文。")
-                && topic.kind
-                    == CoreActionKind::Memory {
-                        surface: "context".to_string(),
-                        operation: "discard".to_string(),
-                    }
+            topic.kind
+                == CoreActionKind::Memory {
+                    surface: "durable".to_string(),
+                    operation: "sql".to_string(),
+                }
         }));
 
         let events = read_audit_events(&audit);
@@ -3548,7 +3673,6 @@ Markdown 协议动作已执行。"#,
         let request = ApprovalRequest {
             approval_id: "approval_1".to_string(),
             action: "run_bash".to_string(),
-            intent: "test".to_string(),
             command: "echo hi".to_string(),
             risk: "test".to_string(),
             reason: "test".to_string(),

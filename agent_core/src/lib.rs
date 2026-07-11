@@ -55,7 +55,8 @@ pub(crate) mod tool_registry;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
-    append_audit_event, host_start_audit_event, max_llm_output_increased_audit_event,
+    append_audit_event, append_repair_output_event, host_start_audit_event,
+    max_llm_output_increased_audit_event, model_repair_output_event,
     model_repair_request_audit_event, model_retry_audit_event, read_audit_doc,
     round_limit_audit_event, stale_context_choice_audit_event, turn_error_audit_event,
     turn_final_audit_event, turn_start_audit_event, user_approval_audit_event,
@@ -128,7 +129,7 @@ pub use provider_config::{
 pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
 pub use redaction::{redact_value, REDACTED};
 pub use response_protocol::ResponseProtocolKind;
-use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup};
+use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};
 pub use retry_policy::{
     is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
     ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
@@ -242,6 +243,13 @@ pub struct LlmResponse {
     pub usage: UsageStats,
     pub truncated: bool,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AssistantReplayMode {
+    RawOutput,
+    ExtractedFields,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnFinal {
     pub final_answer: String,
@@ -288,26 +296,8 @@ fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> Prom
 }
 
 fn context_reduction_delta_ids_from_action_groups(groups: &[ParsedActionGroup]) -> Vec<String> {
-    let mut ids = BTreeSet::new();
-    for action in groups.iter().flat_map(|group| &group.actions) {
-        if action.action != "memmgr" {
-            continue;
-        }
-        let mem_type = action.input_lower("type");
-        let op = action.input_lower("op");
-        let scratch_kind = action.input_lower("kind");
-        let reduces_context = (mem_type == "context" && op == "discard")
-            || (mem_type == "scratch" && op == "write" && scratch_kind == "context_offload");
-        if reduces_context {
-            for id in action.input_list("delta_ids") {
-                let id = id.trim();
-                if !id.is_empty() {
-                    ids.insert(id.to_string());
-                }
-            }
-        }
-    }
-    ids.into_iter().collect()
+    let _ = groups;
+    Vec::new()
 }
 
 fn extract_pid_after_marker(text: &str, marker: &str) -> Option<u32> {
@@ -330,7 +320,6 @@ pub struct ApprovalRequest {
     pub command: String,
     pub reason: String,
     pub risk: String,
-    pub intent: String,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BashApprovalMode {
@@ -408,7 +397,6 @@ pub struct ChatHistoryRecord {
 pub(crate) struct PendingApproval {
     request: ApprovalRequest,
     approved_action: PendingApprovedAction,
-    intent: String,
     continuation: Option<PendingApprovalContinuation>,
 }
 
@@ -433,6 +421,7 @@ pub(crate) enum PendingApprovedAction {
         once_timeout_ms: u64,
         session_id: String,
         turn_id: String,
+        cwd: PathBuf,
     },
 }
 
@@ -453,6 +442,7 @@ impl PendingApprovedAction {
                 once_timeout_ms,
                 session_id,
                 turn_id,
+                cwd,
             } => json!({
                 "command": command,
                 "background": background,
@@ -462,6 +452,7 @@ impl PendingApprovedAction {
                 "once_timeout_ms": if interval_ms.is_some() { Some(*once_timeout_ms) } else { None },
                 "session_id": session_id,
                 "turn_id": turn_id,
+                "cwd": cwd,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -655,7 +646,6 @@ struct ActionAuditEntry {
     time_ms: i64,
     round: u32,
     action: String,
-    intent: String,
     status: String,
     input: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -825,7 +815,11 @@ pub struct AgentCore {
     loaded_work_instruction_fingerprints: HashSet<String>,
     pending_prompt_components: Vec<PromptComponent>,
     prompt_component_sequence: u64,
+    next_delta_sequence: u64,
     assistant_speaker_name: String,
+    assistant_replay_mode: AssistantReplayMode,
+    current_prompt_cwd: PathBuf,
+    cwd_note_pending: bool,
 }
 impl AgentCore {
     pub fn new(
@@ -844,6 +838,7 @@ impl AgentCore {
         let capabilities = CapabilityRegistry::builtin();
         let response_protocol = ResponseProtocolKind::default();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
+        let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let rendered_static_prompt = prompt_render::render_static_prompt(
             &static_prompt,
             &capabilities,
@@ -882,7 +877,11 @@ impl AgentCore {
             loaded_work_instruction_fingerprints: HashSet::new(),
             pending_prompt_components: Vec::new(),
             prompt_component_sequence: 0,
+            next_delta_sequence: 1,
             assistant_speaker_name,
+            assistant_replay_mode: AssistantReplayMode::RawOutput,
+            current_prompt_cwd,
+            cwd_note_pending: true,
         }
     }
 
@@ -894,6 +893,70 @@ impl AgentCore {
     pub fn assistant_speaker_name(&self) -> &str {
         &self.assistant_speaker_name
     }
+
+    pub fn set_assistant_replay_mode(&mut self, mode: AssistantReplayMode) {
+        self.assistant_replay_mode = mode;
+    }
+
+    pub fn assistant_replay_mode(&self) -> AssistantReplayMode {
+        self.assistant_replay_mode
+    }
+
+    pub fn current_prompt_cwd(&self) -> &Path {
+        &self.current_prompt_cwd
+    }
+
+    pub fn change_prompt_cwd(&mut self, new_path: impl AsRef<str>) -> Result<PathBuf, String> {
+        let new_path = new_path.as_ref().trim();
+        if new_path.is_empty() {
+            return Err("new_path_required".to_string());
+        }
+        let candidate = Path::new(new_path);
+        let candidate = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            self.current_prompt_cwd.join(candidate)
+        };
+        let canonical = fs::canonicalize(&candidate).map_err(|_| "path_not_found".to_string())?;
+        if !canonical.is_dir() {
+            return Err("path_is_not_directory".to_string());
+        }
+        self.current_prompt_cwd = canonical.clone();
+        self.cwd_note_pending = true;
+        Ok(canonical)
+    }
+
+    fn cwd_prompt_note(&self) -> String {
+        format!(
+            "[!!!NOTE] cwd now set to: {} , you can save/shorten `cd` command based on this path.",
+            self.current_prompt_cwd.display()
+        )
+    }
+
+    fn submit_cwd_note_if_pending(&mut self) {
+        if !self.cwd_note_pending {
+            return;
+        }
+        self.cwd_note_pending = false;
+        self.submit_cwd_note_at(now_ms());
+    }
+
+    fn submit_cwd_note_at(&mut self, logical_time_ms: i64) {
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "runtime_note",
+            self.cwd_prompt_note(),
+            "runtime_cwd",
+        );
+        if let Some(component) = self.pending_prompt_components.last_mut() {
+            component.created_at_ms = logical_time_ms;
+        }
+    }
+
+    fn cwd_note_slice(&self) -> (String, String) {
+        ("runtime_note".to_string(), self.cwd_prompt_note())
+    }
+
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
         self.bash_approval_mode = mode;
     }
@@ -936,11 +999,13 @@ impl AgentCore {
             .into_iter()
             .map(|update| {
                 format!(
-                    "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms",
+                    "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}",
                     update.pid,
                     update.description(),
                     compact_text(&update.command, 500),
                     update.elapsed_ms,
+                    update.status,
+                    compact_text(&update.output, 4000),
                 )
             })
             .collect::<Vec<_>>()
@@ -1315,6 +1380,7 @@ impl AgentCore {
                 "runtime_memory_precheck",
             );
         }
+        self.submit_cwd_note_if_pending();
         CoreStep::NeedModel {
             prompt: self.build_next_prompt(),
             rounds_remaining: self.round_budget,
@@ -1378,6 +1444,7 @@ impl AgentCore {
         self.last_observed_prompt_tokens = self
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
+        let raw_model_output = response.content.clone();
         if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
             let protocol_suite = self.response_protocol.suite();
             return self.request_protocol_repair(
@@ -1390,9 +1457,6 @@ impl AgentCore {
         let protocol_suite = self.response_protocol.suite();
         let parsed = protocol_suite.parse(&response.content, &self.capabilities);
         let mut slices = Vec::new();
-        if !parsed.thought.is_empty() {
-            slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
-        }
         if let Some(issue) = parsed.repair_issue.clone() {
             if self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
                 return self.request_protocol_repair(
@@ -1406,9 +1470,10 @@ impl AgentCore {
                 && protocol_suite.can_show_plain_text_after_repair_failure(&response.content)
             {
                 let final_text = response.content.trim().to_string();
-                slices.push((
-                    "llm_response".to_string(),
-                    llm_final_answer_slice_text(&final_text),
+                slices.extend(self.assistant_replay_slices(
+                    &raw_model_output,
+                    None,
+                    Some(&final_text),
                 ));
                 self.defer_next_turn_slices(slices);
                 return CoreStep::Final(TurnFinal {
@@ -1437,9 +1502,10 @@ impl AgentCore {
                     )),
                 });
             }
-            slices.push((
-                "llm_response".to_string(),
-                llm_final_answer_slice_text(&final_text),
+            slices.extend(self.assistant_replay_slices(
+                &raw_model_output,
+                Some(&parsed),
+                Some(&final_text),
             ));
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
@@ -1470,20 +1536,64 @@ impl AgentCore {
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
+                let offload_record = if compact.offload_delta_ids.is_empty() {
+                    None
+                } else {
+                    match self.collect_prompt_context_for_scratch(&compact.offload_delta_ids, &[]) {
+                        Ok(offload) => match self.scratch.write_record(
+                            "context_offload",
+                            "context compact offload",
+                            &offload.content,
+                            &offload.delta_ids,
+                            &offload.slice_ids,
+                        ) {
+                            Ok(record) => Some(record),
+                            Err(err) => {
+                                slices.push((
+                                    "result_of_llm_action".to_string(),
+                                    format!(
+                                        "Action result: context_compact\nerror: scratch_offload_failed\nreason: {}",
+                                        err
+                                    ),
+                                ));
+                                continue;
+                            }
+                        },
+                        Err(err) => {
+                            slices.push((
+                                "result_of_llm_action".to_string(),
+                                format!(
+                                    "Action result: context_compact\nerror: scratch_offload_failed\nreason: {}",
+                                    err
+                                ),
+                            ));
+                            continue;
+                        }
+                    }
+                };
                 let shrink_result = self.apply_prompt_shrink(
                     "Action result: context_compact",
                     &compact.delta_ids,
                     &compact.slice_ids,
                 );
+                let scratch_line = offload_record
+                    .as_ref()
+                    .map(|record| {
+                        format!("\nThe scratch id for offloaded deltas is: {}", record.id)
+                    })
+                    .unwrap_or_default();
                 slices.push((
                     "context_compacted".to_string(),
                     format!(
-                        "Context compact summary replacing delta_ids=[{}]:\n{}",
-                        compact.delta_ids.join(","),
-                        compact.summary
+                        "Context compact summary replacing discarded_delta_ids=[{}], offloaded_delta_ids=[{}]:\n{}{}",
+                        compact.discard_delta_ids.join(","),
+                        compact.offload_delta_ids.join(","),
+                        compact.summary,
+                        scratch_line
                     ),
                 ));
                 slices.push(("result_of_llm_action".to_string(), shrink_result));
+                slices.push(self.cwd_note_slice());
             } else {
                 slices.push((
                     "result_of_llm_action".to_string(),
@@ -1502,9 +1612,10 @@ impl AgentCore {
                 }
             }
             let final_text = parsed.final_text();
-            slices.push((
-                "llm_response".to_string(),
-                llm_final_answer_slice_text(&final_text),
+            slices.extend(self.assistant_replay_slices(
+                &raw_model_output,
+                Some(&parsed),
+                Some(&final_text),
             ));
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
@@ -1523,6 +1634,7 @@ impl AgentCore {
         }
 
         // Omitted status is an intentional shorthand for status:working.
+        slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         if let Some(note) = parsed.runtime_note.as_deref() {
             slices.push(("runtime_note".to_string(), note.to_string()));
         }
@@ -1602,9 +1714,10 @@ impl AgentCore {
         } else {
             final_text
         };
-        slices.push((
-            "llm_response".to_string(),
-            llm_final_answer_slice_text(&final_text),
+        slices.extend(self.assistant_replay_slices(
+            &raw_model_output,
+            Some(&parsed),
+            Some(&final_text),
         ));
         self.defer_next_turn_slices(slices);
         CoreStep::Final(TurnFinal {
@@ -1651,6 +1764,7 @@ impl AgentCore {
         let response_model = response.model_name.clone();
         let response_usage = response.usage.clone();
         let response_truncated = response.truncated;
+        let response_content = response.content.clone();
         let mut runtime = CancelOnlyActionRuntime::new(should_cancel);
         let step = self.apply_model_response_with_action_runtime(response, &mut runtime);
         self.record_model_repair_audit_if_needed(
@@ -1661,6 +1775,7 @@ impl AgentCore {
             &response_model,
             &response_usage,
             response_truncated,
+            &response_content,
         );
         step
     }
@@ -1677,6 +1792,7 @@ impl AgentCore {
         let response_model = response.model_name.clone();
         let response_usage = response.usage.clone();
         let response_truncated = response.truncated;
+        let response_content = response.content.clone();
         let step = self.apply_model_response_with_action_runtime(response, runtime);
         self.record_model_repair_audit_if_needed(
             audit_file,
@@ -1686,6 +1802,7 @@ impl AgentCore {
             &response_model,
             &response_usage,
             response_truncated,
+            &response_content,
         );
         step
     }
@@ -1699,15 +1816,42 @@ impl AgentCore {
         response_model: &str,
         response_usage: &UsageStats,
         response_truncated: bool,
+        raw_response: &str,
     ) {
         let repair_calls_after = self.current_stats().repair_calls;
         if repair_calls_after > repair_calls_before {
+            let issue = self.last_repair_issue();
             let _ = append_audit_event(
                 audit_file,
                 &model_repair_request_audit_event(
                     session,
                     turn_id,
-                    self.last_repair_issue(),
+                    issue,
+                    response_model,
+                    response_usage,
+                    response_truncated,
+                    repair_calls_after,
+                    repair_calls_after.saturating_sub(repair_calls_before),
+                ),
+            );
+            let instruction = issue
+                .map(|issue| self.response_protocol.suite().repair_instruction(issue))
+                .unwrap_or("Please resend the response using the required protocol format.");
+            let system_message = format!(
+                "{}'s previous response is not protocol compliant.\nerror: {}\n\n{}",
+                self.assistant_speaker_name,
+                issue.unwrap_or("unknown_repair_issue"),
+                instruction
+            );
+            let _ = append_repair_output_event(
+                audit_file,
+                &model_repair_output_event(
+                    session,
+                    turn_id,
+                    issue,
+                    &self.assistant_speaker_name,
+                    raw_response,
+                    &system_message,
                     response_model,
                     response_usage,
                     response_truncated,
@@ -1820,8 +1964,10 @@ impl AgentCore {
                     once_timeout_ms,
                     session_id,
                     turn_id,
+                    cwd,
                 } => shell_exec::execute_approved_bash(
                     command,
+                    cwd,
                     *background,
                     *timeout_ms,
                     *interval_ms,
@@ -1843,7 +1989,6 @@ impl AgentCore {
                 pending.request.reason
             )
         };
-        let result = annotate_action_result_with_intent(result, &pending.intent);
         self.record_pending_approval_audit(&pending, approved, &result);
         self.append_delta(vec![("result_of_llm_action".to_string(), result)]);
         self.append_in_turn_shrink_review_if_needed();
@@ -1859,15 +2004,12 @@ impl AgentCore {
     }
 
     fn denied_approval_result(&self, pending: &PendingApproval) -> String {
-        annotate_action_result_with_intent(
-            format!(
-                "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
-                pending.request.action,
-                pending.approved_action.command(),
-                pending.request.approval_id,
-                pending.request.reason
-            ),
-            &pending.intent,
+        format!(
+            "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
+            pending.request.action,
+            pending.approved_action.command(),
+            pending.request.approval_id,
+            pending.request.reason
         )
     }
 
@@ -2239,6 +2381,41 @@ impl AgentCore {
         }
     }
 
+    fn assistant_replay_slices(
+        &self,
+        raw_response: &str,
+        parsed: Option<&ParsedEnvelope>,
+        final_text: Option<&str>,
+    ) -> Vec<(String, String)> {
+        match self.assistant_replay_mode {
+            AssistantReplayMode::RawOutput => {
+                let raw = raw_response.trim();
+                if raw.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![("llm_response".to_string(), raw.to_string())]
+                }
+            }
+            AssistantReplayMode::ExtractedFields => {
+                let mut slices = Vec::new();
+                if let Some(parsed) = parsed {
+                    if !parsed.thought.is_empty() {
+                        slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
+                    }
+                }
+                if let Some(final_text) = final_text {
+                    if !final_text.trim().is_empty() {
+                        slices.push((
+                            "llm_response".to_string(),
+                            llm_final_answer_slice_text(final_text),
+                        ));
+                    }
+                }
+                slices
+            }
+        }
+    }
+
     fn submit_prompt_component_at(
         &mut self,
         role: PromptComponentRole,
@@ -2283,6 +2460,10 @@ impl AgentCore {
 
     fn append_delta(&mut self, slice_texts: Vec<(String, String)>) {
         let logical_time_ms = now_ms();
+        if self.cwd_note_pending {
+            self.cwd_note_pending = false;
+            self.submit_cwd_note_at(logical_time_ms);
+        }
         self.submit_prompt_components_from_slice_texts(slice_texts, "runtime", logical_time_ms);
         self.flush_pending_prompt_components();
     }
@@ -2298,7 +2479,9 @@ impl AgentCore {
             .map(|component| component.created_at_ms)
             .min()
             .unwrap_or_else(now_ms);
-        let delta_id = format!("pd_{}_{}", timestamp, self.deltas.len() + 1);
+        let delta_sequence = self.next_delta_sequence;
+        self.next_delta_sequence = self.next_delta_sequence.saturating_add(1);
+        let delta_id = format!("pd_{delta_sequence}");
         let chunks = components
             .into_iter()
             .flat_map(|component| {
@@ -2431,7 +2614,7 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use memmgr type=scratch op=write kind=context_offload for important but lengthy existing deltas or kind=notes for compact checkpoints, then use memmgr type=context op=discard on covered delta_id ranges. Do not target prompt_0.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0.";
         Some(format!(
             "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{instruction}",
             self.max_llm_input_tokens
@@ -2553,8 +2736,6 @@ impl AgentCore {
     ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)> {
         let action = ParsedAction {
             action: pending.request.action.clone(),
-            intent: pending.intent.clone(),
-            parent_intent: None,
             raw_input: pending.approved_action.audit_input(
                 &pending.request.approval_id,
                 &pending.request.risk,
@@ -2574,11 +2755,13 @@ impl AgentCore {
                     once_timeout_ms,
                     session_id,
                     turn_id,
+                    cwd,
                 } => {
                     let mut should_cancel = || false;
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                     shell_exec::execute_approved_bash(
                         command,
+                        cwd,
                         *background,
                         *timeout_ms,
                         *interval_ms,
@@ -2605,6 +2788,7 @@ impl AgentCore {
         let shell_jobs = self.shell_jobs.clone();
         let session_id = self.current_session_id();
         let turn_id = self.current_action_turn_id();
+        let cwd = self.current_prompt_cwd().to_path_buf();
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
             let loop_command = action.input_str("loop_cmd");
@@ -2624,6 +2808,7 @@ impl AgentCore {
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                 shell_exec::execute_run_bash(
                     &command,
+                    &cwd,
                     action.background(),
                     if is_regular_command {
                         action.timeout_ms_i64(5000)
@@ -2633,7 +2818,6 @@ impl AgentCore {
                     action.input_u64("interval_ms"),
                     action.input_u64("once_timeout_ms").unwrap_or(5000),
                     BashApprovalMode::Approve,
-                    &action.intent,
                     &shell_jobs,
                     &session_id,
                     &turn_id,
@@ -2661,7 +2845,6 @@ impl AgentCore {
         for handle in handles {
             match handle.join() {
                 Ok((idx, action, result)) => {
-                    let result = annotate_action_result_with_intent(result, &action.intent);
                     self.record_action_audit(&action, "completed", Some(&result));
                     self.emit_action_finish_topic(&action, &result, runtime);
                     if let Some(slot) = results.get_mut(idx) {
@@ -2688,7 +2871,6 @@ impl AgentCore {
         for handle in handles {
             match handle.join() {
                 Ok((idx, action, pending, result)) => {
-                    let result = annotate_action_result_with_intent(result, &action.intent);
                     self.record_pending_approval_audit(&pending, true, &result);
                     self.emit_action_finish_topic(&action, &result, runtime);
                     if let Some(slot) = results.get_mut(idx) {
@@ -2776,10 +2958,7 @@ impl AgentCore {
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
             Err(err) => {
-                let result = annotate_action_result_with_intent(
-                    format!("Action result: {}\nerror: {}", action.action, err),
-                    &action.intent,
-                );
+                let result = format!("Action result: {}\nerror: {}", action.action, err);
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
                 return ActionExecution::Completed(result);
             }
@@ -2788,21 +2967,15 @@ impl AgentCore {
             .capabilities
             .validate_action_input(&action.action, &action.raw_input)
         {
-            let result = annotate_action_result_with_intent(
-                format!(
-                    "Action result: {}\nerror: invalid_input\nmessage: {}",
-                    action.action, issue
-                ),
-                &action.intent,
+            let result = format!(
+                "Action result: {}\nerror: invalid_input\nmessage: {}",
+                action.action, issue
             );
             self.record_action_audit(&action_for_audit, "invalid_input", Some(&result));
             return ActionExecution::Completed(result);
         }
         if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
-            let result = annotate_action_result_with_intent(
-                self.execute_command_capability(&action, path),
-                &action.intent,
-            );
+            let result = self.execute_command_capability(&action, path);
             self.record_action_audit(&action_for_audit, "completed", Some(&result));
             return ActionExecution::Completed(result);
         }
@@ -2823,20 +2996,19 @@ impl AgentCore {
             };
         match execution {
             ActionExecution::Completed(result) => {
-                let result = annotate_action_result_with_intent(result, &action.intent);
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
                 self.emit_action_finish_topic(&action_for_audit, &result, runtime);
                 ActionExecution::Completed(result)
             }
             ActionExecution::NeedsApproval(pending) => {
-                let result = annotate_action_result_with_intent(format!(
+                let result = format!(
                     "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
                     action_for_audit.action,
                     pending.approved_action.command(),
                     pending.request.approval_id,
                     pending.request.risk,
                     pending.request.reason
-                ), &action_for_audit.intent);
+                );
                 self.record_action_audit(&action_for_audit, "needs_user_approval", Some(&result));
                 ActionExecution::NeedsApproval(pending)
             }
@@ -2866,7 +3038,6 @@ impl AgentCore {
         self.current_stats.tool_calls += 1;
         let payload = json!({
             "action": action.action,
-            "intent": action.intent,
             "args": action.raw_input,
         });
         if action.background() {
@@ -2926,7 +3097,6 @@ impl AgentCore {
                 time_ms: now_ms(),
                 round: self.current_round.max(1),
                 action: action.action.clone(),
-                intent: action.intent.clone(),
                 status: status.to_string(),
                 input: action.audit_input(),
                 result_summary: result.map(|text| compact_text(text, 2_000)),
@@ -2951,7 +3121,6 @@ impl AgentCore {
                 time_ms: now_ms(),
                 round: self.current_round.max(1),
                 action: pending.request.action.clone(),
-                intent: pending.intent.clone(),
                 status: if approved {
                     "approved_completed".to_string()
                 } else {
@@ -3521,7 +3690,7 @@ impl FileMemoryStore {
 
     fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
         format!(
-            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|sql|delete\n- scratch: search|write|read|delete\n- context: discard\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content or kind=context_offload with delta_ids plus label; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}.",
+            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|sql|delete\n- scratch: search|write|read|delete\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}.",
             chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
         )
     }
@@ -4255,18 +4424,6 @@ fn memory_missing_expected_version_result(
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
-fn annotate_action_result_with_intent(result: String, intent: &str) -> String {
-    let intent = intent.trim();
-    if intent.is_empty() || result.lines().any(|line| line.starts_with("intent: ")) {
-        return result;
-    }
-    if let Some((head, tail)) = result.split_once('\n') {
-        format!("{head}\nintent: {intent}\n{tail}")
-    } else {
-        format!("{result}\nintent: {intent}")
-    }
-}
-
 pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {
@@ -4622,7 +4779,7 @@ mod prompt_component_tests {
         assert!(action_result < user);
         assert!(user < system_second);
         assert!(system_second < assistant);
-        assert_eq!(prompt.matches("## SYSTEM").count(), 2);
+        assert!(prompt.matches("## SYSTEM").count() >= 2);
         let dynamic_prompt = prompt.split("[BEGIN DELTA]").nth(1).unwrap_or("");
         assert!(!dynamic_prompt.contains("created_at_ms"));
         assert!(!dynamic_prompt.contains("sequence"));

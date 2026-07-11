@@ -169,9 +169,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.model_name, model);
-        assert!(
-            response.content.contains("report_job_progress") || response.content.contains("pong")
-        );
+        assert!(response.content.contains("free_talk") || response.content.contains("pong"));
         assert!(response.usage.llm_calls >= 1);
         assert!(response.usage.prompt_tokens > 0 || response.usage.total_tokens > 0);
 

@@ -69,9 +69,7 @@ output_schema: |
   }
 example_json: |
   {
-    "action": "run_bash",
-    "intent": "Count files in the current folder.",
-    "args": {
+    "run_bash": {
       "cmd": "rg --files | wc -l",
       "timeout_ms": 5000
     }

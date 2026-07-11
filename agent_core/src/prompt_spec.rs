@@ -40,10 +40,6 @@ mod tests {
         assert!(summary.get("$id").is_none());
         assert!(summary
             .get("fields")
-            .and_then(|value| value.get("progress?"))
-            .is_some());
-        assert!(summary
-            .get("fields")
             .and_then(|value| value.get("status?"))
             .is_some());
         assert!(summary
@@ -64,7 +60,7 @@ mod tests {
         assert!(summary
             .get("action_object_spec")
             .and_then(|value| value.get("intent?"))
-            .is_some());
+            .is_none());
         let text = serde_json::to_string(&summary).unwrap();
         assert!(text.contains("context_compact?"));
         for legacy_field in [
@@ -95,7 +91,6 @@ mod tests {
         assert!(enriched.contains("Markdown response sections."));
         assert!(enriched.contains("The top-level response is Markdown, not JSON."));
         assert!(enriched.contains("`## Status`"));
-        assert!(enriched.contains("`## Progress`"));
         assert!(enriched.contains("`## Final_Answer`"));
         assert!(enriched.contains("`## Free_talk`"));
         assert!(enriched.contains("`## Working_Still_Action`"));

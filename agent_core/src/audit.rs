@@ -6,9 +6,10 @@ use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AUDIT_SIDECAR_THRESHOLD_BYTES: u64 = 1024 * 1024;
+const REPAIR_OUTPUT_RESPONSE_LIMIT_CHARS: usize = 12_000;
 
 pub fn append_audit_event(path: &Path, event: &Value) -> std::io::Result<()> {
     MemGuard::for_audit_file(path)
@@ -28,6 +29,64 @@ pub fn append_audit_event(path: &Path, event: &Value) -> std::io::Result<()> {
             fs::write(path, format!("{text}\n"))
         })
         .map_err(std::io::Error::other)?
+}
+
+pub fn append_repair_output_event(api_audit_file: &Path, event: &Value) -> std::io::Result<()> {
+    let repair_file = repair_output_file_for_api_audit(api_audit_file);
+    MemGuard::for_audit_file(&repair_file)
+        .with_write(|| {
+            if let Some(parent) = repair_file.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut doc = read_repair_output_doc(&repair_file)?;
+            doc["records"]
+                .as_array_mut()
+                .expect("repair output doc records must be an array")
+                .push(event.clone());
+            doc["updated_at_ms"] = json!(audit_now_ms());
+            let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+            fs::write(&repair_file, format!("{text}\n"))
+        })
+        .map_err(std::io::Error::other)?
+}
+
+fn repair_output_file_for_api_audit(api_audit_file: &Path) -> std::path::PathBuf {
+    api_audit_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("api_output_repair.json")
+}
+
+fn read_repair_output_doc(path: &Path) -> std::io::Result<Value> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(empty_repair_output_doc());
+    };
+    if text.trim().is_empty() {
+        return Ok(empty_repair_output_doc());
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+        return Ok(empty_repair_output_doc());
+    };
+    if value.get("records").and_then(Value::as_array).is_none() {
+        value["records"] = json!([]);
+    }
+    if value.get("version").is_none() {
+        value["version"] = json!(1);
+    }
+    Ok(value)
+}
+
+fn empty_repair_output_doc() -> Value {
+    json!({
+        "version": 1,
+        "kind": "timem_realtime_repair_output_log",
+        "notes": [
+            "Realtime model-output protocol repair diagnostics.",
+            "Each record includes the malformed assistant response and the SYSTEM repair message shown to the model.",
+            "assistant_response may be capped to avoid unbounded diagnostic growth."
+        ],
+        "records": []
+    })
 }
 
 pub fn read_audit_doc(path: &Path) -> std::io::Result<Value> {
@@ -167,6 +226,77 @@ pub fn model_repair_request_audit_event(
         "repair_calls": repair_calls,
         "repair_calls_delta": repair_calls_delta,
     })
+}
+
+pub fn model_repair_output_event(
+    session: &str,
+    turn_id: &str,
+    issue: Option<&str>,
+    assistant_name: &str,
+    assistant_response: &str,
+    system_message: &str,
+    model: &str,
+    usage: &UsageStats,
+    truncated: bool,
+    repair_calls: u32,
+    repair_calls_delta: u32,
+) -> Value {
+    let (assistant_response, capped) =
+        cap_repair_output_text(assistant_response, REPAIR_OUTPUT_RESPONSE_LIMIT_CHARS);
+    let time_ms = audit_now_ms();
+    let issue_text = issue.unwrap_or("unknown_repair_issue");
+    json!({
+        "kind": "model_output_repair",
+        "time_ms": time_ms,
+        "session": session,
+        "turn_id": turn_id,
+        "issue": issue,
+        "assistant_name": assistant_name,
+        "assistant_response": assistant_response,
+        "assistant_response_capped": capped,
+        "system_message": system_message,
+        "model": model,
+        "usage": usage,
+        "truncated": truncated,
+        "repair_calls": repair_calls,
+        "repair_calls_delta": repair_calls_delta,
+        "rendered": format!(
+            "---- {} / {} ----\n## assistant:\n{}\n\n## SYSTEM\n{}",
+            time_ms, turn_id, assistant_response, system_message
+        ),
+        "summary": format!("{} repair for {}", issue_text, turn_id),
+    })
+}
+
+fn cap_repair_output_text(text: &str, limit: usize) -> (String, bool) {
+    if text.chars().count() <= limit {
+        return (text.to_string(), false);
+    }
+    let head_count = limit / 2;
+    let tail_count = limit.saturating_sub(head_count);
+    let head = text.chars().take(head_count).collect::<String>();
+    let tail = text
+        .chars()
+        .rev()
+        .take(tail_count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    (
+        format!(
+            "{head}\n[TRUNCATED repair output: omitted middle chars; original_chars={}]\n{tail}",
+            text.chars().count()
+        ),
+        true,
+    )
+}
+
+fn audit_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 pub fn turn_error_audit_event(session: &str, turn_id: &str, error: &str) -> Value {
@@ -413,7 +543,6 @@ mod tests {
             command: "true".into(),
             reason: "ask mode".into(),
             risk: "user_approval_required".into(),
-            intent: "Verify output".into(),
         };
 
         let approval_event = user_approval_audit_event("s", "t", &approval, true);
@@ -447,5 +576,29 @@ mod tests {
         assert_eq!(repair["issue"], "invalid_json");
         assert_eq!(repair["truncated"], true);
         assert_eq!(repair["repair_calls_delta"], 1);
+
+        let repair_output = model_repair_output_event(
+            "s",
+            "t",
+            Some("invalid_json"),
+            "Ai1",
+            "<response>bad</response>\n[BEGIN DELTA]",
+            "Ai1's previous response is not protocol compliant.\nerror: invalid_json",
+            "m",
+            &UsageStats::zero(),
+            false,
+            3,
+            1,
+        );
+        assert_eq!(repair_output["kind"], "model_output_repair");
+        assert_eq!(repair_output["assistant_name"], "Ai1");
+        assert!(repair_output["rendered"]
+            .as_str()
+            .unwrap()
+            .contains("## assistant:\n<response>bad</response>"));
+        assert!(repair_output["rendered"]
+            .as_str()
+            .unwrap()
+            .contains("## SYSTEM\nAi1's previous response"));
     }
 }

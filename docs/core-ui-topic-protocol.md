@@ -147,7 +147,6 @@ malformed response that is being repaired.
 payload:
   status: working | finished
   free_talk: string
-  report_job_progress: string
   final_answer: string
   continue_work: boolean
   global:
@@ -155,20 +154,18 @@ payload:
 ```
 
 `free_talk` is lightweight model context that a host may render as a status
-note. `report_job_progress` is progress for an active turn. `global` carries
-cross-session state; hosts can keep a global thinking indicator visible while
-`working_worker_count > 0` and stop it when the count reaches zero. Direct
-single-turn shells use `1` while the current turn continues and `0` when it is
-finished. Session-worker hosts override this with the shared atomic worker
-runtime count.
+note during an active turn. `global` carries cross-session state; hosts can keep
+a global thinking indicator visible while `working_worker_count > 0` and stop it
+when the count reaches zero. Direct single-turn shells use `1` while the current
+turn continues and `0` when it is finished. Session-worker hosts override this
+with the shared atomic worker runtime count.
 
 ### `core.action`
 
-Action intent and action metadata from core.
+Action metadata from core.
 
 ```text
 payload:
-  intent?: string
   action: string
   input: object
   kind: object

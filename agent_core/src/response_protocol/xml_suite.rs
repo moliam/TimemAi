@@ -3,6 +3,7 @@ use super::{
     ResponseProtocolSuite,
 };
 use crate::capability::CapabilityRegistry;
+use serde_json::Value;
 
 pub struct XmlSuiteV1;
 
@@ -49,26 +50,26 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
 
 pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let trimmed = content.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        return super::json_suite::parse_envelope(content, capabilities);
+    let protocol_text = strip_surrounding_xml_fence(trimmed).unwrap_or(trimmed);
+    if protocol_text.starts_with('{') || protocol_text.starts_with('[') {
+        return super::json_suite::parse_envelope(protocol_text, capabilities);
     }
-    if starts_with_markdown_protocol(trimmed) {
-        return markdown_suite::parse_markdown_envelope(content, capabilities);
+    if starts_with_markdown_protocol(protocol_text) {
+        return markdown_suite::parse_markdown_envelope(protocol_text, capabilities);
     }
-    if looks_like_external_tool_call_protocol(trimmed) {
+    if looks_like_external_tool_call_protocol(protocol_text) {
         return malformed_xml_response("external_tool_call_protocol");
     }
 
-    let Some(response_body) = extract_response_body(trimmed) else {
-        if trimmed.starts_with('<') {
+    let Some(response) = parse_response_fields(protocol_text) else {
+        if protocol_text.starts_with('<') {
             return malformed_xml_response("invalid_xml_response_root");
         }
-        if trimmed.is_empty() {
+        if protocol_text.is_empty() {
             return malformed_xml_response("empty_response");
         }
         return ParsedEnvelope {
-            report_job_progress: String::new(),
-            final_answer: trimmed.to_string(),
+            final_answer: protocol_text.to_string(),
             continue_work: false,
             thought: String::new(),
             thought_keep_in_context: false,
@@ -81,46 +82,35 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         };
     };
 
-    let control_body = strip_display_tag_blocks(response_body);
-    let status_raw = tag_text(&control_body, "status").to_ascii_lowercase();
-    let report_job_progress = first_non_empty_tag_text(
-        response_body,
-        &["progress", "report", "report_job_progress"],
-    );
-    let final_answer = tag_text(response_body, "final_answer");
-    let thought = first_non_empty_tag_text(response_body, &["free_talk", "free-talk", "freetalk"]);
+    let mut repair_issue = response.flow_issue.clone();
+    let has_status = response.has_status;
+    let final_answer = response.final_answer.clone();
+    let thought = response.free_talk.clone();
     let thought_keep_in_context = !thought.trim().is_empty();
 
-    let mut repair_issue = None;
-    let continue_work = match status_raw.trim() {
-        "all_finished" => false,
-        "working" | "in_progress" | "in progress" => true,
-        "" => {
-            if has_actions(&control_body) {
-                true
-            } else if !final_answer.trim().is_empty() {
-                false
-            } else {
-                true
-            }
-        }
-        _ => {
-            repair_issue = Some("status_must_be_working_or_all_finished".to_string());
-            true
-        }
+    let continue_work = if !final_answer.trim().is_empty() {
+        false
+    } else {
+        true
     };
 
-    let context_compacts = parse_context_compacts(&control_body, &mut repair_issue);
-    let (next_actions, action_groups) =
-        parse_actions(&control_body, capabilities, &mut repair_issue);
+    let context_compacts = if repair_issue.is_none() {
+        parse_context_compacts_from_fields(&response, &mut repair_issue)
+    } else {
+        Vec::new()
+    };
+    let (next_actions, action_groups) = if repair_issue.is_none() {
+        parse_action_blocks(
+            response.action_json_blocks.clone(),
+            capabilities,
+            &mut repair_issue,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
-    if repair_issue.is_none() && !continue_work && final_answer.trim().is_empty() {
-        repair_issue = Some("final_answer_required_when_status_finished".to_string());
-    }
-    if repair_issue.is_none() && !final_answer.trim().is_empty() {
-        if !matches!(status_raw.trim(), "all_finished") {
-            repair_issue = Some("final_answer_requires_status_finished".to_string());
-        }
+    if repair_issue.is_none() && has_status {
+        repair_issue = Some("status_tag_not_supported".to_string());
     }
     if repair_issue.is_none() && !continue_work && !next_actions.is_empty() {
         repair_issue = Some("status_finished_must_not_include_next_actions".to_string());
@@ -132,9 +122,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     {
         repair_issue = Some("next_actions_required_when_status_working".to_string());
     }
-
     ParsedEnvelope {
-        report_job_progress,
         final_answer,
         continue_work,
         thought,
@@ -148,9 +136,274 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     }
 }
 
+fn strip_surrounding_xml_fence(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let rest = text.strip_prefix("```")?;
+    let newline = rest.find('\n')?;
+    let lang = rest[..newline].trim().to_ascii_lowercase();
+    if lang != "xml" {
+        return None;
+    }
+    let body = &rest[newline + 1..];
+    let closing = body.rfind("```")?;
+    if !body[closing + 3..].trim().is_empty() {
+        return None;
+    }
+    Some(body[..closing].trim())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResponseFields {
+    free_talk: String,
+    final_answer: String,
+    action_json_blocks: Vec<String>,
+    context_compacts: Vec<ContextCompactFields>,
+    has_status: bool,
+    flow_issue: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ContextCompactFields {
+    discard: String,
+    offload: String,
+    summary: String,
+}
+
+fn parse_response_fields(text: &str) -> Option<ResponseFields> {
+    let text = text.trim();
+    let open_start = find_open_tag(text, "response")?;
+    if !text[..open_start].trim().is_empty() {
+        return None;
+    }
+    let open_end = find_tag_end(text, open_start)?;
+    if is_self_closing_start_tag(&text[open_start..=open_end]) {
+        return None;
+    }
+    let close_start = find_last_close_tag(text, open_end + 1, "response")?;
+    let close_end = close_start + "</response>".len();
+    if !text[close_end..].trim().is_empty() {
+        return None;
+    }
+    let body = &text[open_end + 1..close_start];
+    Some(scan_response_body(body))
+}
+
+fn scan_response_body(body: &str) -> ResponseFields {
+    const TOP_LEVEL_TAGS: &[&str] = &[
+        "free_talk",
+        "free-talk",
+        "freetalk",
+        "working_still_action",
+        "context_compact",
+        "final_answer",
+        "status",
+    ];
+    let mut fields = ResponseFields::default();
+    let mut cursor = 0usize;
+    let mut last_order = 0usize;
+    let mut state_branch_count = 0usize;
+    let mut has_working_action = false;
+    let mut has_final_answer = false;
+
+    while let Some((open_start, tag)) = find_next_open_raw_tag(body, cursor, TOP_LEVEL_TAGS) {
+        let Some(open_end) = find_tag_end(body, open_start) else {
+            fields
+                .flow_issue
+                .get_or_insert_with(|| "invalid_xml_response_root".to_string());
+            break;
+        };
+        let tag_order = if matches!(tag, "free_talk" | "free-talk" | "freetalk") {
+            1
+        } else {
+            state_branch_count += 1;
+            if tag == "working_still_action" {
+                has_working_action = true;
+            }
+            if tag == "final_answer" {
+                has_final_answer = true;
+            }
+            2
+        };
+        if fields.flow_issue.is_none() && tag_order < last_order {
+            fields.flow_issue = Some("xml_tags_out_of_order".to_string());
+        }
+        last_order = tag_order;
+
+        if is_self_closing_start_tag(&body[open_start..=open_end]) {
+            if tag == "status" {
+                fields.has_status = true;
+            }
+            cursor = open_end + 1;
+            continue;
+        }
+
+        let close_start = if tag == "final_answer" {
+            find_last_close_tag(body, open_end + 1, tag)
+        } else if tag == "working_still_action" || tag == "context_compact" {
+            find_close_tag_outside_cdata(body, open_end + 1, tag)
+        } else {
+            find_close_tag(body, open_end + 1, tag)
+        };
+        let Some(close_start) = close_start else {
+            fields
+                .flow_issue
+                .get_or_insert_with(|| "invalid_xml_response_root".to_string());
+            break;
+        };
+        let inner = &body[open_end + 1..close_start];
+        match tag {
+            "free_talk" | "free-talk" | "freetalk" => {
+                fields.free_talk = decode_xml_text(&unwrap_cdata_text(inner));
+            }
+            "final_answer" => {
+                fields.final_answer = decode_xml_text(&unwrap_cdata_text(inner));
+            }
+            "status" => {
+                fields.has_status = true;
+            }
+            "context_compact" => {
+                fields
+                    .context_compacts
+                    .push(parse_context_compact_fields(inner));
+            }
+            "working_still_action" => {
+                fields
+                    .action_json_blocks
+                    .extend(extract_action_json_blocks(inner));
+            }
+            _ => {}
+        }
+        cursor = close_start + close_tag_len(tag);
+    }
+
+    if fields.flow_issue.is_none() && has_working_action && has_final_answer {
+        fields.flow_issue = Some("status_finished_must_not_include_next_actions".to_string());
+    }
+    if fields.flow_issue.is_none() && state_branch_count > 1 {
+        fields.flow_issue = Some("state_branch_must_choose_one".to_string());
+    }
+    fields
+}
+
+fn parse_context_compact_fields(body: &str) -> ContextCompactFields {
+    ContextCompactFields {
+        discard: extract_tag_text(body, "discard", false)
+            .or_else(|| extract_tag_text(body, "delta_ids", false))
+            .unwrap_or_default(),
+        offload: extract_tag_text(body, "offload", false).unwrap_or_default(),
+        summary: extract_tag_text(body, "summary", true).unwrap_or_default(),
+    }
+}
+
+fn extract_action_json_blocks(body: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(open_start) = find_open_tag(&body[cursor..], "action_json") {
+        let open_start = cursor + open_start;
+        let Some(open_end) = find_tag_end(body, open_start) else {
+            break;
+        };
+        if is_self_closing_start_tag(&body[open_start..=open_end]) {
+            cursor = open_end + 1;
+            continue;
+        }
+        let content_start = open_end + 1;
+        let after_open = body[content_start..].trim_start();
+        let skipped_ws = body[content_start..].len() - after_open.len();
+        if after_open.starts_with("<![CDATA[") {
+            let cdata_start = content_start + skipped_ws + "<![CDATA[".len();
+            if let Some((cdata_end, close_start)) =
+                find_cdata_end_before_close_tag(body, cdata_start, "action_json")
+            {
+                blocks.push(body[cdata_start..cdata_end].to_string());
+                cursor = close_start + close_tag_len("action_json");
+                continue;
+            }
+        }
+        let Some(close_start) = find_close_tag(body, content_start, "action_json") else {
+            break;
+        };
+        blocks.push(decode_xml_text(body[content_start..close_start].trim()));
+        cursor = close_start + close_tag_len("action_json");
+    }
+    blocks
+}
+
+fn find_cdata_end_before_close_tag(
+    haystack: &str,
+    from: usize,
+    tag: &str,
+) -> Option<(usize, usize)> {
+    let mut cursor = from;
+    while let Some(close_start) = find_close_tag(haystack, cursor, tag) {
+        let before_close = haystack[from..close_start].trim_end();
+        if let Some(cdata_end_rel) = before_close.rfind("]]>") {
+            return Some((from + cdata_end_rel, close_start));
+        }
+        cursor = close_start + close_tag_len(tag);
+    }
+    None
+}
+
+fn extract_tag_text(body: &str, tag: &str, use_last_close: bool) -> Option<String> {
+    let open_start = find_open_tag(body, tag)?;
+    let open_end = find_tag_end(body, open_start)?;
+    if is_self_closing_start_tag(&body[open_start..=open_end]) {
+        return Some(String::new());
+    }
+    let close_start = if use_last_close {
+        find_last_close_tag(body, open_end + 1, tag)?
+    } else {
+        find_close_tag(body, open_end + 1, tag)?
+    };
+    Some(decode_xml_text(&unwrap_cdata_text(
+        &body[open_end + 1..close_start],
+    )))
+}
+
+fn unwrap_cdata_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("<![CDATA[") && trimmed.ends_with("]]>") {
+        trimmed["<![CDATA[".len()..trimmed.len() - "]]>".len()].to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+fn find_close_tag(haystack: &str, from: usize, tag: &str) -> Option<usize> {
+    let lower = haystack.to_ascii_lowercase();
+    lower[from..]
+        .find(&format!("</{}>", tag.to_ascii_lowercase()))
+        .map(|pos| from + pos)
+}
+
+fn find_close_tag_outside_cdata(haystack: &str, from: usize, tag: &str) -> Option<usize> {
+    let lower = haystack.to_ascii_lowercase();
+    let needle = format!("</{}>", tag.to_ascii_lowercase());
+    let mut cursor = from;
+    while let Some(rel) = lower[cursor..].find(&needle) {
+        let pos = cursor + rel;
+        if !is_inside_cdata(haystack, pos) {
+            return Some(pos);
+        }
+        cursor = pos + needle.len();
+    }
+    None
+}
+
+fn find_last_close_tag(haystack: &str, from: usize, tag: &str) -> Option<usize> {
+    let lower = haystack.to_ascii_lowercase();
+    lower[from..]
+        .rfind(&format!("</{}>", tag.to_ascii_lowercase()))
+        .map(|pos| from + pos)
+}
+
+fn close_tag_len(tag: &str) -> usize {
+    format!("</{tag}>").len()
+}
+
 fn malformed_xml_response(issue: &str) -> ParsedEnvelope {
     ParsedEnvelope {
-        report_job_progress: String::new(),
         final_answer: String::new(),
         continue_work: true,
         thought: String::new(),
@@ -176,135 +429,64 @@ fn looks_like_external_tool_call_protocol(text: &str) -> bool {
         || lower.contains("</function_call>")
 }
 
-fn extract_response_body(text: &str) -> Option<&str> {
-    let start = text.find("<response")?;
-    let after_tag = text[start..].find('>')? + start + 1;
-    let end = find_xml_close_outside_cdata(&text[after_tag..], "</response>")? + after_tag;
-    Some(text[after_tag..end].trim())
-}
-
-fn extract_tags<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
-    let mut result = Vec::new();
-    let mut rest = text;
-    let open_prefix = format!("<{tag}");
-    let close = format!("</{tag}>");
-    while let Some(open_idx) = find_xml_open_outside_cdata(rest, &open_prefix) {
-        let after_open_start = open_idx + open_prefix.len();
-        let Some(open_end_rel) = rest[after_open_start..].find('>') else {
-            break;
-        };
-        let body_start = after_open_start + open_end_rel + 1;
-        let Some(close_idx_rel) = find_xml_close_outside_cdata(&rest[body_start..], &close) else {
-            break;
-        };
-        let body_end = body_start + close_idx_rel;
-        result.push(rest[body_start..body_end].trim());
-        rest = &rest[body_end + close.len()..];
-    }
-    result
-}
-
-fn strip_display_tag_blocks(text: &str) -> String {
-    strip_xml_tag_blocks(
-        text,
-        &[
-            "final_answer",
-            "free_talk",
-            "free-talk",
-            "freetalk",
-            "progress",
-            "report",
-            "report_job_progress",
-        ],
-    )
-}
-
-fn strip_xml_tag_blocks(text: &str, tags: &[&str]) -> String {
-    tags.iter().fold(text.to_string(), |current, tag| {
-        strip_xml_tag_blocks_for_tag(&current, tag)
-    })
-}
-
-fn strip_xml_tag_blocks_for_tag(text: &str, tag: &str) -> String {
-    let mut result = String::new();
-    let mut rest = text;
-    let open_prefix = format!("<{tag}");
-    let close = format!("</{tag}>");
-    while let Some(open_idx) = find_xml_open_outside_cdata(rest, &open_prefix) {
-        let after_open_start = open_idx + open_prefix.len();
-        let Some(open_end_rel) = rest[after_open_start..].find('>') else {
-            break;
-        };
-        let body_start = after_open_start + open_end_rel + 1;
-        let Some(close_idx_rel) = find_xml_close_outside_cdata(&rest[body_start..], &close) else {
-            break;
-        };
-        let body_end = body_start + close_idx_rel;
-        result.push_str(&rest[..open_idx]);
-        rest = &rest[body_end + close.len()..];
-    }
-    result.push_str(rest);
-    result
-}
-
-fn find_xml_close_outside_cdata(text: &str, close: &str) -> Option<usize> {
-    let mut idx = 0;
-    while idx < text.len() {
-        let rest = &text[idx..];
-        if rest.starts_with("<![CDATA[") {
-            if let Some(end_rel) = rest.find("]]>") {
-                idx += end_rel + 3;
-                continue;
-            }
-            return None;
-        }
-        if rest.starts_with(close) {
-            return Some(idx);
-        }
-        idx += rest.chars().next()?.len_utf8();
-    }
-    None
-}
-
-fn find_xml_open_outside_cdata(text: &str, open_prefix: &str) -> Option<usize> {
-    let mut idx = 0;
-    while idx < text.len() {
-        let rest = &text[idx..];
-        if rest.starts_with("<![CDATA[") {
-            if let Some(end_rel) = rest.find("]]>") {
-                idx += end_rel + 3;
-                continue;
-            }
-            return None;
-        }
-        if rest.starts_with(open_prefix) {
-            return Some(idx);
-        }
-        idx += rest.chars().next()?.len_utf8();
-    }
-    None
-}
-
-fn tag_text(text: &str, tag: &str) -> String {
-    extract_tags(text, tag)
-        .first()
-        .map(|raw| decode_xml_text(strip_cdata(raw).trim()))
-        .unwrap_or_default()
-}
-
-fn first_non_empty_tag_text(text: &str, tags: &[&str]) -> String {
+fn find_next_open_raw_tag<'a>(
+    haystack: &str,
+    from: usize,
+    tags: &'a [&str],
+) -> Option<(usize, &'a str)> {
     tags.iter()
-        .map(|tag| tag_text(text, tag))
-        .find(|value| !value.trim().is_empty())
-        .unwrap_or_default()
+        .filter_map(|tag| find_open_tag(&haystack[from..], tag).map(|pos| (from + pos, *tag)))
+        .min_by_key(|(pos, _)| *pos)
 }
 
-fn strip_cdata(text: &str) -> &str {
-    let trimmed = text.trim();
-    trimmed
-        .strip_prefix("<![CDATA[")
-        .and_then(|inner| inner.strip_suffix("]]>"))
-        .unwrap_or(trimmed)
+fn find_open_tag(haystack: &str, tag: &str) -> Option<usize> {
+    let lower = haystack.to_ascii_lowercase();
+    let needle = format!("<{}", tag.to_ascii_lowercase());
+    let mut cursor = 0usize;
+    while let Some(rel) = lower[cursor..].find(&needle) {
+        let pos = cursor + rel;
+        if is_inside_cdata(haystack, pos) {
+            cursor = pos + needle.len();
+            continue;
+        }
+        let after = lower.as_bytes().get(pos + needle.len()).copied();
+        if matches!(
+            after,
+            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+        ) {
+            return Some(pos);
+        }
+        cursor = pos + needle.len();
+    }
+    None
+}
+
+fn is_inside_cdata(text: &str, pos: usize) -> bool {
+    let before = &text[..pos];
+    let Some(open) = before.rfind("<![CDATA[") else {
+        return false;
+    };
+    match before.rfind("]]>") {
+        Some(close) => close < open,
+        None => true,
+    }
+}
+
+fn find_tag_end(text: &str, open_start: usize) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    for (offset, byte) in text.as_bytes()[open_start..].iter().copied().enumerate() {
+        match (quote, byte) {
+            (Some(q), b) if b == q => quote = None,
+            (None, b'"') | (None, b'\'') => quote = Some(byte),
+            (None, b'>') => return Some(open_start + offset),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_self_closing_start_tag(tag_text: &str) -> bool {
+    tag_text.trim_end_matches('>').trim_end().ends_with('/')
 }
 
 fn decode_xml_text(text: &str) -> String {
@@ -315,61 +497,76 @@ fn decode_xml_text(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-fn has_actions(response_body: &str) -> bool {
-    !extract_tags(response_body, "working_still_action").is_empty()
-}
-
-fn parse_actions(
-    response_body: &str,
+fn parse_action_blocks(
+    action_blocks: Vec<String>,
     capabilities: &CapabilityRegistry,
     repair_issue: &mut Option<String>,
 ) -> (Vec<ParsedAction>, Vec<ParsedActionGroup>) {
-    let mut action_blocks = Vec::new();
-    for body in extract_tags(response_body, "working_still_action") {
-        let nested = extract_tags(body, "action_json");
-        if nested.is_empty() {
-            let direct = decode_xml_text(strip_cdata(body).trim());
-            if !direct.trim().is_empty() {
-                action_blocks.push(direct);
-            }
-        } else {
-            for item in nested {
-                let decoded = decode_xml_text(strip_cdata(item).trim());
-                if !decoded.trim().is_empty() {
-                    action_blocks.push(decoded);
-                }
-            }
-        }
-    }
     if action_blocks.is_empty() {
         return (Vec::new(), Vec::new());
     }
 
-    let mut markdown = String::from("## Progress\nchecking\n\n## Working_Still_Action\n");
-    for block in action_blocks {
-        markdown.push_str("```action\n");
-        markdown.push_str(block.trim());
-        markdown.push_str("\n```\n");
+    let mut action_groups = Vec::new();
+    for (block_idx, block) in action_blocks.iter().enumerate() {
+        match serde_json::from_str::<Value>(block.trim()) {
+            Ok(value) => {
+                if !value.is_array() {
+                    if value.as_object().is_some_and(|object| {
+                        object.contains_key("order") || object.contains_key("actions")
+                    }) {
+                        match super::parse_action_workflow_value(
+                            &value,
+                            &format!("actions[{block_idx}]"),
+                            capabilities,
+                        ) {
+                            Ok(_) => {}
+                            Err(issue) => {
+                                *repair_issue = Some(issue);
+                                return (Vec::new(), Vec::new());
+                            }
+                        }
+                    }
+                    *repair_issue = Some(format!("actions[{block_idx}].array_required"));
+                    return (Vec::new(), Vec::new());
+                }
+                match super::parse_action_workflow_value(
+                    &value,
+                    &format!("actions[{block_idx}]"),
+                    capabilities,
+                ) {
+                    Ok(groups) => action_groups.extend(groups),
+                    Err(issue) => {
+                        *repair_issue = Some(issue);
+                        return (Vec::new(), Vec::new());
+                    }
+                }
+            }
+            Err(_) => {
+                *repair_issue = Some(format!("actions[{block_idx}].invalid_json"));
+                return (Vec::new(), Vec::new());
+            }
+        }
     }
-    let parsed = markdown_suite::parse_markdown_envelope(&markdown, capabilities);
-    if let Some(issue) = parsed.repair_issue {
-        *repair_issue = Some(issue);
-        return (Vec::new(), Vec::new());
-    }
-    (parsed.next_actions, parsed.action_groups)
+    let next_actions = action_groups
+        .iter()
+        .flat_map(|group| group.actions.clone())
+        .collect::<Vec<_>>();
+    (next_actions, action_groups)
 }
 
-fn parse_context_compacts(
-    response_body: &str,
+fn parse_context_compacts_from_fields(
+    response: &ResponseFields,
     repair_issue: &mut Option<String>,
 ) -> Vec<ParsedContextCompact> {
     let mut compacts = Vec::new();
-    for (idx, body) in extract_tags(response_body, "context_compact")
-        .into_iter()
-        .enumerate()
-    {
-        let delta_ids = split_id_list(&tag_text(body, "delta_ids"));
-        let summary = tag_text(body, "summary").trim().to_string();
+    for (idx, item) in response.context_compacts.iter().enumerate() {
+        let discard_delta_ids = split_id_list(&item.discard);
+        let offload_delta_ids = split_id_list(&item.offload);
+        let mut delta_ids = discard_delta_ids.clone();
+        delta_ids.extend(offload_delta_ids.iter().cloned());
+        delta_ids.sort();
+        delta_ids.dedup();
+        let summary = item.summary.trim().to_string();
         if delta_ids.is_empty() {
             if repair_issue.is_none() {
                 *repair_issue = Some(format!("context_compact[{idx}].ids_required"));
@@ -383,6 +580,8 @@ fn parse_context_compacts(
             break;
         }
         compacts.push(ParsedContextCompact {
+            discard_delta_ids,
+            offload_delta_ids,
             delta_ids,
             slice_ids: Vec::new(),
             summary,
@@ -403,25 +602,25 @@ fn split_id_list(raw: &str) -> Vec<String> {
 pub fn xml_repair_instruction(issue: &str) -> &'static str {
     match issue {
         "truncated_model_output" => {
-            "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <progress> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
+            "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <free_talk> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
         }
         "external_tool_call_protocol" => {
-            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 XML response protocol：需要动作时写 <progress> 和 <working_still_action><action_json><![CDATA[{...}]]></action_json></working_still_action>；完成时写 <status>ALL_FINISHED</status> 和 <final_answer>...</final_answer>。"
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。Timem 不能执行这种格式。请继续使用 XML response protocol：需要动作时写 <free_talk> 和 <working_still_action><action_json><![CDATA[[...]]></action_json></working_still_action>；完成时直接写 <final_answer>...</final_answer>。"
         }
-        "final_answer_requires_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你给了 <final_answer>，但没有明确 <status>ALL_FINISHED</status>。如果当前用户请求已经完成，请同时提供 <status>ALL_FINISHED</status> 和 <final_answer>；如果仍需 runtime 继续工作，请不要写 <final_answer>，改写 <progress> 和 <working_still_action>。"
-        }
-        "final_answer_required_when_status_finished" => {
-            "检查到刚刚的输出格式有点问题：你写了 <status>ALL_FINISHED</status>，但缺少 <final_answer>。如果当前用户请求已经完成，请同时提供二者；如果 final_answer 里需要展示 XML 标签或 XML 示例，请把整个 final_answer 文本包进 <![CDATA[ ... ]]>，避免示例标签被当作协议标签解析。如果仍需 runtime 继续工作，请不要写 ALL_FINISHED，并提供 <progress> 和需要的 <working_still_action>。"
+        "status_tag_not_supported" => {
+            "检查到刚刚的输出格式有点问题：当前 XML response protocol 不使用 <status>。如果当前用户请求已经完成，请直接提供 <final_answer>；如果仍需 runtime 继续工作，请提供 <free_talk> 和 <working_still_action>。"
         }
         "status_finished_must_not_include_next_actions" => {
-            "检查到刚刚的输出格式有点问题：<status>ALL_FINISHED</status> 表示当前用户请求已完成，因此不能同时包含 <working_still_action>。如果还需要 runtime 执行动作，请保持 working，用 <progress> 和 <working_still_action> 继续；拿到 action result 后再写 ALL_FINISHED 和 <final_answer>。"
+            "检查到刚刚的输出格式有点问题：<final_answer> 表示当前用户请求已完成，因此不能同时包含 <working_still_action>。如果还需要 runtime 执行动作，请用 <free_talk> 和 <working_still_action> 继续；拿到 action result 后再写 <final_answer>。"
         }
         "next_actions_required_when_status_working" => {
-            "检查到刚刚的输出格式有点问题：working 表示还需要 runtime 继续执行动作，因此必须提供 <progress> 和 <working_still_action>。如果当前用户请求已经完成，请改用 <status>ALL_FINISHED</status> 和 <final_answer>。"
+            "检查到刚刚的输出格式有点问题：如果仍需 runtime 继续执行动作，必须提供 <working_still_action>；如果当前用户请求已经完成，请改用 <final_answer>。"
+        }
+        issue if issue.ends_with(".array_required") => {
+            "检查到刚刚的 action_json 格式有点问题：<action_json> 的内容必须是 JSON array。单个工具调用也请写成数组，例如 <![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\"}}]]]>。"
         }
         _ => {
-            "Use the XML response protocol. If work still needs runtime action, write <progress> and concrete <working_still_action>. If the current user request is complete, write <status>ALL_FINISHED</status> with <final_answer>; this does not close the Timem session."
+            "Use the XML response protocol. If work still needs runtime action, write <free_talk> and concrete <working_still_action>. If the current user request is complete, write <final_answer>; this does not close the Timem session."
         }
     }
 }
@@ -446,10 +645,52 @@ mod tests {
         CapabilityRegistry::builtin()
     }
 
+    fn extract_response_examples(text: &str) -> Vec<String> {
+        let mut examples = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(start_rel) = text[cursor..].find("<response>") {
+            let start = cursor + start_rel;
+            let search_from = start + "<response>".len();
+            let Some(end_rel) = text[search_from..].find("</response>") else {
+                break;
+            };
+            let end = search_from + end_rel + "</response>".len();
+            examples.push(text[start..end].to_string());
+            cursor = end;
+        }
+        examples
+    }
+
+    #[test]
+    fn documented_xml_response_examples_parse_with_runtime_parser() {
+        let examples = extract_response_examples(XML_RESPONSE_PROTOCOL_SECTION);
+        assert!(
+            examples.len() >= 4,
+            "expected protocol doc to contain concrete XML response examples"
+        );
+
+        for (idx, example) in examples.iter().enumerate() {
+            let env = parse_xml_envelope(example, &caps());
+            assert!(
+                env.repair_issue.is_none(),
+                "documented XML example #{idx} did not parse: {:?}\n{}",
+                env.repair_issue,
+                example
+            );
+            assert!(
+                !env.final_answer.trim().is_empty()
+                    || !env.next_actions.is_empty()
+                    || !env.context_compacts.is_empty(),
+                "documented XML example #{idx} produced no runtime-visible result:\n{}",
+                example
+            );
+        }
+    }
+
     #[test]
     fn parses_final_answer() {
         let env = parse_xml_envelope(
-            "<response><status>ALL_FINISHED</status><final_answer>done</final_answer></response>",
+            "<response><final_answer>done</final_answer></response>",
             &caps(),
         );
         assert!(env.repair_issue.is_none());
@@ -461,12 +702,10 @@ mod tests {
     fn parses_final_answer_cdata_with_xml_examples() {
         let env = parse_xml_envelope(
             r#"<response>
-  <status>ALL_FINISHED</status>
   <final_answer><![CDATA[
 Example response delta:
 
 <response>
-  <status>ALL_FINISHED</status>
   <final_answer>done</final_answer>
 </response>
 
@@ -487,14 +726,11 @@ Example response delta:
     fn final_answer_xml_action_examples_are_not_parsed_as_real_actions() {
         let env = parse_xml_envelope(
             r#"<response>
-  <status>ALL_FINISHED</status>
   <final_answer><![CDATA[
 This is only a user-facing example:
 
 <working_still_action>
-  <action_json>{
-    "action": "run_bash",
-    "args": {} // missing cmd in the example on purpose
+  <action_json>{"run_bash": {} // missing cmd in the example on purpose
   }</action_json>
 </working_still_action>
   ]]></final_answer>
@@ -507,22 +743,175 @@ This is only a user-facing example:
         assert!(env.next_actions.is_empty());
         assert!(env.action_groups.is_empty());
         assert!(env.final_answer.contains("<working_still_action>"));
-        assert!(env.final_answer.contains("\"args\": {}"));
+        assert!(env.final_answer.contains("\"run_bash\": {}"));
+    }
+
+    #[test]
+    fn final_answer_raw_xml_code_block_is_opaque_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <final_answer>
+Found the original malformed response:
+
+```xml
+<response>
+  <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
+  <working_still_action>
+    <action_json>
+{
+  "order": "parallel",
+  "actions": [
+    {"run_bash": { "cmd": "sleep 15", "background": true } },
+    {"run_bash": { "cmd": "sleep 15", "background": true } },
+    {"run_bash": { "cmd": "sleep 15", "background": true } }
+  ]
+}
+    </action_json>
+  </working_still_action>
+</response>
+```
+
+The issue was the bare group object inside action_json.
+  </final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+        assert!(env
+            .final_answer
+            .contains("Found the original malformed response"));
+        assert!(env.final_answer.contains("<working_still_action>"));
+        assert!(env.final_answer.contains(r#""order": "parallel""#));
+    }
+
+    #[test]
+    fn final_answer_raw_unbalanced_xml_is_opaque_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <final_answer>
+The previous bad output started like this:
+<response>
+  <free_talk>explaining an example without closing the root
+
+Literal same-tag example:
+<final_answer>inner sample</final_answer>
+
+That was text, not a runtime action.
+  </final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env.final_answer.contains("<response>"));
+        assert!(env
+            .final_answer
+            .contains("<free_talk>explaining an example without closing the root"));
+        assert!(env
+            .final_answer
+            .contains("<final_answer>inner sample</final_answer>"));
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+    }
+
+    #[test]
+    fn final_answer_raw_text_can_contain_other_string_tags_without_rescanning() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <final_answer>
+This answer explains multiple protocol snippets:
+<legacy_note>fake legacy note inside final answer</legacy_note>
+<summary>fake compact summary inside final answer</summary>
+<free_talk>fake free talk inside final answer</free_talk>
+None of these are real control fields.
+  </final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env.thought.is_empty());
+        assert!(env.context_compacts.is_empty());
+        assert!(env
+            .final_answer
+            .contains("<legacy_note>fake legacy note inside final answer</legacy_note>"));
+        assert!(env
+            .final_answer
+            .contains("<summary>fake compact summary inside final answer</summary>"));
+        assert!(env
+            .final_answer
+            .contains("<free_talk>fake free talk inside final answer</free_talk>"));
+    }
+
+    #[test]
+    fn final_answer_raw_action_protocol_example_is_not_a_real_action() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<final_answer>
+Here is the malformed response example the user asked for:
+<response>
+  <free_talk>not closed
+<legacy_note>fake note</legacy_note>
+<working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action>
+<summary>fake summary</summary>
+This is all answer text.
+</final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+        assert!(env.final_answer.contains("<working_still_action>"));
+    }
+
+    #[test]
+    fn final_answer_nested_xml_preserves_attributes_and_escaped_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <final_answer>
+Report:
+<diagnostic level="warn" source="unit-test"><message>ok</message><empty marker="1" /></diagnostic>
+Escaped literal: &lt;response&gt;not protocol&lt;/response&gt;
+  </final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env
+            .final_answer
+            .contains(r#"<diagnostic level="warn" source="unit-test">"#));
+        assert!(env.final_answer.contains("<message>ok</message>"));
+        assert!(env.final_answer.contains(r#"<empty marker="1" />"#));
+        assert!(env
+            .final_answer
+            .contains("<response>not protocol</response>"));
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
     }
 
     #[test]
     fn free_talk_xml_action_examples_do_not_hide_real_actions() {
         let env = parse_xml_envelope(
             r#"<response>
-<progress>checking</progress>
 <free_talk><![CDATA[
 Example text only:
 <working_still_action>
-  <action_json>{"action":"run_bash","args":{}}</action_json>
+  <action_json>{"run_bash":{}}</action_json>
 </working_still_action>
 ]]></free_talk>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","intent":"Check cwd.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -531,21 +920,96 @@ Example text only:
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert!(env.continue_work);
         assert_eq!(env.next_actions.len(), 1);
-        assert_eq!(env.next_actions[0].intent, "Check cwd.");
         assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
         assert!(env.thought.contains("<working_still_action>"));
     }
 
     #[test]
-    fn old_finished_status_requests_repair() {
+    fn free_talk_nested_xml_is_opaque_and_real_action_still_parses() {
         let env = parse_xml_envelope(
-            "<response><status>finished</status><final_answer>done</final_answer></response>",
+            r#"<response>
+<free_talk>
+This is only a note:
+<note priority="high"><working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action></note>
+</free_talk>
+<working_still_action>
+<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
+</working_still_action>
+</response>"#,
             &caps(),
         );
 
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.next_actions.len(), 1);
+        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+        assert!(env.thought.contains(r#"<note priority="high">"#));
+        assert!(env.thought.contains("<working_still_action>"));
+    }
+
+    #[test]
+    fn free_talk_raw_xml_text_does_not_break_real_action() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<free_talk>
+I am explaining a malformed example:
+<response><working_still_action><action_json>{ bad
+</free_talk>
+<working_still_action>
+<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(env.thought.contains("<response><working_still_action>"));
+        assert_eq!(env.next_actions.len(), 1);
+        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+    }
+
+    #[test]
+    fn string_field_protection_does_not_hide_malformed_action_json() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<free_talk>text field can mention {"action":"run_bash"}</free_talk>
+<working_still_action>
+<action_json><![CDATA[
+[{"run_bash":{"cmd":"pwd",}}]
+]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+    }
+
+    #[test]
+    fn adjacent_top_level_action_arrays_request_repair_instead_of_execution() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <free_talk>two stage command plan</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"sleep 10","timeout_ms":1000}}],[{"run_bash":{"cmd":"sleep 10","background":true}}]]]></action_json>
+  </working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+    }
+
+    #[test]
+    fn old_finished_status_requests_repair() {
+        let env = parse_xml_envelope("<response><status>finished</status></response>", &caps());
+
         assert_eq!(
             env.repair_issue.as_deref(),
-            Some("status_must_be_working_or_all_finished")
+            Some("status_tag_not_supported")
         );
         assert!(env.continue_work);
     }
@@ -554,10 +1018,9 @@ Example text only:
     fn parses_actions_from_cdata_json() {
         let env = parse_xml_envelope(
             r#"<response>
-<progress>checking</progress>
 <free_talk>state</free_talk>
 <working_still_action>
-<action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd","timeout_ms":5000}}]]></action_json>
+<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
 </working_still_action>
 </response>"#,
             &caps(),
@@ -565,7 +1028,6 @@ Example text only:
 
         assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
         assert!(env.continue_work);
-        assert_eq!(env.report_job_progress, "checking");
         assert_eq!(env.thought, "state");
         assert_eq!(env.next_actions.len(), 1);
         assert_eq!(env.next_actions[0].action, "run_bash");
@@ -573,17 +1035,187 @@ Example text only:
     }
 
     #[test]
+    fn rejects_old_group_object_from_action_json() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[
+{
+  "order": "parallel",
+  "actions": [
+    {"run_bash": { "cmd": "sleep 15", "background": true } },
+    {"run_bash": { "cmd": "sleep 15", "background": true } },
+    {"run_bash": { "cmd": "sleep 15", "background": true } }
+  ]
+}
+    ]]></action_json>
+  </working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert_eq!(
+            env.repair_issue.as_deref(),
+            Some("actions[0].old_group_object_not_supported")
+        );
+        assert!(env.next_actions.is_empty());
+        assert!(env.action_groups.is_empty());
+    }
+
+    #[test]
+    fn parses_bare_action_array_as_parallel_group() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<free_talk>parallel checks</free_talk>
+<working_still_action>
+<action_json><![CDATA[
+[
+  {"run_bash": { "cmd": "printf a", "timeout_ms": 5000 } },
+  {"run_bash": { "cmd": "printf b", "timeout_ms": 5000 } }
+]
+]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 1);
+        assert_eq!(
+            env.action_groups[0].order,
+            crate::ActionGroupOrder::Parallel
+        );
+        assert_eq!(env.action_groups[0].actions.len(), 2);
+        assert_eq!(env.next_actions[0].input_str("cmd"), "printf a");
+        assert_eq!(env.next_actions[1].input_str("cmd"), "printf b");
+    }
+
+    #[test]
+    fn parses_nested_action_arrays_as_ordered_parallel_groups() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<free_talk>stage then stage</free_talk>
+<working_still_action>
+<action_json><![CDATA[
+[
+  [
+    {"run_bash": { "cmd": "printf a1", "timeout_ms": 5000 } },
+    {"run_bash": { "cmd": "printf a2", "timeout_ms": 5000 } }
+  ],
+  [
+    {"run_bash": { "cmd": "printf b1", "timeout_ms": 5000 } }
+  ]
+]
+]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 2);
+        assert_eq!(
+            env.action_groups[0].order,
+            crate::ActionGroupOrder::Parallel
+        );
+        assert_eq!(
+            env.action_groups[1].order,
+            crate::ActionGroupOrder::Parallel
+        );
+        assert_eq!(env.action_groups[0].actions.len(), 2);
+        assert_eq!(env.action_groups[1].actions.len(), 1);
+        assert_eq!(env.next_actions[0].input_str("cmd"), "printf a1");
+        assert_eq!(env.next_actions[1].input_str("cmd"), "printf a2");
+        assert_eq!(env.next_actions[2].input_str("cmd"), "printf b1");
+    }
+
+    #[test]
+    fn action_args_can_contain_xml_like_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<working_still_action>
+<action_json><![CDATA[
+[
+  {"run_bash": {
+      "cmd": "printf group",
+      "timeout_ms": 5000
+    }
+  },
+  {"run_bash": {
+      "cmd": "printf '%s\n' '<working_still_action><action_json>{\"action\":\"run_bash\"}</action_json></working_still_action>'",
+      "timeout_ms": 5000
+    }
+  }
+]
+]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 1);
+        assert_eq!(env.next_actions[0].input_str("cmd"), "printf group");
+        assert!(env.next_actions[1]
+            .input_str("cmd")
+            .contains("<working_still_action>"));
+    }
+
+    #[test]
+    fn action_args_strings_can_contain_protocol_isomorphic_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<free_talk>query protocol-like text</free_talk>
+<working_still_action>
+<action_json><![CDATA[
+[
+  {"run_bash": {
+      "cmd": "printf '%s\n' '<response><final_answer>not real</final_answer></response>' && printf '%s\n' '{\"working_still_action\":[{\"action\":\"run_bash\"}]}'",
+      "timeout_ms": 5000
+    }
+  },
+  {"memmgr": {
+      "type": "raw_chat",
+      "op": "sql",
+      "sql": "SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5",
+      "params": ["%</action_json><status>ALL_FINISHED</status><action_json>%"],
+      "limit": 5
+    }
+  }
+]
+]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.action_groups.len(), 1);
+        assert_eq!(
+            env.action_groups[0].order,
+            crate::ActionGroupOrder::Parallel
+        );
+        assert_eq!(env.next_actions.len(), 2);
+        assert!(env.next_actions[0]
+            .input_str("cmd")
+            .contains("<response><final_answer>not real</final_answer>"));
+        assert_eq!(
+            env.next_actions[1].input_params(),
+            vec!["%</action_json><status>ALL_FINISHED</status><action_json>%".to_string()]
+        );
+    }
+
+    #[test]
     fn parses_context_compact() {
         let env = parse_xml_envelope(
             r#"<response>
-<progress>compact</progress>
+<free_talk>need compact</free_talk>
 <context_compact>
-<delta_ids>pd_a, pd_b</delta_ids>
+<discard>pd_a</discard>
+<offload>pd_b</offload>
 <summary><![CDATA[keep state]]></summary>
 </context_compact>
-<working_still_action>
-<action_json><![CDATA[{"action":"run_bash","intent":"Check files.","args":{"cmd":"pwd"}}]]></action_json>
-</working_still_action>
 </response>"#,
             &caps(),
         );
@@ -591,7 +1223,72 @@ Example text only:
         assert!(env.repair_issue.is_none());
         assert_eq!(env.context_compacts.len(), 1);
         assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a", "pd_b"]);
+        assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
+        assert_eq!(env.context_compacts[0].offload_delta_ids, vec!["pd_b"]);
         assert_eq!(env.context_compacts[0].summary, "keep state");
+    }
+
+    #[test]
+    fn context_compact_summary_raw_xml_is_opaque_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<free_talk>need compact</free_talk>
+<context_compact>
+<delta_ids>pd_a</delta_ids>
+<summary>
+Keep this protocol example:
+<response><final_answer>not real</final_answer>
+</summary>
+</context_compact>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.context_compacts.len(), 1);
+        assert!(env.context_compacts[0]
+            .summary
+            .contains("<response><final_answer>not real</final_answer>"));
+    }
+
+    #[test]
+    fn parses_response_wrapped_in_xml_markdown_fence() {
+        let env = parse_xml_envelope(
+            r#"```xml
+<response>
+  <free_talk>finished</free_talk>
+  <final_answer>done</final_answer>
+</response>
+```"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert_eq!(env.final_answer, "done");
+        assert_eq!(env.thought, "finished");
+    }
+
+    #[test]
+    fn xml_state_branch_must_choose_one() {
+        let env = parse_xml_envelope(
+            r#"<response>
+<free_talk>compact and act</free_talk>
+<context_compact>
+<delta_ids>pd_a</delta_ids>
+<summary>keep state</summary>
+</context_compact>
+<working_still_action>
+<action_json><![CDATA[[{"run_bash":{"cmd":"pwd"}}]]]></action_json>
+</working_still_action>
+</response>"#,
+            &caps(),
+        );
+
+        assert_eq!(
+            env.repair_issue.as_deref(),
+            Some("state_branch_must_choose_one")
+        );
     }
 
     #[test]

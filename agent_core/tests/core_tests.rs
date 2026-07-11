@@ -1,10 +1,10 @@
 use agent_core::capability::{CapabilityHostProfile, CapabilityRegistry};
 use agent_core::self_tool::SelfToolPaths;
 use agent_core::{
-    read_audit_doc, AgentCore, BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard,
-    OutputExpansionRequest, OutputExpansionResolution, ProviderConfig, ResponseProtocolKind,
-    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail,
-    TurnStopReason, UsageStats,
+    read_audit_doc, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile, CoreStep,
+    LlmResponse, MemGuard, OutputExpansionRequest, OutputExpansionResolution, ProviderConfig,
+    ResponseProtocolKind, RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField,
+    TurnFinal, TurnStopDetail, TurnStopReason, UsageStats,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -125,10 +125,6 @@ fn first_field_value(prompt: &str, field: &str) -> String {
         .to_string()
 }
 
-fn action_result_field(prompt: &str, field: &str) -> String {
-    first_field_value(prompt, field)
-}
-
 fn field_values(prompt: &str, field: &str) -> Vec<String> {
     let prefix = format!("{field}: ");
     prompt
@@ -174,10 +170,78 @@ fn prompt_is_append_only_and_segmented() {
     };
     assert!(second.contains("[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]"));
     assert!(second.contains("## TIMEM_ASSISTANT"));
-    assert!(second.contains(
+    assert!(second.contains(r#"{"status":"ALL_FINISHED","final_answer":"你好"}"#));
+    assert!(!second.contains("All previous pending open tasks are completed."));
+    assert!(second.contains("## USER\n\n继续"));
+}
+
+#[test]
+fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("assistant_replay_extracted"),
+    );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
+    assert_eq!(
+        core.assistant_replay_mode(),
+        AssistantReplayMode::ExtractedFields
+    );
+
+    let _ = core.begin_turn("你好", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"你好"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains("先分析"));
+    assert!(prompt.contains(
         "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n你好"
     ));
-    assert!(second.contains("## USER\n\n继续"));
+    assert!(
+        !prompt.contains(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"你好"}"#)
+    );
+}
+
+#[test]
+fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("assistant_replay_raw_working"),
+    );
+    assert_eq!(core.assistant_replay_mode(), AssistantReplayMode::RawOutput);
+
+    let _ = core.begin_turn("查看自己信息", None);
+    let raw_response = r#"{"free_talk":"需要读取自身信息。","working_still_action":[{"self_tool":{"type":"about_me","op":"read"}}]}"#;
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(raw_response),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let raw = prompt.find(raw_response).unwrap();
+    let system_result = prompt
+        .find("The following are results of TIMEM_ASSISTANT newly initiated actions:")
+        .unwrap();
+    assert!(assistant < raw);
+    assert!(raw < system_result);
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(!prompt.contains("## TIMEM_ASSISTANT\n\n需要读取自身信息。"));
 }
 
 #[test]
@@ -223,8 +287,23 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
 
     assert!(prompt.contains("YOUR ID is: Ai4"));
     assert!(prompt.contains("## Ai4"));
-    assert!(prompt.contains("The following are results of Ai4 newly initiated actions:"));
     assert!(!prompt.contains("CURRENT_ASSISTANT_NAME"));
+    assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
+
+    let _ = core.begin_turn("查看自身信息", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"working_still_action":[{"self_tool":{"type":"about_me","op":"read"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("The following are results of Ai4 newly initiated actions:"));
     assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
 }
 
@@ -282,7 +361,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     core.set_max_rounds(1);
     let _ = core.begin_turn("需要两步完成", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Need evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -323,12 +402,11 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     assert_eq!(events[0]["continued"], true);
     assert_eq!(rounds_remaining, 50);
     assert!(prompt.contains("## USER\n\n需要两步完成"));
-    assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("Runtime round budget continued by user."));
     assert!(!prompt.contains("rounds_remaining: 50"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Need evidence after continuation.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -352,7 +430,7 @@ fn round_limit_stop_resolution_is_core_owned() {
     core.set_max_rounds(1);
     let _ = core.begin_turn("需要两步完成", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Need evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -585,9 +663,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
     assert!(prompt.contains("max_llm_input_tokens=3000"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Run local command under configured approval policy.","args":{"cmd":"printf configured"}}]}"#,
-        ),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"printf configured"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -614,7 +690,7 @@ fn one_prompt_delta_can_render_to_multiple_slices() {
     };
 
     assert!(prompt.contains("[BEGIN DELTA]"));
-    assert!(prompt.contains("delta_id: pd_"));
+    assert!(prompt.contains("delta_id: pd_1"));
     assert!(!prompt.contains("slice_id: ps_"));
     assert!(!prompt.contains("prompt_type: user_question"));
     assert_eq!(prompt.matches("[BEGIN DELTA]").count(), 1);
@@ -639,7 +715,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     let prompt = core.render_prompt();
     let delta_ids = field_values(&prompt, "delta_id");
 
-    assert_eq!(delta_ids.len(), 1);
+    assert_eq!(delta_ids, vec!["pd_1"]);
     assert!(!prompt.contains("## TIMEM_ASSISTANT"));
     assert!(!prompt.contains("先分析"));
     assert!(!prompt.contains("Final Answer:\n结论"));
@@ -649,12 +725,13 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     };
     let delta_ids = field_values(&prompt, "delta_id");
 
-    assert_eq!(delta_ids.len(), 2);
+    assert_eq!(delta_ids, vec!["pd_1", "pd_2"]);
     assert!(prompt.contains("## TIMEM_ASSISTANT"));
     assert!(prompt.contains("先分析"));
-    assert!(prompt.contains(
-        "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n结论"
-    ));
+    assert!(
+        prompt.contains(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"结论"}"#)
+    );
+    assert!(!prompt.contains("All previous pending open tasks are completed."));
 }
 
 #[test]
@@ -735,7 +812,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
     let _ = core.begin_turn("我的测试代号是什么？", None);
 
     let step = core.apply_model_response(LlmResponse {
-        content: r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查找已确认的测试代号记忆。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#.to_string(),
+        content: r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#.to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -780,7 +857,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"remove stale test delta"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -791,7 +868,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("removed_delta_count: 1"));
     let shrunk_tokens_estimate = first_field_value(&prompt, "shrunk_tokens_estimate")
         .parse::<u32>()
@@ -812,24 +889,33 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
 }
 
 #[test]
-fn memmgr_context_discard_removes_whole_delta_by_delta_id() {
+fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
-        tmp_dir("memmgr_context_discard"),
+        tmp_dir("delta_id_global_sequence"),
     );
-    let prompt = match core.begin_turn("REMOVE_THIS_MEMMGR_DELTA", None) {
+    let prompt = match core.begin_turn("first delta", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let delta_id = first_field_value(&prompt, "delta_id");
-    assert!(!delta_id.is_empty());
+    assert_eq!(field_values(&prompt, "delta_id"), vec!["pd_1"]);
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove stale user question delta.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = match core.begin_turn("second delta", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(field_values(&prompt, "delta_id"), vec!["pd_1", "pd_2"]);
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"context_compact":{"discard":["pd_1"],"summary":"drop first delta"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -838,11 +924,37 @@ fn memmgr_context_discard_removes_whole_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: context"));
-    assert!(prompt.contains("op: discard"));
-    assert!(prompt.contains("removed_delta_count: 1"));
-    assert!(!prompt.contains("REMOVE_THIS_MEMMGR_DELTA"));
+    assert_eq!(field_values(&prompt, "delta_id"), vec!["pd_2", "pd_3"]);
+    assert!(!prompt.contains("delta_id: pd_1"));
+}
+
+#[test]
+fn memmgr_context_discard_is_not_executable() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("memmgr_context_discard"),
+    );
+    let _prompt = match core.begin_turn("REMOVE_THIS_MEMMGR_DELTA", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"working_still_action":[{"memmgr":{"type":"context","op":"discard","delta_ids":["pd_missing"]}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("delta_ids_unsupported"));
+    assert!(prompt.contains("REMOVE_THIS_MEMMGR_DELTA"));
 }
 
 #[test]
@@ -861,7 +973,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            "## Progress\n整理旧上下文。\n\n## Context Compact\ndelta_ids: {delta_id}\nsummary:\n旧任务已经完成，只保留 compact 后的测试摘要。"
+            "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndiscard: {delta_id}\nsummary:\n旧任务已经完成，只保留 compact 后的测试摘要。"
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -898,7 +1010,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Hide one rendered prompt delta.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"remove visible test delta"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -909,7 +1021,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("removed_delta_count: 1"));
     let shrunk_tokens_estimate = first_field_value(&prompt, "shrunk_tokens_estimate")
         .parse::<u32>()
@@ -1098,9 +1210,9 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
     assert!(prompt.contains("current progress"));
     assert!(prompt.contains("todo/next steps"));
     assert!(prompt.contains("high-level work principles"));
-    assert!(prompt.contains("memmgr type=scratch op=write kind=context_offload"));
-    assert!(prompt.contains("kind=notes"));
-    assert!(prompt.contains("memmgr type=context op=discard"));
+    assert!(prompt.contains("response protocol's context_compact block"));
+    assert!(prompt.contains("offload important but lengthy delta ids"));
+    assert!(prompt.contains("discard stale delta ids"));
     assert!(!prompt.contains("use scratch_write"));
     assert!(!prompt.contains("use prompt_shrink"));
     assert!(!prompt.contains("shrink_review_threshold_tokens"));
@@ -1137,7 +1249,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!delta_ids.is_empty());
 
     let shrink_response = format!(
-        r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove visible dynamic context after checkpointing.","args":{{"type":"context","op":"discard","delta_ids":{}}}}}]}}"#,
+        r#"{{"context_compact":{{"discard":{},"summary":"compact old prompt context and keep current task state"}}}}"#,
         serde_json::to_string(&delta_ids).unwrap()
     );
     let step = core.apply_model_response(LlmResponse {
@@ -1151,9 +1263,8 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(next_prompt.contains("Action result: memmgr"));
-    assert!(next_prompt.contains("type: context"));
-    assert!(next_prompt.contains("op: discard"));
+    assert!(next_prompt.contains("Action result: context_compact"));
+    assert!(next_prompt.contains("removed_delta_count"));
     assert!(!next_prompt.contains("mode=force_shrink_required"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -1217,7 +1328,7 @@ fn query_memory_action_returns_action_result_delta() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("测试项目纪念日是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? AND content LIKE ? LIMIT 5","params":["%测试项目%","%纪念日%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? AND content LIKE ? LIMIT 5","params":["%测试项目%","%纪念日%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1242,7 +1353,7 @@ fn memmgr_durable_sql_returns_action_result_delta() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("测试项目纪念日是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test durable sql","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1271,7 +1382,7 @@ fn canonical_tools_accept_json_object_args() {
     let _ = core.begin_turn("用 JSON object args 跑工具", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"测试 JSON object args。","working_still_action":[{"action":"memmgr","intent":"查询测试代号记忆。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"action":"run_bash","intent":"验证 shell JSON object args。","args":{"cmd":"printf kv-ok","timeout_ms":5000}},{"action":"self_tool","intent":"查看 Timem 信息。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"run_bash":{"cmd":"printf kv-ok","timeout_ms":5000}},{"self_tool":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1311,151 +1422,82 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
 
     let first_response = json!({
         "status": "working",
-        "progress": "端到端执行 builtin tool 参数。",
         "working_still_action": [
-            {
-                "order": "sequential",
-                "intent": "覆盖记忆管理参数。",
-                "actions": [
-                    {
-                        "action": "memmgr",
-                        "intent": "写入 durable 事实。",
-                        "args": {
-                            "type": "durable",
-                            "op": "upsert",
-                            "id": "builtin_fact",
-                            "content": "builtin e2e fact value"
-                        }
-                    },
-                    {
-                        "action": "memmgr",
-                        "intent": "用 SQL 查询 durable 事实。",
-                        "args": {
-                            "type": "durable",
-                            "op": "sql",
-                            "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
-                            "params": ["%builtin e2e%"],
-                            "limit": 5
-                        }
-                    },
-                    {
-                        "action": "memmgr",
-                        "intent": "用 SQL 参数查询 durable 事实。",
-                        "args": {
-                            "type": "durable",
-                            "op": "sql",
-                            "sql": "SELECT id, content FROM memories WHERE id = ?",
-                            "params": ["builtin_fact"],
-                            "limit": 5
-                        }
-                    },
-                    {
-                        "action": "memmgr",
-                        "intent": "查询 raw chat 记录。",
-                        "args": {
-                            "type": "raw_chat",
-                            "op": "search",
-                            "search_text": "BUILTIN-RAW-42",
-                            "limit": 5
-                        }
-                    },
-                    {
-                        "action": "memmgr",
-                        "intent": "写入 scratch note。",
-                        "args": {
-                            "type": "scratch",
-                            "op": "write",
-                            "kind": "notes",
-                            "label": "builtin e2e note",
-                            "content": "scratch e2e content"
-                        }
-                    }
-                ]
-            },
-            {
-                "order": "sequential",
-                "intent": "覆盖 capability/self/bash 参数。",
-                "actions": [
-                    {
-                        "action": "capmgr",
-                        "intent": "列出 builtin tools。",
-                        "args": {
-                            "op": "list",
-                            "kind": "tool"
-                        }
-                    },
-                    {
-                        "action": "capmgr",
-                        "intent": "加载 run_bash 说明。",
-                        "args": {
-                            "op": "load",
-                            "kind": "tool",
-                            "id": "run_bash"
-                        }
-                    },
-                    {
-                        "action": "self_tool",
-                        "intent": "设置非敏感环境变量。",
-                        "args": {
-                            "type": "env",
-                            "op": "write",
-                            "key": "TIMEM_BUILTIN_E2E",
-                            "value": "enabled"
-                        }
-                    },
-                    {
-                        "action": "self_tool",
-                        "intent": "读取非敏感环境变量。",
-                        "args": {
-                            "type": "env",
-                            "op": "read",
-                            "key": "TIMEM_BUILTIN_E2E"
-                        }
-                    },
-                    {
-                        "action": "self_tool",
-                        "intent": "读取路径。",
-                        "args": {
-                            "type": "mem_path",
-                            "op": "read"
-                        }
-                    },
-                    {
-                        "action": "self_tool",
-                        "intent": "读取自身信息。",
-                        "args": {
-                            "type": "about_me",
-                            "op": "read"
-                        }
-                    },
-                    {
-                        "action": "run_bash",
-                        "intent": "执行普通命令。",
-                        "args": {
-                            "cmd": "printf builtin-normal",
-                            "timeout_ms": 5000
-                        }
-                    },
-                    {
-                        "action": "run_bash",
-                        "intent": "执行轮询命令。",
-                        "args": {
-                            "loop_cmd": format!("test -f {}", loop_marker.display()),
-                            "interval_ms": 10,
-                            "loop_timeout_ms": 500,
-                            "once_timeout_ms": 200
-                        }
-                    },
-                    {
-                        "action": "run_bash",
-                        "intent": "启动后台命令。",
-                        "args": {
-                            "cmd": "sleep 0.1; printf builtin-bg",
-                            "background": true
-                        }
-                    }
-                ]
-            }
+            [{"memmgr": {
+                "type": "durable",
+                "op": "upsert",
+                "id": "builtin_fact",
+                "content": "builtin e2e fact value"
+            }}],
+            [{"memmgr": {
+                "type": "durable",
+                "op": "sql",
+                "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
+                "params": ["%builtin e2e%"],
+                "limit": 5
+            }}],
+            [{"memmgr": {
+                "type": "durable",
+                "op": "sql",
+                "sql": "SELECT id, content FROM memories WHERE id = ?",
+                "params": ["builtin_fact"],
+                "limit": 5
+            }}],
+            [{"memmgr": {
+                "type": "raw_chat",
+                "op": "search",
+                "search_text": "BUILTIN-RAW-42",
+                "limit": 5
+            }}],
+            [{"memmgr": {
+                "type": "scratch",
+                "op": "write",
+                "kind": "notes",
+                "label": "builtin e2e note",
+                "content": "scratch e2e content"
+            }}],
+            [{"capmgr": {
+                "op": "list",
+                "kind": "tool"
+            }}],
+            [{"capmgr": {
+                "op": "load",
+                "kind": "tool",
+                "id": "run_bash"
+            }}],
+            [{"self_tool": {
+                "type": "env",
+                "op": "write",
+                "key": "TIMEM_BUILTIN_E2E",
+                "value": "enabled"
+            }}],
+            [{"self_tool": {
+                "type": "env",
+                "op": "read",
+                "key": "TIMEM_BUILTIN_E2E"
+            }}],
+            [{"self_tool": {
+                "type": "mem_path",
+                "op": "read"
+            }}],
+            [{"self_tool": {
+                "type": "about_me",
+                "op": "read"
+            }}],
+            [{"run_bash": {
+                "cmd": "printf builtin-normal",
+                "timeout_ms": 5000
+            }}],
+            [{"run_bash": {
+                "loop_cmd": format!("test -f {}", loop_marker.display()),
+                "interval_ms": 10,
+                "loop_timeout_ms": 500,
+                "once_timeout_ms": 200
+            }}],
+            [{"run_bash": {
+                "cmd": "sleep 0.1; printf builtin-bg",
+                "background": true
+            }}]
         ]
     });
 
@@ -1496,11 +1538,7 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
 
     let second_response = json!({
         "status": "working",
-        "progress": "继续普通检查并接收后台任务状态更新。",
-        "working_still_action": {
-            "action": "run_bash",
-            "intent": "继续普通检查。",
-            "args": {
+        "working_still_action": {"run_bash": {
                 "cmd": "printf checked",
                 "timeout_ms": 1000
             }
@@ -1528,7 +1566,7 @@ fn action_input_field_is_rejected_instead_of_compatibly_executed() {
     let _ = core.begin_turn("查一下记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"旧协议测试。","working_still_action":[{"action":"memmgr","intent":"查询测试代号记忆","input":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#, // allow_legacy_input_negative_test
+            r#"{"status":"working","working_still_action":[{"action":"memmgr","input":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#, // allow_legacy_input_negative_test
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1540,7 +1578,7 @@ fn action_input_field_is_rejected_instead_of_compatibly_executed() {
     };
     assert!(prompt.contains("## SYSTEM"));
     assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("actions[0].args_required"));
+    assert!(prompt.contains("actions[0].action_missing"));
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
@@ -1574,7 +1612,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("查项目代号并统计文件", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"正在检索长期记忆，并统计当前目录的文件总数...","free_talk":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"working_still_action":[{"action":"memmgr","intent":"查询持久化记忆中与项目代号相关的信息","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project codename%"],"limit":5}},{"action":"run_bash","intent":"统计当前工作目录的文件数量以辅助确认上下文","args":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","free_talk":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project codename%"],"limit":5}},{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1606,7 +1644,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("更新冲突后的事实", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"检测到持久化记忆版本冲突，正在尝试带版本号重写...","free_talk":{"content":"使用查询得到的 expected_version=3 更新测试事实。","keep_in_context":false},"working_still_action":[{"action":"memmgr","intent":"更新测试事实，指定预期版本号以防止并发冲突","args":{"type":"durable","op":"update","id":"fact_992","expected_version":3,"content":"测试项目代号为：Project-Alpha"}}]}"#,
+            r#"{"status":"working","free_talk":{"content":"使用查询得到的 expected_version=3 更新测试事实。","keep_in_context":false},"working_still_action":[{"memmgr":{"type":"durable","op":"update","id":"fact_992","expected_version":3,"content":"测试项目代号为：Project-Alpha"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1621,7 +1659,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("读取受保护路径", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"尝试修改启动变量被系统拦截，正在转换为只读查询...","free_talk":{"content":"启动变量不可运行期修改，改为读取路径。","keep_in_context":false},"working_still_action":[{"action":"self_tool","intent":"既然无法直接修改启动环境，先读取当前内存路径以便向用户说明现状","args":{"type":"mem_path","op":"read"}}]}"#,
+            r#"{"status":"working","free_talk":{"content":"启动变量不可运行期修改，改为读取路径。","keep_in_context":false},"working_still_action":[{"self_tool":{"type":"mem_path","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1636,7 +1674,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("上下文收缩", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"为了保证响应效率，正在对历史冗余上下文进行清理和暂存...","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"working_still_action":[{"action":"memmgr","intent":"将过期的 Prompt Delta 离线暂存到临时便签中","args":{"type":"scratch","op":"write","kind":"context_offload","label":"test offload","delta_ids":"pd_001,pd_002"}},{"action":"memmgr","intent":"从当前活跃 Prompt Context 中裁剪掉已暂存的 delta_ids","args":{"type":"context","op":"discard","delta_ids":"pd_001,pd_002"}}]}"#,
+            r#"{"status":"working","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"context_compact":{"discard":["pd_001"],"offload":["pd_002"],"summary":"保留测试状态摘要"}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1645,14 +1683,14 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected context maintenance action results, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("pd_001"));
     assert!(prompt.contains("pd_002"));
 
     let _ = core.begin_turn("读取错误日志", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"正在调取系统构建日志以分析故障原因...","working_still_action":[{"action":"run_bash","intent":"拉取异常日志摘要。","args":{"cmd":"printf ERROR","timeout_ms":8000}}]}"#,
+            r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"printf ERROR","timeout_ms":8000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1666,7 +1704,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
 
     let _ = core.begin_turn("最小动作", None);
     let prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"working_still_action":[{"action":"run_bash","intent":"Check status","args":{"cmd":"printf minimal"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"printf minimal"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1684,12 +1722,9 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
             "comment_and_trailing_comma",
             r#"{
   "status": "working",
-  "progress": "正在处理...", // 非法注释
+  // 非法注释
   "working_still_action": [
-    {
-      "action": "run_bash",
-      "intent": "清理缓存",
-      "args":{"cmd":"rm -rf .cache"},
+    {"run_bash":{"cmd":"rm -rf .cache"},
     }
   ]
 }"#,
@@ -1697,18 +1732,18 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
         ),
         (
             "truncated_json",
-            r#"{"status":"working","progress":"正在调取长期记忆...","working_still_action":[{"action":"memmgr","intent":"查询"#,
+            r#"{"status":"working","working_still_action":[{"action":"memmgr"#,
             "invalid_json",
         ),
         (
             "missing_intent_and_args",
             r#"{"status":"working","working_still_action":[{"action":"run_bash"}]}"#,
-            "actions[0].args_required",
+            "actions[0].args_must_be_object",
         ),
         (
             "invented_tool",
-            r#"{"status":"working","progress":"尝试调用未授权的第三方工具...","working_still_action":[{"action":"fetch_web_page","intent":"去外网抓取数据（系统并未提供此工具）","args":{"url":"https://example.com"}}]}"#,
-            "unsupported_action:fetch_web_page",
+            r#"{"status":"working","working_still_action":[{"action":"fetch_web_page","args":{"url":"https://example.com"}}]}"#,
+            "actions[0].action_missing",
         ),
         (
             "extra_top_level_fields",
@@ -1751,7 +1786,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
     let _ = core.begin_turn("既结束又工作", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"ALL_FINISHED","final_answer":"这是给用户的最终回答。","working_still_action":[{"action":"run_bash","intent":"但我这里还想执行一个后台命令","args":{"cmd":"printf downgraded","background":true}}]}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"这是给用户的最终回答。","working_still_action":[{"run_bash":{"cmd":"printf downgraded","background":true}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1769,7 +1804,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
     let _ = core.begin_turn("字符串 args 应被拒绝", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"正在检查内存...","working_still_action":[{"action":"memmgr","intent":"查询记忆","args":"type=durable op=sql sql='SELECT id, content FROM memories LIMIT 5' limit=5"}]}"#, // allow_string_args_negative_test
+            r#"{"status":"working","working_still_action":[{"memmgr":"type=durable op=sql sql='SELECT id, content FROM memories LIMIT 5' limit=5"}]}"#, // allow_string_args_negative_test
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1799,7 +1834,7 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test raw chat search","args":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1937,7 +1972,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
     core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"ALL_FINISHED","progress":"完成了"}"#),
+        content: scored(r#"{"status":"ALL_FINISHED"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1951,7 +1986,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
     assert!(prompt.contains("final_answer_required_when_status_finished"));
     assert!(prompt.contains("缺少 `## Final_Answer`"));
     assert!(prompt.contains("同时提供 `## Status` 和 `## Final_Answer`"));
-    assert!(prompt.contains(r#"{"status":"ALL_FINISHED","progress":"完成了"}"#));
+    assert!(prompt.contains(r#"{"status":"ALL_FINISHED"}"#));
 }
 
 #[test]
@@ -2014,8 +2049,9 @@ fn protocol_repair_delta_separates_previous_output_from_system_error() {
     let raw_pos = prompt
         .find(raw_response)
         .expect("missing previous model output");
-    let system_pos = prompt
+    let system_pos = prompt[raw_pos..]
         .find("## SYSTEM")
+        .map(|pos| raw_pos + pos)
         .expect("missing system repair slice");
     let issue_pos = prompt
         .find("final_answer_requires_status_finished")
@@ -2129,9 +2165,10 @@ fn status_working_requires_working_still_action_and_keeps_progress_separate() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("status_working_progress"),
     );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
     let _ = core.begin_turn("查一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"working","progress":"正在查询。","working_still_action":[{"action":"memmgr","intent":"Find evidence.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
+        content: scored(r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2142,13 +2179,12 @@ fn status_working_requires_working_still_action_and_keeps_progress_separate() {
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
     assert!(!prompt.contains("progress:\n正在查询。"));
-    assert!(!prompt.contains("正在查询。"));
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("intent: Find evidence."));
+    assert!(!prompt.contains("intent: Find evidence."));
 }
 
 #[test]
-fn omitted_status_bare_action_defaults_to_working_next_action() {
+fn omitted_status_bare_action_requests_protocol_repair() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -2156,19 +2192,18 @@ fn omitted_status_bare_action_defaults_to_working_next_action() {
     );
     let _ = core.begin_turn("继续修复", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"action":"run_bash","intent":"Check repository status.","args":{"cmd":"git status --short","timeout_ms":1000}}"#,
-        ),
+        content: scored(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":1000}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     });
-    let request = match step {
-        CoreStep::NeedsUserApproval { request } => request,
-        other => panic!("expected NeedsUserApproval, got {other:?}"),
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected protocol repair, got {other:?}"),
     };
-    assert_eq!(request.action, "run_bash");
-    assert_eq!(request.command, "git status --short");
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("unexpected_top_level_field:run_bash"));
+    assert!(!prompt.contains("Action result: run_bash"));
 }
 
 #[test]
@@ -2214,8 +2249,7 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
     assert!(matches!(step, CoreStep::NeedModel { .. }));
 
     let mut step = core.apply_model_response(LlmResponse {
-        content: r#"working_still_action: [{"action":"run_bash","args":{"cmd":"git commit"}}]"#
-            .to_string(),
+        content: r#"working_still_action: [{"run_bash":{"cmd":"git commit"}}]"#.to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2267,7 +2301,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
     core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("写一个很长的报告", None);
     let step = core.apply_model_response(LlmResponse {
-        content: "{\"progress\":\"partial".to_string(),
+        content: "{\"free_talk\":\"partial".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: true,
@@ -2282,7 +2316,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
     assert!(prompt.contains("truncated_model_output"));
     assert!(prompt.contains("max output token"));
     assert!(prompt.contains("Markdown response protocol"));
-    assert!(prompt.contains(r#"{"progress":"partial"#));
+    assert!(prompt.contains(r#"{"#));
 }
 
 #[test]
@@ -2294,7 +2328,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
 
     let step = core.apply_model_response_with_repair_audit(
         LlmResponse {
-            content: "{\"progress\":\"partial".to_string(),
+            content: "{\"free_talk\":\"partial".to_string(),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
             truncated: true,
@@ -2317,6 +2351,33 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
     assert_eq!(events[0]["repair_calls"], 1);
     assert_eq!(events[0]["repair_calls_delta"], 1);
     assert_eq!(events[0]["usage"]["prompt_tokens"], 10);
+
+    let repair_log_file = dir.join("audit").join("api_output_repair.json");
+    let repair_log: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&repair_log_file).unwrap()).unwrap();
+    let records = repair_log["records"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["kind"], "model_output_repair");
+    assert_eq!(records[0]["session"], "session_1");
+    assert_eq!(records[0]["turn_id"], "turn_1");
+    assert_eq!(records[0]["issue"], "truncated_model_output");
+    assert_eq!(records[0]["assistant_name"], "TIMEM_ASSISTANT");
+    assert!(records[0]["assistant_response"]
+        .as_str()
+        .unwrap()
+        .contains(r#"{"#));
+    assert!(records[0]["system_message"]
+        .as_str()
+        .unwrap()
+        .contains("TIMEM_ASSISTANT's previous response is not protocol compliant"));
+    assert!(records[0]["rendered"]
+        .as_str()
+        .unwrap()
+        .contains("## assistant:\n"));
+    assert!(records[0]["rendered"]
+        .as_str()
+        .unwrap()
+        .contains("## SYSTEM\n"));
 }
 
 #[test]
@@ -2360,7 +2421,7 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
     );
     let _ = core.begin_turn("写一个很长的报告", None);
     let step = core.apply_model_response(LlmResponse {
-        content: "{\"progress\":\"partial".to_string(),
+        content: "{\"free_talk\":\"partial".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: true,
@@ -2368,7 +2429,7 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
     assert!(matches!(step, CoreStep::NeedModel { .. }));
 
     let mut step = core.apply_model_response(LlmResponse {
-        content: "{\"progress\":\"still partial".to_string(),
+        content: "{\"free_talk\":\"still partial".to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: true,
@@ -2376,7 +2437,7 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
     assert!(matches!(step, CoreStep::NeedModel { .. }));
     for idx in 3..=5 {
         step = core.apply_model_response(LlmResponse {
-            content: format!("{{\"progress\":\"still partial repair {idx}"),
+            content: format!("{{\"free_talk\":\"still partial repair {idx}"),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
             truncated: true,
@@ -2419,7 +2480,8 @@ fn mixed_protocol_transcript_extracts_final_json_without_leaking_raw_segments() 
     );
     let _ = core.begin_turn("展示一个耗尽 8 步交互的操作", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":"Round 7","progress":"","working_still_action":[{"action":"run_bash","intent":"old action","args":{"cmd":"uptime"}}]}
+        content: scored(
+            r#"{"free_talk":"Round 7","working_still_action":[{"run_bash":{"cmd":"uptime"}}]}
 
 [BEGIN DELTA]
 delta_id: pd_18
@@ -2436,7 +2498,8 @@ ok
   "free_talk": "Final summary",
   "status": "ALL_FINISHED",
   "final_answer": "只展示最终摘要。"
-}"#),
+}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2576,7 +2639,7 @@ fn action_input_decodes_common_json_escape_sequences() {
     );
     let _ = core.begin_turn("记住一段 escape 文本", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Store escaped text exactly after JSON decoding.","args":{"type":"durable","op":"insert","content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"insert","content":"tab:\tend\nline2\r\nunicode:\u4f60\u597d path:C:\\Users\\me\\file quote:\"ok\" slash:\/ regex:\\d+"}}]}"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
@@ -2602,11 +2665,9 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
     let step = core.apply_model_response(LlmResponse {
         content: scored(
             r#"{
-  "progress": "",
   "working_still_action": [
     {
-      "action": "memmgr",
-      "intent": "查找用户说过的"当前目录"相关问题",
+      "action": "memmgr"当前目录"相关问题",
       "args":{"type":"raw_chat","op":"search","search_text":"当前目录的代码量，\"rust\" 代码有多少行？","limit":5}
     }
   ]
@@ -2620,7 +2681,7 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains("not protocol compliant"));
     assert!(prompt.contains("当前目录"));
 }
 
@@ -2709,7 +2770,7 @@ fn memmgr_durable_sql_lists_recent_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("durable mem 不是有几条记录吗？", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"列出最近 durable memory 记录。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 1","limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 1","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2748,16 +2809,13 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
   <free_talk>用 SQL 列出 durable memory 最近记录来确认现状。</free_talk>
   <working_still_action>
     <action_json><![CDATA[
-{
-  "action": "memmgr",
-  "intent": "查询 durable memory 中全部现存记录（最多10条）。",
-  "args": {
+[{"memmgr": {
     "type": "durable",
     "op": "sql",
     "sql": "SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 10",
     "limit": 10
   }
-}
+}]
     ]]></action_json>
   </working_still_action>
 </response>"#,
@@ -2783,10 +2841,11 @@ fn progress_and_working_still_action_continue_with_implicit_continue_note() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("progress_action_continue"),
     );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
     let _ = core.begin_turn("请一直完成任务，不要停止", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"progress":"备份完成。现在继续查证。","working_still_action":[{"action":"memmgr","intent":"查找相关记忆。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%项目状态%"],"limit":1}}]}"#,
+            r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%项目状态%"],"limit":1}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -2797,7 +2856,6 @@ fn progress_and_working_still_action_continue_with_implicit_continue_note() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
-    assert!(!prompt.contains("备份完成。现在继续查证。"));
     assert!(!prompt.contains("上轮回复没有写 status"));
     assert!(prompt.contains("Action result: memmgr"));
 }
@@ -2811,7 +2869,7 @@ fn next_action_without_intent_uses_action_name_fallback() {
     );
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2834,7 +2892,7 @@ fn unsupported_action_is_not_executed_silently() {
     );
     let _ = core.begin_turn("打开文件", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"delete_file","intent":"test action","args":{"path":"/tmp/x"}}]}"#),
+        content: scored(r#"{"working_still_action":{"delete_file":{"path":"/tmp/x"}}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2855,7 +2913,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
     );
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Create a task checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2881,7 +2939,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         .expect("scratch id should exist");
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Read saved checkpoint by id.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
+        content: scored(format!(r#"{{"working_still_action":[{{"memmgr":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2895,7 +2953,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
     assert!(prompt.contains("continue this task later"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Remove completed checkpoint.","args":{{"type":"scratch","op":"delete","id":"{}"}}}}]}}"#, scratch_id)),
+        content: scored(format!(r#"{{"working_still_action":[{{"memmgr":{{"type":"scratch","op":"delete","id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2920,7 +2978,7 @@ fn memmgr_scratch_write_and_read_notes() {
     );
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Create a task checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2947,7 +3005,7 @@ fn memmgr_scratch_write_and_read_notes() {
         .expect("scratch id should exist");
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Read saved checkpoint by id.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
+        content: scored(format!(r#"{{"working_still_action":[{{"memmgr":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#, scratch_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2971,7 +3029,9 @@ fn memmgr_missing_op_requests_protocol_repair_from_manifest_idl() {
     );
     let _ = core.begin_turn("查一下记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Broken memory action","args":{"type":"durable","search_text":"测试代号"}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"memmgr":{"type":"durable","search_text":"测试代号"}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2998,7 +3058,7 @@ fn memmgr_legacy_query_op_is_not_executed_after_sql_search_split() {
 
     let _ = core.begin_turn("查测试项目代号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Old durable query op must not run.","args":{"type":"durable","op":"query","query":"测试项目代号","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"query","query":"测试项目代号","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3033,7 +3093,7 @@ fn scratch_search_empty_text_lists_recent_notes_with_limit() {
 
     let _ = core.begin_turn("列出最近一条草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"List recent checkpoints.","args":{"type":"scratch","op":"search","search_text":"","limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3059,7 +3119,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 
     let _ = core.begin_turn("写一条空草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Create empty checkpoint.","args":{}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3075,7 +3135,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 
     let _ = core.begin_turn("写一条没有标签的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Create unlabeled checkpoint.","args":{"type":"scratch","op":"write","kind":"notes","content":"x"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"notes","content":"x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3090,7 +3150,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 
     let _ = core.begin_turn("读取一条没有 id 的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Read checkpoint.","args":{"type":"scratch","op":"read"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"read"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3105,7 +3165,9 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 
     let _ = core.begin_turn("删除一条没有 id 的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Delete checkpoint.","args":{"type":"scratch","op":"delete"}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"delete"}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3135,7 +3197,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 
     let _ = core.begin_turn("删除不存在的草稿", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Delete missing checkpoint.","args":{"type":"scratch","op":"delete","id":"scratch_missing"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"delete","id":"scratch_missing"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3152,7 +3214,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 }
 
 #[test]
-fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
+fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -3170,7 +3232,7 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Offload visible prompt delta by id.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"large investigation context","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -3181,23 +3243,25 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("label: large investigation context"));
-    assert!(prompt.contains("type: context_offload"));
-    assert!(prompt.contains(&format!("prompt_delta_ids: {delta_id}")));
-    assert!(prompt.contains("content_preview: [BEGIN SCRATCH OFFLOAD DELTA"));
-    let scratch_id = action_result_field(&prompt, "id");
+    assert!(prompt.contains("Action result: context_compact"));
+    assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
+    let scratch_id = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("The scratch id for offloaded deltas is: "))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     assert!(scratch_id.starts_with("scratch_"));
 
     let stored = fs::read_to_string(core.scratch_file()).unwrap();
     assert!(stored.contains("\"scratch_type\":\"context_offload\""));
-    assert!(stored.contains("\"label\":\"large investigation context\""));
+    assert!(stored.contains("\"label\":\"context compact offload\""));
     assert!(stored.contains("large investigation context that should move to scratch"));
     assert!(stored.contains(&delta_id));
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Read offloaded prompt context.","args":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#,
+            r#"{{"working_still_action":[{{"memmgr":{{"type":"scratch","op":"read","id":"{}"}}}}]}}"#,
             scratch_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -3214,7 +3278,7 @@ fn scratch_write_context_offload_stores_runtime_prompt_delta_by_id() {
 }
 
 #[test]
-fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
+fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -3222,7 +3286,7 @@ fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
     );
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Attempt invalid offload.","args":{"type":"scratch","op":"write","kind":"context_offload","label":"bad refs","delta_ids":["pd_missing"]}}]}"#),
+        content: scored(r#"{"context_compact":{"offload":["pd_missing"],"summary":"bad refs should not write scratch"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3231,13 +3295,14 @@ fn scratch_context_offload_rejects_invalid_prompt_refs_without_writing() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("error: invalid_prompt_refs missing_ids=pd_missing"));
+    assert!(prompt.contains("Action result: context_compact"));
+    assert!(prompt.contains("error: invalid_prompt_refs"));
+    assert!(prompt.contains("missing_ids: pd_missing"));
     assert!(!core.scratch_file().exists());
 }
 
 #[test]
-fn scratch_context_offload_requires_prompt_refs_in_protocol() {
+fn context_compact_requires_prompt_refs_in_protocol() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("aliyun", "qwen-plus"),
@@ -3245,7 +3310,7 @@ fn scratch_context_offload_requires_prompt_refs_in_protocol() {
     );
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Missing refs.","args":{"type":"scratch","op":"write","kind":"context_offload","label":"missing refs"}}]}"#),
+        content: scored(r#"{"context_compact":{"summary":"missing refs should repair"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3255,7 +3320,7 @@ fn scratch_context_offload_requires_prompt_refs_in_protocol() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("input.any_required_when_delta_ids"));
+    assert!(prompt.contains("context_compact[0].ids_required"));
 }
 
 #[test]
@@ -3267,7 +3332,9 @@ fn memory_write_action_requires_content_or_query() {
     );
     let _ = core.begin_turn("记住", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"insert"}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"insert"}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3293,7 +3360,7 @@ fn query_memory_does_not_expand_semantic_aliases() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%user's name%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%user's name%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3319,7 +3386,7 @@ fn query_memory_exposes_version_for_conflict_safe_updates() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查测试代号记忆版本", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Find versioned durable memory before update.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, created_at_ms, updated_at_ms, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, created_at_ms, updated_at_ms, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3389,7 +3456,7 @@ fn sql_read_action_returns_rows() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我最早什么时候告诉你测试代号的", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3416,7 +3483,7 @@ fn durable_sql_empty_filter_reports_total_rows() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我叫什么名字", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%姓名%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%姓名%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3443,7 +3510,7 @@ fn memory_sql_query_reads_memory_versions_and_normalizes_legacy_rows() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆版本", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Read durable memory versions for safe update.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, updated_at_ms, content FROM memories ORDER BY created_at_ms ASC","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, updated_at_ms, content FROM memories ORDER BY created_at_ms ASC","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3469,7 +3536,7 @@ fn sql_read_allows_with_cte_reads() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("按时间查测试代号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3495,7 +3562,7 @@ fn sql_read_rejects_write_statement() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("改记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3521,7 +3588,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3544,7 +3611,7 @@ fn sql_read_rejects_other_tables() {
     );
     let _ = core.begin_turn("列出表", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT name FROM sqlite_master LIMIT 5"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT name FROM sqlite_master LIMIT 5"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3565,7 +3632,9 @@ fn memory_schema_action_returns_native_schema_contract() {
     );
     let _ = core.begin_turn("有哪些记忆表", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查看记忆结构","args":{"type":"durable","op":"schema"}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"schema"}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3592,7 +3661,7 @@ fn memory_sql_query_allows_pragma_table_info() {
     );
     let _ = core.begin_turn("查看 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(memories)","limit":20}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"PRAGMA table_info(memories)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3615,7 +3684,7 @@ fn memory_sql_query_allows_chat_messages_table_info() {
     );
     let _ = core.begin_turn("查看聊天 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(chat_messages)","limit":20}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"PRAGMA table_info(chat_messages)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3639,7 +3708,7 @@ fn memory_sql_query_rejects_non_memories_pragma() {
     );
     let _ = core.begin_turn("查看 schema", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"PRAGMA table_info(sqlite_master)","limit":20}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"PRAGMA table_info(sqlite_master)","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3660,7 +3729,7 @@ fn sql_read_action_requires_sql_for_repair() {
     );
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3686,7 +3755,7 @@ fn memory_sql_query_requires_params_for_placeholders() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3712,7 +3781,7 @@ fn memory_sql_query_rejects_extra_params_for_placeholders() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%mynameis%","%Iam%"],"limit":20}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%mynameis%","%Iam%"],"limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3738,7 +3807,7 @@ fn memory_sql_prepare_error_exposes_sqlite_reason_to_model() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("有个数字悄悄告诉你的，是什么来着", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"错误地按 key 列搜索，应该返回具体 SQL 错误原因。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE key LIKE ? OR content LIKE ? LIMIT 5","params":["%ABC%","%123456%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE key LIKE ? OR content LIKE ? LIMIT 5","params":["%ABC%","%123456%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3770,7 +3839,7 @@ fn chat_history_query_reads_persisted_chat_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询聊天记录","args":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3803,7 +3872,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("旧格式里说过什么", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询旧格式聊天记录","args":{"type":"raw_chat","op":"search","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3834,7 +3903,7 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
     });
     let _ = core.begin_turn("我刚才说了什么物品", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询聊天记录","args":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3867,7 +3936,7 @@ fn chat_history_search_empty_text_lists_recent_records() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"列出最近聊天记录","args":{"type":"raw_chat","op":"search","search_text":"","limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3899,7 +3968,7 @@ fn memory_sql_query_reads_chat_messages_with_time_window() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查最近窗口聊天", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"按时间窗口查询聊天记录","args":{"type":"durable","op":"sql","sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3923,21 +3992,21 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
         (
             "string_params_inside_input",
             format!(
-                r#""args":{{"type":"durable","op":"sql","sql":{},"params":["1782200000000","1782210000000"],"limit":50}}"#,
+                r#""memmgr":{{"type":"durable","op":"sql","sql":{},"params":["1782200000000","1782210000000"],"limit":50}}"#,
                 sql_json
             ),
         ),
         (
             "integer_params_inside_input",
             format!(
-                r#""args":{{"type":"durable","op":"sql","sql":{},"params":[1782200000000,1782210000000],"limit":50}}"#,
+                r#""memmgr":{{"type":"durable","op":"sql","sql":{},"params":[1782200000000,1782210000000],"limit":50}}"#,
                 sql_json
             ),
         ),
         (
             "float_params_inside_input",
             format!(
-                r#""args":{{"type":"durable","op":"sql","sql":{},"params":[1782200000000,1782210000000],"limit":50}}"#,
+                r#""memmgr":{{"type":"durable","op":"sql","sql":{},"params":[1782200000000,1782210000000],"limit":50}}"#,
                 sql_json
             ),
         ),
@@ -3958,7 +4027,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
         let mut core = AgentCore::new("STATIC", profile("custom", "aws-claude-sonnet-4-6"), &dir);
         let _ = core.begin_turn("我今天和你聊过什么？", None);
         let content = scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"查询今天的聊天记录",{}}}]}}"#,
+            r#"{{"working_still_action":{{{}}}}}"#,
             action_fields
         ));
         let step = core.apply_model_response(LlmResponse {
@@ -3996,7 +4065,7 @@ fn memory_sql_query_rejects_raw_update_sql() {
     );
     let _ = core.begin_turn("更新记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='bad'","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='bad'","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4026,7 +4095,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("删除聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Attempt to delete chat history through SQL.","args":{"type":"durable","op":"sql","sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4058,7 +4127,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("删除包含目标的聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Delete matching chat record.","args":{"type":"raw_chat","op":"delete","search_text":"删除目标","limit":10}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"delete","search_text":"删除目标","limit":10}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4081,7 +4150,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("记住我的测试代号", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"upsert","id":"user_name","content":"测试代号是 ALPHA-42"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"user_name","content":"测试代号是 ALPHA-42"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4098,7 +4167,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         .contains("测试代号是 ALPHA-42"));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","id":"user_name","content":"测试代号是 BETA-43"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"update","id":"user_name","content":"测试代号是 BETA-43"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4113,7 +4182,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         .contains("测试代号是 ALPHA-42\""));
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","id":"user_name","expected_version":1,"content":"测试代号是 BETA-43"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"update","id":"user_name","expected_version":1,"content":"测试代号是 BETA-43"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4130,7 +4199,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     assert!(core.memory_git_commit_count() >= 2);
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"delete","id":"user_name","expected_version":2}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"delete","id":"user_name","expected_version":2}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4154,7 +4223,7 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 
     let _ = core_a.begin_turn("创建共享记忆", None);
     let step = core_a.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Insert shared row.","args":{"type":"durable","op":"upsert","id":"shared_fact","content":"版本1"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"shared_fact","content":"版本1"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4163,7 +4232,7 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 
     let _ = core_a.begin_turn("A 更新", None);
     let step = core_a.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Update shared row from A.","args":{"type":"durable","op":"update","id":"shared_fact","expected_version":1,"content":"版本2 from A"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"update","id":"shared_fact","expected_version":1,"content":"版本2 from A"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4176,7 +4245,7 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 
     let _ = core_b.begin_turn("B 用旧版本更新", None);
     let step = core_b.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Update shared row from B with stale version.","args":{"type":"durable","op":"update","id":"shared_fact","expected_version":1,"content":"版本2 from B"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"update","id":"shared_fact","expected_version":1,"content":"版本2 from B"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4200,7 +4269,7 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
     let mut seed_core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = seed_core.begin_turn("创建共享记忆", None);
     let step = seed_core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Insert shared conflict row.","args":{"type":"durable","op":"upsert","id":"shared_conflict","content":"初始值"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"shared_conflict","content":"初始值"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4219,7 +4288,7 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
             barrier.wait();
             let step = core.apply_model_response(LlmResponse {
                 content: scored(format!(
-                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Concurrent same-version update.","args":{{"type":"durable","op":"update","id":"shared_conflict","expected_version":1,"content":"winner candidate {idx}"}}}}]}}"#
+                    r#"{{"working_still_action":[{{"memmgr":{{"type":"durable","op":"update","id":"shared_conflict","expected_version":1,"content":"winner candidate {idx}"}}}}]}}"#
                 )),
                 model_name: "qwen-plus".to_string(),
                 usage: usage(),
@@ -4376,7 +4445,7 @@ fn mem_guard_keeps_concurrent_memory_updates_from_losing_records() {
             barrier.wait();
             let step = core.apply_model_response(LlmResponse {
                 content: scored(format!(
-                    r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Concurrent durable write.","args":{{"type":"durable","op":"upsert","id":"guard_id_{idx}","content":"guard content {idx}"}}}}]}}"#
+                    r#"{{"working_still_action":[{{"memmgr":{{"type":"durable","op":"upsert","id":"guard_id_{idx}","content":"guard content {idx}"}}}}]}}"#
                 )),
                 model_name: "qwen-plus".to_string(),
                 usage: usage(),
@@ -4414,7 +4483,7 @@ fn memory_update_requires_protocol_fields() {
     );
     let _ = core.begin_turn("更新记忆", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"test action","args":{"type":"durable","op":"update","content":"x"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"update","content":"x"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4438,7 +4507,9 @@ fn run_bash_allows_readonly_count_command() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"count output lines","args":{"cmd":"pwd | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"pwd | wc -l","timeout_ms":5000}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4458,7 +4529,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("整理这个任务", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"记录任务计划","args":{"type":"scratch","op":"write","kind":"notes","label":"任务计划","content":"step one"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"notes","label":"任务计划","content":"step one"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4468,7 +4539,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
         other => panic!("unexpected step: {other:?}"),
     }
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"查询任务计划","args":{"type":"scratch","op":"search","search_text":"step","limit":3}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"search","search_text":"step","limit":3}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4488,7 +4559,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
     assert_eq!(interactions.len(), 2);
     assert_eq!(interactions[0]["round"], 1);
     assert_eq!(interactions[0]["actions"][0]["action"], "memmgr");
-    assert_eq!(interactions[0]["actions"][0]["intent"], "记录任务计划");
+    assert!(interactions[0]["actions"][0].get("intent").is_none());
     assert_eq!(interactions[0]["actions"][0]["status"], "completed");
     assert_eq!(
         interactions[0]["actions"][0]["input"]["content"],
@@ -4499,7 +4570,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
     assert_eq!(interactions[0]["actions"][0]["input"]["label"], "任务计划");
     assert_eq!(interactions[1]["round"], 2);
     assert_eq!(interactions[1]["actions"][0]["action"], "memmgr");
-    assert_eq!(interactions[1]["actions"][0]["intent"], "查询任务计划");
+    assert!(interactions[1]["actions"][0].get("intent").is_none());
 }
 
 #[test]
@@ -4512,7 +4583,9 @@ fn run_bash_rejects_old_timeout_sec_field() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"count output lines","args":{"cmd":"pwd | wc -l","timeout_sec":1}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"pwd | wc -l","timeout_sec":1}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4536,7 +4609,7 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("run a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a background task.","args":{"cmd":"sleep 0.1; printf background-ok","background":true}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 0.1; printf background-ok","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4551,7 +4624,9 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
 
     std::thread::sleep(std::time::Duration::from_millis(250));
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Continue after background task.","args":{"cmd":"printf next","timeout_ms":1000}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"printf next","timeout_ms":1000}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4563,6 +4638,9 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
     assert!(prompt.contains("background job"), "{prompt}");
     assert!(prompt.contains("now exits"), "{prompt}");
+    assert!(prompt.contains("Exit status: 0"), "{prompt}");
+    assert!(prompt.contains("Final output:"), "{prompt}");
+    assert!(prompt.contains("background-ok"), "{prompt}");
 }
 
 #[test]
@@ -4580,7 +4658,7 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
     let user_delta_id = first_field_value(&prompt, "delta_id");
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a still-running background task.","args":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf late","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4608,7 +4686,7 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Compact old prompt context.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -4619,7 +4697,10 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"), "{prompt}");
+    assert!(
+        prompt.contains("Action result: context_compact"),
+        "{prompt}"
+    );
     assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
     assert!(prompt.contains("background job"), "{prompt}");
     assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
@@ -4650,7 +4731,7 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
     let user_delta_id = first_field_value(&prompt, "delta_id");
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a still-running background task.","args":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf late","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4672,7 +4753,7 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Discard unrelated user-only prompt context.","args":{{"type":"context","op":"discard","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
             user_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -4683,7 +4764,10 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"), "{prompt}");
+    assert!(
+        prompt.contains("Action result: context_compact"),
+        "{prompt}"
+    );
     assert!(!prompt.contains("RUNNING JOB LIST:"), "{prompt}");
 
     #[cfg(unix)]
@@ -4711,7 +4795,7 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
     };
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a still-running background task.","args":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf late","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4733,7 +4817,7 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Offload old prompt context.","args":{{"type":"scratch","op":"write","kind":"context_offload","label":"running job context","delta_ids":["{}"]}}}}]}}"#,
+            r#"{{"context_compact":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -4744,7 +4828,10 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("type: context_offload"), "{prompt}");
+    assert!(
+        prompt.contains("The scratch id for offloaded deltas is: scratch_"),
+        "{prompt}"
+    );
     assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
     assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
 
@@ -4773,7 +4860,7 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
     };
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Start a still-running background task.","args":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf late","background":true}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4795,7 +4882,7 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            "## Progress\n压缩旧上下文。\n\n## Context Compact\ndelta_ids: {running_delta_id}\nsummary:\n后台任务仍在运行，需要保留运行状态。"
+            "## Free_talk\n压缩旧上下文。\n\n## Context Compact\ndiscard: {running_delta_id}\nsummary:\n后台任务仍在运行，需要保留运行状态。"
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -4832,7 +4919,7 @@ fn removed_shell_job_status_action_is_rejected_as_unsupported() {
     );
     let _ = core.begin_turn("poll a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"shell_job_status","intent":"Poll background task.","args":{"op":"status"}}]}"#),
+        content: scored(r#"{"working_still_action":{"shell_job_status":{"op":"status"}}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4855,7 +4942,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("poll a long task", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Run a command with a short timeout.","args":{"cmd":"sleep 10; printf late","timeout_ms":100}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 10; printf late","timeout_ms":100}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4874,7 +4961,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"","working_still_action":[{{"action":"run_bash","intent":"Stop the timed out process by pid.","args":{{"cmd":"kill {}","timeout_ms":1000}}}}]}}"#,
+            r#"{{"working_still_action":[{{"run_bash":{{"cmd":"kill {}","timeout_ms":1000}}}}]}}"#,
             pid
         )),
         model_name: "qwen-plus".to_string(),
@@ -4889,6 +4976,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
     assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
     assert!(prompt.contains("old timeout job"), "{prompt}");
     assert!(prompt.contains("now exits"), "{prompt}");
+    assert!(prompt.contains("Final output:"), "{prompt}");
 }
 
 #[test]
@@ -4901,7 +4989,7 @@ fn run_bash_rejects_removed_read_back_protocol() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"read back count","args":{"cmd":"pwd","read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"pwd","read_back_command":"pwd | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4925,7 +5013,7 @@ fn run_bash_rejects_removed_large_readback_protocol() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"pwd","large_readback_opt_in":"need full output","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"pwd","large_readback_opt_in":"need full output","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4945,7 +5033,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
     let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("delete something", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"rm not_allowed"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"rm not_allowed"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4988,7 +5076,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
         .unwrap();
     assert_eq!(actions.len(), 2);
     assert_eq!(actions[0]["action"], "run_bash");
-    assert_eq!(actions[0]["intent"], "test action");
+    assert!(actions[0].get("intent").is_none());
     assert_eq!(actions[0]["status"], "needs_user_approval");
     assert_eq!(actions[0]["input"]["cmd"], "rm not_allowed");
     assert_eq!(actions[1]["status"], "denied_by_user");
@@ -5005,7 +5093,7 @@ fn run_bash_allows_compound_local_write_commands() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("write local file", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"mkdir -p target/timem_test; printf ok | tee target/timem_test/write_guard.txt; cat target/timem_test/write_guard.txt"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5030,7 +5118,9 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
     );
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"pwd && rm not_allowed"}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"pwd && rm not_allowed"}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5053,7 +5143,7 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
     );
     let _ = core.begin_turn("test shell syntax", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Run shell syntax after approval.","args":{"cmd":"x=ok; printf $x | tr o O","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"x=ok; printf $x | tr o O","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5083,7 +5173,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
     );
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5106,7 +5196,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
     );
     let _ = core.begin_turn("read passwd", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"test action","args":{"cmd":"cat /etc/passwd"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"cat /etc/passwd"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5130,7 +5220,9 @@ fn run_bash_allows_low_risk_system_identity_commands() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("inspect system identity", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Read system identity.","args":{"cmd":"uname -s","timeout_ms":5000}}]}"#),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"uname -s","timeout_ms":5000}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5140,7 +5232,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("intent: Read system identity."));
+    assert!(!prompt.contains("intent: Read system identity."));
     assert!(prompt.contains("Command: uname -s"));
     assert!(prompt.contains("Exit code: 0"));
     assert!(!prompt.contains("approval_status: approved_by_user"));
@@ -5173,7 +5265,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 
     let _ = core.begin_turn("2099-06-12 是什么测试日期", None);
     let recall_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Find durable birthday memory before answering.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? AND content LIKE ? LIMIT 5","params":["%测试项目%","%2099-06-12%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? AND content LIKE ? LIMIT 5","params":["%测试项目%","%2099-06-12%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5199,7 +5291,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 
     let _ = core.begin_turn("删除测试项目纪念日这条记忆", None);
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Delete the user-requested birthday memory.","args":{"type":"durable","op":"delete","id":"mem_0"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"delete","id":"mem_0"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5211,7 +5303,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(delete_prompt.contains("error: id_not_found"));
 
     let delete_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"memmgr","intent":"Find exact memory id before deleting.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%测试项目纪念日%"],"limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? ORDER BY created_at_ms DESC","params":["%测试项目纪念日%"],"limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5235,7 +5327,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         })
         .expect("memory id should exist");
     let delete_final_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(format!(r#"{{"progress":"","working_still_action":[{{"action":"memmgr","intent":"Delete exact durable birthday memory.","args":{{"type":"durable","op":"delete","id":"{}","expected_version":1}}}}]}}"#, memory_id)),
+        content: scored(format!(r#"{{"working_still_action":[{{"memmgr":{{"type":"durable","op":"delete","id":"{}","expected_version":1}}}}]}}"#, memory_id)),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5262,7 +5354,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("请统计当前目录文件数量", None);
     let shell_prompt = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Count files in current project folder.","args":{"cmd":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"find . -maxdepth 1 -type f | wc -l","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5276,7 +5368,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("把 /etc/passwd 读出来", None);
     let security_request = match core.apply_model_response(LlmResponse {
-        content: scored(r#"{"progress":"","working_still_action":[{"action":"run_bash","intent":"Attempt forbidden absolute path read.","args":{"cmd":"cat /etc/passwd","timeout_ms":5000}}]}"#),
+        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"cat /etc/passwd","timeout_ms":5000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5327,7 +5419,7 @@ fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
     );
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"先查看项目结构和测试入口。","working_still_action":[{"action":"run_bash","intent":"Inspect Rust project files and test definitions.","args":{"cmd":"mkdir -p target; printf %s\\n src/lib.rs src/main.rs tests/core_tests.rs > target/timem_scenario_files.txt; printf %s\\n smoke_test regression_test > target/timem_scenario_tests.rs; wc -l target/timem_scenario_files.txt target/timem_scenario_tests.rs","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"mkdir -p target; printf %s\\n src/lib.rs src/main.rs tests/core_tests.rs > target/timem_scenario_files.txt; printf %s\\n smoke_test regression_test > target/timem_scenario_tests.rs; wc -l target/timem_scenario_files.txt target/timem_scenario_tests.rs","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5383,7 +5475,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
     let _ = core.begin_turn("我的测试代号是什么？测试时段我们聊了什么？", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"查询长期记忆和聊天记录后再回答。","working_still_action":[{"action":"memmgr","intent":"查询测试代号长期记忆。","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"action":"memmgr","intent":"查询测试时段聊天记录。","args":{"type":"raw_chat","op":"search","search_text":"测试时段 发布检查 CI TTY","limit":5}}]}"#,
+            r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试时段 发布检查 CI TTY","limit":5}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5421,7 +5513,7 @@ fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
     let _ = core.begin_turn("你是谁？把本轮调试标记设成 enabled，再确认你的路径。", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"查询 Timem 自身信息并设置非敏感运行期标记。","working_still_action":[{"action":"self_tool","intent":"查看 Timem 身份和进程。","args":{"type":"about_me","op":"read"}},{"action":"self_tool","intent":"设置非敏感调试标记。","args":{"type":"env","op":"write","key":"TIMEM_SCENARIO_DEBUG","value":"enabled"}},{"action":"self_tool","intent":"查看当前记忆和审计路径。","args":{"type":"mem_path","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"about_me","op":"read"}},{"self_tool":{"type":"env","op":"write","key":"TIMEM_SCENARIO_DEBUG","value":"enabled"}},{"self_tool":{"type":"mem_path","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5466,7 +5558,7 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
     let _ = core.begin_turn("帮我写一份简短发布检查 md，并确认文件内容。", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"写入发布检查文档并读回验证。","working_still_action":[{"action":"run_bash","intent":"Create and verify a release checklist markdown file.","args":{"cmd":"mkdir -p target/timem_scenario_output; printf %s\\n Release_Check CI_passed Sensitive_scan_passed Real_TTY_smoke_passed > target/timem_scenario_output/release_check.md; sed -n 1,20p target/timem_scenario_output/release_check.md","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"mkdir -p target/timem_scenario_output; printf %s\\n Release_Check CI_passed Sensitive_scan_passed Real_TTY_smoke_passed > target/timem_scenario_output/release_check.md; sed -n 1,20p target/timem_scenario_output/release_check.md","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5638,9 +5730,9 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(!prompt.contains("\"$id\""));
     assert!(prompt.contains("Markdown response sections."));
     assert!(prompt.find("`## Status`").unwrap() < prompt.find("`## Free_talk`").unwrap());
-    assert!(prompt.contains("`## Progress`"));
+    assert!(!prompt.contains("`## Progress`"));
     assert!(prompt.contains("`## Context Compact`"));
-    assert!(prompt.contains("`delta_ids`"));
+    assert!(prompt.contains("`discard:`"));
     assert!(!prompt.contains("`slice_ids`"));
     assert!(!prompt.contains("\"context_compact?\""));
     assert!(!prompt.contains("object or array<object>"));
@@ -5648,7 +5740,7 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(!prompt.contains(
         "\"durable\": \"boolean; optional. Default false. Set true only when this reasoning draft"
     ));
-    assert!(prompt.contains("`intent`"));
+    assert!(!prompt.contains("`intent`"));
     assert!(prompt.contains("The top-level response is Markdown, not JSON."));
     assert!(prompt.contains("the individual action blocks"));
     assert!(prompt.contains("inside `## Working_Still_Action` use JSON objects."));
@@ -5756,7 +5848,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(default_prompt.contains("The top-level response is XML."));
+    assert!(default_prompt.contains("# System Response Protocol"));
     assert!(default_prompt.contains("protocol-compliant response in XML format"));
     assert!(!default_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
@@ -5802,9 +5894,15 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    assert!(xml_prompt.contains("The top-level response is XML."));
+    assert!(xml_prompt.contains("# System Response Protocol"));
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
     assert!(xml_prompt.contains("<working_still_action>"));
+    assert!(xml_prompt.contains("<context_compact>"));
+    assert!(xml_prompt.contains("<discard>"));
+    assert!(xml_prompt.contains("<offload>"));
+    assert!(xml_prompt.contains("<summary>"));
+    assert!(xml_prompt.contains("Runtime discards discarded deltas"));
+    assert!(xml_prompt.contains("Example 4: Compact Context Response Output"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }
 
@@ -5839,7 +5937,7 @@ fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
 
     let repair_prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"checking files","working_still_action":[{"action":"run_bash","intent":"Count files.","args":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5959,7 +6057,7 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
     let _ = core.begin_turn("检查项目", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","free_talk":"先说明一下检查思路。","progress":"正在检查项目结构","working_still_action":[{"action":"run_bash","intent":"列出 Rust 文件","args":{"cmd":"rg --files -g '*.rs'","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","free_talk":"先说明一下检查思路。正在检查项目结构。","working_still_action":[{"run_bash":{"cmd":"rg --files -g '*.rs'","timeout_ms":5000}}]}"#,
         ),
         usage: usage(),
         model_name: "qwen-plus".to_string(),
@@ -5982,15 +6080,16 @@ fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
         agent_core::CORE_TOPIC_MODEL_RESPONSE
     );
     let model_response = received[0].as_model_response().unwrap();
-    assert_eq!(model_response.free_talk, "先说明一下检查思路。");
-    assert_eq!(model_response.progress, "正在检查项目结构");
+    assert_eq!(
+        model_response.free_talk,
+        "先说明一下检查思路。正在检查项目结构。"
+    );
     assert_eq!(model_response.status, "working");
     assert_eq!(model_response.global.working_worker_count, 1);
 
     let action = received[1].as_action().unwrap();
     assert_eq!(received[1].session_id, "session_a");
     assert_eq!(received[1].topic.name, agent_core::CORE_TOPIC_ACTION);
-    assert_eq!(action.intent.as_deref(), Some("列出 Rust 文件"));
     assert_eq!(action.action, "run_bash");
     assert_eq!(action.input["cmd"], "rg --files -g '*.rs'");
     assert_eq!(action.input["timeout_ms"], 5000);
@@ -6020,9 +6119,7 @@ fn protocol_repair_does_not_publish_invalid_model_response_topic() {
     let mut core = core_with_builtin_capabilities("repair_no_topic");
     let _ = core.begin_turn("检查项目", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"status":"working","progress":"正在检查","working_still_action":[{"action":"run_bash","intent":"List.""#,
-        ),
+        content: scored(r#"{"status":"working","working_still_action":[{"action":"run_bash""#),
         usage: usage(),
         model_name: "qwen-plus".to_string(),
         truncated: false,
@@ -6088,9 +6185,7 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
 
-    assert!(prompt.contains("Examples below are format examples ONLY"));
-    assert!(prompt.contains("SYSTEM action results are runtime evidence"));
-    assert!(prompt.contains("trust the SYSTEM action results"));
+    assert!(prompt.contains("EXAMPLES ONLY"));
     for leaked_example_task in [
         "project codename",
         "Get the OS version",
@@ -6123,7 +6218,7 @@ fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
         .contains("## -------- Example: finish one of user's tasks, compact context --------"));
     assert!(
         !prompt.contains("### Example:"),
-        "example headings must not be lower-level than protocol headings such as ## Progress"
+        "example headings must not be lower-level than protocol headings"
     );
     assert!(
         !prompt.contains("\n## Example:"),
@@ -6186,7 +6281,7 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"progress":"正在查询记忆。","working_still_action":[{"action":"memmgr","intent":"Query durable memory through manifest-backed tool.","args":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#,
+            r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6219,7 +6314,7 @@ fn legacy_actions_are_not_visible_or_executable() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"progress":"旧动作应被拒绝。","working_still_action":[{"action":"query_memory","intent":"Legacy fallback check.","args":{"query":"测试代号","limit":1}}]}"#,
+            r#"{"working_still_action":{"query_memory":{"query":"测试代号","limit":1}}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6249,7 +6344,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
     let _ = core.begin_turn("准备发布", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"progress":"加载发布检查 skill。","working_still_action":[{"action":"capmgr","intent":"Load release quality instructions before auditing.","args":{"op":"load","kind":"skill","id":"release_quality_gate"}}]}"#,
+            r#"{"working_still_action":[{"capmgr":{"op":"load","kind":"skill","id":"release_quality_gate"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6273,7 +6368,7 @@ fn self_tool_reads_mem_paths_and_about_info() {
     let _ = core.begin_turn("Timem 的记忆路径和版本是什么？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"查询 Timem 自身信息。","working_still_action":[{"action":"self_tool","intent":"查看本次记忆和审计路径。","args":{"type":"mem_path","op":"read"}},{"action":"self_tool","intent":"查看 Timem 软件信息。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"mem_path","op":"read"}},{"self_tool":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6336,7 +6431,7 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
     let _ = core.begin_turn("查看运行时信息", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"查询 Timem 运行时信息。","working_still_action":[{"action":"self_tool","intent":"读取运行时路径。","args":{"type":"mem_path","op":"read"}},{"action":"self_tool","intent":"读取 Timem 软件身份。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"mem_path","op":"read"}},{"self_tool":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6372,7 +6467,7 @@ fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
     let _ = core.begin_turn("调整 Timem 的运行期环境。", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"检查并更新运行期环境。","working_still_action":[{"action":"self_tool","intent":"确认 API key 不会暴露。","args":{"type":"env","op":"read","key":"TIMEM_API_KEY"}},{"action":"self_tool","intent":"设置一个非敏感运行期标记。","args":{"type":"env","op":"write","key":"TIMEM_SELF_TOOL_TEST","value":"enabled"}},{"action":"self_tool","intent":"读取刚设置的运行期标记。","args":{"type":"env","op":"read","key":"TIMEM_SELF_TOOL_TEST"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"env","op":"read","key":"TIMEM_API_KEY"}},{"self_tool":{"type":"env","op":"write","key":"TIMEM_SELF_TOOL_TEST","value":"enabled"}},{"self_tool":{"type":"env","op":"read","key":"TIMEM_SELF_TOOL_TEST"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6396,11 +6491,12 @@ fn self_tool_env_denies_memory_path_writes_through_core_action() {
         profile("aliyun", "qwen-plus"),
         tmp_dir("self_tool_protected_env"),
     );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
     let _ = core.begin_turn("把 Timem 的 data dir 改到另一个目录。", None);
     let attempted_path = "/tmp/timem-should-not-become-data-root";
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"status":"working","progress":"尝试更新 Timem 数据目录。","working_still_action":[{{"action":"self_tool","intent":"更新 Timem 数据根目录。","args":{{"type":"env","op":"write","key":"TIMEM_DATA_DIR","value":"{attempted_path}"}}}},{{"action":"self_tool","intent":"更新 Timem 记忆空间。","args":{{"type":"env","op":"write","key":"TIMEM_SPACE","value":".other_mem"}}}}]}}"#
+            r#"{{"status":"working","working_still_action":[{{"self_tool":{{"type":"env","op":"write","key":"TIMEM_DATA_DIR","value":"{attempted_path}"}}}},{{"self_tool":{{"type":"env","op":"write","key":"TIMEM_SPACE","value":".other_mem"}}}}]}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6419,6 +6515,124 @@ fn self_tool_env_denies_memory_path_writes_through_core_action() {
 }
 
 #[test]
+fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
+    let memory_dir = tmp_dir("self_tool_chg_cwd_memory");
+    let work_dir = tmp_dir("self_tool_chg_cwd_work");
+    let sub_dir = work_dir.join("sub");
+    fs::create_dir_all(&sub_dir).unwrap();
+    fs::write(sub_dir.join("marker.txt"), "cwd-ok").unwrap();
+    let sub_dir = fs::canonicalize(&sub_dir).unwrap();
+
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+
+    let first_prompt = match core.begin_turn("先确认 cwd", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected prompt, got {other:?}"),
+    };
+    assert!(first_prompt.contains("[!!!NOTE] cwd now set to:"));
+
+    let response = format!(
+        r#"{{
+  "status":"working",
+  "working_still_action":[
+    {{"self_tool":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}},
+    {{"run_bash":{{"cmd":"pwd; cat marker.txt","timeout_ms":5000}}}}
+  ]
+}}"#,
+        sub_dir.display()
+    );
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(response),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+
+    assert_eq!(core.current_prompt_cwd(), sub_dir.as_path());
+    assert!(prompt.contains("Action result: self_tool"), "{prompt}");
+    assert!(prompt.contains("type: cwd"), "{prompt}");
+    assert!(prompt.contains("op: chg_cwd"), "{prompt}");
+    assert!(
+        prompt.contains("status: updated_prompt_context_cwd"),
+        "{prompt}"
+    );
+    assert!(prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", sub_dir.display())));
+    assert!(prompt.contains("Action result: run_bash"), "{prompt}");
+    assert!(prompt.contains(&sub_dir.display().to_string()), "{prompt}");
+    assert!(prompt.contains("cwd-ok"), "{prompt}");
+}
+
+#[test]
+fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
+    let memory_dir = tmp_dir("self_tool_relative_cwd_memory");
+    let base_dir = tmp_dir("self_tool_relative_cwd_base");
+    let sub_dir = base_dir.join("nested");
+    fs::create_dir_all(&sub_dir).unwrap();
+    fs::write(sub_dir.join("rel.txt"), "relative-ok").unwrap();
+    let base_dir = fs::canonicalize(&base_dir).unwrap();
+    let sub_dir = fs::canonicalize(&sub_dir).unwrap();
+
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
+
+    let _ = core.begin_turn("切到相对路径", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"cwd","op":"chg_cwd","new_path":"nested"}},{"run_bash":{"cmd":"pwd; cat rel.txt","timeout_ms":5000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+
+    assert_eq!(core.current_prompt_cwd(), sub_dir.as_path());
+    assert!(prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", sub_dir.display())));
+    assert!(prompt.contains("relative-ok"), "{prompt}");
+}
+
+#[test]
+fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
+    let memory_dir = tmp_dir("self_tool_bad_cwd_memory");
+    let base_dir = tmp_dir("self_tool_bad_cwd_base");
+    let base_dir = fs::canonicalize(&base_dir).unwrap();
+    let missing = base_dir.join("missing");
+
+    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
+
+    let _ = core.begin_turn("切到不存在路径", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"status":"working","working_still_action":[{{"self_tool":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}}]}}"#,
+            missing.display()
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+
+    assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
+    assert!(prompt.contains("Action result: self_tool"), "{prompt}");
+    assert!(prompt.contains("type: cwd"), "{prompt}");
+    assert!(prompt.contains("error: path_not_found"), "{prompt}");
+    assert!(!prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", missing.display())));
+}
+
+#[test]
 fn self_tool_supports_identity_and_process_qa_replay() {
     let mut core = AgentCore::new(
         "STATIC",
@@ -6428,7 +6642,7 @@ fn self_tool_supports_identity_and_process_qa_replay() {
     let _ = core.begin_turn("你是谁？你这个 Timem 进程是什么？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","progress":"查询 Timem 自身身份和进程。","working_still_action":[{"action":"self_tool","intent":"查看 Timem 身份、版本、作者和当前进程。","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"about_me","op":"read"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6475,9 +6689,7 @@ fn capmgr_load_missing_kind_requests_protocol_repair_from_manifest_idl() {
     );
     let _ = core.begin_turn("准备发布", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"progress":"加载 skill。","working_still_action":[{"action":"capmgr","intent":"Load missing skill.","args":{"op":"load"}}]}"#,
-        ),
+        content: scored(r#"{"working_still_action":[{"capmgr":{"op":"load"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -6497,12 +6709,12 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
     for (case, payload, expected_issue) in [
         (
             "bad_op",
-            r#"{"progress":"检查 capability。","working_still_action":[{"action":"capmgr","intent":"Use an unsupported capability operation.","args":{"op":"remove","kind":"skill","id":"release_quality_gate"}}]}"#,
+            r#"{"working_still_action":[{"capmgr":{"op":"remove","kind":"skill","id":"release_quality_gate"}}]}"#,
             "actions[0].input.op_unsupported:remove",
         ),
         (
             "bad_kind",
-            r#"{"progress":"检查 capability。","working_still_action":[{"action":"capmgr","intent":"Use an unsupported capability kind.","args":{"op":"load","kind":"resource","id":"release_quality_gate"}}]}"#,
+            r#"{"working_still_action":[{"capmgr":{"op":"load","kind":"resource","id":"release_quality_gate"}}]}"#,
             "actions[0].input.kind_unsupported:resource",
         ),
     ] {
@@ -6530,6 +6742,128 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
 }
 
 #[test]
+fn runtime_overlay_add_remove_keeps_prompt_executor_and_repair_consistent() {
+    let overlay_dir = tmp_dir("overlay_add_remove_consistency");
+    let tools_dir = overlay_dir.join("tools");
+    let scripts_dir = overlay_dir.join("scripts");
+    fs::create_dir_all(&tools_dir).unwrap();
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::write(
+        tools_dir.join("cap_echo.yaml"),
+        r#"kind: tool
+id: cap_echo
+binding_type: command
+binding_name: scripts/cap_echo.sh
+summary: Echo a capability payload.
+description: |
+  Runtime-added command tool used to verify capability add/remove behavior.
+input_properties:
+  text: string
+required:
+  - text
+example_json: |
+  {
+    "cap_echo": {
+      "text": "hello"
+    }
+  }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        tools_dir.join("shell_alias.yaml"),
+        r#"kind: tool
+id: shell_alias
+binding_type: builtin
+binding_name: run_bash
+summary: Alias for local shell.
+description: |
+  Runtime-added builtin alias for run_bash.
+input_properties:
+  cmd: string
+required:
+  - cmd
+example_json: |
+  {
+    "shell_alias": {
+      "cmd": "pwd"
+    }
+  }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        scripts_dir.join("cap_echo.sh"),
+        "payload=$(cat)\nprintf 'cap_echo_ok %s\\n' \"$payload\"\n",
+    )
+    .unwrap();
+
+    let registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+        &overlay_dir,
+        CapabilityHostProfile::with_local_command_execution(),
+    )
+    .unwrap();
+    let mut core = AgentCore::new(
+        "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("overlay_add_remove_active"),
+    );
+    core.set_capability_registry(registry);
+    let prompt = match core.begin_turn("use overlay", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected prompt, got {other:?}"),
+    };
+    assert!(prompt.contains("#### `cap_echo`"));
+    assert!(prompt.contains("#### `shell_alias`"));
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(r#"{"working_still_action":{"cap_echo":{"text":"hello"}}}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected overlay command result, got {other:?}"),
+    };
+    assert!(prompt.contains("Action result: cap_echo"));
+    assert!(prompt.contains("cap_echo_ok"));
+    assert!(prompt.contains(r#""text":"hello""#));
+    assert!(!prompt.contains("response is not protocol compliant"));
+
+    let filtered_registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+        &overlay_dir,
+        CapabilityHostProfile::without_local_command_execution(),
+    )
+    .unwrap();
+    let mut filtered_core = AgentCore::new(
+        "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("overlay_add_remove_filtered"),
+    );
+    filtered_core.set_capability_registry(filtered_registry);
+    let prompt = match filtered_core.begin_turn("use overlay after removal", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected filtered prompt, got {other:?}"),
+    };
+    assert!(!prompt.contains("#### `run_bash`"));
+    assert!(!prompt.contains("#### `cap_echo`"));
+    assert!(!prompt.contains("#### `shell_alias`"));
+
+    let prompt = match filtered_core.apply_model_response(LlmResponse {
+        content: scored(r#"{"working_still_action":{"shell_alias":{"cmd":"pwd"}}}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected unsupported action repair, got {other:?}"),
+    };
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("unsupported_action:shell_alias"));
+    assert!(!prompt.contains("Action result: shell_alias"));
+}
+
+#[test]
 fn runtime_overlay_command_tool_executes_with_json_input() {
     let memory_dir = tmp_dir("overlay_command_memory");
     let overlay_dir = tmp_dir("overlay_command_capabilities");
@@ -6552,9 +6886,7 @@ required:
   - text
 example_json: |
   {
-    "action": "echo_payload",
-    "intent": "Echo payload.",
-    "args":{"text":"hello"}
+    "echo_payload":{"text":"hello"}
   }
 "#,
     )
@@ -6570,9 +6902,7 @@ example_json: |
     let _ = core.begin_turn("echo", None);
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"progress":"运行 overlay command。","working_still_action":[{"action":"echo_payload","intent":"Echo runtime payload.","args":{"text":"hello"}}]}"#,
-        ),
+        content: scored(r#"{"working_still_action":{"echo_payload":{"text":"hello"}}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -6610,9 +6940,7 @@ required:
   - text
 example_json: |
   {
-    "action": "echo_payload",
-    "intent": "Echo payload.",
-    "args":{"text":"hello"}
+    "echo_payload":{"text":"hello"}
   }
 "#,
     )
@@ -6625,7 +6953,7 @@ example_json: |
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"progress":"运行 overlay command。","working_still_action":[{"action":"echo_payload","intent":"Echo runtime payload in background.","args":{"text":"hello","background":true}}]}"#
+            r#"{"working_still_action":{"echo_payload":{"text":"hello","background":true}}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6637,7 +6965,7 @@ example_json: |
     };
 
     assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("actions[0].input.background_unsupported"));
+    assert!(prompt.contains("actions.input.background_unsupported"));
     assert!(!prompt.contains("background_started"));
 }
 
@@ -6671,9 +6999,7 @@ input_schema: |
   }
 example_json: |
   {
-    "action": "echo_payload",
-    "intent": "Echo payload.",
-    "args":{"text":"hello","background":true}
+    "echo_payload":{"text":"hello","background":true}
   }
 "#,
     )
@@ -6690,7 +7016,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"progress":"后台运行 overlay command。","working_still_action":[{"action":"echo_payload","intent":"Echo runtime payload in background.","args":{"text":"hello","background":true,"timeout_ms":5000}}]}"#
+            r#"{"working_still_action":{"echo_payload":{"text":"hello","background":true,"timeout_ms":5000}}}"#
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6711,7 +7037,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"检查后台工具任务。","working_still_action":[{{"action":"capmgr","intent":"Wait for registered background tool.","args":{{"op":"job_status","job_id":"{}","timeout_ms":3000}}}}]}}"#,
+            r#"{{"working_still_action":[{{"capmgr":{{"op":"job_status","job_id":"{}","timeout_ms":3000}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -6755,9 +7081,7 @@ input_schema: |
   }
 example_json: |
   {
-    "action": "slow_payload",
-    "intent": "Run slowly.",
-    "args":{"background":true}
+    "slow_payload":{"background":true}
   }
 "#,
     )
@@ -6774,7 +7098,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"progress":"后台运行慢工具。","working_still_action":[{"action":"slow_payload","intent":"Start slow registered tool.","args":{"background":true,"timeout_ms":5000}}]}"#
+            r#"{"working_still_action":{"slow_payload":{"background":true,"timeout_ms":5000}}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6792,7 +7116,7 @@ example_json: |
 
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(format!(
-            r#"{{"progress":"取消后台工具任务。","working_still_action":[{{"action":"capmgr","intent":"Cancel registered background tool.","args":{{"op":"job_cancel","job_id":"{}"}}}}]}}"#,
+            r#"{{"working_still_action":[{{"capmgr":{{"op":"job_cancel","job_id":"{}"}}}}]}}"#,
             job_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -6816,7 +7140,7 @@ fn finished_with_actions_requests_repair_and_executes_nothing() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("完成任务", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"任务已完成","working_still_action":[{"action":"run_bash","intent":"Verify.","args":{"cmd":"true","timeout_ms":2000}}]}"#),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"任务已完成","working_still_action":[{"run_bash":{"cmd":"true","timeout_ms":2000}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -6840,11 +7164,11 @@ fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
     for (case, payload) in [
         (
             "multiple",
-            r#"{"status":"ALL_FINISHED","final_answer":"任务已完成","working_still_action":[{"action":"run_bash","intent":"First.","args":{"cmd":"true","timeout_ms":2000}},{"action":"run_bash","intent":"Last.","args":{"cmd":"true","timeout_ms":2000}}]}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"任务已完成","working_still_action":[{"run_bash":{"cmd":"true","timeout_ms":2000}},{"run_bash":{"cmd":"true","timeout_ms":2000}}]}"#,
         ),
         (
             "self_tool",
-            r#"{"status":"ALL_FINISHED","final_answer":"好的，以下是我的版本信息。","working_still_action":[{"action":"self_tool","intent":"获取 Timem 的版本和运行时信息","args":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"好的，以下是我的版本信息。","working_still_action":[{"self_tool":{"type":"about_me","op":"read"}}]}"#,
         ),
     ] {
         let mut core = core_with_builtin_capabilities(&format!("finished_actions_repair_{case}"));
@@ -7015,7 +7339,7 @@ fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
 }
 
 #[test]
-fn array_of_actions_auto_wrapped_as_working_still_action() {
+fn bare_array_of_actions_requests_protocol_repair() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
@@ -7024,23 +7348,22 @@ fn array_of_actions_auto_wrapped_as_working_still_action() {
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("find files", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"[{"action":"run_bash","intent":"Find files.","args":{"cmd":"echo ok","timeout_ms":5000}}]"#,
-        ),
+        content: scored(r#"[{"run_bash":{"cmd":"echo ok","timeout_ms":5000}}]"#),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
         truncated: false,
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected NeedModel with action results, got: {other:?}"),
+        other => panic!("expected protocol repair, got: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("ok"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("root_must_be_json_object"));
+    assert!(!prompt.contains("Action result: run_bash"));
 }
 
 #[test]
-fn array_of_multiple_actions_auto_wrapped() {
+fn bare_array_of_multiple_actions_requests_protocol_repair() {
     let mut core = AgentCore::new(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
@@ -7050,7 +7373,7 @@ fn array_of_multiple_actions_auto_wrapped() {
     let _ = core.begin_turn("multi", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"[{"action":"run_bash","intent":"First.","args":{"cmd":"echo one","timeout_ms":5000}},{"action":"run_bash","intent":"Second.","args":{"cmd":"echo two","timeout_ms":5000}}]"#,
+            r#"[{"run_bash":{"cmd":"echo one","timeout_ms":5000}},{"run_bash":{"cmd":"echo two","timeout_ms":5000}}]"#,
         ),
         model_name: "aws-claude-sonnet-4-6".to_string(),
         usage: usage(),
@@ -7058,10 +7381,11 @@ fn array_of_multiple_actions_auto_wrapped() {
     });
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected NeedModel, got: {other:?}"),
+        other => panic!("expected protocol repair, got: {other:?}"),
     };
-    assert!(prompt.contains("one"));
-    assert!(prompt.contains("two"));
+    assert!(prompt.contains("response is not protocol compliant"));
+    assert!(prompt.contains("root_must_be_json_object"));
+    assert!(!prompt.contains("Action result: run_bash"));
 }
 
 #[test]
@@ -7097,6 +7421,88 @@ fn assert_perf_under(label: &str, started: Instant, budget: Duration) {
             "{label} took {elapsed:?}, expected <= {budget:?}"
         );
     }
+}
+
+#[test]
+fn performance_guard_many_overlay_capabilities_render_is_bounded() {
+    let overlay_dir = tmp_dir("perf_many_overlay_capabilities");
+    let tools_dir = overlay_dir.join("tools");
+    let skills_dir = overlay_dir.join("skills");
+    fs::create_dir_all(&tools_dir).unwrap();
+    fs::create_dir_all(&skills_dir).unwrap();
+    for i in 0..120 {
+        fs::write(
+            tools_dir.join(format!("perf_tool_{i:03}.yaml")),
+            format!(
+                r#"kind: tool
+id: perf_tool_{i:03}
+binding_type: builtin
+binding_name: self_tool
+summary: Performance overlay tool {i}.
+description: |
+  Synthetic overlay tool {i} used for capability prompt render performance.
+input_properties:
+  type: string
+  op: string
+required:
+  - type
+  - op
+example_json: |
+  {{
+    "perf_tool_{i:03}": {{
+      "type": "about_me",
+      "op": "read"
+    }}
+  }}
+"#
+            ),
+        )
+        .unwrap();
+    }
+    for i in 0..40 {
+        let skill_dir = skills_dir.join(format!("perf_skill_{i:03}"));
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("skill.yaml"),
+            format!(
+                r#"kind: skill
+id: perf_skill_{i:03}
+title: Performance Skill {i}
+summary: Synthetic performance skill {i}.
+entry: instructions.md
+when_to_use: |
+  Use synthetic skill {i} only in performance tests.
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("instructions.md"),
+            format!("# Performance Skill {i}\n\nBody {i}.\n"),
+        )
+        .unwrap();
+    }
+
+    let registry = CapabilityRegistry::builtin_with_overlay_dir_for_host(
+        &overlay_dir,
+        CapabilityHostProfile::with_local_command_execution(),
+    )
+    .unwrap();
+    assert!(registry.contains_tool("perf_tool_119"));
+    assert_eq!(registry.skill_count(), 40);
+
+    let started = Instant::now();
+    let mut rendered_len = 0usize;
+    for _ in 0..80 {
+        rendered_len += registry.render_tool_catalog_markdown().len();
+        rendered_len += registry.render_skill_headers_markdown().len();
+    }
+    assert!(rendered_len > 1_000_000);
+    assert_perf_under(
+        "many overlay capability render x80",
+        started,
+        Duration::from_millis(750),
+    );
 }
 
 #[test]
@@ -7147,18 +7553,14 @@ fn performance_guard_topic_generation_for_many_actions_is_bounded() {
 
     let mut core = core_with_builtin_capabilities("perf_many_action_topics");
     let actions = (0..150)
-        .map(|idx| {
-            format!(
-                r#"{{"action":"self_tool","intent":"Read runtime info {idx}.","args":{{"type":"about_me","op":"read"}}}}"#
-            )
-        })
+        .map(|_| format!(r#"{{"self_tool":{{"type":"about_me","op":"read"}}}}"#))
         .collect::<Vec<_>>()
         .join(",");
 
     let _ = core.begin_turn("emit many action topics", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(&format!(
-            r#"{{"status":"working","progress":"checking many actions","working_still_action":[{actions}]}}"#
+            r#"{{"status":"working","working_still_action":[{actions}]}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),

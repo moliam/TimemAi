@@ -266,7 +266,6 @@ required:
 example_json: |
   {
     "action": "my_tool",
-    "intent": "Run my runtime tool.",
     "args": {
       "query": "hello"
     }
@@ -274,7 +273,7 @@ example_json: |
 ```
 
 Runtime invokes `/bin/sh scripts/my_tool.sh` and writes one JSON object to
-stdin: `{"action":"my_tool","intent":"...","args":{...}}`. Output is captured
+stdin: `{"action":"my_tool","args":{...}}`. Output is captured
 as an action result with bounded size and timeout.
 
 ## Runtime Data
@@ -314,7 +313,6 @@ package installs, or video commands, the model can request:
 ```json
 {
   "action": "run_bash",
-  "intent": "Run a long local task.",
   "args": {
     "cmd": "cargo test",
     "background": true

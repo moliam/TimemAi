@@ -1274,15 +1274,13 @@ mod tests {
             let content = if prompt.contains("denied_by_user") {
                 "## Status\nfinished\n\n## Final_Answer\nDENIED_OK"
             } else {
-                r#"## Progress
+                r#"## Free_talk
 需要用户确认后执行本地命令。
 
 ## Working_Still_Action
 ```action
 {
-  "action": "run_bash",
-  "intent": "Run a command that requires approval.",
-  "args": {
+  "run_bash": {
     "cmd": "printf approval-worker-ok",
     "timeout_ms": 5000
   }
@@ -1742,7 +1740,7 @@ mod tests {
             self.call_no += 1;
             let content = if self.call_no == 1 {
                 self.first_call_barrier.wait();
-                "## Status\nworking\n\n## Progress\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"action\":\"self_tool\",\"intent\":\"读取运行时自身信息以推进测试回合。\",\"args\":{\"type\":\"about_me\",\"op\":\"read\"}}\n```"
+                "## Status\nworking\n\n## Free_talk\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"self_tool\":{\"type\":\"about_me\",\"op\":\"read\"}}\n```"
                     .to_string()
             } else {
                 "## Status\nfinished\n\n## Final_Answer\nWORKER_COUNT_DONE".to_string()
@@ -2004,10 +2002,7 @@ mod tests {
                 )
             }
             ResponseProtocolKind::Xml => {
-                format!(
-                    "<response><free_talk>{}</free_talk><status>ALL_FINISHED</status><final_answer>{}</final_answer></response>",
-                    free_talk, answer
-                )
+                format!("<response><free_talk>{free_talk}</free_talk><final_answer>{answer}</final_answer></response>")
             }
         }
     }
@@ -2123,10 +2118,9 @@ mod tests {
 
     fn stress_action_response(worker_idx: usize, turn_idx: usize, step_idx: usize) -> String {
         let marker = stress_marker(worker_idx, turn_idx, step_idx);
-        let (action, intent, args) = match step_idx % 8 {
+        let (action, args) = match step_idx % 8 {
             1 => (
                 "run_bash",
-                format!("Run a short stress shell action for {marker}."),
                 serde_json::json!({
                     "cmd": format!("printf {marker}"),
                     "timeout_ms": 5000,
@@ -2134,7 +2128,6 @@ mod tests {
             ),
             2 => (
                 "run_bash",
-                format!("Exercise long command validation for {marker}."),
                 serde_json::json!({
                     "cmd": format!("printf {marker}; # {}", "x".repeat(2_100)),
                     "timeout_ms": 5000,
@@ -2142,30 +2135,24 @@ mod tests {
             ),
             3 => (
                 "self_tool",
-                format!("Read runtime paths while stress testing {marker}."),
                 serde_json::json!({
-                    "type": "mem_path",
+                    "type": "env",
                     "op": "read",
+                    "key": marker,
                 }),
             ),
             _ => (
                 "memmgr",
-                format!("Query durable memory marker {marker}."),
                 serde_json::json!({
-                    "type": "durable",
-                    "op": "sql",
-                    "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1",
-                    "params": [format!("%{marker}%")],
-                    "limit": 1,
+                    "type": "scratch",
+                    "op": "write",
+                    "kind": "notes",
+                    "label": marker,
+                    "content": "stress marker note",
                 }),
             ),
         };
-        serde_json::json!({
-            "action": action,
-            "intent": intent,
-            "args": args,
-        })
-        .to_string()
+        serde_json::json!({ action: args }).to_string()
     }
 
     impl ModelClient for StressWorkerModel {
@@ -2215,7 +2202,7 @@ mod tests {
             }
             if completed_actions < target_actions {
                 let content = format!(
-                    "## Progress\n{}\n\n## Working_Still_Action\n```action\n{}\n```",
+                    "## Free_talk\n{}\n\n## Working_Still_Action\n```action\n{}\n```",
                     stress_progress(self.worker_idx, turn_idx, completed_actions),
                     stress_action_response(self.worker_idx, turn_idx, completed_actions)
                 );
@@ -2275,12 +2262,15 @@ mod tests {
                 },
                 &dir,
             );
+            core.set_response_protocol(ResponseProtocolKind::Markdown);
             core.set_bash_approval_mode(BashApprovalMode::Approve);
             core.set_max_rounds(TEST_MAX_ROUNDS as u32);
             core.set_max_llm_input_tokens(1_000_000);
+            let mut config = test_config();
+            config.response_protocol = ResponseProtocolKind::Markdown;
             let worker = CoreSessionWorker::spawn_with_model_client(
                 core,
-                test_config(),
+                config,
                 test_worker_config(
                     &dir,
                     &format!("stress_session_{worker_idx}"),
@@ -2674,7 +2664,7 @@ mod tests {
                 CoreSessionWorkerEvent::Topics(events) => {
                     for event in events {
                         if let Some(response) = event.as_model_response() {
-                            if response.progress.len() > 2_000 {
+                            if response.free_talk.len() > 2_000 {
                                 long_progress_seen = true;
                             }
                         }

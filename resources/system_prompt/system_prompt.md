@@ -51,32 +51,21 @@ compact or offload old dynamic context.
 
 ---- Prompt delta example -----
 
-[BEGIN DELTA]
-delta_id: xxx
-time: 123
+[BEGIN DELTA]   --> a delta begins with BEGIN DELTA
+delta_id: pd_1    --> the system generated identity for this delta. It is a simple globally increasing sequence: pd_1, pd_2, ...
+time: 123        --> time of creation
 
 ## USER
 new user input, or user supplement entered while the current turn was already in
 progress.
 
 ## {{CURRENT_ASSISTANT_NAME}}
-your previous free_talk, response, or final answer already shown in the user
-interface.
+replay of your response
 
 ## SYSTEM
-runtime's active injection, feedback, etc, such as response repair, context compaction notes, work
-instructions, pending work, runtime action results, etc.
-SYSTEM action results are runtime evidence. If they conflict with previous
-assistant free_talk or assumptions, trust the SYSTEM action results and correct
-your next response.
+runtime's feedback to your response.
 
-The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
-
-Action result: run_bash
-...
-
-[END DELTA]
-
+[END DELTA] --> a delta ends with BEGIN DELTA
 
 ## Memory
 
@@ -102,7 +91,7 @@ Refer to memmgr tool spec for usage.
 Prompt context is actually the current working memory.
 
 Shrink timely if there are stale/wrong/oversized/temporary prompt. Frequently ask yourself. Do this through
- `memmgr` actions as mentioned below.
+ the response protocol's context compact branch.
 
 Target dynamic prompt deltas by `delta_id`; do not target this system prompt.
 

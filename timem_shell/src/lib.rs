@@ -1039,6 +1039,7 @@ mod tests {
             pid: 12345,
             kind: "timeout".to_string(),
             command: "sleep 30".to_string(),
+            cwd: "/tmp".to_string(),
             session_id: "session_a".to_string(),
             turn_id: "turn_a".to_string(),
             created_at_ms: 1000,
