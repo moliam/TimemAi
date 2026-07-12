@@ -12,6 +12,9 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   branch-matched correction skeleton. Content placed before `<response>`, such
   as a stray `<free_talk>`, receives an explicit instruction to move every tag
   inside the single root; realtime repair audit records the same guidance.
+- XML repair classification is guarded by a 30-case raw-response corpus.
+  Consecutive top-level `<response>` documents are rejected as trailing root
+  content, while XML examples inside final-answer text remain opaque data.
 - Builtin tool callback panics are now contained at the capability registry
   boundary and returned as audited internal action failures instead of
   unwinding through the Timem process.

@@ -63,6 +63,9 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     if looks_like_external_tool_call_protocol(protocol_text) {
         return malformed_xml_response("external_tool_call_protocol");
     }
+    if has_adjacent_response_roots(protocol_text) {
+        return malformed_xml_response("xml_content_after_response");
+    }
 
     let Some(response) = parse_response_fields(protocol_text) else {
         if protocol_text.is_empty() {
@@ -137,6 +140,35 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         runtime_note: None,
         repair_issue,
     }
+}
+
+fn has_adjacent_response_roots(text: &str) -> bool {
+    let mut cursor = 0usize;
+    while let Some(close_rel) = text[cursor..].find("</response>") {
+        let close_start = cursor + close_rel;
+        let after = close_start + "</response>".len();
+        if !is_inside_cdata(text, close_start)
+            && !is_inside_outer_text_field(text, close_start, "free_talk")
+            && !is_inside_outer_text_field(text, close_start, "final_answer")
+            && find_open_tag(text[after..].trim_start(), "response") == Some(0)
+        {
+            return true;
+        }
+        cursor = after;
+    }
+    false
+}
+
+fn is_inside_outer_text_field(text: &str, pos: usize, tag: &str) -> bool {
+    let before = &text[..pos];
+    let mut open_count = 0usize;
+    let mut cursor = 0usize;
+    while let Some(open_rel) = find_open_tag(&before[cursor..], tag) {
+        open_count += 1;
+        cursor += open_rel + tag.len() + 1;
+    }
+    let close_count = before.matches(&format!("</{tag}>")).count();
+    open_count > close_count
 }
 
 fn strip_surrounding_xml_fence(text: &str) -> Option<&str> {
@@ -640,6 +672,9 @@ fn split_id_list(raw: &str) -> Vec<String> {
 
 pub fn xml_repair_instruction(issue: &str) -> &'static str {
     match issue {
+        "empty_response" => {
+            "检查到模型没有生成可解析的内容。请重新输出一个完整的 <response>...</response>；需要继续执行动作时在其中提供 <working_still_action>，已经完成时提供 <final_answer>。"
+        }
         "truncated_model_output" => {
             "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <free_talk> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
         }
@@ -950,6 +985,220 @@ mod tests {
     }
 
     #[test]
+    fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
+        struct Case {
+            name: &'static str,
+            raw: &'static str,
+            issue: &'static str,
+            guidance: &'static str,
+        }
+
+        let cases = [
+            Case {
+                name: "empty output",
+                raw: "   ",
+                issue: "empty_response",
+                guidance: "没有生成可解析的内容",
+            },
+            Case {
+                name: "missing response root",
+                raw: "<final_answer>done</final_answer>",
+                issue: "xml_response_root_missing",
+                guidance: "did not contain the required <response> root",
+            },
+            Case {
+                name: "xml declaration before root",
+                raw: "<?xml version=\"1.0\"?><response><final_answer>done</final_answer></response>",
+                issue: "xml_content_before_response",
+                guidance: "content before the <response> root",
+            },
+            Case {
+                name: "free talk before root",
+                raw: "<free_talk>thinking</free_talk><response><final_answer>done</final_answer></response>",
+                issue: "xml_content_before_response",
+                guidance: "Move every tag, including <free_talk>, inside <response>",
+            },
+            Case {
+                name: "trailing prose after root",
+                raw: "<response><final_answer>done</final_answer></response>extra",
+                issue: "xml_content_after_response",
+                guidance: "content after the </response> root",
+            },
+            Case {
+                name: "second response root",
+                raw: "<response><final_answer>one</final_answer></response><response><final_answer>two</final_answer></response>",
+                issue: "xml_content_after_response",
+                guidance: "Output nothing before <response> or after </response>",
+            },
+            Case {
+                name: "unclosed response root",
+                raw: "<response><final_answer>done</final_answer>",
+                issue: "xml_response_root_unclosed",
+                guidance: "one complete <response>...</response> root",
+            },
+            Case {
+                name: "self closing response root",
+                raw: "<response/>",
+                issue: "xml_response_root_self_closing",
+                guidance: "one complete <response>...</response> root",
+            },
+            Case {
+                name: "empty response body",
+                raw: "<response></response>",
+                issue: "next_actions_required_when_status_working",
+                guidance: "必须提供 <working_still_action>",
+            },
+            Case {
+                name: "unknown top level tag",
+                raw: "<response><progress>working</progress><final_answer>done</final_answer></response>",
+                issue: "xml_unexpected_content_inside_response",
+                guidance: "unknown top-level tag",
+            },
+            Case {
+                name: "raw text inside response",
+                raw: "<response>thinking<final_answer>done</final_answer></response>",
+                issue: "xml_unexpected_content_inside_response",
+                guidance: "Put text inside <free_talk> or <final_answer>",
+            },
+            Case {
+                name: "duplicate free talk",
+                raw: "<response><free_talk>a</free_talk><free_talk>b</free_talk><final_answer>done</final_answer></response>",
+                issue: "xml_duplicate_free_talk",
+                guidance: "Merge them into one optional <free_talk>",
+            },
+            Case {
+                name: "free talk after state branch",
+                raw: "<response><final_answer>done</final_answer><free_talk>late</free_talk></response>",
+                issue: "xml_tags_out_of_order",
+                guidance: "tags are out of order",
+            },
+            Case {
+                name: "unclosed free talk",
+                raw: "<response><free_talk>broken<final_answer>done</final_answer></response>",
+                issue: "xml_unclosed_tag:free_talk",
+                guidance: "field tag is not closed",
+            },
+            Case {
+                name: "working and final branches together",
+                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\"}}]]]></action_json></working_still_action><final_answer>done</final_answer></response>",
+                issue: "status_finished_must_not_include_next_actions",
+                guidance: "不能同时包含 <working_still_action>",
+            },
+            Case {
+                name: "compact and final branches together",
+                raw: "<response><context_compact><discard>pd_1</discard><summary>state</summary></context_compact><final_answer>done</final_answer></response>",
+                issue: "state_branch_must_choose_one",
+                guidance: "selected more than one state branch",
+            },
+            Case {
+                name: "unsupported status tag",
+                raw: "<response><status>ALL_FINISHED</status></response>",
+                issue: "status_tag_not_supported",
+                guidance: "不使用 <status>",
+            },
+            Case {
+                name: "action payload is not array",
+                raw: "<response><working_still_action><action_json><![CDATA[{\"run_bash\":{\"cmd\":\"pwd\"}}]]></action_json></working_still_action></response>",
+                issue: "actions[0].array_required",
+                guidance: "必须是 JSON array",
+            },
+            Case {
+                name: "invalid action json",
+                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\",}}]]]></action_json></working_still_action></response>",
+                issue: "actions[0].invalid_json",
+                guidance: "not valid JSON",
+            },
+            Case {
+                name: "removed action group shape",
+                raw: "<response><working_still_action><action_json><![CDATA[{\"order\":\"parallel\",\"actions\":[]}]]></action_json></working_still_action></response>",
+                issue: "actions[0].old_group_object_not_supported",
+                guidance: "removed {\"order\":...,\"actions\":[...]} group shape",
+            },
+            Case {
+                name: "empty workflow",
+                raw: "<response><working_still_action><action_json><![CDATA[[]]]></action_json></working_still_action></response>",
+                issue: "actions[0].actions_required",
+                guidance: "empty or incomplete stage",
+            },
+            Case {
+                name: "empty parallel stage",
+                raw: "<response><working_still_action><action_json><![CDATA[[[]]]]></action_json></working_still_action></response>",
+                issue: "actions[0][0].actions_required",
+                guidance: "empty or incomplete stage",
+            },
+            Case {
+                name: "action has no tool key",
+                raw: "<response><working_still_action><action_json><![CDATA[[{}]]]></action_json></working_still_action></response>",
+                issue: "actions[0][0].action_missing",
+                guidance: "missing its tool-name key",
+            },
+            Case {
+                name: "action has multiple tool keys",
+                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{},\"memmgr\":{}}]]]></action_json></working_still_action></response>",
+                issue: "actions[0][0].action_missing",
+                guidance: "missing its tool-name key",
+            },
+            Case {
+                name: "tool arguments are scalar",
+                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":\"pwd\"}]]]></action_json></working_still_action></response>",
+                issue: "actions[0][0].args_must_be_object",
+                guidance: "not a JSON object",
+            },
+            Case {
+                name: "workflow entry is scalar",
+                raw: "<response><working_still_action><action_json><![CDATA[[42]]]></action_json></working_still_action></response>",
+                issue: "actions[0][0].action_missing",
+                guidance: "missing its tool-name key",
+            },
+            Case {
+                name: "unknown tool",
+                raw: "<response><working_still_action><action_json><![CDATA[[{\"not_a_tool\":{}}]]]></action_json></working_still_action></response>",
+                issue: "unsupported_action:not_a_tool",
+                guidance: "not in the available capability catalog",
+            },
+            Case {
+                name: "missing required run bash command",
+                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{}}]]]></action_json></working_still_action></response>",
+                issue: "actions[0][0].input.any_required:cmd|loop_cmd",
+                guidance: "do not satisfy the capability specification",
+            },
+            Case {
+                name: "compact missing ids",
+                raw: "<response><context_compact><summary>state</summary></context_compact></response>",
+                issue: "context_compact[0].ids_required",
+                guidance: "at least one non-empty <discard> or <offload>",
+            },
+            Case {
+                name: "compact missing summary",
+                raw: "<response><context_compact><discard>pd_1</discard></context_compact></response>",
+                issue: "context_compact[0].summary_required",
+                guidance: "missing a non-empty <summary>",
+            },
+        ];
+
+        assert!(cases.len() >= 30, "keep the malformed corpus substantial");
+        for case in cases {
+            let parsed = parse_xml_envelope(case.raw, &caps());
+            assert_eq!(
+                parsed.repair_issue.as_deref(),
+                Some(case.issue),
+                "case={} raw={}",
+                case.name,
+                case.raw
+            );
+            let instruction = xml_repair_instruction_for_response(case.issue, case.raw);
+            assert!(
+                instruction.contains(case.guidance),
+                "case={} issue={} guidance={} instruction={}",
+                case.name,
+                case.issue,
+                case.guidance,
+                instruction
+            );
+        }
+    }
+
+    #[test]
     fn non_root_repair_keeps_issue_specific_static_instruction() {
         assert_eq!(
             xml_repair_instruction_for_response(
@@ -1083,6 +1332,29 @@ The issue was the bare group object inside action_json.
             .contains("Found the original malformed response"));
         assert!(env.final_answer.contains("<working_still_action>"));
         assert!(env.final_answer.contains(r#""order": "parallel""#));
+    }
+
+    #[test]
+    fn final_answer_can_contain_multiple_adjacent_response_examples_as_text() {
+        let env = parse_xml_envelope(
+            r#"<response>
+  <final_answer><![CDATA[
+First example:
+<response><final_answer>one</final_answer></response>
+<response><final_answer>two</final_answer></response>
+  ]]></final_answer>
+</response>"#,
+            &caps(),
+        );
+
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert!(!env.continue_work);
+        assert!(env
+            .final_answer
+            .contains("<response><final_answer>one</final_answer></response>"));
+        assert!(env
+            .final_answer
+            .contains("<response><final_answer>two</final_answer></response>"));
     }
 
     #[test]
