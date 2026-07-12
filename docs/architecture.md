@@ -343,6 +343,15 @@ terminal input handling. Host integrations should treat it as a state machine:
 - reply to core-originated request topics
 - signal cancellation and supply optional user supplements
 
+Model-requested actions have a failure boundary inside `agent_core`. Command
+tools and `run_bash` execute as child processes, so nonzero exits and Unix
+signals become bounded action evidence rather than host-process failures.
+Builtin callbacks are invoked through the capability registry under a panic
+boundary; a panic produces an `internal_error` audit record and the session can
+continue. Rust panic recovery cannot safely recover a native SIGSEGV in the
+same process, so future untrusted native/FFI capabilities must run behind a
+process boundary.
+
 The terminal app is one host adapter. iOS should be another host adapter, not a
 fork of the agent loop. The iOS path should reuse `agent_core` through the
 existing JSON-in/JSON-out C ABI or a thin generated binding, then implement only

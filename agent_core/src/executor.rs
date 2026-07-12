@@ -98,17 +98,35 @@ pub fn execute_command_action(
             if combined.is_empty() {
                 combined = "<no output>".to_string();
             }
-            format!(
-                "Action result: {action}\nstatus: {}\noutput:\n{}",
-                output.status.code().unwrap_or(-1),
-                compact_text(&combined, 4000)
-            )
+            if let Some(signal) = exit_signal(&output.status) {
+                format!(
+                    "Action result: {action}\nerror: terminated_by_signal\nsignal: {signal}\noutput:\n{}",
+                    compact_text(&combined, 4000)
+                )
+            } else {
+                format!(
+                    "Action result: {action}\nstatus: {}\noutput:\n{}",
+                    output.status.code().unwrap_or(-1),
+                    compact_text(&combined, 4000)
+                )
+            }
         }
         Err(err) => format!(
             "Action result: {action}\nerror: command_output_failed\nreason: {}",
             compact_text(&err.to_string(), 1000)
         ),
     }
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 fn compact_text(text: &str, max_chars: usize) -> String {
@@ -239,6 +257,23 @@ example_json: |
         assert!(result.contains("status: 3"));
         assert!(result.contains("out"));
         assert!(result.contains("stderr: err"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_action_contains_script_sigsegv_and_executor_remains_usable() {
+        let dir = temp_case_dir("command_sigsegv");
+        fs::write(dir.join("crash.sh"), "#!/bin/sh\nkill -SEGV $$\n").unwrap();
+        fs::write(dir.join("ok.sh"), "#!/bin/sh\nprintf still_alive\n").unwrap();
+
+        let crashed = execute_command_action("crash_tool", &dir.join("crash.sh"), &json!({}), 1000);
+        assert!(crashed.contains("error: terminated_by_signal"), "{crashed}");
+        assert!(crashed.contains("signal: 11"), "{crashed}");
+
+        let follow_up = execute_command_action("ok_tool", &dir.join("ok.sh"), &json!({}), 1000);
+        assert!(follow_up.contains("status: 0"), "{follow_up}");
+        assert!(follow_up.contains("still_alive"), "{follow_up}");
         let _ = fs::remove_dir_all(&dir);
     }
 

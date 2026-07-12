@@ -154,7 +154,7 @@ impl ShellJobWatcher {
             return;
         };
         let status = match watched.child.try_wait() {
-            Ok(Some(status)) => Some(status.code().unwrap_or(-1).to_string()),
+            Ok(Some(status)) => Some(exit_status_text(&status)),
             Ok(None) => None,
             Err(_) => Some("unknown".to_string()),
         };
@@ -195,7 +195,7 @@ fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
         let mut finished = Vec::new();
         for (pid, watched) in jobs.iter_mut() {
             match watched.child.try_wait() {
-                Ok(Some(status)) => finished.push((*pid, status.code().unwrap_or(-1).to_string())),
+                Ok(Some(status)) => finished.push((*pid, exit_status_text(&status))),
                 Ok(None) => {}
                 Err(_) => finished.push((*pid, "unknown".to_string())),
             }
@@ -370,11 +370,12 @@ impl FileShellJobStore {
                 next_long_running_check =
                     next_long_running_check.saturating_add(long_running_command_prompt_after());
             }
-            if let Some(code) = read_status_code(&record.status_file) {
+            if let Some(status) = read_process_status(&record.status_file) {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
                 return BashCommandOutput {
                     command: clean.to_string(),
-                    status: Some(code),
+                    status: status.code,
+                    signal: status.signal,
                     output: normalized_shell_output(&output),
                     error: None,
                 };
@@ -385,6 +386,7 @@ impl FileShellJobStore {
                 return BashCommandOutput {
                     command: clean.to_string(),
                     status: None,
+                    signal: None,
                     output: compact_text(&partial, 2000),
                     error: Some(format!("timeout_still_running:{}", record.pid)),
                 };
@@ -981,6 +983,7 @@ fn sleep_arg_seconds(arg: &str) -> Option<f64> {
 pub struct BashCommandOutput {
     pub command: String,
     pub status: Option<i32>,
+    pub signal: Option<i32>,
     pub output: String,
     pub error: Option<String>,
 }
@@ -1004,6 +1007,15 @@ impl BashCommandOutput {
                 action_name,
                 self.command,
                 bash_runtime_error_message(error)
+            );
+        }
+        if let Some(signal) = self.signal {
+            return format!(
+                "Action result: {}\nThe command terminated because of a process signal.\nCommand: {}\nSignal: {}\nOutput:\n{}",
+                action_name,
+                self.command,
+                signal,
+                compact_text(&self.output, 4000)
             );
         }
         format!(
@@ -1107,7 +1119,8 @@ fn execute_one_bash_structured_with_prompt_after(
             }
             BashCommandOutput {
                 command: command.to_string(),
-                status: Some(output.status.code().unwrap_or(-1)),
+                status: output.status.code(),
+                signal: exit_signal(&output.status),
                 output: combined,
                 error: None,
             }
@@ -1163,9 +1176,21 @@ fn bash_error(command: &str, error: &str) -> BashCommandOutput {
     BashCommandOutput {
         command: command.to_string(),
         status: None,
+        signal: None,
         output: String::new(),
         error: Some(error.to_string()),
     }
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 fn bash_action_not_executed(command: Option<&str>, reason: &str) -> String {
@@ -1205,12 +1230,37 @@ fn bash_runtime_error_message(error: &str) -> &'static str {
     }
 }
 
-fn read_status_code(status_file: &str) -> Option<i32> {
-    fs::read_to_string(status_file)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessStatus {
+    code: Option<i32>,
+    signal: Option<i32>,
+}
+
+fn read_process_status(status_file: &str) -> Option<ProcessStatus> {
+    let text = fs::read_to_string(status_file)
         .ok()
         .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .and_then(|text| text.parse::<i32>().ok())
+        .filter(|text| !text.is_empty())?;
+    if let Some(signal) = text.strip_prefix("signal:") {
+        return signal.parse::<i32>().ok().map(|signal| ProcessStatus {
+            code: None,
+            signal: Some(signal),
+        });
+    }
+    text.parse::<i32>().ok().map(|code| ProcessStatus {
+        code: Some(code),
+        signal: None,
+    })
+}
+
+fn exit_status_text(status: &std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return code.to_string();
+    }
+    if let Some(signal) = exit_signal(status) {
+        return format!("signal:{signal}");
+    }
+    "unknown".to_string()
 }
 
 fn normalized_shell_output(output: &str) -> String {
@@ -1397,6 +1447,19 @@ mod tests {
         assert!(result.contains("Action result: run_bash"));
         assert!(result.contains("Exit code: 0"));
         assert!(result.contains("shell_ok"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_bash_contains_child_sigsegv_and_accepts_follow_up_command() {
+        let mut runtime = NeverCancelRuntime;
+        let crashed = execute_one_bash("kill -SEGV $$", 1000, &mut runtime);
+        assert!(crashed.contains("process signal"), "{crashed}");
+        assert!(crashed.contains("Signal: 11"), "{crashed}");
+
+        let follow_up = execute_one_bash("printf still_alive", 1000, &mut runtime);
+        assert!(follow_up.contains("Exit code: 0"), "{follow_up}");
+        assert!(follow_up.contains("still_alive"), "{follow_up}");
     }
 
     #[test]
@@ -1798,6 +1861,34 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].status, "0");
         assert_eq!(updates[0].output, "background `ShellJobWatcher` output");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_reaps_sigsegv_background_job_and_reports_signal_transition() {
+        let dir = tmp_memory_dir("background_sigsegv");
+        let store = FileShellJobStore::new(&dir);
+        let started =
+            store.spawn_background("kill -SEGV $$", &dir, "session_signal", "turn_signal");
+        assert!(
+            started.contains("now keeps running in background"),
+            "{started}"
+        );
+
+        let mut updates = Vec::new();
+        let wait_started = Instant::now();
+        while wait_started.elapsed() < Duration::from_secs(3) {
+            let (running, current_updates) = store.refresh_for_session("session_signal");
+            updates = current_updates;
+            if running.is_empty() && !updates.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(updates.len(), 1, "signal exit must produce one update");
+        assert_eq!(updates[0].status, "signal:11");
+        assert!(store.running_for_session("session_signal").is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

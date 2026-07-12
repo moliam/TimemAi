@@ -3187,14 +3187,27 @@ impl AgentCore {
             }
         };
         self.current_stats.tool_calls += 1;
-        let execution =
-            match tool_registry::execute_builtin_tool(self, dispatch_name, &action, runtime) {
-                Some(execution) => execution,
-                None => ActionExecution::Completed(format!(
-                    "Action result: {}\nunsupported native action",
+        let execution = match tool_registry::execute_builtin_tool(
+            self,
+            dispatch_name,
+            &action,
+            runtime,
+        ) {
+            Ok(Some(execution)) => execution,
+            Ok(None) => ActionExecution::Completed(format!(
+                "Action result: {}\nunsupported native action",
+                dispatch_name
+            )),
+            Err(_) => {
+                let result = format!(
+                    "Action result: {}\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.",
                     dispatch_name
-                )),
-            };
+                );
+                self.record_action_audit(&action_for_audit, "internal_error", Some(&result));
+                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
+                return ActionExecution::Completed(result);
+            }
+        };
         match execution {
             ActionExecution::Completed(result) => {
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));

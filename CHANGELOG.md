@@ -8,6 +8,12 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Fixed
 
+- Builtin tool callback panics are now contained at the capability registry
+  boundary and returned as audited internal action failures instead of
+  unwinding through the Timem process.
+- `run_bash` and command-backed capabilities now report Unix signal termination
+  explicitly. A child command that receives SIGSEGV no longer appears as an
+  ordinary `Exit code: -1`, and the current session remains usable.
 - Action results are now budgeted before their prompt Delta is committed. If a
   sudden result would push estimated input beyond 95% of
   `TIMEM_MAX_LLM_INPUT`, the large output is omitted and a bounded SYSTEM note
