@@ -6,6 +6,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-07-12
+
 ### Fixed
 
 - Rust test functions and fixture corpora now live under each crate's `tests`
