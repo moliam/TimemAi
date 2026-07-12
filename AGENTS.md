@@ -15,6 +15,10 @@ making changes. Keep it short, concrete, and enforceable.
 - New functionality must be tested end to end, not only by isolated helper
   tests. Include multi-turn flows when the feature participates in agent
   interaction.
+- Test functions and fixture corpora belong under each crate's `tests`
+  directory, not in production files under `src`. A `src` module may retain
+  only the minimal `#[cfg(test)]` path/module declaration or test-only hook
+  required for private white-box access.
 - Tests should challenge behavior with malformed model output, boundary sizes,
   cancellation, retries, and realistic terminal interaction where relevant.
 - Do not use real user private facts, paths, keys, internal URLs, or personal

@@ -238,12 +238,5 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scratch_kind_aliases_are_normalized() {
-        assert_eq!(normalize_scratch_kind("note"), "notes");
-        assert_eq!(normalize_scratch_kind("custom"), "custom");
-    }
-}
+#[path = "../../../agent_core/tests/unit/capability_tool_memmgr_tests.rs"]
+mod tests;
