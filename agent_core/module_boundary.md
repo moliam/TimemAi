@@ -286,3 +286,9 @@ such as action intent, job progress, retry status, or memory activity. A host ma
 render, throttle, or ignore those topics, but it should not treat them as
 required user decisions unless the topic explicitly expects a reply and the
 session state is waiting.
+
+## Test Layout
+
+Test functions and fixture corpora live under `agent_core/tests`. Production
+modules may keep only a minimal `#[cfg(test)]` external-module declaration or
+an explicitly test-only hook needed for private white-box access.

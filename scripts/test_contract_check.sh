@@ -87,6 +87,17 @@ for pattern in "${required_patterns[@]}"; do
   fi
 done
 
+inline_test_hits="$(
+  search_lines_regex '#\[test\]' \
+    agent_core/src timem_shell/src resources/capabilities/tools \
+    || true
+)"
+if [ -n "$inline_test_hits" ]; then
+  echo "test functions must live under a crate tests directory, not src:" >&2
+  echo "$inline_test_hits" >&2
+  exit 1
+fi
+
 ci_required=(
   "cargo test --workspace"
   "scripts/edge_regression.sh"

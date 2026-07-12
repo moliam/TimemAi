@@ -8,6 +8,10 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Fixed
 
+- Rust test functions and fixture corpora now live under each crate's `tests`
+  directory instead of being embedded in production implementation files. CI
+  rejects new `#[test]` functions under `src` or capability tool sources.
+
 - XML protocol repair now inspects malformed root structure and returns a
   branch-matched correction skeleton. Content placed before `<response>`, such
   as a stray `<free_talk>`, receives an explicit instruction to move every tag
