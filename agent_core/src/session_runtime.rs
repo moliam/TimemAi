@@ -1168,6 +1168,89 @@ This is an answer, not an executable action:
     }
 
     #[test]
+    fn session_turn_xml_root_repair_explains_exact_structure_then_continues_action() {
+        let dir = tmp_dir("xml_root_repair_exact_structure");
+        let audit = dir.join("audit.json");
+        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+        let mut config = test_config();
+        config.response_protocol = crate::ResponseProtocolKind::Xml;
+        let mut ui = RetryRecordingUi::default();
+        let mut model = ReplayModel::new([
+            Ok(llm(
+                r#"<free_talk>search memory</free_talk>
+<response>
+  <working_still_action>
+    <action_json><![CDATA[[{"memmgr":{"type":"raw_chat","op":"search","search_text":"fixture","limit":1}}]]]></action_json>
+  </working_still_action>
+</response>"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                r#"<response>
+  <free_talk>search memory</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[[{"memmgr":{"type":"raw_chat","op":"search","search_text":"fixture","limit":1}}]]]></action_json>
+  </working_still_action>
+</response>"#,
+                1_000,
+                false,
+            )),
+            Ok(llm(
+                "<response><final_answer>repair recovered</final_answer></response>",
+                1_000,
+                false,
+            )),
+        ]);
+
+        let outcome = run_session_turn_with_model_client(
+            &mut core,
+            &mut config,
+            TurnInput {
+                input: "find fixture",
+                session: "xml_root_repair_session",
+                audit_file: &audit,
+                runtime: "timem_native_shell",
+                run_bash_target: "user_local_machine",
+                additional_context: None,
+            },
+            &mut ui,
+            None,
+            &mut model,
+        );
+
+        assert_eq!(outcome.text, "repair recovered");
+        assert_eq!(outcome.stats.repair_calls, 1);
+        assert_eq!(outcome.stats.tool_calls, 1);
+        assert_eq!(model.prompts.len(), 3);
+        assert!(model.prompts[1].contains("## TIMEM_ASSISTANT"));
+        assert!(model.prompts[1].contains("<free_talk>search memory</free_talk>"));
+        assert!(model.prompts[1].contains(
+            "The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'"
+        ));
+        assert!(model.prompts[2].contains("Action result: memmgr"));
+        let repair_events = read_audit_events(&audit)
+            .into_iter()
+            .filter(|event| event["type"] == "model_repair_request")
+            .collect::<Vec<_>>();
+        assert_eq!(repair_events.len(), 1);
+        let repair_log: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("api_output_repair.json")).unwrap(),
+        )
+        .unwrap();
+        let repair_record = &repair_log["records"][0];
+        assert_eq!(repair_record["issue"], "xml_content_before_response");
+        assert!(repair_record["system_message"]
+            .as_str()
+            .unwrap()
+            .contains(
+                "The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'"
+            ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn session_turn_xml_raw_string_tags_do_not_repair_or_execute() {
         let dir = tmp_dir("xml_raw_string_tags");
         let audit = dir.join("audit.json");
@@ -1245,7 +1328,6 @@ This is all answer text.
             Ok(llm(
                 r#"<response>
 <free_talk>Need a local check.</free_talk>
-<free_talk>checking</free_talk>
 <working_still_action>
 <action_json><![CDATA[
 {"run_bash":{"cmd":"pwd",}}

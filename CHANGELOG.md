@@ -8,6 +8,10 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Fixed
 
+- XML protocol repair now inspects malformed root structure and returns a
+  branch-matched correction skeleton. Content placed before `<response>`, such
+  as a stray `<free_talk>`, receives an explicit instruction to move every tag
+  inside the single root; realtime repair audit records the same guidance.
 - Builtin tool callback panics are now contained at the capability registry
   boundary and returned as audited internal action failures instead of
   unwinding through the Timem process.

@@ -1455,9 +1455,11 @@ impl AgentCore {
         let raw_model_output = response.content.clone();
         if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
             let protocol_suite = self.response_protocol.suite();
+            let instruction = protocol_suite
+                .repair_instruction_for_response("truncated_model_output", &response.content);
             return self.request_protocol_repair(
                 "truncated_model_output",
-                protocol_suite.repair_instruction("truncated_model_output"),
+                &instruction,
                 &response.content,
                 runtime,
             );
@@ -1467,9 +1469,11 @@ impl AgentCore {
         let mut slices = Vec::new();
         if let Some(issue) = parsed.repair_issue.clone() {
             if self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
+                let instruction =
+                    protocol_suite.repair_instruction_for_response(&issue, &response.content);
                 return self.request_protocol_repair(
                     &issue,
-                    protocol_suite.repair_instruction(&issue),
+                    &instruction,
                     &response.content,
                     runtime,
                 );
@@ -1843,8 +1847,14 @@ impl AgentCore {
                 ),
             );
             let instruction = issue
-                .map(|issue| self.response_protocol.suite().repair_instruction(issue))
-                .unwrap_or("Please resend the response using the required protocol format.");
+                .map(|issue| {
+                    self.response_protocol
+                        .suite()
+                        .repair_instruction_for_response(issue, raw_response)
+                })
+                .unwrap_or_else(|| {
+                    "Please resend the response using the required protocol format.".to_string()
+                });
             let system_message = format!(
                 "{}'s previous response is not protocol compliant.\nerror: {}\n\n{}",
                 self.assistant_speaker_name,

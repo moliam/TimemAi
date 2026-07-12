@@ -57,7 +57,10 @@ flowchart LR
 - Builds append-only prompt segments.
 - Parses and repairs model response envelopes through
   `agent_core::response_protocol`. The parser modules are runtime code, not
-  model-facing prompt resources.
+  model-facing prompt resources. Each protocol suite owns issue-specific repair
+  guidance and may inspect the malformed raw response to provide a concrete,
+  protocol-native correction skeleton; the turn loop only assembles the shared
+  temporary repair delta and audit record.
 - Loads capability manifests and renders the model-facing tool catalog from the
   same JSON Schema style IDL used to validate canonical tool actions.
 - Renders `prompt_0` and dynamic prompt delta blocks through
@@ -941,11 +944,11 @@ whether to answer or ask for another action.
 
 Provider output is untrusted. The runtime validates:
 
-- The response is a JSON object or contains an extractable JSON envelope.
+- The response follows the selected JSON, Markdown, or XML envelope.
 - `status`, `free_talk`, `final_answer`, and `context_compact` follow
   the active response protocol contract.
-- `next_actions` is an array when present.
-- Every action has `action` and valid `args`.
+- The action section follows the selected protocol's workflow-array shape.
+- Every action uses a registered tool-name key and a valid argument object.
 - SQL and bash actions pass their own safety checks.
 
 If validation fails, the runtime builds a temporary, non-cache-controlled repair
@@ -958,7 +961,9 @@ the concrete protocol error:
 
 ## SYSTEM
 <CURRENT_ASSISTANT_NAME>'s previous response is not protocol compliant.
-error: actions[0].args_required
+error: invalid_xml_response_root
+
+The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'.
 ```
 
 Repair is retried a bounded number of times for one model response failure. Each

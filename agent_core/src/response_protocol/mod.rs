@@ -367,6 +367,9 @@ pub trait ResponseProtocolSuite {
     }
     fn parse(&self, raw: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope;
     fn repair_instruction(&self, issue: &str) -> &str;
+    fn repair_instruction_for_response(&self, issue: &str, _raw_response: &str) -> String {
+        self.repair_instruction(issue).to_string()
+    }
     fn repair_reason(&self, issue: &str) -> &str;
     fn focused_repair_text(&self, issue: &str, text: &str) -> String;
     fn can_show_plain_text_after_repair_failure(&self, content: &str) -> bool;

@@ -4,9 +4,10 @@ All responses must be valid XML wrapped in a single `<response>` root.
 
 ## Core Constraints
 
-1. **Order**: `<free_talk>` (Optional) -> `<working_still_action>` OR `<context_compact>` OR `<final_answer>`.
-2. **Action Payload**: Inside `<working_still_action>`, use `<action_json><![CDATA[<JSON_LITERAL_TEXT>]]></action_json>`.
-3. **No Outer Fences**: Output directly starts with `<response>`, no markdown code blocks allowed as the root wrapper.
+1. **Root**: The entire output is one `<response>...</response>` element. No text or child tag may appear before `<response>` or after `</response>`.
+2. **Inside-Root Order**: Inside `<response>`, write optional `<free_talk>` first, then `<working_still_action>` OR `<context_compact>` OR `<final_answer>`.
+3. **Action Payload**: Inside `<working_still_action>`, use `<action_json><![CDATA[<JSON_LITERAL_TEXT>]]></action_json>`.
+4. **No Outer Fences**: Output directly starts with `<response>`, no markdown code blocks allowed as the root wrapper.
 
 ## Tag Dictionary & Streaming Flow
 
