@@ -4,9 +4,9 @@ use super::{
     merge_queued_input, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
     paste_marker_segments, paste_recovery_return_edit_clear_lines,
     paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
-    push_thinking_supplement_bytes, queued_input_drain_from_bytes, random_spinner_tick,
-    raw_multiline_paste_display, raw_multiline_paste_needs_confirmation, read_approval_key,
-    read_approval_key_until, read_menu_key, read_paste_recovery_key,
+    push_thinking_supplement_bytes, queued_input_drain_from_bytes, queued_text_to_supplements,
+    random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
+    read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
     reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
     render_approval_choices, render_config_apply_report, render_config_menu,
     render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
@@ -151,14 +151,11 @@ fn thinking_supplement_ignores_empty_and_control_lines() {
 }
 
 #[test]
-fn thinking_supplement_escape_clears_only_the_current_editor_buffer() {
-    let mut buffer = "待取消的补充".as_bytes().to_vec();
-    let mut pending = vec!["已提交的补充".to_string()];
-
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, &[27]);
-
-    assert!(buffer.is_empty());
-    assert_eq!(pending, vec!["已提交的补充"]);
+fn queued_thinking_supplement_text_splits_nonempty_lines() {
+    assert_eq!(
+        queued_text_to_supplements("\n 补充一 \r\n\n补充二\n"),
+        vec!["补充一", "补充二"]
+    );
 }
 
 #[test]
@@ -241,32 +238,24 @@ fn thinking_status_initial_frame_includes_thought_panel() {
     assert!(rendered.contains("Thought / Action"));
     assert!(rendered.contains("思考中"));
     assert!(rendered.contains("[INPUT]"));
+    assert!(rendered.contains("模型工作中可继续输入补充"));
     assert!(!rendered.contains("x2"));
 
     status.finish();
 }
 
 #[test]
-fn thinking_view_input_row_is_last_and_preserves_the_live_editor_text() {
+fn thinking_view_input_hint_is_inside_rendered_frame_accounting() {
     let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
     let snapshot = status.state.lock().unwrap().clone();
-    let rendered = timem_shell::render_thinking_view_with_input_at(
-        &snapshot,
-        "12:00:00",
-        "补充：不要提交，先展示 diff",
-    );
+    let rendered = timem_shell::render_thinking_view_at(&snapshot, "12:00:00");
     let rows = rendered_terminal_rows(&rendered, 100);
 
     assert!(rendered.contains("[INPUT]"));
-    assert!(rendered.contains("补充：不要提交，先展示 diff"));
     assert!(rows >= rendered.lines().count());
     assert!(
-        rendered.find("[INPUT]").unwrap() > rendered.find("aliyun:qwen-plus").unwrap(),
-        "the editable input row must be below the status footer"
-    );
-    assert!(
-        rendered.trim_end().ends_with("补充：不要提交，先展示 diff"),
-        "the terminal cursor should remain at the end of the input row"
+        rendered.find("[INPUT]").unwrap() < rendered.find("aliyun:qwen-plus").unwrap(),
+        "input hint should be rendered before status lines so users see it while thinking"
     );
 
     status.finish();
