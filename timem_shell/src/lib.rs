@@ -52,7 +52,7 @@ pub use observation::{
     observation_events_from_core_topic_events, observation_panel_width_for_terminal,
     render_observation_panel, render_observation_panel_at,
     render_observation_panel_at_with_elapsed, ObservationEvent, ObservationLine,
-    ObservationLineStyle, ObservationPanel, ObservationPanelMode,
+    ObservationLineStyle, ObservationPanel,
 };
 pub use profiler::render_prof_report_data;
 
@@ -61,7 +61,6 @@ pub const ANSI_RESET: &str = "\x1b[0m";
 pub const ANSI_BRIGHT_TIMEM: &str = "\x1b[92;1m";
 pub const ANSI_DIM: &str = "\x1b[2m";
 pub const ANSI_BOLD: &str = "\x1b[1m";
-pub const ANSI_BLUE_BOLD: &str = "\x1b[94;1m";
 pub const SPINNER_ICONS: [&str; 27] = [
     "🦩", "🐧", "🦅", "🦆", "🦢", "🦉", "🦄", "🦖", "🐉", "🐌", "🦏", "🦛", "🐫", "🦙", "🦑", "🦞",
     "🦐", "🦁", "🐮", "🐷", "🐸", "🐒", "🐭", "🐹", "🐰", "🦊", "🦝",
@@ -209,17 +208,9 @@ fn render_named_thinking_view_at(
         snapshot.status.tick,
         Some(&format_elapsed_clock(snapshot.status.elapsed_secs)),
     ));
-    out.push_str(&render_thinking_input_hint());
     out.push_str(&render_thinking_status_line(&snapshot.status));
     out.push('\n');
     out
-}
-
-fn render_thinking_input_hint() -> String {
-    let label = format!("{ANSI_BLUE_BOLD}[INPUT]{ANSI_RESET}{ANSI_DIM}");
-    let text =
-        format!("  {label} 模型工作中可继续输入补充，Enter 发送到当前任务；Ctrl+C 取消本轮。");
-    format!("{}\n", dim_line(&text))
 }
 
 fn render_thinking_status_line(snapshot: &ShellStatusSnapshot) -> String {

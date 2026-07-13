@@ -4,7 +4,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const ANSI_BOLD: &str = "\x1b[1m";
 const ANSI_RESET: &str = "\x1b[0m";
-const ANSI_INFO: &str = "\x1b[94;1m";
 const ACTIVE_TEXT_COLORS: [&str; 3] = ["\x1b[38;5;245m", "\x1b[38;5;250m", "\x1b[38;5;255m"];
 const OBSERVATION_LINE_PREFIX: &str = "· ";
 const OBSERVATION_CHILD_MID_PREFIX: &str = "  ├─ ";
@@ -44,21 +43,6 @@ pub enum ObservationEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObservationPanelMode {
-    Scroll,
-    Accumulate,
-}
-
-impl ObservationPanelMode {
-    pub fn from_env() -> Self {
-        match std::env::var("TIMEM_THOUGHT_PANEL_MODE") {
-            Ok(value) if value.eq_ignore_ascii_case("accumulate") => Self::Accumulate,
-            _ => Self::Scroll,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservationLineStyle {
     Normal,
     ActiveBlink,
@@ -86,7 +70,6 @@ pub struct ObservationPanel {
     transients: Vec<TransientObservation>,
     max_lines: usize,
     max_width: usize,
-    mode: ObservationPanelMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,17 +91,7 @@ impl ObservationPanel {
             transients: Vec::new(),
             max_lines: max_lines.max(1),
             max_width: max_width.max(10),
-            mode: ObservationPanelMode::Scroll,
         }
-    }
-
-    pub fn with_mode(mut self, mode: ObservationPanelMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    pub fn mode(&self) -> ObservationPanelMode {
-        self.mode
     }
 
     pub fn set_max_width(&mut self, max_width: usize) {
@@ -128,10 +101,7 @@ impl ObservationPanel {
     pub fn apply(&mut self, event: ObservationEvent) {
         match event {
             ObservationEvent::Persistent(text) => {
-                let prefix = if text.starts_with("💡 ")
-                    || text.starts_with("⚙️ ")
-                    || text.starts_with("[INFO] ")
-                {
+                let prefix = if text.starts_with("💡 ") || text.starts_with("⚙️ ") {
                     String::new()
                 } else {
                     OBSERVATION_LINE_PREFIX.to_string()
@@ -244,10 +214,8 @@ impl ObservationPanel {
             prefix,
             timer,
         });
-        if self.mode == ObservationPanelMode::Scroll {
-            while self.lines.len() > self.max_lines {
-                self.lines.pop_front();
-            }
+        while self.lines.len() > self.max_lines {
+            self.lines.pop_front();
         }
     }
 
@@ -261,7 +229,7 @@ impl ObservationPanel {
                 timer: None,
             });
         }
-        if self.mode == ObservationPanelMode::Scroll && lines.len() > self.max_lines {
+        if lines.len() > self.max_lines {
             let overflow = lines.len() - self.max_lines;
             lines.drain(0..overflow);
         }
@@ -506,7 +474,7 @@ pub fn render_observation_panel_at_with_elapsed(
             render_rows.push((line.style, format!("{prefix}{rendered}")));
         }
     }
-    if panel.mode == ObservationPanelMode::Scroll && render_rows.len() > panel.max_lines {
+    if render_rows.len() > panel.max_lines {
         let overflow = render_rows.len() - panel.max_lines;
         render_rows.drain(0..overflow);
     }
@@ -573,14 +541,6 @@ pub fn observation_events_from_core_topic_events(
                 "⚠️ 模型回复偏离协议，重试 ({attempt}/{max_attempts})..."
             )));
             observations.push(ObservationEvent::EnsureTransient("思考中...".to_string()));
-            continue;
-        }
-        if let Some(compact) = event.as_context_compact() {
-            observations.push(ObservationEvent::Persistent(format!(
-                "[INFO] Context compacted : {} --> {}",
-                compact_estimated_token_count(compact.estimated_before_tokens),
-                compact_estimated_token_count(compact.estimated_after_tokens)
-            )));
             continue;
         }
         if event.as_work_instruction_load().is_some() {
@@ -776,26 +736,6 @@ fn fallback_unknown(text: &str) -> String {
     }
 }
 
-fn compact_estimated_token_count(value: u32) -> String {
-    if value < 1_000 {
-        return value.to_string();
-    }
-    if value < 1_000_000 {
-        return trim_decimal(format!("{:.1}", value as f64 / 1_000.0)) + "K";
-    }
-    trim_decimal(format!("{:.2}", value as f64 / 1_000_000.0)) + "M"
-}
-
-fn trim_decimal(mut text: String) -> String {
-    while text.contains('.') && text.ends_with('0') {
-        text.pop();
-    }
-    if text.ends_with('.') {
-        text.pop();
-    }
-    text
-}
-
 fn action_observation_pair(
     parent_label: Option<&str>,
     child_style: ObservationLineStyle,
@@ -871,21 +811,6 @@ fn wrap_display_width_limited(text: &str, width: usize, max_lines: usize) -> Vec
 }
 
 fn render_markdown_lines_limited(text: &str, width: usize, max_lines: usize) -> Vec<String> {
-    if text.starts_with("[INFO] ") {
-        let rows = wrap_display_width_limited(text, width, max_lines);
-        return rows
-            .into_iter()
-            .enumerate()
-            .map(|(idx, line)| {
-                if idx == 0 {
-                    let rendered = termimad::inline(&line).to_string();
-                    rendered.replacen("[INFO]", &format!("{ANSI_INFO}[INFO]{ANSI_RESET}"), 1)
-                } else {
-                    termimad::inline(&line).to_string()
-                }
-            })
-            .collect::<Vec<_>>();
-    }
     if let Some(code) = single_inline_code_span(text) {
         return wrap_display_width_limited(code, width, max_lines)
             .into_iter()

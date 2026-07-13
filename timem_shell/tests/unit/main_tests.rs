@@ -237,26 +237,7 @@ fn thinking_status_initial_frame_includes_thought_panel() {
 
     assert!(rendered.contains("Thought / Action"));
     assert!(rendered.contains("思考中"));
-    assert!(rendered.contains("[INPUT]"));
-    assert!(rendered.contains("模型工作中可继续输入补充"));
     assert!(!rendered.contains("x2"));
-
-    status.finish();
-}
-
-#[test]
-fn thinking_view_input_hint_is_inside_rendered_frame_accounting() {
-    let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
-    let snapshot = status.state.lock().unwrap().clone();
-    let rendered = timem_shell::render_thinking_view_at(&snapshot, "12:00:00");
-    let rows = rendered_terminal_rows(&rendered, 100);
-
-    assert!(rendered.contains("[INPUT]"));
-    assert!(rows >= rendered.lines().count());
-    assert!(
-        rendered.find("[INPUT]").unwrap() < rendered.find("aliyun:qwen-plus").unwrap(),
-        "input hint should be rendered before status lines so users see it while thinking"
-    );
 
     status.finish();
 }
@@ -981,7 +962,6 @@ fn runtime_help_omits_startup_options_and_highlights_sections() {
     for expected in [
         "\x1b[1mInteractive commands\x1b[0m",
         "\x1b[1mInteractive keys\x1b[0m",
-        "\x1b[1mDisplay\x1b[0m",
         "\x1b[1mRuntime system\x1b[0m",
         "/help",
         "/config",
@@ -990,7 +970,6 @@ fn runtime_help_omits_startup_options_and_highlights_sections() {
         "/exit",
         "Ctrl+C or Esc cancels",
         "While Timem is thinking",
-        "TIMEM_THOUGHT_PANEL_MODE=accumulate",
         "Use /prof to inspect token usage",
         "Use /config for changes that can take effect without restarting",
     ] {
