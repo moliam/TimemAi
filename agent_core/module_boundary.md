@@ -84,6 +84,12 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   application, process execution, command output/evidence shaping, and tool
   audit. Hosts may provide user decisions and cancellation signals, but the
   executor remains a core responsibility.
+- Action failure isolation. External command exits, including signal-based
+  termination, are action results and must not terminate the core process.
+  Builtin callback panics are contained at the tool registry boundary, reported
+  as internal action failures, and audited as `internal_error`. A tool that can
+  cause a native in-process fault must use process isolation rather than relying
+  on panic recovery.
 - Long foreground command lifecycle for positive model-provided `timeout_ms`:
   core owns process waiting, long-running decision requests, timeout transition
   into the session running-pid set, action result shaping, and user-supplement
@@ -280,3 +286,9 @@ such as action intent, job progress, retry status, or memory activity. A host ma
 render, throttle, or ignore those topics, but it should not treat them as
 required user decisions unless the topic explicitly expects a reply and the
 session state is waiting.
+
+## Test Layout
+
+Test functions and fixture corpora live under `agent_core/tests`. Production
+modules may keep only a minimal `#[cfg(test)]` external-module declaration or
+an explicitly test-only hook needed for private white-box access.

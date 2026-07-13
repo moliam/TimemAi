@@ -5164,6 +5164,48 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
     assert!(!prompt.contains("shell_expansion_not_allowed"));
 }
 
+#[cfg(unix)]
+#[test]
+fn run_bash_child_sigsegv_isolated_and_turn_can_still_finish() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("aliyun", "qwen-plus"),
+        tmp_dir("bash_sigsegv_isolation"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("run a crashing child and keep working", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"kill -SEGV $$","timeout_ms":5000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step after child signal: {other:?}"),
+    };
+    assert!(prompt.contains("process signal"), "{prompt}");
+    assert!(prompt.contains("Signal: 11"), "{prompt}");
+
+    let final_turn = match core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"ALL_FINISHED","final_answer":"The child failed, but the session remained active."}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::Final(turn) => turn,
+        other => panic!("core did not finish after isolated child signal: {other:?}"),
+    };
+    assert_eq!(
+        final_turn.final_answer,
+        "The child failed, but the session remained active."
+    );
+}
+
 #[test]
 fn run_bash_missing_command_returns_tool_input_error() {
     let mut core = AgentCore::new(

@@ -6,6 +6,45 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-07-12
+
+### Fixed
+
+- Rust test functions and fixture corpora now live under each crate's `tests`
+  directory instead of being embedded in production implementation files. CI
+  rejects new `#[test]` functions under `src` or capability tool sources.
+
+- XML protocol repair now inspects malformed root structure and returns a
+  branch-matched correction skeleton. Content placed before `<response>`, such
+  as a stray `<free_talk>`, receives an explicit instruction to move every tag
+  inside the single root; realtime repair audit records the same guidance.
+- XML repair classification is guarded by a 30-case raw-response corpus.
+  Consecutive top-level `<response>` documents are rejected as trailing root
+  content, while XML examples inside final-answer text remain opaque data.
+- Builtin tool callback panics are now contained at the capability registry
+  boundary and returned as audited internal action failures instead of
+  unwinding through the Timem process.
+- `run_bash` and command-backed capabilities now report Unix signal termination
+  explicitly. A child command that receives SIGSEGV no longer appears as an
+  ordinary `Exit code: -1`, and the current session remains usable.
+- Action results are now budgeted before their prompt Delta is committed. If a
+  sudden result would push estimated input beyond 95% of
+  `TIMEM_MAX_LLM_INPUT`, the large output is omitted and a bounded SYSTEM note
+  asks the model to narrow the action or compact context.
+- Explicit local `E2BIG` and provider input/context-too-large failures now
+  remove the most recent action-result Delta once, append a compact SYSTEM
+  recovery note, and continue the same turn instead of immediately stopping or
+  retrying forever. The recovery is recorded in the API audit.
+- Provider request JSON is streamed to `curl` through stdin instead of being
+  placed in the process argument list, preventing large prompts from failing
+  locally with `Argument list too long (os error 7)` before any HTTP request.
+- Provider transport now drains stdout and stderr concurrently while retaining
+  cancellation polling, avoiding pipe backpressure on unusually large provider
+  responses or error bodies.
+- SIGINT handler registration now uses an explicit function-pointer conversion,
+  eliminating the newer Rust `function_casts_as_integer` warning on Linux while
+  preserving macOS behavior.
+
 ## [0.9.9] - 2026-07-11
 
 ### Added
@@ -25,6 +64,7 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   topic fan-out, and long Thought / Action panel rendering hot paths.
 
 ### Changed
+- Improved `self_tool` prompt description to remind the model to use `chg_cwd` instead of repeating `cd` in every `run_bash` command, reducing redundant output.
 - Default response protocol changed from JSON to XML.
 - Consolidated core protocol and shell runtime into agent_core.
 - Reorganized capability tools into resources/capabilities/tools/.

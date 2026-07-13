@@ -37,6 +37,9 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
     fn repair_instruction(&self, issue: &str) -> &str {
         xml_repair_instruction(issue)
     }
+    fn repair_instruction_for_response(&self, issue: &str, raw_response: &str) -> String {
+        xml_repair_instruction_for_response(issue, raw_response)
+    }
     fn repair_reason(&self, issue: &str) -> &str {
         xml_repair_reason(issue)
     }
@@ -60,13 +63,16 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     if looks_like_external_tool_call_protocol(protocol_text) {
         return malformed_xml_response("external_tool_call_protocol");
     }
+    if has_adjacent_response_roots(protocol_text) {
+        return malformed_xml_response("xml_content_after_response");
+    }
 
     let Some(response) = parse_response_fields(protocol_text) else {
-        if protocol_text.starts_with('<') {
-            return malformed_xml_response("invalid_xml_response_root");
-        }
         if protocol_text.is_empty() {
             return malformed_xml_response("empty_response");
+        }
+        if protocol_text.starts_with('<') {
+            return malformed_xml_response(classify_xml_root_issue(protocol_text));
         }
         return ParsedEnvelope {
             final_answer: protocol_text.to_string(),
@@ -136,6 +142,35 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     }
 }
 
+fn has_adjacent_response_roots(text: &str) -> bool {
+    let mut cursor = 0usize;
+    while let Some(close_rel) = text[cursor..].find("</response>") {
+        let close_start = cursor + close_rel;
+        let after = close_start + "</response>".len();
+        if !is_inside_cdata(text, close_start)
+            && !is_inside_outer_text_field(text, close_start, "free_talk")
+            && !is_inside_outer_text_field(text, close_start, "final_answer")
+            && find_open_tag(text[after..].trim_start(), "response") == Some(0)
+        {
+            return true;
+        }
+        cursor = after;
+    }
+    false
+}
+
+fn is_inside_outer_text_field(text: &str, pos: usize, tag: &str) -> bool {
+    let before = &text[..pos];
+    let mut open_count = 0usize;
+    let mut cursor = 0usize;
+    while let Some(open_rel) = find_open_tag(&before[cursor..], tag) {
+        open_count += 1;
+        cursor += open_rel + tag.len() + 1;
+    }
+    let close_count = before.matches(&format!("</{tag}>")).count();
+    open_count > close_count
+}
+
 fn strip_surrounding_xml_fence(text: &str) -> Option<&str> {
     let text = text.trim();
     let rest = text.strip_prefix("```")?;
@@ -188,6 +223,30 @@ fn parse_response_fields(text: &str) -> Option<ResponseFields> {
     Some(scan_response_body(body))
 }
 
+fn classify_xml_root_issue(text: &str) -> &'static str {
+    let text = text.trim();
+    let Some(open_start) = find_open_tag(text, "response") else {
+        return "xml_response_root_missing";
+    };
+    if !text[..open_start].trim().is_empty() {
+        return "xml_content_before_response";
+    }
+    let Some(open_end) = find_tag_end(text, open_start) else {
+        return "xml_response_root_unclosed";
+    };
+    if is_self_closing_start_tag(&text[open_start..=open_end]) {
+        return "xml_response_root_self_closing";
+    }
+    let Some(close_start) = find_last_close_tag(text, open_end + 1, "response") else {
+        return "xml_response_root_unclosed";
+    };
+    let close_end = close_start + "</response>".len();
+    if !text[close_end..].trim().is_empty() {
+        return "xml_content_after_response";
+    }
+    "invalid_xml_response_root"
+}
+
 fn scan_response_body(body: &str) -> ResponseFields {
     const TOP_LEVEL_TAGS: &[&str] = &[
         "free_talk",
@@ -204,15 +263,23 @@ fn scan_response_body(body: &str) -> ResponseFields {
     let mut state_branch_count = 0usize;
     let mut has_working_action = false;
     let mut has_final_answer = false;
+    let mut has_free_talk = false;
 
     while let Some((open_start, tag)) = find_next_open_raw_tag(body, cursor, TOP_LEVEL_TAGS) {
+        if fields.flow_issue.is_none() && !body[cursor..open_start].trim().is_empty() {
+            fields.flow_issue = Some("xml_unexpected_content_inside_response".to_string());
+        }
         let Some(open_end) = find_tag_end(body, open_start) else {
             fields
                 .flow_issue
-                .get_or_insert_with(|| "invalid_xml_response_root".to_string());
+                .get_or_insert_with(|| format!("xml_malformed_tag:{tag}"));
             break;
         };
         let tag_order = if matches!(tag, "free_talk" | "free-talk" | "freetalk") {
+            if has_free_talk && fields.flow_issue.is_none() {
+                fields.flow_issue = Some("xml_duplicate_free_talk".to_string());
+            }
+            has_free_talk = true;
             1
         } else {
             state_branch_count += 1;
@@ -247,7 +314,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
         let Some(close_start) = close_start else {
             fields
                 .flow_issue
-                .get_or_insert_with(|| "invalid_xml_response_root".to_string());
+                .get_or_insert_with(|| format!("xml_unclosed_tag:{tag}"));
             break;
         };
         let inner = &body[open_end + 1..close_start];
@@ -274,6 +341,10 @@ fn scan_response_body(body: &str) -> ResponseFields {
             _ => {}
         }
         cursor = close_start + close_tag_len(tag);
+    }
+
+    if fields.flow_issue.is_none() && !body[cursor..].trim().is_empty() {
+        fields.flow_issue = Some("xml_unexpected_content_inside_response".to_string());
     }
 
     if fields.flow_issue.is_none() && has_working_action && has_final_answer {
@@ -452,7 +523,7 @@ fn find_open_tag(haystack: &str, tag: &str) -> Option<usize> {
         let after = lower.as_bytes().get(pos + needle.len()).copied();
         if matches!(
             after,
-            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+            Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
         ) {
             return Some(pos);
         }
@@ -601,6 +672,9 @@ fn split_id_list(raw: &str) -> Vec<String> {
 
 pub fn xml_repair_instruction(issue: &str) -> &'static str {
     match issue {
+        "empty_response" => {
+            "检查到模型没有生成可解析的内容。请重新输出一个完整的 <response>...</response>；需要继续执行动作时在其中提供 <working_still_action>，已经完成时提供 <final_answer>。"
+        }
         "truncated_model_output" => {
             "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <free_talk> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
         }
@@ -616,6 +690,69 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         "next_actions_required_when_status_working" => {
             "检查到刚刚的输出格式有点问题：如果仍需 runtime 继续执行动作，必须提供 <working_still_action>；如果当前用户请求已经完成，请改用 <final_answer>。"
         }
+        "invalid_xml_response_root" => {
+            "The response must be exactly one <response>...</response> root element, with no text or tags before <response> or after </response>. Put <free_talk> and the selected state branch inside that root."
+        }
+        "xml_response_root_missing" => {
+            "The required <response> root is missing. Return XML only, beginning with <response> and ending with </response>."
+        }
+        "xml_response_root_unclosed" => {
+            "The <response> root is not completely closed. Return one complete <response>...</response> document."
+        }
+        "xml_response_root_self_closing" => {
+            "A self-closing <response/> cannot contain the required response branch. Use <response>...</response> with exactly one state branch inside."
+        }
+        "xml_content_before_response" => {
+            "The response contains text or tags before <response>. Move all response fields inside the single <response> root."
+        }
+        "xml_content_after_response" => {
+            "The response contains text or tags after </response>. Return exactly one XML root and remove all trailing content."
+        }
+        "xml_unexpected_content_inside_response" => {
+            "The <response> body contains text or an unknown top-level tag outside a supported field. Put text inside <free_talk> or <final_answer>, and use only one supported state branch."
+        }
+        "xml_duplicate_free_talk" => {
+            "The response contains more than one <free_talk> field. Merge them into one optional <free_talk> before the state branch."
+        }
+        issue if issue.starts_with("xml_unclosed_tag:") => {
+            "A response field tag is not closed. Close the named tag before writing the next field or </response>."
+        }
+        issue if issue.starts_with("xml_malformed_tag:") => {
+            "A response field opening tag is malformed. Rewrite that field with a complete opening tag, matching closing tag, and no broken attributes."
+        }
+        "xml_tags_out_of_order" => {
+            "The XML tags are out of order. Inside <response>, put optional <free_talk> first, followed by exactly one of <working_still_action>, <context_compact>, or <final_answer>."
+        }
+        "state_branch_must_choose_one" => {
+            "The response selected more than one state branch. Inside <response>, use exactly one of <working_still_action>, <context_compact>, or <final_answer>."
+        }
+        issue if issue.ends_with(".invalid_json") => {
+            "The <action_json> content is not valid JSON. Keep it inside <![CDATA[...]]>, use one top-level JSON array, and ensure every string and special character is valid JSON."
+        }
+        issue if issue.ends_with(".action_missing") => {
+            "An action entry is missing its tool-name key. In the top-level workflow array, write each sequential action as {\"tool_name\":{...}}; write a parallel stage as an inner array of those tool objects."
+        }
+        issue if issue.ends_with(".args_must_be_object") => {
+            "A tool value is not a JSON object. Write each action as {\"tool_name\":{\"argument\":\"value\"}}, even when the tool has no arguments."
+        }
+        issue if issue.ends_with(".old_group_object_not_supported") => {
+            "The action payload used the removed {\"order\":...,\"actions\":[...]} group shape. Use an inner JSON array for a parallel stage and preserve outer-array order for sequential stages."
+        }
+        issue if issue.ends_with(".actions_required") => {
+            "The action workflow contains an empty or incomplete stage. Provide at least one {\"tool_name\":{...}} action object in every stage."
+        }
+        issue if issue.starts_with("unsupported_action:") => {
+            "The response requested a tool that is not in the available capability catalog. Choose an available tool name and keep its arguments inside that tool's JSON object."
+        }
+        issue if issue.contains(".input.") => {
+            "The tool arguments do not satisfy the capability specification. Keep the same XML/action-array structure, then correct the missing, invalid, or conditionally required argument named in error."
+        }
+        issue if issue.starts_with("context_compact[") && issue.ends_with(".ids_required") => {
+            "The <context_compact> block must contain at least one non-empty <discard> or <offload> delta-id list, followed by <summary>."
+        }
+        issue if issue.starts_with("context_compact[") && issue.ends_with(".summary_required") => {
+            "The <context_compact> block is missing a non-empty <summary> describing the essential retained task state."
+        }
         issue if issue.ends_with(".array_required") => {
             "检查到刚刚的 action_json 格式有点问题：<action_json> 的内容必须是 JSON array。单个工具调用也请写成数组，例如 <![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\"}}]]]>。"
         }
@@ -623,6 +760,64 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "Use the XML response protocol. If work still needs runtime action, write <free_talk> and concrete <working_still_action>. If the current user request is complete, write <final_answer>; this does not close the Timem session."
         }
     }
+}
+
+pub fn xml_repair_instruction_for_response(issue: &str, raw_response: &str) -> String {
+    if !matches!(
+        issue,
+        "invalid_xml_response_root"
+            | "xml_response_root_missing"
+            | "xml_response_root_unclosed"
+            | "xml_response_root_self_closing"
+            | "xml_content_before_response"
+            | "xml_content_after_response"
+    ) {
+        return xml_repair_instruction(issue).to_string();
+    }
+
+    let trimmed = raw_response.trim();
+    let protocol_text = strip_surrounding_xml_fence(trimmed).unwrap_or(trimmed);
+    let response_start = find_open_tag(protocol_text, "response");
+    let has_content_before_root = response_start
+        .map(|start| !protocol_text[..start].trim().is_empty())
+        .unwrap_or(false);
+    let branch = if protocol_text.contains("<working_still_action") {
+        "<working_still_action>...</working_still_action>"
+    } else if protocol_text.contains("<context_compact") {
+        "<context_compact>...</context_compact>"
+    } else if protocol_text.contains("<final_answer") {
+        "<final_answer>...</final_answer>"
+    } else {
+        "<working_still_action>...</working_still_action>"
+    };
+    let free_talk = if protocol_text.contains("<free_talk")
+        || protocol_text.contains("<free-talk")
+        || protocol_text.contains("<freetalk")
+    {
+        "<free_talk>...</free_talk>"
+    } else {
+        ""
+    };
+    let expected = format!("<response>{free_talk}{branch}</response>");
+
+    if issue == "xml_content_before_response" || has_content_before_root {
+        return format!(
+            "The previous output placed content before the <response> root. The response must be in format '{expected}'. Move every tag, including <free_talk>, inside <response>; output nothing before <response> or after </response>."
+        );
+    }
+    if issue == "xml_content_after_response" {
+        return format!(
+            "The previous output placed content after the </response> root. The response must be in format '{expected}'. Output nothing before <response> or after </response>."
+        );
+    }
+    if issue == "xml_response_root_unclosed" || response_start.is_some() {
+        return format!(
+            "The previous output did not form one complete <response>...</response> root. The response must be in format '{expected}'. Output nothing before <response> or after </response>."
+        );
+    }
+    format!(
+        "The previous output did not contain the required <response> root. The response must be in format '{expected}'."
+    )
 }
 
 pub fn xml_repair_reason(issue: &str) -> &'static str {
@@ -638,668 +833,5 @@ pub fn xml_can_show_plain_text_after_repair_failure(content: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn caps() -> CapabilityRegistry {
-        CapabilityRegistry::builtin()
-    }
-
-    fn extract_response_examples(text: &str) -> Vec<String> {
-        let mut examples = Vec::new();
-        let mut cursor = 0usize;
-        while let Some(start_rel) = text[cursor..].find("<response>") {
-            let start = cursor + start_rel;
-            let search_from = start + "<response>".len();
-            let Some(end_rel) = text[search_from..].find("</response>") else {
-                break;
-            };
-            let end = search_from + end_rel + "</response>".len();
-            examples.push(text[start..end].to_string());
-            cursor = end;
-        }
-        examples
-    }
-
-    #[test]
-    fn documented_xml_response_examples_parse_with_runtime_parser() {
-        let examples = extract_response_examples(XML_RESPONSE_PROTOCOL_SECTION);
-        assert!(
-            examples.len() >= 4,
-            "expected protocol doc to contain concrete XML response examples"
-        );
-
-        for (idx, example) in examples.iter().enumerate() {
-            let env = parse_xml_envelope(example, &caps());
-            assert!(
-                env.repair_issue.is_none(),
-                "documented XML example #{idx} did not parse: {:?}\n{}",
-                env.repair_issue,
-                example
-            );
-            assert!(
-                !env.final_answer.trim().is_empty()
-                    || !env.next_actions.is_empty()
-                    || !env.context_compacts.is_empty(),
-                "documented XML example #{idx} produced no runtime-visible result:\n{}",
-                example
-            );
-        }
-    }
-
-    #[test]
-    fn parses_final_answer() {
-        let env = parse_xml_envelope(
-            "<response><final_answer>done</final_answer></response>",
-            &caps(),
-        );
-        assert!(env.repair_issue.is_none());
-        assert!(!env.continue_work);
-        assert_eq!(env.final_answer, "done");
-    }
-
-    #[test]
-    fn parses_final_answer_cdata_with_xml_examples() {
-        let env = parse_xml_envelope(
-            r#"<response>
-  <final_answer><![CDATA[
-Example response delta:
-
-<response>
-  <final_answer>done</final_answer>
-</response>
-
-[END DELTA]
-  ]]></final_answer>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(!env.continue_work);
-        assert!(env.final_answer.contains("<response>"));
-        assert!(env.final_answer.contains("</final_answer>"));
-        assert!(env.final_answer.contains("[END DELTA]"));
-    }
-
-    #[test]
-    fn final_answer_xml_action_examples_are_not_parsed_as_real_actions() {
-        let env = parse_xml_envelope(
-            r#"<response>
-  <final_answer><![CDATA[
-This is only a user-facing example:
-
-<working_still_action>
-  <action_json>{"run_bash": {} // missing cmd in the example on purpose
-  }</action_json>
-</working_still_action>
-  ]]></final_answer>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(!env.continue_work);
-        assert!(env.next_actions.is_empty());
-        assert!(env.action_groups.is_empty());
-        assert!(env.final_answer.contains("<working_still_action>"));
-        assert!(env.final_answer.contains("\"run_bash\": {}"));
-    }
-
-    #[test]
-    fn final_answer_raw_xml_code_block_is_opaque_text() {
-        let env = parse_xml_envelope(
-            r#"<response>
-  <final_answer>
-Found the original malformed response:
-
-```xml
-<response>
-  <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
-  <working_still_action>
-    <action_json>
-{
-  "order": "parallel",
-  "actions": [
-    {"run_bash": { "cmd": "sleep 15", "background": true } },
-    {"run_bash": { "cmd": "sleep 15", "background": true } },
-    {"run_bash": { "cmd": "sleep 15", "background": true } }
-  ]
-}
-    </action_json>
-  </working_still_action>
-</response>
-```
-
-The issue was the bare group object inside action_json.
-  </final_answer>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(!env.continue_work);
-        assert!(env.next_actions.is_empty());
-        assert!(env.action_groups.is_empty());
-        assert!(env
-            .final_answer
-            .contains("Found the original malformed response"));
-        assert!(env.final_answer.contains("<working_still_action>"));
-        assert!(env.final_answer.contains(r#""order": "parallel""#));
-    }
-
-    #[test]
-    fn final_answer_raw_unbalanced_xml_is_opaque_text() {
-        let env = parse_xml_envelope(
-            r#"<response>
-  <final_answer>
-The previous bad output started like this:
-<response>
-  <free_talk>explaining an example without closing the root
-
-Literal same-tag example:
-<final_answer>inner sample</final_answer>
-
-That was text, not a runtime action.
-  </final_answer>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(!env.continue_work);
-        assert!(env.final_answer.contains("<response>"));
-        assert!(env
-            .final_answer
-            .contains("<free_talk>explaining an example without closing the root"));
-        assert!(env
-            .final_answer
-            .contains("<final_answer>inner sample</final_answer>"));
-        assert!(env.next_actions.is_empty());
-        assert!(env.action_groups.is_empty());
-    }
-
-    #[test]
-    fn final_answer_raw_text_can_contain_other_string_tags_without_rescanning() {
-        let env = parse_xml_envelope(
-            r#"<response>
-  <final_answer>
-This answer explains multiple protocol snippets:
-<legacy_note>fake legacy note inside final answer</legacy_note>
-<summary>fake compact summary inside final answer</summary>
-<free_talk>fake free talk inside final answer</free_talk>
-None of these are real control fields.
-  </final_answer>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(!env.continue_work);
-        assert!(env.thought.is_empty());
-        assert!(env.context_compacts.is_empty());
-        assert!(env
-            .final_answer
-            .contains("<legacy_note>fake legacy note inside final answer</legacy_note>"));
-        assert!(env
-            .final_answer
-            .contains("<summary>fake compact summary inside final answer</summary>"));
-        assert!(env
-            .final_answer
-            .contains("<free_talk>fake free talk inside final answer</free_talk>"));
-    }
-
-    #[test]
-    fn final_answer_raw_action_protocol_example_is_not_a_real_action() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<final_answer>
-Here is the malformed response example the user asked for:
-<response>
-  <free_talk>not closed
-<legacy_note>fake note</legacy_note>
-<working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action>
-<summary>fake summary</summary>
-This is all answer text.
-</final_answer>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(!env.continue_work);
-        assert!(env.next_actions.is_empty());
-        assert!(env.action_groups.is_empty());
-        assert!(env.final_answer.contains("<working_still_action>"));
-    }
-
-    #[test]
-    fn final_answer_nested_xml_preserves_attributes_and_escaped_text() {
-        let env = parse_xml_envelope(
-            r#"<response>
-  <final_answer>
-Report:
-<diagnostic level="warn" source="unit-test"><message>ok</message><empty marker="1" /></diagnostic>
-Escaped literal: &lt;response&gt;not protocol&lt;/response&gt;
-  </final_answer>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(!env.continue_work);
-        assert!(env
-            .final_answer
-            .contains(r#"<diagnostic level="warn" source="unit-test">"#));
-        assert!(env.final_answer.contains("<message>ok</message>"));
-        assert!(env.final_answer.contains(r#"<empty marker="1" />"#));
-        assert!(env
-            .final_answer
-            .contains("<response>not protocol</response>"));
-        assert!(env.next_actions.is_empty());
-        assert!(env.action_groups.is_empty());
-    }
-
-    #[test]
-    fn free_talk_xml_action_examples_do_not_hide_real_actions() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk><![CDATA[
-Example text only:
-<working_still_action>
-  <action_json>{"run_bash":{}}</action_json>
-</working_still_action>
-]]></free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(env.continue_work);
-        assert_eq!(env.next_actions.len(), 1);
-        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
-        assert!(env.thought.contains("<working_still_action>"));
-    }
-
-    #[test]
-    fn free_talk_nested_xml_is_opaque_and_real_action_still_parses() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>
-This is only a note:
-<note priority="high"><working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action></note>
-</free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(env.next_actions.len(), 1);
-        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
-        assert!(env.thought.contains(r#"<note priority="high">"#));
-        assert!(env.thought.contains("<working_still_action>"));
-    }
-
-    #[test]
-    fn free_talk_raw_xml_text_does_not_break_real_action() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>
-I am explaining a malformed example:
-<response><working_still_action><action_json>{ bad
-</free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(env.thought.contains("<response><working_still_action>"));
-        assert_eq!(env.next_actions.len(), 1);
-        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
-    }
-
-    #[test]
-    fn string_field_protection_does_not_hide_malformed_action_json() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>text field can mention {"action":"run_bash"}</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[{"run_bash":{"cmd":"pwd",}}]
-]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
-        assert!(env.next_actions.is_empty());
-        assert!(env.action_groups.is_empty());
-    }
-
-    #[test]
-    fn adjacent_top_level_action_arrays_request_repair_instead_of_execution() {
-        let env = parse_xml_envelope(
-            r#"<response>
-  <free_talk>two stage command plan</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[[{"run_bash":{"cmd":"sleep 10","timeout_ms":1000}}],[{"run_bash":{"cmd":"sleep 10","background":true}}]]]></action_json>
-  </working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
-        assert!(env.next_actions.is_empty());
-        assert!(env.action_groups.is_empty());
-    }
-
-    #[test]
-    fn old_finished_status_requests_repair() {
-        let env = parse_xml_envelope("<response><status>finished</status></response>", &caps());
-
-        assert_eq!(
-            env.repair_issue.as_deref(),
-            Some("status_tag_not_supported")
-        );
-        assert!(env.continue_work);
-    }
-
-    #[test]
-    fn parses_actions_from_cdata_json() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>state</free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(env.continue_work);
-        assert_eq!(env.thought, "state");
-        assert_eq!(env.next_actions.len(), 1);
-        assert_eq!(env.next_actions[0].action, "run_bash");
-        assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
-    }
-
-    #[test]
-    fn rejects_old_group_object_from_action_json() {
-        let env = parse_xml_envelope(
-            r#"<response>
-  <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[
-{
-  "order": "parallel",
-  "actions": [
-    {"run_bash": { "cmd": "sleep 15", "background": true } },
-    {"run_bash": { "cmd": "sleep 15", "background": true } },
-    {"run_bash": { "cmd": "sleep 15", "background": true } }
-  ]
-}
-    ]]></action_json>
-  </working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert_eq!(
-            env.repair_issue.as_deref(),
-            Some("actions[0].old_group_object_not_supported")
-        );
-        assert!(env.next_actions.is_empty());
-        assert!(env.action_groups.is_empty());
-    }
-
-    #[test]
-    fn parses_bare_action_array_as_parallel_group() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>parallel checks</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[
-  {"run_bash": { "cmd": "printf a", "timeout_ms": 5000 } },
-  {"run_bash": { "cmd": "printf b", "timeout_ms": 5000 } }
-]
-]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(env.action_groups.len(), 1);
-        assert_eq!(
-            env.action_groups[0].order,
-            crate::ActionGroupOrder::Parallel
-        );
-        assert_eq!(env.action_groups[0].actions.len(), 2);
-        assert_eq!(env.next_actions[0].input_str("cmd"), "printf a");
-        assert_eq!(env.next_actions[1].input_str("cmd"), "printf b");
-    }
-
-    #[test]
-    fn parses_nested_action_arrays_as_ordered_parallel_groups() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>stage then stage</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[
-  [
-    {"run_bash": { "cmd": "printf a1", "timeout_ms": 5000 } },
-    {"run_bash": { "cmd": "printf a2", "timeout_ms": 5000 } }
-  ],
-  [
-    {"run_bash": { "cmd": "printf b1", "timeout_ms": 5000 } }
-  ]
-]
-]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(env.action_groups.len(), 2);
-        assert_eq!(
-            env.action_groups[0].order,
-            crate::ActionGroupOrder::Parallel
-        );
-        assert_eq!(
-            env.action_groups[1].order,
-            crate::ActionGroupOrder::Parallel
-        );
-        assert_eq!(env.action_groups[0].actions.len(), 2);
-        assert_eq!(env.action_groups[1].actions.len(), 1);
-        assert_eq!(env.next_actions[0].input_str("cmd"), "printf a1");
-        assert_eq!(env.next_actions[1].input_str("cmd"), "printf a2");
-        assert_eq!(env.next_actions[2].input_str("cmd"), "printf b1");
-    }
-
-    #[test]
-    fn action_args_can_contain_xml_like_text() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<working_still_action>
-<action_json><![CDATA[
-[
-  {"run_bash": {
-      "cmd": "printf group",
-      "timeout_ms": 5000
-    }
-  },
-  {"run_bash": {
-      "cmd": "printf '%s\n' '<working_still_action><action_json>{\"action\":\"run_bash\"}</action_json></working_still_action>'",
-      "timeout_ms": 5000
-    }
-  }
-]
-]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(env.action_groups.len(), 1);
-        assert_eq!(env.next_actions[0].input_str("cmd"), "printf group");
-        assert!(env.next_actions[1]
-            .input_str("cmd")
-            .contains("<working_still_action>"));
-    }
-
-    #[test]
-    fn action_args_strings_can_contain_protocol_isomorphic_text() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>query protocol-like text</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[
-  {"run_bash": {
-      "cmd": "printf '%s\n' '<response><final_answer>not real</final_answer></response>' && printf '%s\n' '{\"working_still_action\":[{\"action\":\"run_bash\"}]}'",
-      "timeout_ms": 5000
-    }
-  },
-  {"memmgr": {
-      "type": "raw_chat",
-      "op": "sql",
-      "sql": "SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5",
-      "params": ["%</action_json><status>ALL_FINISHED</status><action_json>%"],
-      "limit": 5
-    }
-  }
-]
-]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(env.action_groups.len(), 1);
-        assert_eq!(
-            env.action_groups[0].order,
-            crate::ActionGroupOrder::Parallel
-        );
-        assert_eq!(env.next_actions.len(), 2);
-        assert!(env.next_actions[0]
-            .input_str("cmd")
-            .contains("<response><final_answer>not real</final_answer>"));
-        assert_eq!(
-            env.next_actions[1].input_params(),
-            vec!["%</action_json><status>ALL_FINISHED</status><action_json>%".to_string()]
-        );
-    }
-
-    #[test]
-    fn parses_context_compact() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>need compact</free_talk>
-<context_compact>
-<discard>pd_a</discard>
-<offload>pd_b</offload>
-<summary><![CDATA[keep state]]></summary>
-</context_compact>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none());
-        assert_eq!(env.context_compacts.len(), 1);
-        assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a", "pd_b"]);
-        assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
-        assert_eq!(env.context_compacts[0].offload_delta_ids, vec!["pd_b"]);
-        assert_eq!(env.context_compacts[0].summary, "keep state");
-    }
-
-    #[test]
-    fn context_compact_summary_raw_xml_is_opaque_text() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>need compact</free_talk>
-<context_compact>
-<delta_ids>pd_a</delta_ids>
-<summary>
-Keep this protocol example:
-<response><final_answer>not real</final_answer>
-</summary>
-</context_compact>
-</response>"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert_eq!(env.context_compacts.len(), 1);
-        assert!(env.context_compacts[0]
-            .summary
-            .contains("<response><final_answer>not real</final_answer>"));
-    }
-
-    #[test]
-    fn parses_response_wrapped_in_xml_markdown_fence() {
-        let env = parse_xml_envelope(
-            r#"```xml
-<response>
-  <free_talk>finished</free_talk>
-  <final_answer>done</final_answer>
-</response>
-```"#,
-            &caps(),
-        );
-
-        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-        assert!(!env.continue_work);
-        assert_eq!(env.final_answer, "done");
-        assert_eq!(env.thought, "finished");
-    }
-
-    #[test]
-    fn xml_state_branch_must_choose_one() {
-        let env = parse_xml_envelope(
-            r#"<response>
-<free_talk>compact and act</free_talk>
-<context_compact>
-<delta_ids>pd_a</delta_ids>
-<summary>keep state</summary>
-</context_compact>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd"}}]]]></action_json>
-</working_still_action>
-</response>"#,
-            &caps(),
-        );
-
-        assert_eq!(
-            env.repair_issue.as_deref(),
-            Some("state_branch_must_choose_one")
-        );
-    }
-
-    #[test]
-    fn repairs_external_tool_call_protocol() {
-        let env = parse_xml_envelope(
-            r#"<tool_call>{"name":"run_bash","arguments":{"cmd":"pwd"}}</tool_call>"#,
-            &caps(),
-        );
-        assert_eq!(
-            env.repair_issue.as_deref(),
-            Some("external_tool_call_protocol")
-        );
-    }
-}
+#[path = "../../tests/response_protocol/xml_suite_tests.rs"]
+mod tests;

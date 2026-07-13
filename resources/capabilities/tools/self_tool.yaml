@@ -14,7 +14,9 @@ prompt_input: |
   value and only changes current process runtime env. type=mem_path supports
   op=read. type=about_me supports op=read. type=cwd supports op=read/chg_cwd;
   chg_cwd requires new_path and changes the prompt context cwd used by later
-  run_bash actions in this context. API key/token/secret/password-like env
+  run_bash actions in this context. You should shorten your 'cd' command output
+  with this ability.
+  API key/token/secret/password-like env
   variables are not readable or writable. Memory path env variables such as
   TIMEM_DATA_DIR and TIMEM_SPACE are startup-only and are not writable through
   self_tool.
