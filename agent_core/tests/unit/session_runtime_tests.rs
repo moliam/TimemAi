@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     ApprovalRequest, BashApprovalMode, CapabilityRegistry, CoreActionKind, CoreProfile,
     CoreTopicEvent, HostDecision, NoopTurnUi, TurnStopDetail, TurnStopReason,
-    CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -3126,6 +3126,85 @@ impl TurnUi for RecordingTopicUi {
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         self.events.extend_from_slice(events);
     }
+}
+
+struct CompactThenFinishModel {
+    prompts: Vec<String>,
+    calls: usize,
+}
+
+impl ModelClient for CompactThenFinishModel {
+    fn call_model(
+        &mut self,
+        _config: &ProviderConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.push(prompt.to_string());
+        self.calls += 1;
+        if self.calls == 1 {
+            let delta_id = prompt_field_values(prompt, "delta_id")
+                .into_iter()
+                .next()
+                .expect("delta id in first prompt");
+            Ok(llm(
+                format!(
+                    "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndiscard: {delta_id}\nsummary:\n保留当前任务目标和下一步。"
+                ),
+                3_000,
+                false,
+            ))
+        } else {
+            Ok(llm(
+                "## Status\nfinished\n\n## Final_Answer\ncompact done",
+                1_500,
+                false,
+            ))
+        }
+    }
+}
+
+#[test]
+fn session_turn_context_compact_emits_structured_topic() {
+    let dir = tmp_dir("context_compact_topic");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut ui = RecordingTopicUi::default();
+    let mut model = CompactThenFinishModel {
+        prompts: Vec::new(),
+        calls: 0,
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "OLD_DYNAMIC_CONTEXT_TO_COMPACT",
+            session: "compact_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "compact done");
+    let compact = ui
+        .events
+        .iter()
+        .find(|event| event.topic.name == CORE_TOPIC_CONTEXT_COMPACT)
+        .and_then(CoreTopicEvent::as_context_compact)
+        .expect("context compact topic");
+    assert!(compact.estimated_before_tokens > compact.estimated_after_tokens);
+    assert_eq!(compact.discarded_delta_ids.len(), 1);
+    assert!(compact.offloaded_delta_ids.is_empty());
+    assert!(compact.scratch_id.is_none());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
