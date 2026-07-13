@@ -344,7 +344,6 @@ pub struct CoreTopicEvent {
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
-pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
@@ -368,15 +367,6 @@ pub struct CoreModelRepairTopic {
     pub issue: String,
     pub attempt: u32,
     pub max_attempts: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoreContextCompactTopic {
-    pub estimated_before_tokens: u32,
-    pub estimated_after_tokens: u32,
-    pub discarded_delta_ids: Vec<String>,
-    pub offloaded_delta_ids: Vec<String>,
-    pub scratch_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -650,19 +640,6 @@ impl CoreTopicEvent {
         })
     }
 
-    pub fn as_context_compact(&self) -> Option<CoreContextCompactTopic> {
-        if self.topic.name != CORE_TOPIC_CONTEXT_COMPACT {
-            return None;
-        }
-        Some(CoreContextCompactTopic {
-            estimated_before_tokens: self.payload["estimated_before_tokens"].as_u64()? as u32,
-            estimated_after_tokens: self.payload["estimated_after_tokens"].as_u64()? as u32,
-            discarded_delta_ids: string_array_payload(&self.payload["discarded_delta_ids"]),
-            offloaded_delta_ids: string_array_payload(&self.payload["offloaded_delta_ids"]),
-            scratch_id: self.payload["scratch_id"].as_str().map(str::to_string),
-        })
-    }
-
     pub fn with_global_worker_status(mut self, status: CoreGlobalWorkerStatus) -> Self {
         self.payload["global"] = global_worker_status_payload(status);
         self
@@ -787,33 +764,6 @@ pub fn model_repair_topic_event(
             "issue": issue,
             "attempt": attempt,
             "max_attempts": max_attempts,
-        }),
-    )
-}
-
-pub fn context_compact_topic_event(
-    session_id: impl Into<String>,
-    estimated_before_tokens: u32,
-    estimated_after_tokens: u32,
-    discarded_delta_ids: &[String],
-    offloaded_delta_ids: &[String],
-    scratch_id: Option<&str>,
-) -> CoreTopicEvent {
-    CoreTopicEvent::new(
-        session_id,
-        CoreTopic::new(
-            CORE_TOPIC_CONTEXT_COMPACT,
-            json!({
-                "name": CORE_TOPIC_CONTEXT_COMPACT,
-            }),
-        ),
-        CoreSessionState::Running,
-        json!({
-            "estimated_before_tokens": estimated_before_tokens,
-            "estimated_after_tokens": estimated_after_tokens,
-            "discarded_delta_ids": discarded_delta_ids,
-            "offloaded_delta_ids": offloaded_delta_ids,
-            "scratch_id": scratch_id,
         }),
     )
 }
@@ -1000,18 +950,6 @@ fn parse_global_worker_status(value: &Value) -> CoreGlobalWorkerStatus {
     CoreGlobalWorkerStatus {
         working_worker_count: value["working_worker_count"].as_u64().unwrap_or(0) as usize,
     }
-}
-
-fn string_array_payload(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn parse_dynamic_context_summary(value: &Value) -> Option<CoreDynamicContextSummary> {
