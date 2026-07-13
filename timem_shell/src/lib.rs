@@ -170,7 +170,18 @@ pub fn render_thinking_block_at(snapshot: &ShellStatusSnapshot, time_label: &str
 }
 
 pub fn render_thinking_view_at(snapshot: &ThinkingViewSnapshot, time_label: &str) -> String {
-    render_named_thinking_view_at(snapshot, time_label, None)
+    render_thinking_view_with_input_at(snapshot, time_label, "")
+}
+
+/// Renders the live Thought / Action view with the shell-owned supplement
+/// editor as its final row. The editor text is deliberately a UI concern: the
+/// core only receives it after the user presses Enter.
+pub fn render_thinking_view_with_input_at(
+    snapshot: &ThinkingViewSnapshot,
+    time_label: &str,
+    input_text: &str,
+) -> String {
+    render_named_thinking_view_at(snapshot, time_label, None, input_text)
 }
 
 pub fn render_worker_thinking_view_at(
@@ -178,7 +189,7 @@ pub fn render_worker_thinking_view_at(
     time_label: &str,
     worker_label: &str,
 ) -> String {
-    render_named_thinking_view_at(snapshot, time_label, Some(worker_label))
+    render_named_thinking_view_at(snapshot, time_label, Some(worker_label), "")
 }
 
 pub fn render_worker_thinking_views_at(
@@ -198,6 +209,7 @@ fn render_named_thinking_view_at(
     snapshot: &ThinkingViewSnapshot,
     time_label: &str,
     worker_label: Option<&str>,
+    input_text: &str,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -209,17 +221,16 @@ fn render_named_thinking_view_at(
         snapshot.status.tick,
         Some(&format_elapsed_clock(snapshot.status.elapsed_secs)),
     ));
-    out.push_str(&render_thinking_input_hint());
     out.push_str(&render_thinking_status_line(&snapshot.status));
     out.push('\n');
+    out.push_str(&render_thinking_input_line(input_text));
     out
 }
 
-fn render_thinking_input_hint() -> String {
-    let label = format!("{ANSI_BLUE_BOLD}[INPUT]{ANSI_RESET}{ANSI_DIM}");
-    let text =
-        format!("  {label} 模型工作中可继续输入补充，Enter 发送到当前任务；Ctrl+C 取消本轮。");
-    format!("{}\n", dim_line(&text))
+fn render_thinking_input_line(input_text: &str) -> String {
+    // Keep this as the last terminal row. The raw-mode supplement editor owns
+    // the cursor here, while periodic Thought-panel redraws restore its text.
+    format!("  {ANSI_BLUE_BOLD}[INPUT]{ANSI_RESET} {input_text}\n")
 }
 
 fn render_thinking_status_line(snapshot: &ShellStatusSnapshot) -> String {
