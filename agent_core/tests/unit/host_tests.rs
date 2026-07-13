@@ -155,6 +155,26 @@ fn turn_ui_request_topic_requires_matching_topic_reply_before_resuming() {
 }
 
 #[test]
+fn context_compact_topic_round_trips_structured_payload() {
+    let event = context_compact_topic_event(
+        "session_a",
+        82_000,
+        14_000,
+        &["pd_1".to_string()],
+        &["pd_2".to_string()],
+        Some("scratch_1"),
+    );
+
+    assert_eq!(event.topic.name, CORE_TOPIC_CONTEXT_COMPACT);
+    let topic = event.as_context_compact().expect("context compact topic");
+    assert_eq!(topic.estimated_before_tokens, 82_000);
+    assert_eq!(topic.estimated_after_tokens, 14_000);
+    assert_eq!(topic.discarded_delta_ids, vec!["pd_1"]);
+    assert_eq!(topic.offloaded_delta_ids, vec!["pd_2"]);
+    assert_eq!(topic.scratch_id.as_deref(), Some("scratch_1"));
+}
+
+#[test]
 fn turn_ui_decision_requests_are_structured_and_ui_neutral() {
     let round = RoundLimitDecisionRequest::new(20);
     assert_eq!(round.max_rounds, 20);

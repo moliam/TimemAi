@@ -83,9 +83,10 @@ pub use data_layout::{
     default_data_root, layout_for_space, workspace_config_file, RuntimeDataLayout,
 };
 pub use host::{
-    core_initialized_topic_event, core_initialized_topic_event_with_worker,
-    normalize_user_supplements, resolve_topic_reply, session_worker_default_display_name,
-    topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
+    context_compact_topic_event, core_initialized_topic_event,
+    core_initialized_topic_event_with_worker, normalize_user_supplements, resolve_topic_reply,
+    session_worker_default_display_name, topic_event_status_hint,
+    work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
     CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
     CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
     CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
@@ -94,10 +95,11 @@ pub use host::{
     NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
     RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
     TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, CORE_TOPIC_ACTION,
-    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_STALE_CONTEXT_REQUEST,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};
@@ -1548,6 +1550,7 @@ impl AgentCore {
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
+                let estimated_before_tokens = self.dynamic_context_summary().estimated_tokens;
                 let offload_record = if compact.offload_delta_ids.is_empty() {
                     None
                 } else {
@@ -1588,6 +1591,18 @@ impl AgentCore {
                     &compact.delta_ids,
                     &compact.slice_ids,
                 );
+                let estimated_after_tokens = self
+                    .dynamic_context_summary()
+                    .estimated_tokens
+                    .saturating_add(estimate_prompt_tokens(&compact.summary));
+                runtime.on_core_topic_events(&[host::context_compact_topic_event(
+                    self.current_session_id(),
+                    estimated_before_tokens,
+                    estimated_after_tokens,
+                    &compact.discard_delta_ids,
+                    &compact.offload_delta_ids,
+                    offload_record.as_ref().map(|record| record.id.as_str()),
+                )]);
                 let scratch_line = offload_record
                     .as_ref()
                     .map(|record| {
