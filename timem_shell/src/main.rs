@@ -35,14 +35,15 @@ use timem_shell::{
     work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
     work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
     CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
-    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
-    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
-    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
-    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
-    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
-    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
-    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
-    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
+    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, ObservationPanelMode,
+    OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
+    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
+    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot,
+    StaleContextDecisionRequest, ThinkingViewSnapshot, TurnInput, TurnUi,
+    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
+    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
+    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, SPINNER_ICONS,
+    TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -604,7 +605,8 @@ impl ThinkingStatus {
                 retry: None,
             },
             observations: {
-                let mut panel = ObservationPanel::default();
+                let mut panel =
+                    ObservationPanel::default().with_mode(ObservationPanelMode::from_env());
                 panel.apply(ObservationEvent::EnsureTransient("思考中...".to_string()));
                 panel
             },
@@ -737,7 +739,21 @@ impl ThinkingStatus {
     fn finish(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         self.stop_renderer_thread();
-        clear_thinking_block(&self.rendered_lines);
+        let keep_panel = self
+            .state
+            .lock()
+            .map(|state| state.observations.mode() == ObservationPanelMode::Accumulate)
+            .unwrap_or(false);
+        if keep_panel {
+            if let Ok(mut state) = self.state.lock() {
+                state.observations.apply(ObservationEvent::SettleActive);
+                state.status.elapsed_secs =
+                    active_elapsed_secs(self.started_at, &self.paused_total);
+                rerender_thinking(&state, &self.rendered_lines);
+            }
+        } else {
+            clear_thinking_block(&self.rendered_lines);
+        }
     }
 
     fn finish_cancelled(&mut self) {
@@ -3530,7 +3546,7 @@ fn cli_help_text() -> &'static str {
 }
 
 fn runtime_help_text() -> &'static str {
-    "\x1b[1mInteractive commands\x1b[0m\n  /help       show runtime help\n  /config     edit runtime model and token settings\n  /workspace  manage workspace directories shown to the model as reference context\n  /prof       show runtime profiling for tokens, model wait/local time, and storage size\n  /exit       leave the shell intentionally\n\n\x1b[1mInteractive keys\x1b[0m\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Ctrl+D exits the shell intentionally.\n\n\x1b[1mRuntime system\x1b[0m\n  Timem keeps a local memory space, runtime context, action audit, and API audit under the configured data directory.\n  Use /prof to inspect token usage, KVC stats, model wait time, local execution time, and storage size.\n  Use /config for changes that can take effect without restarting this Timem process.\n"
+    "\x1b[1mInteractive commands\x1b[0m\n  /help       show runtime help\n  /config     edit runtime model and token settings\n  /workspace  manage workspace directories shown to the model as reference context\n  /prof       show runtime profiling for tokens, model wait/local time, and storage size\n  /exit       leave the shell intentionally\n\n\x1b[1mInteractive keys\x1b[0m\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Ctrl+D exits the shell intentionally.\n\n\x1b[1mDisplay\x1b[0m\n  Thought / Action defaults to scroll mode. Set TIMEM_THOUGHT_PANEL_MODE=accumulate before launch to keep the full panel after a turn finishes.\n\n\x1b[1mRuntime system\x1b[0m\n  Timem keeps a local memory space, runtime context, action audit, and API audit under the configured data directory.\n  Use /prof to inspect token usage, KVC stats, model wait time, local execution time, and storage size.\n  Use /config for changes that can take effect without restarting this Timem process.\n"
 }
 
 fn startup_control_hint() -> &'static str {

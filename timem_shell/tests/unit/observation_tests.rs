@@ -1,7 +1,7 @@
 use super::*;
 use agent_core::{
-    CoreMemoryActivity, CoreSessionState, CoreTopic, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CoreMemoryActivity, CoreSessionState, CoreTopic, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPACT,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -171,6 +171,26 @@ fn work_instruction_load_topic(status: &str, file_names: Vec<&str>) -> CoreTopic
     )
 }
 
+fn context_compact_topic(before: u32, after: u32) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        "session_test",
+        CoreTopic::new(
+            CORE_TOPIC_CONTEXT_COMPACT,
+            json!({
+                "name": CORE_TOPIC_CONTEXT_COMPACT,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "estimated_before_tokens": before,
+            "estimated_after_tokens": after,
+            "discarded_delta_ids": ["pd_1"],
+            "offloaded_delta_ids": ["pd_2"],
+            "scratch_id": "scratch_1",
+        }),
+    )
+}
+
 #[test]
 fn panel_renders_heavy_border_and_blinking_transient() {
     let mut panel = ObservationPanel::new(8, 48);
@@ -179,6 +199,46 @@ fn panel_renders_heavy_border_and_blinking_transient() {
     assert!(rendered.contains("\x1b[1m┏━ Thought / Action"));
     assert!(rendered.contains("\x1b[38;5;245m· 思考中..."));
     assert!(rendered.contains('┗'));
+}
+
+#[test]
+fn context_compact_topic_renders_highlighted_info_line() {
+    let events =
+        observation_events_from_core_topic_events(&[context_compact_topic(82_000, 14_000)]);
+    assert_eq!(
+        events,
+        vec![ObservationEvent::Persistent(
+            "[INFO] Context compacted : 82K --> 14K".to_string()
+        )]
+    );
+    let mut panel = ObservationPanel::new(8, 88);
+    panel.apply_all(events);
+    let rendered = render_observation_panel(&panel);
+    let plain = strip_ansi(&rendered);
+    assert!(plain.contains("[INFO] Context compacted : 82K --> 14K"));
+    assert!(
+        rendered.contains("\x1b[94;1m[INFO]\x1b[0m"),
+        "INFO marker should be highlighted: {rendered}"
+    );
+}
+
+#[test]
+fn scroll_mode_keeps_bounded_rows_but_accumulate_mode_keeps_history() {
+    let mut scroll = ObservationPanel::new(3, 72);
+    let mut accumulate = ObservationPanel::new(3, 72).with_mode(ObservationPanelMode::Accumulate);
+    for idx in 0..5 {
+        let event = ObservationEvent::Persistent(format!("line {idx}"));
+        scroll.apply(event.clone());
+        accumulate.apply(event);
+    }
+
+    let scroll_plain = strip_ansi(&render_observation_panel(&scroll));
+    assert!(!scroll_plain.contains("line 0"));
+    assert!(scroll_plain.contains("line 4"));
+
+    let accumulate_plain = strip_ansi(&render_observation_panel(&accumulate));
+    assert!(accumulate_plain.contains("line 0"));
+    assert!(accumulate_plain.contains("line 4"));
 }
 
 #[test]
