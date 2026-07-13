@@ -19,7 +19,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
@@ -29,7 +29,7 @@ use timem_shell::{
     load_workspace_dirs_from_path, local_time_label, observation_events_from_core_topic_events,
     observation_panel_width_for_terminal, parse_cli_args, provider_config_from_env,
     render_final_response_at, render_prof_report_data, render_shell_status_bar,
-    render_thinking_view_with_input_at, render_turn_outcome_text, run_session_turn,
+    render_thinking_view_at, render_turn_outcome_text, run_session_turn,
     runtime_active_elapsed_secs, runtime_info_context, runtime_profile_report,
     shell_status_message_from_core_topic, stale_context_decision_request, topic_event_status_hint,
     work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
@@ -54,7 +54,6 @@ const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
 const PASTE_START_MARKER: char = '\u{2063}';
 const PASTE_END_MARKER: char = '\u{2064}';
 static TURN_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
-static THINKING_RENDER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 struct ConfigRow {
     key: String,
     value: String,
@@ -335,11 +334,10 @@ fn main() {
             ThinkingStatus::start(&config.provider, &config.model, config.max_llm_input_tokens);
         TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
         let _sigint_guard = SigintGuard::install();
-        let supplement_input = status.supplement_input();
         let mut turn_ui = CliTurnUi {
             status: Some(&mut status),
             interactive_approval: true,
-            supplement_input,
+            supplement_input: ThinkingSupplementInput::new(),
         };
         let turn_work_instruction_context = resolve_work_instruction_context_for_turn(
             work_instruction_mode,
@@ -539,10 +537,7 @@ impl TurnUi for CliTurnUi<'_> {
 
     fn resume_after_user_decision(&mut self) {
         if self.supplement_input.is_none() {
-            self.supplement_input = self
-                .status
-                .as_deref()
-                .and_then(ThinkingStatus::supplement_input);
+            self.supplement_input = ThinkingSupplementInput::new();
         }
         if let Some(status) = self.status.as_deref_mut() {
             status.resume_after_user_approval();
@@ -588,7 +583,6 @@ struct ThinkingStatus {
     started_at: Instant,
     paused_total: Arc<Mutex<Duration>>,
     paused_since: Option<Instant>,
-    supplement_preview: Arc<Mutex<String>>,
 }
 
 impl ThinkingStatus {
@@ -619,13 +613,11 @@ impl ThinkingStatus {
         }));
         let running = Arc::new(AtomicBool::new(true));
         let rendered_lines = Arc::new(Mutex::new(0));
-        let supplement_preview = Arc::new(Mutex::new(String::new()));
-        render_thinking_with_input(&state.lock().unwrap(), &rendered_lines, &supplement_preview);
+        render_thinking(&state.lock().unwrap(), &rendered_lines);
         let (handle, stop_tx) = spawn_thinking_renderer(
             Arc::clone(&state),
             Arc::clone(&running),
             Arc::clone(&rendered_lines),
-            Arc::clone(&supplement_preview),
             Arc::clone(&paused_total),
             started_at,
         );
@@ -638,16 +630,7 @@ impl ThinkingStatus {
             started_at,
             paused_total,
             paused_since: None,
-            supplement_preview,
         }
-    }
-
-    fn supplement_input(&self) -> Option<ThinkingSupplementInput> {
-        ThinkingSupplementInput::new(
-            Arc::clone(&self.state),
-            Arc::clone(&self.rendered_lines),
-            Arc::clone(&self.supplement_preview),
-        )
     }
 
     fn set_model_direction(&mut self, round: u32, direction: ModelDirection) {
@@ -655,7 +638,7 @@ impl ThinkingStatus {
             state.status.model_round = round;
             state.status.direction = direction;
             state.status.retry = None;
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -663,7 +646,7 @@ impl ThinkingStatus {
         if let Ok(mut state) = self.state.lock() {
             state.status.usage.add(&usage);
             state.status.latest_usage = Some(usage);
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -673,7 +656,7 @@ impl ThinkingStatus {
                 prompt_tokens,
                 ..UsageStats::zero()
             });
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -685,7 +668,7 @@ impl ThinkingStatus {
                 .trim()
                 .to_string();
             state.status.memory_activity = memory_activity;
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -694,7 +677,7 @@ impl ThinkingStatus {
             state
                 .observations
                 .apply(ObservationEvent::EnsureTransient(text.to_string()));
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -703,7 +686,7 @@ impl ThinkingStatus {
             state
                 .observations
                 .apply(ObservationEvent::FinishTransient("思考中...".to_string()));
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -715,7 +698,7 @@ impl ThinkingStatus {
         };
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply(ObservationEvent::Persistent(text));
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -732,7 +715,7 @@ impl ThinkingStatus {
                 attempt: Some(attempt),
                 max_attempts: Some(max_attempts),
             });
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -742,14 +725,14 @@ impl ThinkingStatus {
         }
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply_all(events);
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
     fn settle_active_observations(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply(ObservationEvent::SettleActive);
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -766,11 +749,7 @@ impl ThinkingStatus {
                 state.observations.apply(ObservationEvent::SettleActive);
                 state.status.elapsed_secs =
                     active_elapsed_secs(self.started_at, &self.paused_total);
-                rerender_thinking_with_input(
-                    &state,
-                    &self.rendered_lines,
-                    &self.supplement_preview,
-                );
+                rerender_thinking(&state, &self.rendered_lines);
             }
         } else {
             clear_thinking_block(&self.rendered_lines);
@@ -783,7 +762,7 @@ impl ThinkingStatus {
         if let Ok(mut state) = self.state.lock() {
             state.status.intent = "已取消".to_string();
             state.status.elapsed_secs = active_elapsed_secs(self.started_at, &self.paused_total);
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            rerender_thinking(&state, &self.rendered_lines);
         }
     }
 
@@ -820,13 +799,12 @@ impl ThinkingStatus {
         self.running.store(true, Ordering::Relaxed);
         if let Ok(mut state) = self.state.lock() {
             state.status.elapsed_secs = active_elapsed_secs(self.started_at, &self.paused_total);
-            render_thinking_with_input(&state, &self.rendered_lines, &self.supplement_preview);
+            render_thinking(&state, &self.rendered_lines);
         }
         let (handle, stop_tx) = spawn_thinking_renderer(
             Arc::clone(&self.state),
             Arc::clone(&self.running),
             Arc::clone(&self.rendered_lines),
-            Arc::clone(&self.supplement_preview),
             Arc::clone(&self.paused_total),
             self.started_at,
         );
@@ -848,7 +826,6 @@ fn spawn_thinking_renderer(
     state: Arc<Mutex<ThinkingViewSnapshot>>,
     running: Arc<AtomicBool>,
     rendered_lines: Arc<Mutex<usize>>,
-    supplement_preview: Arc<Mutex<String>>,
     paused_total: Arc<Mutex<Duration>>,
     started_at: Instant,
 ) -> (JoinHandle<()>, Sender<()>) {
@@ -865,7 +842,7 @@ fn spawn_thinking_renderer(
             if let Ok(mut snapshot) = state.lock() {
                 snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
                 snapshot.status.elapsed_secs = active_elapsed_secs(started_at, &paused_total);
-                rerender_thinking_with_input(&snapshot, &rendered_lines, &supplement_preview);
+                rerender_thinking(&snapshot, &rendered_lines);
             }
         }
     });
@@ -1005,17 +982,10 @@ struct ThinkingSupplementInput {
     nonblocking_mode: NonblockingGuard,
     buffer: Vec<u8>,
     pending: Vec<String>,
-    state: Arc<Mutex<ThinkingViewSnapshot>>,
-    rendered_lines: Arc<Mutex<usize>>,
-    preview: Arc<Mutex<String>>,
 }
 
 impl ThinkingSupplementInput {
-    fn new(
-        state: Arc<Mutex<ThinkingViewSnapshot>>,
-        rendered_lines: Arc<Mutex<usize>>,
-        preview: Arc<Mutex<String>>,
-    ) -> Option<Self> {
+    fn new() -> Option<Self> {
         let input = ShellInputSource::open().ok()?;
         let fd = input.as_raw_fd();
         let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
@@ -1034,50 +1004,40 @@ impl ThinkingSupplementInput {
             nonblocking_mode,
             buffer: Vec::new(),
             pending: Vec::new(),
-            state,
-            rendered_lines,
-            preview,
         })
     }
 
     fn poll(&mut self) -> io::Result<()> {
         let mut bytes = [0u8; 256];
-        let mut changed = false;
         loop {
             match self.input.read(&mut bytes) {
                 Ok(0) => break,
-                Ok(n) => {
-                    self.push_bytes(&bytes[..n]);
-                    changed = true;
-                }
+                Ok(n) => self.push_bytes(&bytes[..n]),
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(err),
             }
-        }
-        if changed {
-            self.refresh_preview();
         }
         Ok(())
     }
 
     fn drain(&mut self) -> Vec<String> {
         let _ = self.poll();
-        std::mem::take(&mut self.pending)
+        let mut supplements = std::mem::take(&mut self.pending);
+        let queued = drain_queued_tty_input(
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+            Duration::from_millis(120),
+        );
+        if queued.interrupted {
+            TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+        }
+        supplements.extend(queued_text_to_supplements(&queued.text));
+        supplements
     }
 
     fn push_bytes(&mut self, bytes: &[u8]) {
         push_thinking_supplement_bytes(&mut self.buffer, &mut self.pending, bytes);
-    }
-
-    fn refresh_preview(&self) {
-        let text = String::from_utf8_lossy(&self.buffer).to_string();
-        if let Ok(mut preview) = self.preview.lock() {
-            *preview = text;
-        }
-        if let Ok(state) = self.state.lock() {
-            rerender_thinking_with_input(&state, &self.rendered_lines, &self.preview);
-        }
     }
 }
 
@@ -1102,11 +1062,7 @@ fn push_thinking_supplement_bytes(buffer: &mut Vec<u8>, pending: &mut Vec<String
     for &byte in bytes {
         match byte {
             b'\r' | b'\n' => finish_thinking_supplement_line(buffer, pending),
-            // Ctrl+C is handled by ISIG as a turn cancel. Esc only cancels the
-            // currently edited supplement and must not leave stale text on the
-            // next redraw.
-            27 => buffer.clear(),
-            3 | 4 => {}
+            3 | 4 | 27 => {}
             8 | 127 => pop_last_utf8_char_bytes(buffer),
             byte if byte.is_ascii_control() => {}
             byte => buffer.push(byte),
@@ -1120,6 +1076,15 @@ fn finish_thinking_supplement_line(buffer: &mut Vec<u8>, pending: &mut Vec<Strin
     if !text.is_empty() {
         pending.push(text);
     }
+}
+
+fn queued_text_to_supplements(text: &str) -> Vec<String> {
+    normalize_newlines(text)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn pop_last_utf8_char_bytes(buffer: &mut Vec<u8>) {
@@ -3078,34 +3043,13 @@ impl Prompt for TimemReedlinePrompt {
     }
 }
 
-fn thinking_render_lock() -> &'static Mutex<()> {
-    THINKING_RENDER_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn render_thinking_with_input(
-    snapshot: &ThinkingViewSnapshot,
-    rendered_lines: &Arc<Mutex<usize>>,
-    supplement_preview: &Arc<Mutex<String>>,
-) {
-    let _terminal = thinking_render_lock().lock().unwrap();
-    render_thinking_with_input_locked(snapshot, rendered_lines, supplement_preview);
-}
-
-fn render_thinking_with_input_locked(
-    snapshot: &ThinkingViewSnapshot,
-    rendered_lines: &Arc<Mutex<usize>>,
-    supplement_preview: &Arc<Mutex<String>>,
-) {
+fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
     let mut snapshot = snapshot.clone();
     snapshot
         .observations
         .set_max_width(observation_panel_width_for_terminal(terminal_width()));
     let width = terminal_width();
-    let input_text = supplement_preview
-        .lock()
-        .map(|preview| preview.clone())
-        .unwrap_or_default();
-    let rendered = render_thinking_view_with_input_at(&snapshot, &time_label(), &input_text);
+    let rendered = render_thinking_view_at(&snapshot, &time_label());
     let line_count = rendered_terminal_rows(&rendered, width);
     print!("{rendered}");
     if let Ok(mut previous) = rendered_lines.lock() {
@@ -3114,22 +3058,12 @@ fn render_thinking_with_input_locked(
     let _ = io::stdout().flush();
 }
 
-fn rerender_thinking_with_input(
-    snapshot: &ThinkingViewSnapshot,
-    rendered_lines: &Arc<Mutex<usize>>,
-    supplement_preview: &Arc<Mutex<String>>,
-) {
-    let _terminal = thinking_render_lock().lock().unwrap();
-    clear_thinking_block_locked(rendered_lines);
-    render_thinking_with_input_locked(snapshot, rendered_lines, supplement_preview);
+fn rerender_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
+    clear_thinking_block(rendered_lines);
+    render_thinking(snapshot, rendered_lines);
 }
 
 fn clear_thinking_block(rendered_lines: &Arc<Mutex<usize>>) {
-    let _terminal = thinking_render_lock().lock().unwrap();
-    clear_thinking_block_locked(rendered_lines);
-}
-
-fn clear_thinking_block_locked(rendered_lines: &Arc<Mutex<usize>>) {
     let previous = rendered_lines.lock().map(|lines| *lines).unwrap_or(0);
     if previous > 0 {
         print!("\x1b[{}F\x1b[J", previous);
