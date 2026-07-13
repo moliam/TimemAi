@@ -580,7 +580,221 @@ pub fn validate_bash_request(command: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("command_required".to_string());
     }
+    validate_bash_safety(trimmed)?;
     Ok(())
+}
+
+fn validate_bash_safety(command: &str) -> Result<(), String> {
+    let words = shell_words_for_safety_scan(command);
+    let mut i = 0;
+    while i < words.len() {
+        if !is_command_separator(&words[i]) {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        while i < words.len() && is_assignment_word(&words[i]) {
+            i += 1;
+        }
+        if i >= words.len() || words[i] != "rm" {
+            continue;
+        }
+
+        let mut recursive = false;
+        let mut force = false;
+        i += 1;
+        while i < words.len() && !is_command_separator(&words[i]) {
+            let word = &words[i];
+            if word == "--" {
+                i += 1;
+                break;
+            }
+            if word.starts_with('-') && word != "-" {
+                if word == "--recursive" {
+                    recursive = true;
+                    i += 1;
+                    continue;
+                }
+                if word == "--force" {
+                    force = true;
+                    i += 1;
+                    continue;
+                }
+                if !word.starts_with("--") {
+                    recursive |= word.chars().skip(1).any(|ch| ch == 'r' || ch == 'R');
+                    force |= word.chars().skip(1).any(|ch| ch == 'f');
+                    i += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        while i < words.len() && !is_command_separator(&words[i]) {
+            if recursive && force && is_dangerous_rm_target(&words[i]) {
+                return Err("dangerous_recursive_root_delete".to_string());
+            }
+            i += 1;
+        }
+    }
+    Ok(())
+}
+
+fn shell_words_for_safety_scan(command: &str) -> Vec<String> {
+    let mut words = vec![";".to_string()];
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '\\' if !in_single => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            '$' if !in_single && chars.peek() == Some(&'(') => {
+                current.push('$');
+                current.push(chars.next().unwrap_or('('));
+                let mut depth = 1_u32;
+                let mut sub_single = false;
+                let mut sub_double = false;
+                while let Some(next) = chars.next() {
+                    current.push(next);
+                    match next {
+                        '\'' if !sub_double => sub_single = !sub_single,
+                        '"' if !sub_single => sub_double = !sub_double,
+                        '\\' if !sub_single => {
+                            if let Some(escaped) = chars.next() {
+                                current.push(escaped);
+                            }
+                        }
+                        '(' if !sub_single && !sub_double => depth = depth.saturating_add(1),
+                        ')' if !sub_single && !sub_double => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ' ' | '\t' | '\n' if !in_single && !in_double => {
+                push_shell_word(&mut words, &mut current);
+            }
+            ';' if !in_single && !in_double => {
+                push_shell_word(&mut words, &mut current);
+                push_separator(&mut words);
+            }
+            '&' | '|' if !in_single && !in_double => {
+                push_shell_word(&mut words, &mut current);
+                if chars.peek() == Some(&ch) {
+                    let _ = chars.next();
+                }
+                push_separator(&mut words);
+            }
+            '(' | ')' if !in_single && !in_double => {
+                push_shell_word(&mut words, &mut current);
+                push_separator(&mut words);
+            }
+            _ => current.push(ch),
+        }
+    }
+    push_shell_word(&mut words, &mut current);
+    words
+}
+
+fn push_shell_word(words: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        words.push(std::mem::take(current));
+    }
+}
+
+fn push_separator(words: &mut Vec<String>) {
+    if words.last().is_none_or(|word| word != ";") {
+        words.push(";".to_string());
+    }
+}
+
+fn is_command_separator(word: &str) -> bool {
+    matches!(word, ";" | "then" | "do" | "else")
+}
+
+fn is_assignment_word(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_dangerous_rm_target(target: &str) -> bool {
+    let clean = target.trim();
+    if clean.is_empty() {
+        return false;
+    }
+    if clean.chars().all(|ch| ch == '/') {
+        return true;
+    }
+    matches!(clean, "/." | "/*" | "/./" | "/./*") || starts_with_root_variable_expansion(clean)
+}
+
+fn starts_with_root_variable_expansion(target: &str) -> bool {
+    let Some(rest) = expansion_tail(target) else {
+        return false;
+    };
+    rest == "/" || rest == "/*" || rest.starts_with("//") || rest.starts_with("/./")
+}
+
+fn expansion_tail(target: &str) -> Option<&str> {
+    if let Some(rest) = target.strip_prefix("${") {
+        let end = rest.find('}')?;
+        return Some(&rest[end + 1..]);
+    }
+    if let Some(rest) = target.strip_prefix("$(") {
+        let mut depth = 1_i32;
+        let mut in_single = false;
+        let mut in_double = false;
+        for (idx, ch) in rest.char_indices() {
+            match ch {
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                '(' if !in_single && !in_double => depth += 1,
+                ')' if !in_single && !in_double => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&rest[idx + ch.len_utf8()..]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    if let Some(rest) = target.strip_prefix('$') {
+        let end = rest
+            .char_indices()
+            .find_map(|(idx, ch)| {
+                if ch == '_' || ch.is_ascii_alphanumeric() {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
+            .unwrap_or(rest.len());
+        if end > 0 {
+            return Some(&rest[end..]);
+        }
+    }
+    None
 }
 
 pub(crate) fn execute_run_bash_action(
@@ -753,11 +967,20 @@ pub(crate) fn execute_approved_bash(
     shell_jobs: &FileShellJobStore,
     runtime: &mut dyn ActionRuntime,
 ) -> String {
+    let clean = command.trim();
+    if let Err(reason) = validate_bash_request(clean) {
+        let mut result = bash_action_not_executed(Some(clean), bash_validation_message(&reason));
+        result.push_str(&format!(
+            "\napproval_id: {}\napproval_status: approved_by_user",
+            request.approval_id
+        ));
+        return result;
+    }
     let mut result = if background {
-        shell_jobs.spawn_background(command.trim(), cwd, session_id, turn_id)
+        shell_jobs.spawn_background(clean, cwd, session_id, turn_id)
     } else if let Some(interval_ms) = interval_ms {
         execute_polling_bash(
-            command.trim(),
+            clean,
             cwd,
             interval_ms,
             timeout_ms,
@@ -765,14 +988,7 @@ pub(crate) fn execute_approved_bash(
             runtime,
         )
     } else {
-        shell_jobs.run_with_timeout(
-            command.trim(),
-            cwd,
-            timeout_ms,
-            session_id,
-            turn_id,
-            runtime,
-        )
+        shell_jobs.run_with_timeout(clean, cwd, timeout_ms, session_id, turn_id, runtime)
     };
     result.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
@@ -1208,6 +1424,9 @@ fn bash_action_not_executed(command: Option<&str>, reason: &str) -> String {
 fn bash_validation_message(reason: &str) -> &'static str {
     match reason {
         "command_required" => "No shell command was provided.",
+        "dangerous_recursive_root_delete" => {
+            "The shell command was blocked by Timem safety policy because it may recursively delete the filesystem root."
+        }
         _ => "The shell command request did not pass runtime validation.",
     }
 }

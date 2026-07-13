@@ -638,3 +638,169 @@ fn bash_validation_rejects_empty_and_allows_long_commands() {
     assert!(validate_bash_request(&huge).is_ok());
     assert!(validate_bash_request("printf ok").is_ok());
 }
+
+#[test]
+fn bash_validation_blocks_recursive_force_root_delete_variants() {
+    for command in [
+        "rm -rf /",
+        "rm -fr -- /",
+        "rm -rf /*",
+        "echo ok; rm -rf /; echo done",
+        "EMPTY=; rm -rf \"$EMPTY\"/",
+        "EMPTY=; rm -rf ${EMPTY}/*",
+        "rm -rf $(printf '')/",
+        "rm -rf $(printf '')/*",
+        "if true; then rm -rf /; fi",
+    ] {
+        assert_eq!(
+            validate_bash_request(command),
+            Err("dangerous_recursive_root_delete".to_string()),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn bash_validation_allows_non_root_delete_variants() {
+    for command in [
+        "rm -rf ./target",
+        "rm -rf target",
+        "rm -rf /tmp/timem-test-dir",
+        "rm -r /",
+        "rm -f /",
+        "printf 'rm -rf / is only text'",
+    ] {
+        assert!(validate_bash_request(command).is_ok(), "{command}");
+    }
+}
+
+#[test]
+fn run_bash_blocks_dangerous_delete_before_spawning_or_approval() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("dangerous_delete_guard"));
+    let cwd = tmp_cwd("dangerous_delete_guard");
+    let marker = cwd.join("marker.txt");
+    let command = format!("rm -rf /; printf should_not_run > {}", marker.display());
+    let result = execute_run_bash(
+        &command,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Ask,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    match result {
+        ActionExecution::Completed(text) => {
+            assert!(text.contains("blocked by Timem safety policy"), "{text}");
+            assert!(
+                !marker.exists(),
+                "blocked command must not execute follow-up"
+            );
+        }
+        ActionExecution::NeedsApproval(_) => {
+            panic!("dangerous command should be blocked before approval")
+        }
+    }
+}
+
+#[test]
+fn run_bash_blocks_dangerous_polling_loop_command() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("dangerous_poll_guard"));
+    let cwd = tmp_cwd("dangerous_poll_guard");
+    let result = execute_run_bash(
+        "rm -rf $(printf '')/*",
+        &cwd,
+        false,
+        5000,
+        Some(1000),
+        1000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        false,
+        &mut NeverCancelRuntime,
+    );
+    match result {
+        ActionExecution::Completed(text) => {
+            assert!(text.contains("blocked by Timem safety policy"), "{text}");
+        }
+        other => panic!("expected safety block, got {other:?}"),
+    }
+}
+
+#[test]
+fn approved_bash_rechecks_safety_before_execution() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("approved_dangerous_guard"));
+    let cwd = tmp_cwd("approved_dangerous_guard");
+    let marker = cwd.join("marker.txt");
+    let request = ApprovalRequest {
+        approval_id: "approval_test".to_string(),
+        action: "run_bash".to_string(),
+        command: "rm -rf /".to_string(),
+        reason: "test".to_string(),
+        risk: "local_command_execution".to_string(),
+    };
+    let command = format!("rm -rf /; printf should_not_run > {}", marker.display());
+    let result = execute_approved_bash(
+        &command,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        "session_a",
+        "turn_a",
+        true,
+        &request,
+        &store,
+        &mut NeverCancelRuntime,
+    );
+    assert!(
+        result.contains("blocked by Timem safety policy"),
+        "{result}"
+    );
+    assert!(
+        result.contains("approval_status: approved_by_user"),
+        "{result}"
+    );
+    assert!(
+        !marker.exists(),
+        "blocked approved command must not execute"
+    );
+}
+
+#[test]
+fn run_bash_allows_safe_tmp_delete() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("safe_tmp_delete"));
+    let cwd = tmp_cwd("safe_tmp_delete");
+    let target = cwd.join("safe-delete");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("file.txt"), "ok").unwrap();
+    let result = execute_run_bash(
+        &format!("rm -rf {}", shell_quote_path(&target)),
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    match result {
+        ActionExecution::Completed(text) => {
+            assert!(text.contains("Exit code: 0"), "{text}");
+            assert!(!target.exists(), "safe temp dir should be removable");
+        }
+        other => panic!("expected safe command to run, got {other:?}"),
+    }
+}
