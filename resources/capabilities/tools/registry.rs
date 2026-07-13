@@ -1,6 +1,7 @@
 use crate::response_protocol::ParsedAction;
 use crate::{capmgr, memmgr, self_tool, shell_exec};
 use crate::{ActionExecution, ActionRuntime, AgentCore};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &["memmgr", "capmgr", "run_bash", "self_tool"];
 
@@ -12,8 +13,21 @@ pub(crate) fn execute_builtin_tool(
     binding_name: &str,
     action: &ParsedAction,
     runtime: &mut dyn ActionRuntime,
-) -> Option<ActionExecution> {
-    builtin_tool_callback(binding_name).map(|callback| callback(core, action, runtime))
+) -> Result<Option<ActionExecution>, BuiltinToolFailure> {
+    let Some(callback) = builtin_tool_callback(binding_name) else {
+        return Ok(None);
+    };
+    catch_builtin_execution(|| callback(core, action, runtime)).map(Some)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BuiltinToolFailure;
+
+fn catch_builtin_execution<F>(execute: F) -> Result<ActionExecution, BuiltinToolFailure>
+where
+    F: FnOnce() -> ActionExecution,
+{
+    catch_unwind(AssertUnwindSafe(execute)).map_err(|_| BuiltinToolFailure)
 }
 
 fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
@@ -59,17 +73,5 @@ fn execute_run_bash(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builtin_registry_lists_all_compiled_tool_callbacks() {
-        for binding in BUILTIN_TOOL_BINDINGS {
-            assert!(
-                builtin_tool_callback(binding).is_some(),
-                "missing builtin callback for {binding}"
-            );
-        }
-        assert!(builtin_tool_callback("ghost_tool").is_none());
-    }
-}
+#[path = "../../../agent_core/tests/unit/capability_tool_registry_tests.rs"]
+mod tests;

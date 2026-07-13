@@ -80,79 +80,31 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
     false
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retry_policy_defaults_match_user_visible_contract() {
-        let policy = ModelSystemRetryPolicy::default();
-        assert_eq!(policy.max_attempts, 5);
-        assert_eq!(policy.delay, Duration::ZERO);
-    }
-
-    #[test]
-    fn retryable_model_system_errors_cover_network_and_transient_http() {
-        for error in [
-            "provider_network_error: curl: (16) Error in the HTTP2 framing layer",
-            "provider_timeout: request exceeded timeout",
-            "curl_failed",
-            "curl: (28) operation timed out",
-            "connection reset by peer",
-            "could not resolve host: example.invalid",
-            "provider_http_408: timeout",
-            "provider_http_409: conflict",
-            "provider_http_425: too early",
-            "provider_http_429: rate limit",
-            "provider_http_500: upstream overloaded",
-            "provider_http_503",
-        ] {
-            assert!(is_retryable_model_system_error(error), "{error}");
-        }
-    }
-
-    #[test]
-    fn non_retryable_model_errors_do_not_waste_rounds() {
-        for error in [
-            "cancelled_by_user",
-            "provider_http_400: invalid model",
-            "provider_http_401: unauthorized",
-            "provider_http_403: forbidden",
-            "provider_http_404: model not found",
-            "invalid_json",
-            "status_required",
-            "next_actions[0].args_required",
-        ] {
-            assert!(!is_retryable_model_system_error(error), "{error}");
-        }
-    }
-
-    #[test]
-    fn retry_decision_is_structured_and_ui_neutral() {
-        let policy = ModelSystemRetryPolicy {
-            max_attempts: 5,
-            delay: Duration::from_secs(10),
-        };
-        let decision =
-            model_retry_decision("provider_http_503: overloaded", 0, policy, false).unwrap();
-        assert_eq!(
-            decision,
-            ModelRetryDecision {
-                retry_attempt: 1,
-                max_attempts: 5,
-                delay: Duration::from_secs(10),
-            }
-        );
-        assert!(model_retry_decision("provider_http_400: bad request", 0, policy, false).is_none());
-        assert!(model_retry_decision("provider_http_503", 5, policy, false).is_none());
-        assert!(model_retry_decision("provider_http_503", 0, policy, true).is_none());
-
-        let debug = format!("{decision:?}");
-        for forbidden in ["重试", "网络错误", "\x1b"] {
-            assert!(
-                !debug.contains(forbidden),
-                "core retry decision leaked UI text {forbidden:?}: {debug}"
-            );
-        }
-    }
+pub fn is_model_input_too_large_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let input_subject =
+        lower.contains("input") || lower.contains("prompt") || lower.contains("context");
+    let size_subject = lower.contains("token") || lower.contains("length");
+    let exceeds_limit = lower.contains("too long")
+        || lower.contains("too large")
+        || lower.contains("too many")
+        || lower.contains("exceed");
+    lower.contains("argument list too long")
+        || lower.contains("os error 7")
+        || lower.contains("e2big")
+        || lower.starts_with("provider_http_413")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("maximum context length")
+        || lower.contains("max context length")
+        || lower.contains("input context is too long")
+        || lower.contains("input is too long")
+        || lower.contains("input too long")
+        || lower.contains("too many input tokens")
+        || lower.contains("request body too large")
+        || lower.contains("payload too large")
+        || (input_subject && size_subject && exceeds_limit)
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/retry_policy_tests.rs"]
+mod tests;

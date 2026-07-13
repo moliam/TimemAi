@@ -57,7 +57,10 @@ flowchart LR
 - Builds append-only prompt segments.
 - Parses and repairs model response envelopes through
   `agent_core::response_protocol`. The parser modules are runtime code, not
-  model-facing prompt resources.
+  model-facing prompt resources. Each protocol suite owns issue-specific repair
+  guidance and may inspect the malformed raw response to provide a concrete,
+  protocol-native correction skeleton; the turn loop only assembles the shared
+  temporary repair delta and audit record.
 - Loads capability manifests and renders the model-facing tool catalog from the
   same JSON Schema style IDL used to validate canonical tool actions.
 - Renders `prompt_0` and dynamic prompt delta blocks through
@@ -343,6 +346,15 @@ terminal input handling. Host integrations should treat it as a state machine:
 - reply to core-originated request topics
 - signal cancellation and supply optional user supplements
 
+Model-requested actions have a failure boundary inside `agent_core`. Command
+tools and `run_bash` execute as child processes, so nonzero exits and Unix
+signals become bounded action evidence rather than host-process failures.
+Builtin callbacks are invoked through the capability registry under a panic
+boundary; a panic produces an `internal_error` audit record and the session can
+continue. Rust panic recovery cannot safely recover a native SIGSEGV in the
+same process, so future untrusted native/FFI capabilities must run behind a
+process boundary.
+
 The terminal app is one host adapter. iOS should be another host adapter, not a
 fork of the agent loop. The iOS path should reuse `agent_core` through the
 existing JSON-in/JSON-out C ABI or a thin generated binding, then implement only
@@ -595,10 +607,31 @@ Runtime shrink review and context maintenance should use `delta_id`:
   branch: summarize useful dynamic prompt deltas to about 10%-20% of their
   current token footprint, discard stale delta ids, and offload important but
   lengthy delta ids into scratch.
+- Action-result Deltas have a second, stricter commit boundary. Before an
+  action result is added, core combines the latest observed provider input,
+  pending prompt components, the candidate Delta, and conservative render
+  overhead. If that projection exceeds 95% of `TIMEM_MAX_LLM_INPUT`, core does
+  not commit that candidate Delta or same-batch action-result components. It
+  commits a bounded SYSTEM note reporting the output size and remaining
+  context budget instead. Non-ASCII action output is conservatively estimated at no
+  less than one token per character instead of using the general `chars / 4`
+  approximation. `build_next_prompt` applies the same guard to pending runtime
+  action results such as memory precheck output while retaining the new USER
+  input and unrelated SYSTEM metadata.
+- A provider may still reject input because its tokenizer or effective limit
+  differs from the local estimate. For explicit `E2BIG`, HTTP 413, or
+  input/context-length errors, session runtime removes the newest Delta that
+  contains action results, replaces it with the same bounded SYSTEM guidance,
+  records `model_input_overflow_recovery`, and retries the model once through
+  the normal turn loop. If no action-result Delta remains, the error stops the
+  turn; this prevents an unbounded recovery loop and avoids silently deleting
+  the user's question.
 
 Prompt deltas are append-only in normal operation. Later provider requests
 render the same static prefix plus all retained dynamic deltas, so the
 model can see what it asked the runtime to do and what the runtime returned.
+The input-overflow recovery above is the deliberate exception to append-only
+operation.
 
 The relationship is:
 
@@ -911,11 +944,11 @@ whether to answer or ask for another action.
 
 Provider output is untrusted. The runtime validates:
 
-- The response is a JSON object or contains an extractable JSON envelope.
+- The response follows the selected JSON, Markdown, or XML envelope.
 - `status`, `free_talk`, `final_answer`, and `context_compact` follow
   the active response protocol contract.
-- `next_actions` is an array when present.
-- Every action has `action` and valid `args`.
+- The action section follows the selected protocol's workflow-array shape.
+- Every action uses a registered tool-name key and a valid argument object.
 - SQL and bash actions pass their own safety checks.
 
 If validation fails, the runtime builds a temporary, non-cache-controlled repair
@@ -928,7 +961,9 @@ the concrete protocol error:
 
 ## SYSTEM
 <CURRENT_ASSISTANT_NAME>'s previous response is not protocol compliant.
-error: actions[0].args_required
+error: invalid_xml_response_root
+
+The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'.
 ```
 
 Repair is retried a bounded number of times for one model response failure. Each
