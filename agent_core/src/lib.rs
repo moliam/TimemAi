@@ -3267,6 +3267,15 @@ impl AgentCore {
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
         event.payload["status"] = json!(Self::action_finish_status(action, result));
+        if action.action == "self_tool"
+            && action.input_lower("type") == "cwd"
+            && action.input_lower("op") == "chg_cwd"
+            && result.contains("status: updated_prompt_context_cwd")
+        {
+            event.payload["context_state"] = json!({
+                "cwd": self.current_prompt_cwd().display().to_string(),
+            });
+        }
         if let Some(pid) = action_result_pid(result) {
             event.payload["pid"] = json!(pid);
         }

@@ -57,6 +57,18 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web_ui/timem-web/pnpm-lock.yaml
+
       - name: Run production CI gate
         shell: bash
         run: scripts/ci.sh

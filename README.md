@@ -114,8 +114,8 @@ git pull --ff-only
 ./install.sh
 ```
 
-This rebuilds the latest release binary and overwrites the installed
-`timem-native-rs` and the `timem` command. Your private env file is
+This rebuilds the latest CLI and Web release binaries and overwrites the installed
+`timem-native-rs`, `timem`, and `timem-web` commands. Your private env file is
 user-managed and is not touched; source it explicitly before running:
 
 ```bash
@@ -366,7 +366,7 @@ TIMEM_SHELL_SKIP_RUST_INSTALL=1 ./install.sh
 ```
 
 After Rust is ready, the installer runs `cargo fetch --locked` and
-`cargo build --locked -p timem_shell --release`. Cargo downloads Rust crates
+`cargo build --locked -p timem_shell -p timem_web --release`. Cargo downloads Rust crates
 from `Cargo.lock` automatically, including terminal rendering dependencies such
 as `termimad`; users do not manually install those crate libraries. If this
 step fails on a fresh machine, check network access to crates.io and rerun
@@ -380,10 +380,16 @@ rustup update stable
 rustup default stable
 ```
 
-The installer builds `timem_shell`, installs:
+The installer builds the terminal and local Web hosts, then installs:
 
 - `timem-native-rs`: release binary
 - `timem`: thin wrapper that runs the binary; it does not load env files
+- `timem-web`: local browser UI with the production assistant-ui bundle embedded
+
+Run `timem` for the terminal UI or `timem-web` to start the loopback-only Web
+host and open its authenticated page in the default browser. Installing a
+release source package does not require Node or a separate assistant-ui clone;
+the checked-in production Web bundle is embedded by Cargo.
 
 ## Development Run
 

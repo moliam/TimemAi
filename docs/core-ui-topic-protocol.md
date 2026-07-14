@@ -16,6 +16,8 @@ Every topic event has the same envelope:
 
 ```text
 session_id: string
+context_id?: string
+worker_id?: string
 topic:
   name: string
   attributes: object
@@ -26,6 +28,9 @@ payload: object
 ```
 
 `session_id` is required so a host can multiplex multiple agent sessions.
+Worker-originated topics also carry `context_id` and `worker_id`; Session-level
+runtime topics may omit them. These ids are routing scope, not instructions to
+create another user-visible chat.
 `topic.name` identifies the semantic payload shape. `state` tells the host what
 the session is doing when the topic is emitted. `payload` is typed by
 `topic.name`.
@@ -61,15 +66,17 @@ instead of inventing per-request response channels:
 
 ```text
 session_id: string
+worker_id?: string
 topic_name: string
 request_id?: string
 decision: accept | decline
 payload: object
 ```
 
-`session_id` selects the suspended session. `topic_name` identifies the request
-topic being answered. `request_id` is optional today and reserved for hosts that
-need multiple outstanding requests in the same session. `decision` carries the
+`session_id` selects the owning Session. `worker_id` is the requesting worker's
+return address; when absent, the reply targets the primary worker. `topic_name`
+identifies the request topic being answered. `request_id` correlates multiple
+outstanding requests in the same session. `decision` carries the
 high-level accept/decline answer. `payload` carries topic-specific details when
 a future request needs more than a boolean decision.
 
@@ -80,6 +87,11 @@ the turn. The UI should not duplicate that runtime policy.
 Core validates a reply against the pending request topic before applying it. A
 reply with the wrong `session_id`, `topic_name`, or `request_id` must not resume
 the session. Replying to a non-blocking notification topic is also invalid.
+
+Only the primary worker owns the user-facing conversation. A child-worker
+request is rendered in that primary turn, and the host relays the resulting
+reply to the child using `worker_id`. Child workers do not receive independent
+chat surfaces.
 
 ## Current topics
 
@@ -105,9 +117,11 @@ payload:
     skills: number
   worker?: null | object
     session_id: string
+    context_id: string
+    worker_id: string
     display_name: string
     ordinal: number
-    parent_session_id?: null | string
+    parent_worker_id?: null | string
   workspace?: null | object
     current_dir?: null | string
     data_dir: string

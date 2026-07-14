@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Timem</title>
+    <script>
+      try {
+        const saved = JSON.parse(localStorage.getItem("timem-web-appearance-v1") || "{}");
+        document.documentElement.dataset.theme = saved.theme === "dark" || saved.theme === "light"
+          ? saved.theme
+          : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        document.documentElement.dataset.font = ["system", "serif", "mono"].includes(saved.font) ? saved.font : "system";
+        document.documentElement.dataset.textSize = ["small", "medium", "large"].includes(saved.textSize) ? saved.textSize : "medium";
+      } catch (_) {
+        document.documentElement.dataset.theme = "dark";
+        document.documentElement.dataset.font = "system";
+        document.documentElement.dataset.textSize = "medium";
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

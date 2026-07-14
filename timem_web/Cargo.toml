@@ -1,0 +1,18 @@
+[package]
+name = "timem_web"
+build = "build.rs"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "timem-web"
+path = "src/main.rs"
+
+[dependencies]
+agent_core = { path = "../agent_core" }
+axum = { version = "0.7", features = ["multipart", "ws"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "net", "signal", "sync", "time"] }

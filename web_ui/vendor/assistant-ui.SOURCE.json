@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/assistant-ui/assistant-ui",
+  "commit": "e45669aad58ab0106214f403ded8fe7ee1fe9699",
+  "package_manager": "pnpm@11.10.0",
+  "node_engine": ">=24",
+  "license": "MIT",
+  "purpose": "Local source checkout for Timem's Web UI integration. This file is the reproducible source pin; the checkout itself is intentionally ignored."
+}
