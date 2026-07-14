@@ -28,6 +28,14 @@ impl CoreSessionWorkerConfig {
     pub fn session_id(&self) -> &str {
         &self.identity.session_id
     }
+
+    pub fn context_id(&self) -> &str {
+        &self.identity.context_id
+    }
+
+    pub fn worker_id(&self) -> &str {
+        &self.identity.worker_id
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -254,7 +262,8 @@ struct ManagedSessionWorker {
 
 pub struct CoreSessionWorkerManager {
     runtime: CoreSessionWorkerRuntime,
-    next_ordinal: u32,
+    next_session_ordinal: u32,
+    next_worker_ordinal: u32,
     workers: BTreeMap<String, ManagedSessionWorker>,
 }
 
@@ -262,7 +271,8 @@ impl CoreSessionWorkerManager {
     pub fn new() -> Self {
         Self {
             runtime: CoreSessionWorkerRuntime::new(),
-            next_ordinal: 0,
+            next_session_ordinal: 0,
+            next_worker_ordinal: 0,
             workers: BTreeMap::new(),
         }
     }
@@ -289,9 +299,9 @@ impl CoreSessionWorkerManager {
             .collect()
     }
 
-    pub fn handle(&self, session_id: &str) -> Option<CoreSessionWorkerHandle> {
+    pub fn handle(&self, worker_id: &str) -> Option<CoreSessionWorkerHandle> {
         self.workers
-            .get(session_id)
+            .get(worker_id)
             .map(|worker| worker.worker.handle())
     }
 
@@ -301,8 +311,8 @@ impl CoreSessionWorkerManager {
         config: ProviderConfig,
         workspace: CoreSessionWorkerWorkspace,
     ) -> Result<String, String> {
-        if let Some(session_id) = self.workers.keys().next() {
-            return Ok(session_id.clone());
+        if let Some(worker_id) = self.workers.keys().next() {
+            return Ok(worker_id.clone());
         }
         self.spawn_worker(core, config, workspace, None, None)
     }
@@ -317,8 +327,8 @@ impl CoreSessionWorkerManager {
     where
         M: ModelClient + Send + 'static,
     {
-        if let Some(session_id) = self.workers.keys().next() {
-            return Ok(session_id.clone());
+        if let Some(worker_id) = self.workers.keys().next() {
+            return Ok(worker_id.clone());
         }
         self.spawn_worker_with_model_client(core, config, workspace, None, None, model_client)
     }
@@ -329,14 +339,36 @@ impl CoreSessionWorkerManager {
         config: ProviderConfig,
         workspace: CoreSessionWorkerWorkspace,
         display_name: Option<String>,
-        parent_session_id: Option<String>,
+        parent_worker_id: Option<String>,
     ) -> Result<String, String> {
         self.spawn_worker_with_model_client(
             core,
             config,
             workspace,
             display_name,
-            parent_session_id,
+            parent_worker_id,
+            ProviderModelClient,
+        )
+    }
+
+    pub fn spawn_worker_in_session(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+    ) -> Result<String, String> {
+        self.spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
             ProviderModelClient,
         )
     }
@@ -347,23 +379,72 @@ impl CoreSessionWorkerManager {
         config: ProviderConfig,
         workspace: CoreSessionWorkerWorkspace,
         display_name: Option<String>,
-        parent_session_id: Option<String>,
+        parent_worker_id: Option<String>,
         model_client: M,
     ) -> Result<String, String>
     where
         M: ModelClient + Send + 'static,
     {
-        let ordinal = self.next_ordinal;
-        self.next_ordinal = self
-            .next_ordinal
+        let session_ordinal = self.next_session_ordinal;
+        self.next_session_ordinal = self
+            .next_session_ordinal
+            .checked_add(1)
+            .ok_or_else(|| "session_ordinal_overflow".to_string())?;
+        self.spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            workspace,
+            format!("session_{session_ordinal}"),
+            "context_0",
+            display_name,
+            parent_worker_id,
+            model_client,
+        )
+    }
+
+    pub fn spawn_worker_in_session_with_model_client<M>(
+        &mut self,
+        core: AgentCore,
+        config: ProviderConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
+        let session_id = session_id.into();
+        let context_id = context_id.into();
+        if self.workers.values().any(|worker| {
+            worker.identity.session_id == session_id && worker.identity.context_id == context_id
+        }) {
+            return Err("session_context_worker_exists".to_string());
+        }
+        if let Some(parent_worker_id) = parent_worker_id.as_deref() {
+            let parent = self
+                .workers
+                .get(parent_worker_id)
+                .ok_or_else(|| "parent_worker_not_found".to_string())?;
+            if parent.identity.session_id != session_id {
+                return Err("parent_worker_session_mismatch".to_string());
+            }
+        }
+        let ordinal = self.next_worker_ordinal;
+        self.next_worker_ordinal = self
+            .next_worker_ordinal
             .checked_add(1)
             .ok_or_else(|| "session_worker_ordinal_overflow".to_string())?;
-        let session_id = format!("session_{ordinal}");
-        let identity = CoreSessionWorkerIdentity::new(
-            session_id.clone(),
+        let worker_id = format!("worker_{ordinal}");
+        let identity = CoreSessionWorkerIdentity::new_scoped(
+            session_id,
+            context_id,
+            worker_id.clone(),
             ordinal,
             display_name,
-            parent_session_id,
+            parent_worker_id,
         );
         let worker = CoreSessionWorker::spawn_with_runtime_model_client(
             core,
@@ -373,18 +454,18 @@ impl CoreSessionWorkerManager {
             model_client,
         );
         self.workers.insert(
-            session_id.clone(),
+            worker_id.clone(),
             ManagedSessionWorker {
                 identity,
                 state: CoreSessionWorkerLifecycleState::Running,
                 worker,
             },
         );
-        Ok(session_id)
+        Ok(worker_id)
     }
 
-    pub fn try_recv_event(&mut self, session_id: &str) -> Option<CoreSessionWorkerEvent> {
-        let managed = self.workers.get_mut(session_id)?;
+    pub fn try_recv_event(&mut self, worker_id: &str) -> Option<CoreSessionWorkerEvent> {
+        let managed = self.workers.get_mut(worker_id)?;
         match managed.worker.events().try_recv() {
             Ok(event) => {
                 if matches!(event, CoreSessionWorkerEvent::WorkerStopped) {
@@ -396,23 +477,23 @@ impl CoreSessionWorkerManager {
         }
     }
 
-    pub fn request_shutdown(&mut self, session_id: &str) -> Result<(), String> {
+    pub fn request_shutdown(&mut self, worker_id: &str) -> Result<(), String> {
         let managed = self
             .workers
-            .get_mut(session_id)
+            .get_mut(worker_id)
             .ok_or_else(|| "session_worker_not_found".to_string())?;
         managed.state = CoreSessionWorkerLifecycleState::Stopping;
         managed.worker.handle().request_shutdown()
     }
 
-    pub fn remove_stopped(&mut self, session_id: &str) -> Result<(), String> {
-        let Some(managed) = self.workers.get(session_id) else {
+    pub fn remove_stopped(&mut self, worker_id: &str) -> Result<(), String> {
+        let Some(managed) = self.workers.get(worker_id) else {
             return Err("session_worker_not_found".to_string());
         };
         if managed.state != CoreSessionWorkerLifecycleState::Stopped {
             return Err("session_worker_not_stopped".to_string());
         }
-        let managed = self.workers.remove(session_id).unwrap();
+        let managed = self.workers.remove(worker_id).unwrap();
         managed.worker.shutdown()
     }
 
@@ -422,7 +503,7 @@ impl CoreSessionWorkerManager {
             managed.state = CoreSessionWorkerLifecycleState::Stopping;
         }
         let mut first_error = None;
-        for (_session_id, managed) in self.workers {
+        for (_worker_id, managed) in self.workers {
             if let Err(err) = managed.worker.shutdown() {
                 first_error.get_or_insert(err);
             }
@@ -512,11 +593,15 @@ impl CoreSessionWorker {
                 Some(&identity),
                 Some(&workspace),
                 Some(core.dynamic_context_summary()),
-            );
+            )
+            .with_worker_scope(&identity.context_id, &identity.worker_id);
             let _ = event_tx.send(CoreSessionWorkerEvent::Topics(vec![init_event]));
             let mut profiler = RuntimeProfiler::default();
             let mut ui = WorkerTurnUi {
                 event_tx: event_tx.clone(),
+                session_id: identity.session_id.clone(),
+                context_id: identity.context_id.clone(),
+                worker_id: identity.worker_id.clone(),
                 supplement_queue,
                 cancel_requested,
                 reply_rx,
@@ -536,7 +621,7 @@ impl CoreSessionWorker {
                         input,
                         additional_context,
                     } => {
-                        let session_id = identity.session_id.clone();
+                        let context_id = identity.context_id.clone();
                         let outcome = {
                             let working = runtime.begin_worker_turn();
                             ui.current_turn_active = Some(working.active_handle());
@@ -545,7 +630,7 @@ impl CoreSessionWorker {
                                 &mut config,
                                 TurnInput {
                                     input: &input,
-                                    session: &session_id,
+                                    session: &context_id,
                                     audit_file: &workspace.audit_file,
                                     runtime: &workspace.runtime,
                                     run_bash_target: &workspace.run_bash_target,
@@ -575,7 +660,8 @@ impl CoreSessionWorker {
                             Some(&identity),
                             Some(&workspace),
                             Some(core.dynamic_context_summary()),
-                        );
+                        )
+                        .with_worker_scope(&identity.context_id, &identity.worker_id);
                         let _ = event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
                     }
                     CoreSessionWorkerCommand::Shutdown => break,
@@ -622,6 +708,9 @@ impl Drop for CoreSessionWorker {
 
 struct WorkerTurnUi {
     event_tx: Sender<CoreSessionWorkerEvent>,
+    session_id: String,
+    context_id: String,
+    worker_id: String,
     supplement_queue: Arc<Mutex<Vec<String>>>,
     cancel_requested: Arc<AtomicBool>,
     reply_rx: Receiver<TopicReply>,
@@ -670,7 +759,13 @@ impl TurnUi for WorkerTurnUi {
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         let events = self
             .runtime
-            .enrich_topic_events(events.to_vec(), self.current_turn_active.as_ref());
+            .enrich_topic_events(events.to_vec(), self.current_turn_active.as_ref())
+            .into_iter()
+            .map(|mut event| {
+                event.session_id = self.session_id.clone();
+                event.with_worker_scope(&self.context_id, &self.worker_id)
+            })
+            .collect();
         let _ = self.event_tx.send(CoreSessionWorkerEvent::Topics(events));
     }
 

@@ -1,10 +1,10 @@
 use agent_core::capability::{CapabilityHostProfile, CapabilityRegistry};
 use agent_core::self_tool::SelfToolPaths;
 use agent_core::{
-    read_audit_doc, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile, CoreStep,
-    LlmResponse, MemGuard, OutputExpansionRequest, OutputExpansionResolution, ProviderConfig,
-    ResponseProtocolKind, RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField,
-    TurnFinal, TurnStopDetail, TurnStopReason, UsageStats,
+    read_audit_doc, ActionRuntime, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile,
+    CoreStep, LlmResponse, MemGuard, OutputExpansionRequest, OutputExpansionResolution,
+    ProviderConfig, ResponseProtocolKind, RoundLimitDecisionRequest, RoundLimitResolution,
+    RuntimeConfigField, TurnFinal, TurnStopDetail, TurnStopReason, UsageStats,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -6558,6 +6558,18 @@ fn self_tool_env_denies_memory_path_writes_through_core_action() {
 
 #[test]
 fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<agent_core::CoreTopicEvent>);
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+
+        fn on_core_topic_events(&mut self, events: &[agent_core::CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+
     let memory_dir = tmp_dir("self_tool_chg_cwd_memory");
     let work_dir = tmp_dir("self_tool_chg_cwd_work");
     let sub_dir = work_dir.join("sub");
@@ -6584,12 +6596,16 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
 }}"#,
         sub_dir.display()
     );
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(response),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
+    let mut runtime = TopicRecorder::default();
+    let step = core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            content: scored(response),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        },
+        &mut runtime,
+    );
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
@@ -6607,6 +6623,19 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
     assert!(prompt.contains("Action result: run_bash"), "{prompt}");
     assert!(prompt.contains(&sub_dir.display().to_string()), "{prompt}");
     assert!(prompt.contains("cwd-ok"), "{prompt}");
+    let cwd_update = runtime
+        .0
+        .iter()
+        .find(|event| {
+            event.topic.name == agent_core::CORE_TOPIC_ACTION
+                && event.payload["action"] == "self_tool"
+                && event.payload["event"] == "finish"
+        })
+        .expect("self_tool finish topic");
+    assert_eq!(
+        cwd_update.payload["context_state"]["cwd"],
+        sub_dir.display().to_string()
+    );
 }
 
 #[test]
@@ -6644,6 +6673,18 @@ fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
 
 #[test]
 fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<agent_core::CoreTopicEvent>);
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+
+        fn on_core_topic_events(&mut self, events: &[agent_core::CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+
     let memory_dir = tmp_dir("self_tool_bad_cwd_memory");
     let base_dir = tmp_dir("self_tool_bad_cwd_base");
     let base_dir = fs::canonicalize(&base_dir).unwrap();
@@ -6653,15 +6694,19 @@ fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
     core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
 
     let _ = core.begin_turn("切到不存在路径", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(
-            r#"{{"status":"working","working_still_action":[{{"self_tool":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}}]}}"#,
-            missing.display()
-        )),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
+    let mut runtime = TopicRecorder::default();
+    let step = core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            content: scored(format!(
+                r#"{{"status":"working","working_still_action":[{{"self_tool":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}}]}}"#,
+                missing.display()
+            )),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        },
+        &mut runtime,
+    );
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
@@ -6672,6 +6717,10 @@ fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
     assert!(prompt.contains("type: cwd"), "{prompt}");
     assert!(prompt.contains("error: path_not_found"), "{prompt}");
     assert!(!prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", missing.display())));
+    assert!(runtime
+        .0
+        .iter()
+        .all(|event| event.payload.get("context_state").is_none()));
 }
 
 #[test]

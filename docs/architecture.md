@@ -1,7 +1,7 @@
 # Timem Architecture
 
-Timem Shell is the terminal host for the reusable Timem Rust agent core. The
-terminal host owns CLI/input/rendering. `agent_core` owns the reusable runtime,
+Timem provides terminal and local-browser hosts for the reusable Timem Rust
+agent core. Each host owns its input and rendering. `agent_core` owns the reusable runtime,
 provider transport, memory, model protocol parsing, capability execution, and
 structured core/UI topic protocol.
 
@@ -19,9 +19,10 @@ structured core/UI topic protocol.
 ```mermaid
 flowchart LR
     User["User terminal"] --> Shell["timem_shell\nterminal UI + CLI"]
-    Browser["Future local web UI"] -.-> Web["web adapter\nplanned"]
+    Browser["Local browser"] --> WebUI["web_ui\nassistant-ui + React"]
+    WebUI <--> Web["timem_web\nloopback HTTP/WebSocket host"]
     Shell --> Core["agent_core\nruntime + topic protocol"]
-    Web -.-> Core
+    Web --> Core
     Core --> Runtime["agent_core::session_runtime\nUI-neutral turn runner"]
     Runtime --> Provider["agent_core::provider_transport\nprovider I/O"]
     Provider --> Wire["agent_core::provider\nwire-format adapter"]
@@ -158,6 +159,82 @@ adapter ergonomics. If a feature must be visible to the model, callable by the
 model, shared by iOS/Web/CLI, or reflected in prompt/capability contracts, it
 belongs in `agent_core` or `resources` instead of being implemented as a
 shell-only shortcut.
+
+### `timem_web/`
+
+`timem_web` is a local host adapter, not a second agent runtime. It binds only
+to `127.0.0.1`, authenticates API and WebSocket access with a per-process token,
+embeds the production frontend, and maps browser commands to public
+`agent_core` worker/session interfaces. It preserves session and request ids on
+every topic, assigns stable event ids, and keeps one bounded host-side turn
+envelope for the task text, supplements, approvals, process events, final answer,
+and completion telemetry. Uploads, retained turns, per-turn user entries, and
+per-turn process events are bounded independently. Concurrent workers never
+share a turn envelope. Provider calls, prompt construction, memory, protocol
+parsing, and tool execution remain in `agent_core`.
+
+The Web Session is also the runtime-configuration ownership boundary. On
+creation, `timem_web` copies the current host defaults and applies a validated
+allowlist of Session overrides for provider, model, wire/response protocols,
+base URL, token limits, timeout, approval/work-instruction policy, and API key.
+Existing Sessions are immutable when host defaults change; later Sessions see
+the new defaults. API keys remain in the server-side Session runtime and are
+never serialized into snapshots or topics. A Session owns explicit
+`contexts[]` and `workers[]` registries. All of its workers share the Session
+profile, while each Context owns its prompt/workspace state. Different Sessions
+remain isolated and may use different profiles. The current UI creates one
+default Context and primary Worker, but identity and routing already support
+child workers on additional contexts.
+
+The current ownership cardinality is one mutable `AgentCore` per Context and
+one worker per Context. Spawning a concurrent subtask therefore allocates a new
+Context and then attaches a child Worker whose `parent_worker_id` names the
+requesting worker. The manager rejects duplicate `(session_id, context_id)`
+workers and cross-Session parent links. Sharing one mutable Context between
+workers requires a future context coordinator and is intentionally not implied
+by the present arrays.
+
+The primary Worker is the sole user-facing communication endpoint for a Web
+Session. Child-worker process output and decision requests are projected into
+the primary turn. Decision topics retain the requesting `worker_id` as a relay
+address; after the user's choice is recorded in the primary conversation, the
+host routes the structured reply back to that waiting worker. Child final
+answers remain internal task results and cannot close or directly append to the
+primary chat.
+Child creation never creates a browser Session or another user conversation.
+The sidebar remains a list of user-owned Sessions; internal contexts/workers
+are visible only through the owning Session's structured process stream and
+diagnostics.
+
+User Stop/Cancel is a Session-wide task barrier and cancels every active worker.
+The next user turn targets only the primary Worker. The primary may choose to
+create fresh child Context/Worker pairs, but cancelled children are never
+implicitly resumed.
+
+The shell host intentionally creates one default Session and does not add a
+Session-profile dialog. Its existing process environment and CLI options become
+that Session's profile. This keeps CLI behavior unchanged while preserving the
+same ownership model as Web.
+
+### `web_ui/`
+
+`web_ui/timem-web` owns assistant-ui/React composition, Markdown and syntax
+highlighting, session navigation, session-scoped inline decision queues, themes,
+responsive layout, and turn rendering. One task is presented as a `YOU` frame
+that accumulates supplements and approval replies, a bounded scrollable Timem
+process frame for free talk/actions/repair/compaction/requests, and a separate
+final-delivery block with token and elapsed-time telemetry. Stable host event ids
+make reconnect/snapshot replay idempotent. Browser preferences such as dark/light
+theme remain local UI state.
+
+The Web session snapshot includes the prompt context's cwd. A successful
+`self_tool type=cwd op=chg_cwd` action adds `context_state.cwd` to the existing
+`core.action` finish topic. `timem_web` updates the authoritative session before
+forwarding the event, and the browser reducer updates only the matching session.
+This keeps reconnects, navigation, the composer, and later `run_bash` execution
+on the same cwd without creating a separate fine-grained topic.
+The ignored `web_ui/vendor/assistant-ui` checkout is only a pinned source
+reference; production uses the package lock and embeds the built `dist` assets.
 
 In short:
 
@@ -417,16 +494,22 @@ multiple sessions or recreate a terminal-specific model/action loop.
 
 `CoreSessionWorkerManager` is the core-side multi-session owner. It allocates
 worker identities from ordinal 0, creates `ID0` as the default worker when a
-host asks for the default session, keeps a registry of workers by session id,
+host asks for the default session, keeps a registry of workers by worker id,
 exposes handles/status snapshots, polls worker events without forcing a
 terminal-specific event loop, and requests or joins shutdown across all workers.
 Workers created by one manager share one `CoreSessionWorkerRuntime`, so global
 working-worker counts published in model-response topics reflect all active
 sessions managed by that host.
 
+Provider/runtime configuration belongs to the Session above its contexts and
+workers. A host must construct every worker/context in one Session from the
+same immutable Session profile; it must not let an individual worker silently
+drift to another provider or model. Cross-Session profiles are independent.
+
 A session worker has a stable identity and a workspace description. Identity is
-core/UI protocol data, not a shell label: `session_id`, display name, ordinal,
-and optional parent session id. If no display name is supplied, workers use
+core/UI protocol data, not a shell label: `session_id`, `context_id`,
+`worker_id`, display name, ordinal, and optional `parent_worker_id`. These three
+ids form the cross-language topic-routing scope. If no display name is supplied, workers use
 `ID0`, `ID1`, ... by ordinal. A parent agent or host may create a worker
 with a more specific name, and the name can later be changed through the worker
 handle; the update is emitted as a lifecycle topic. Workspace data describes
@@ -449,6 +532,14 @@ structured facts such as version, profile, response protocol, context limit,
 round budget, capability counts, optional worker identity, optional workspace
 metadata, and optional dynamic-context summary. A shell may render this as a
 startup status line; a web UI may render it as a session state event.
+
+Token telemetry follows the same structured boundary. Each worker
+`ModelResponse` event carries that provider call's `UsageStats`; a host may
+aggregate those events for live task spending while retaining the latest call's
+`prompt_tokens` as the observed context size. `TurnOutcome.stats` remains the
+authoritative completed-task aggregate. Web sessions retain their own
+`max_llm_input_tokens` from lifecycle state, so context percentages and usage
+never depend on a global UI setting or leak across sessions.
 
 Stopped-turn outcomes are returned as `TurnStopSummary`/`TurnStopDetail`
 structure. The terminal host renders those structures into Chinese shell text;

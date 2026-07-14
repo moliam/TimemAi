@@ -1,0 +1,8 @@
+# Local checkout of the upstream assistant-ui monorepo. Recreate it with
+# scripts/bootstrap_assistant_ui.sh; do not commit upstream source or caches.
+/vendor/assistant-ui/
+
+# Future Timem web host/frontend build products.
+/timem-web/node_modules/
+/timem-web/.vite/
+/timem-web/coverage/

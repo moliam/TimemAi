@@ -322,7 +322,8 @@ fn session_worker_manager_allocates_id0_default_and_tracks_lifecycle() {
             ManagerOkModel,
         )
         .expect("manager should spawn default worker");
-    assert_eq!(session_id, "session_0");
+    assert_eq!(session_id, "worker_0");
+    assert_eq!(manager.statuses()[0].identity.session_id, "session_0");
     assert_eq!(manager.worker_count(), 1);
     assert_eq!(manager.statuses()[0].identity.display_name, "ID0");
     assert_eq!(
@@ -409,13 +410,138 @@ fn session_worker_manager_allocates_multiple_workers_from_id0() {
             .expect("manager should spawn worker");
         session_ids.push(session_id);
     }
-    assert_eq!(session_ids, vec!["session_0", "session_1"]);
+    assert_eq!(session_ids, vec!["worker_0", "worker_1"]);
     let names = manager
         .statuses()
         .into_iter()
         .map(|status| status.identity.display_name)
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["ID0", "ID1"]);
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn manager_scopes_multiple_context_workers_to_one_session() {
+    let mut manager = CoreSessionWorkerManager::new();
+    let mut worker_ids = Vec::new();
+    for context_index in 0..2 {
+        let dir = tmp_dir(&format!("shared_session_context_{context_index}"));
+        let core = AgentCore::new(
+            "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+            CoreProfile {
+                name: "test".to_string(),
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+            },
+            &dir,
+        );
+        let worker_id = manager
+            .spawn_worker_in_session_with_model_client(
+                core,
+                test_config(),
+                CoreSessionWorkerWorkspace::new(
+                    &dir,
+                    dir.join("api_audit.jsonl"),
+                    "test-runtime",
+                    "local",
+                ),
+                "shared_session",
+                format!("context_{context_index}"),
+                Some(format!("Context worker {context_index}")),
+                worker_ids.first().cloned(),
+                ManagerOkModel,
+            )
+            .expect("same-session worker should spawn");
+        worker_ids.push(worker_id);
+    }
+
+    assert_eq!(worker_ids, vec!["worker_0", "worker_1"]);
+    let statuses = manager.statuses();
+    assert_eq!(statuses.len(), 2);
+    assert!(statuses
+        .iter()
+        .all(|status| status.identity.session_id == "shared_session"));
+    assert_eq!(statuses[0].identity.context_id, "context_0");
+    assert_eq!(statuses[1].identity.context_id, "context_1");
+    assert_eq!(
+        statuses[1].identity.parent_worker_id.as_deref(),
+        Some("worker_0")
+    );
+
+    let duplicate_dir = tmp_dir("duplicate_context_worker");
+    let duplicate_core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        },
+        &duplicate_dir,
+    );
+    assert_eq!(
+        manager
+            .spawn_worker_in_session_with_model_client(
+                duplicate_core,
+                test_config(),
+                CoreSessionWorkerWorkspace::new(
+                    &duplicate_dir,
+                    duplicate_dir.join("api_audit.jsonl"),
+                    "test-runtime",
+                    "local",
+                ),
+                "shared_session",
+                "context_0",
+                None,
+                None,
+                ManagerOkModel,
+            )
+            .unwrap_err(),
+        "session_context_worker_exists"
+    );
+
+    let wrong_parent_dir = tmp_dir("cross_session_parent");
+    let wrong_parent_core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        },
+        &wrong_parent_dir,
+    );
+    assert_eq!(
+        manager
+            .spawn_worker_in_session_with_model_client(
+                wrong_parent_core,
+                test_config(),
+                CoreSessionWorkerWorkspace::new(
+                    &wrong_parent_dir,
+                    wrong_parent_dir.join("api_audit.jsonl"),
+                    "test-runtime",
+                    "local",
+                ),
+                "other_session",
+                "context_0",
+                None,
+                Some("worker_0".to_string()),
+                ManagerOkModel,
+            )
+            .unwrap_err(),
+        "parent_worker_session_mismatch"
+    );
+
+    for (index, worker_id) in worker_ids.iter().enumerate() {
+        match wait_for_manager_event(&mut manager, worker_id, "scoped lifecycle") {
+            CoreSessionWorkerEvent::Topics(events) => {
+                assert!(events.iter().all(|event| {
+                    event.session_id == "shared_session"
+                        && event.context_id.as_deref() == Some(format!("context_{index}").as_str())
+                        && event.worker_id.as_deref() == Some(worker_id.as_str())
+                }));
+            }
+            other => panic!("unexpected scoped lifecycle event: {other:?}"),
+        }
+    }
     manager.shutdown_all().unwrap();
 }
 

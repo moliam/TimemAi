@@ -336,6 +336,8 @@ impl CoreTopic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreTopicEvent {
     pub session_id: String,
+    pub context_id: Option<String>,
+    pub worker_id: Option<String>,
     pub topic: CoreTopic,
     pub state: CoreSessionState,
     pub payload: Value,
@@ -430,9 +432,11 @@ pub struct CoreTopicStatusHint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreSessionWorkerIdentity {
     pub session_id: String,
+    pub context_id: String,
+    pub worker_id: String,
     pub display_name: String,
     pub ordinal: u32,
-    pub parent_session_id: Option<String>,
+    pub parent_worker_id: Option<String>,
 }
 
 impl CoreSessionWorkerIdentity {
@@ -440,13 +444,34 @@ impl CoreSessionWorkerIdentity {
         session_id: impl Into<String>,
         ordinal: u32,
         display_name: Option<String>,
-        parent_session_id: Option<String>,
+        parent_worker_id: Option<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        Self::new_scoped(
+            session_id.clone(),
+            "context_0",
+            session_id,
+            ordinal,
+            display_name,
+            parent_worker_id,
+        )
+    }
+
+    pub fn new_scoped(
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        worker_id: impl Into<String>,
+        ordinal: u32,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
     ) -> Self {
         Self {
             session_id: session_id.into(),
+            context_id: context_id.into(),
+            worker_id: worker_id.into(),
             display_name: session_worker_default_display_name(ordinal, display_name),
             ordinal,
-            parent_session_id,
+            parent_worker_id,
         }
     }
 
@@ -556,10 +581,22 @@ impl CoreTopicEvent {
     ) -> Self {
         Self {
             session_id: session_id.into(),
+            context_id: None,
+            worker_id: None,
             topic,
             state,
             payload,
         }
+    }
+
+    pub fn with_worker_scope(
+        mut self,
+        context_id: impl Into<String>,
+        worker_id: impl Into<String>,
+    ) -> Self {
+        self.context_id = Some(context_id.into());
+        self.worker_id = Some(worker_id.into());
+        self
     }
 
     pub fn state_payload(&self) -> Value {
@@ -573,7 +610,7 @@ impl CoreTopicEvent {
     }
 
     pub fn wire_payload(&self) -> Value {
-        json!({
+        let mut payload = json!({
             "session_id": &self.session_id,
             "topic": {
                 "name": &self.topic.name,
@@ -581,7 +618,14 @@ impl CoreTopicEvent {
             },
             "state": self.state_payload(),
             "payload": &self.payload,
-        })
+        });
+        if let Some(context_id) = self.context_id.as_deref() {
+            payload["context_id"] = json!(context_id);
+        }
+        if let Some(worker_id) = self.worker_id.as_deref() {
+            payload["worker_id"] = json!(worker_id);
+        }
+        payload
     }
 
     pub fn expects_reply(&self) -> bool {
@@ -917,9 +961,11 @@ pub fn work_instruction_load_topic_event(
 fn worker_identity_payload(identity: &CoreSessionWorkerIdentity) -> Value {
     json!({
         "session_id": &identity.session_id,
+        "context_id": &identity.context_id,
+        "worker_id": &identity.worker_id,
         "display_name": &identity.display_name,
         "ordinal": identity.ordinal,
-        "parent_session_id": &identity.parent_session_id,
+        "parent_worker_id": &identity.parent_worker_id,
     })
 }
 
@@ -929,9 +975,11 @@ fn parse_worker_identity(value: &Value) -> Option<CoreSessionWorkerIdentity> {
     }
     Some(CoreSessionWorkerIdentity {
         session_id: value["session_id"].as_str()?.to_string(),
+        context_id: value["context_id"].as_str()?.to_string(),
+        worker_id: value["worker_id"].as_str()?.to_string(),
         display_name: value["display_name"].as_str()?.to_string(),
         ordinal: value["ordinal"].as_u64()? as u32,
-        parent_session_id: value["parent_session_id"].as_str().map(str::to_string),
+        parent_worker_id: value["parent_worker_id"].as_str().map(str::to_string),
     })
 }
 

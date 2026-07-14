@@ -100,6 +100,9 @@ fi
 
 ci_required=(
   "cargo test --workspace"
+  "pnpm --dir web_ui/timem-web test"
+  "pnpm --dir web_ui/timem-web build"
+  "cargo build --locked -p timem_shell -p timem_web --release"
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
   "scripts/real_tty_supplement_smoke.expect"
@@ -245,6 +248,8 @@ feature_doc_required=(
   "Stress/repetition path"
   "Current Supplement Decisions"
   "every new feature"
+  "F32"
+  "Local Web host and assistant-ui experience"
 )
 
 for pattern in "${feature_doc_required[@]}"; do

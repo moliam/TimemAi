@@ -41,7 +41,7 @@ secret_regexes=(
 scan_current() {
   local failed=0
   local files
-  files="$(git ls-files | grep -Ev '(^target/|^data/|^env$|^Cargo.lock$)' || true)"
+  files="$(git ls-files | grep -Ev '(^target/|^data/|^env$|^Cargo.lock$|(^|/)pnpm-lock\.yaml$)' || true)"
   if [ -z "$files" ]; then
     echo "No tracked files to scan."
     return 0
