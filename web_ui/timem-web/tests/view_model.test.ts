@@ -131,6 +131,24 @@ describe("web topic view model", () => {
     expect(turns[0].final_answer).toBe("done");
   });
 
+  it("sorts restored entries and events within one turn by creation time", () => {
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 30, kind: "approval", content: "approved late" },
+      { type: "event", role: "system", turn_id: "turn_1", created_at_ms: 20, kind: "action_result", content: "second event", source: "history", payload: { marker: "event-2" } },
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 10, kind: "task", content: "first task" },
+      { type: "event", role: "system", turn_id: "turn_1", created_at_ms: 15, kind: "action", content: "first event", source: "history", payload: { marker: "event-1" } },
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 25, kind: "supplement", content: "middle supplement" },
+    ];
+
+    const turns = turnsFromHistoryRecords(records);
+    expect(turns[0].user_entries.map((entry) => entry.text)).toEqual([
+      "first task",
+      "middle supplement",
+      "approved late",
+    ]);
+    expect(turns[0].events.map((event) => event.payload.marker)).toEqual(["event-1", "event-2"]);
+  });
+
   it("falls back to task for unknown historical user entry kinds", () => {
     const turns = turnsFromHistoryRecords([
       { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, kind: "legacy_custom", content: "legacy text" },

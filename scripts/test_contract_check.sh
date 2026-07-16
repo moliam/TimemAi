@@ -81,6 +81,7 @@ required_patterns=(
   "restored_web_turns_follow_history_time_not_turn_id_lexical_order"
   "restored_web_turns_preserve_user_entry_kinds"
   "turn_user_entries_are_persisted_with_raw_text_and_semantic_kind"
+  "sorts restored entries and events within one turn by creation time"
   "shell_resume_uses_stored_session_cwd_for_core_prompt_context"
   "shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence"
 )
