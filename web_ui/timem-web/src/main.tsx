@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, sessionContextUsage, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, sessionContextUsage, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -453,6 +453,7 @@ function TimemApp() {
         <ContextUsageBar session={activeSession}/>
         <TimemThread
           activeSession={activeSession}
+          sessionIds={sessions.map((session) => session.session_id)}
           decisions={sessionDecisions}
           fileInput={fileInput}
           isCancelling={!!activeSession && cancellingSessionIdSet.has(activeSession.session_id)}
@@ -514,8 +515,9 @@ const MAX_RENDERED_TURN_EVENTS = 200;
 const INITIAL_RENDERED_TURNS = 24;
 const TURN_HISTORY_PAGE_SIZE = 24;
 
-function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply }: {
+function TimemThread({ activeSession, sessionIds, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply }: {
   activeSession: Session | undefined;
+  sessionIds: string[];
   decisions: Decision[];
   fileInput: React.RefObject<HTMLInputElement | null>;
   isCancelling: boolean;
@@ -545,8 +547,16 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
   const visibleTurns = hiddenTurnCount > 0 ? turns.slice(-visibleTurnCount) : turns;
   const latestTurn = turns.at(-1);
   const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
+  const liveSessionKey = sessionIds.join("\u0000");
 
   useEffect(() => setVisibleTurnCount(INITIAL_RENDERED_TURNS), [activeSession?.session_id]);
+
+  useEffect(() => {
+    setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
+    if (pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)) {
+      setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+    }
+  }, [liveSessionKey]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;

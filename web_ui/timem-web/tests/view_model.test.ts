@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, sessionContextUsage, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, sessionContextUsage, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -147,6 +147,26 @@ describe("web topic view model", () => {
     const submittedB = reserveSessionDraftSubmission(locks, "session_b", drafts);
     drafts = finishSessionDraftSubmission(locks, drafts, "session_b", submittedB!.text, true);
     expect(draftForSession(drafts, "session_b")).toBe("");
+  });
+
+  it("prunes stale drafts and pending send locks when a snapshot swaps out sessions", () => {
+    const drafts = {
+      session_a: "old mem draft",
+      session_b: "live draft",
+      session_c: "removed session draft",
+    };
+    const locks = { current: new Set(["session_a", "session_b", "session_c"]) };
+
+    const liveSessions = ["session_b", "session_d"];
+    expect(pruneSessionDrafts(drafts, liveSessions)).toEqual({ session_b: "live draft" });
+    expect(pruneSessionSubmissionLocks(locks, liveSessions)).toBe(true);
+    expect(Array.from(locks.current)).toEqual(["session_b"]);
+    expect(pruneSessionSubmissionLocks(locks, liveSessions)).toBe(false);
+  });
+
+  it("keeps draft state identity stable when every draft belongs to a live session", () => {
+    const drafts = { session_a: "draft A", session_b: "draft B" };
+    expect(pruneSessionDrafts(drafts, ["session_a", "session_b"])).toBe(drafts);
   });
 
   it("does not send while cancellation is still in flight", () => {

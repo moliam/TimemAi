@@ -121,6 +121,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());");
     expect(source).toContain("reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession)");
     expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, current, reserved.sessionId, reserved.text, sent)");
+    expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
+    expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
+    expect(source).toContain("pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)");
     expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft}");
     expect(source).toContain("pendingAttachmentRemoveIdsRef");
     expect(source).toContain("pendingDecisionKeysRef");
