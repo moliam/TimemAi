@@ -833,8 +833,8 @@ Algorithm:
 4. Mark the latest `DYNAMIC_TAIL_CACHE_BLOCKS = 3` dynamic blocks cacheable.
 5. Leave older dynamic blocks unmarked.
 6. Append a temporary response trailer as the final user block without cache
-   control: XML uses `please fulfill your response in XML only:`, while other
-   suites use `please fulfill your response only:`; both are followed by
+   control: XML uses `Please continue your ID's response only in XML:`, while other
+   suites use `Please continue your ID's response only:`; both are followed by
    `## <CURRENT_ASSISTANT_NAME>`. The runtime resolves the assistant name before
    sending the prompt.
    This trailer is not a prompt delta and must not be merged into the latest

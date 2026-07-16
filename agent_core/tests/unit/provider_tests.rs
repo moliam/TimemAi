@@ -207,13 +207,13 @@ fn anthropic_request_sends_formatted_response_trailer_without_cache_control() {
 
     assert_eq!(
         content.last().unwrap()["text"],
-        "please fulfill your response in XML only:\n## Ai4"
+        "Please continue your ID's response only in XML:\n## Ai4"
     );
     assert_eq!(content.last().unwrap().get("cache_control"), None);
     assert!(!content[0]["text"]
         .as_str()
         .unwrap()
-        .contains("please fulfill your response only"));
+        .contains("Please continue your ID's response only"));
 }
 
 #[test]
@@ -306,13 +306,13 @@ fn openai_compatible_request_sends_formatted_response_trailer_without_cache_cont
 
     assert_eq!(
         messages.last().unwrap()["content"],
-        "please fulfill your response only:\n## Ai9"
+        "Please continue your ID's response only:\n## Ai9"
     );
     assert_eq!(messages.last().unwrap().get("cache_control"), None);
     assert!(!messages[messages.len() - 2]["content"]
         .as_str()
         .unwrap()
-        .contains("please fulfill your response only"));
+        .contains("Please continue your ID's response only"));
 }
 
 #[test]
