@@ -83,7 +83,9 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Model-requested local tool execution, including `run_bash`, command approval
   application, process execution, command output/evidence shaping, and tool
   audit. Hosts may provide user decisions and cancellation signals, but the
-  executor remains a core responsibility.
+  executor remains a core responsibility. Parallel actions share the owning
+  turn's cancellation state; core must keep polling it while joins are pending
+  and must terminate the full command process group on explicit host Stop.
 - Action failure isolation. External command exits, including signal-based
   termination, are action results and must not terminate the core process.
   Builtin callback panics are contained at the tool registry boundary, reported

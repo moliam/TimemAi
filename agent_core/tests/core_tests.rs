@@ -716,9 +716,9 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     let delta_ids = field_values(&prompt, "delta_id");
 
     assert_eq!(delta_ids, vec!["pd_1"]);
-    assert!(!prompt.contains("## TIMEM_ASSISTANT"));
     assert!(!prompt.contains("先分析"));
     assert!(!prompt.contains("Final Answer:\n结论"));
+    assert!(prompt.ends_with("please fulfill your response in XML only:\n## TIMEM_ASSISTANT"));
     let prompt = match core.begin_turn("继续", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),

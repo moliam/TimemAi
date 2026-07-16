@@ -9,7 +9,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -2058,6 +2059,7 @@ impl AgentCore {
         runtime: &mut dyn ActionRuntime,
     ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
         let mut results = vec![None; actions.len()];
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         for (idx, result) in denied_results.into_iter().chain(completed_results) {
             if let Some(slot) = results.get_mut(idx) {
                 *slot = Some(result);
@@ -2066,7 +2068,11 @@ impl AgentCore {
 
         let mut handles = Vec::new();
         for (idx, pending) in approved {
-            handles.push(self.spawn_approved_parallel_bash_action(idx, pending));
+            handles.push(self.spawn_approved_parallel_bash_action(
+                idx,
+                pending,
+                Arc::clone(&cancel_requested),
+            ));
         }
 
         for (idx, action) in actions.iter().cloned().enumerate() {
@@ -2080,13 +2086,23 @@ impl AgentCore {
                     }
                 }
                 ActionExecution::NeedsApproval(pending) => {
-                    self.collect_approved_parallel_bash_handles(handles, &mut results, runtime);
+                    self.collect_approved_parallel_bash_handles(
+                        handles,
+                        &mut results,
+                        runtime,
+                        &cancel_requested,
+                    );
                     return Err((Self::ordered_parallel_results(results), pending));
                 }
             }
         }
 
-        self.collect_approved_parallel_bash_handles(handles, &mut results, runtime);
+        self.collect_approved_parallel_bash_handles(
+            handles,
+            &mut results,
+            runtime,
+            &cancel_requested,
+        );
         Ok(Self::ordered_parallel_results(results))
     }
 
@@ -2959,6 +2975,7 @@ impl AgentCore {
         &mut self,
         idx: usize,
         pending: PendingApproval,
+        cancel_requested: Arc<AtomicBool>,
     ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)> {
         let action = ParsedAction {
             action: pending.request.action.clone(),
@@ -2983,7 +3000,7 @@ impl AgentCore {
                     turn_id,
                     cwd,
                 } => {
-                    let mut should_cancel = || false;
+                    let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                     shell_exec::execute_approved_bash(
                         command,
@@ -3009,6 +3026,7 @@ impl AgentCore {
         &mut self,
         idx: usize,
         action: ParsedAction,
+        cancel_requested: Arc<AtomicBool>,
     ) -> thread::JoinHandle<(usize, ParsedAction, String)> {
         let action_for_audit = action.clone();
         let shell_jobs = self.shell_jobs.clone();
@@ -3030,7 +3048,7 @@ impl AgentCore {
                     "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.".to_string(),
                 )
             } else {
-                let mut should_cancel = || false;
+                let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                 shell_exec::execute_run_bash(
                     &command,
@@ -3064,11 +3082,20 @@ impl AgentCore {
 
     fn collect_parallel_bash_handles(
         &self,
-        handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
+        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
+        cancel_requested: &Arc<AtomicBool>,
     ) {
-        for handle in handles {
+        while !handles.is_empty() {
+            if runtime.should_cancel() {
+                cancel_requested.store(true, Ordering::SeqCst);
+            }
+            let Some(position) = handles.iter().position(thread::JoinHandle::is_finished) else {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            let handle = handles.swap_remove(position);
             match handle.join() {
                 Ok((idx, action, result)) => {
                     self.record_action_audit(&action, "completed", Some(&result));
@@ -3090,11 +3117,20 @@ impl AgentCore {
 
     fn collect_approved_parallel_bash_handles(
         &self,
-        handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)>>,
+        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)>>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
+        cancel_requested: &Arc<AtomicBool>,
     ) {
-        for handle in handles {
+        while !handles.is_empty() {
+            if runtime.should_cancel() {
+                cancel_requested.store(true, Ordering::SeqCst);
+            }
+            let Some(position) = handles.iter().position(thread::JoinHandle::is_finished) else {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            let handle = handles.swap_remove(position);
             match handle.join() {
                 Ok((idx, action, pending, result)) => {
                     self.record_pending_approval_audit(&pending, true, &result);
@@ -3144,9 +3180,14 @@ impl AgentCore {
         let action_count = actions.len();
         let mut results = vec![None; action_count];
         let mut handles = Vec::new();
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         for (idx, action) in actions.iter().cloned().enumerate() {
             if self.can_spawn_parallel_bash_action(&action) {
-                handles.push(self.spawn_parallel_bash_action(idx, action));
+                handles.push(self.spawn_parallel_bash_action(
+                    idx,
+                    action,
+                    Arc::clone(&cancel_requested),
+                ));
                 continue;
             }
             match self.execute_action(action, runtime) {
@@ -3154,7 +3195,12 @@ impl AgentCore {
                     results[idx] = Some(result);
                 }
                 ActionExecution::NeedsApproval(pending) => {
-                    self.collect_parallel_bash_handles(handles, &mut results, runtime);
+                    self.collect_parallel_bash_handles(
+                        handles,
+                        &mut results,
+                        runtime,
+                        &cancel_requested,
+                    );
                     let pending = Self::pending_approval_with_parallel_continuation(
                         pending,
                         actions,
@@ -3171,7 +3217,7 @@ impl AgentCore {
                 }
             }
         }
-        self.collect_parallel_bash_handles(handles, &mut results, runtime);
+        self.collect_parallel_bash_handles(handles, &mut results, runtime, &cancel_requested);
         Ok(Self::ordered_parallel_results(results))
     }
 

@@ -129,7 +129,7 @@ impl TurnStopSummary {
         Self {
             stats: UsageStats::zero(),
             latest_usage: None,
-            repair_issue: Some("cancelled_by_user".to_string()),
+            repair_issue: None,
             stop_reason: TurnStopReason::CancelledByUser,
             detail: TurnStopDetail::None,
         }

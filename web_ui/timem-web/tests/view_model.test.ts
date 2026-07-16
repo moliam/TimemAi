@@ -417,6 +417,22 @@ describe("web topic view model", () => {
       completion: { elapsed_ms: 2300, stats: { prompt_tokens: 4200 } },
     });
     expect(finished.active_turn_id).toBeNull();
+    expect(finished.state).toBe("ready");
+    expect(finished.workers[0]?.state).toBe("ready");
+  });
+
+  it("clears stale primary working state when a cancelled turn finishes without a model response", () => {
+    const active = upsertTurn(session("session_1"), turn("turn_cancelled"));
+    const working = updateSessionWorkerState(active, active.primary_worker_id, "working");
+
+    const finished = finishTurn(working, "turn_cancelled", {
+      elapsed_ms: 519_000,
+      stop_reason: "CancelledByUser",
+    });
+
+    expect(finished.active_turn_id).toBeNull();
+    expect(finished.state).toBe("ready");
+    expect(finished.workers.find((worker) => worker.worker_id === finished.primary_worker_id)?.state).toBe("ready");
   });
 
   it("deduplicates replayed turn events by the host event id", () => {

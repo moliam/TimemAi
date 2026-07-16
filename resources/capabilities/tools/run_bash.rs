@@ -1269,13 +1269,18 @@ fn execute_one_bash_structured_with_prompt_after(
     if timeout_ms <= 0 {
         return bash_error(command, "invalid_timeout");
     }
-    let spawn = Command::new(BASH_EXECUTABLE)
+    let mut shell = Command::new(BASH_EXECUTABLE);
+    shell
         .arg("-lc")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        shell.process_group(0);
+    }
+    let spawn = shell.spawn();
     let mut child = match spawn {
         Ok(child) => child,
         Err(_) => return bash_error(command, "command_failed"),
@@ -1285,7 +1290,7 @@ fn execute_one_bash_structured_with_prompt_after(
     let mut next_long_running_check = long_running_prompt_after;
     loop {
         if runtime.should_cancel() {
-            let _ = child.kill();
+            terminate_process(child.id());
             let _ = child.wait();
             return bash_error(command, "cancelled");
         }
@@ -1297,7 +1302,7 @@ fn execute_one_bash_structured_with_prompt_after(
                 timeout_ms: Some(timeout_ms),
             };
             if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
-                let _ = child.kill();
+                terminate_process(child.id());
                 let _ = child.wait();
                 return bash_error(command, "cancelled_by_user");
             }
@@ -1307,7 +1312,7 @@ fn execute_one_bash_structured_with_prompt_after(
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
+                terminate_process(child.id());
                 let _ = child.wait();
                 return bash_error(command, "timeout");
             }
@@ -1551,7 +1556,7 @@ fn terminate_process(pid: u32) {
             .status();
         if status.as_ref().is_ok_and(|s| s.success()) {
             thread::sleep(Duration::from_millis(100));
-            if process_running(pid) {
+            if process_group_running(pid) {
                 let _ = Command::new("/bin/kill")
                     .arg("-KILL")
                     .arg(&group)
@@ -1579,6 +1584,12 @@ fn terminate_process(pid: u32) {
                 .status();
         }
     }
+}
+
+#[cfg(unix)]
+fn process_group_running(group_leader_pid: u32) -> bool {
+    let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {

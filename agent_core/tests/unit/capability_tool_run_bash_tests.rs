@@ -15,8 +15,7 @@ struct ToggleCancelRuntime<'a> {
 
 impl ActionRuntime for ToggleCancelRuntime<'_> {
     fn should_cancel(&mut self) -> bool {
-        let previous = self.cancelled.swap(true, Ordering::Relaxed);
-        previous
+        self.cancelled.swap(true, Ordering::Relaxed)
     }
 }
 
@@ -115,6 +114,38 @@ fn normal_bash_positive_timeout_reports_long_running_status_to_runtime() {
     );
     assert_eq!(runtime.prompts[0].timeout_ms, Some(5000));
     assert!(runtime.prompts[0].elapsed >= Duration::from_millis(50));
+}
+
+#[cfg(unix)]
+#[test]
+fn normal_bash_cancel_terminates_the_entire_process_group() {
+    let cwd = tmp_cwd("cancel_process_group");
+    let child_pid_file = cwd.join("child.pid");
+    let command = format!(
+        "bash -c 'trap \"\" TERM; tail -f /dev/null' & echo $! > {}; wait",
+        shell_quote_path(&child_pid_file)
+    );
+    let cancelled = AtomicBool::new(false);
+    let mut runtime = ToggleCancelRuntime {
+        cancelled: &cancelled,
+    };
+
+    let started = Instant::now();
+    let result = execute_one_bash_structured(&command, &cwd, 60_000, &mut runtime)
+        .to_action_result("run_bash");
+
+    assert!(result.contains("cancelled before it completed"), "{result}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let child_pid = fs::read_to_string(&child_pid_file)
+        .expect("child pid should be recorded before cancellation")
+        .trim()
+        .parse::<u32>()
+        .expect("child pid should be numeric");
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !process_running(child_pid),
+        "descendant process {child_pid} survived run_bash cancellation"
+    );
 }
 
 #[test]

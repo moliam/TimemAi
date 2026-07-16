@@ -3,25 +3,36 @@ use crate::prompt_spec;
 use crate::response_protocol::ResponseProtocolSuite;
 use crate::{PromptDelta, PromptSlice};
 
-pub(crate) fn formatted_response_trailer(protocol_language: &str) -> String {
-    let protocol_language = protocol_language.trim();
-    if protocol_language.eq_ignore_ascii_case("XML") {
-        return "Follow the system prompt, give your XML formatted response. It must start with <response>:".to_string();
-    }
-    format!("Follow the system prompt, give your {protocol_language} formatted response:")
+pub(crate) fn formatted_response_trailer(
+    protocol_language: &str,
+    assistant_heading: &str,
+) -> String {
+    let instruction = if protocol_language.trim().eq_ignore_ascii_case("XML") {
+        "please fulfill your response in XML only:"
+    } else {
+        "please fulfill your response only:"
+    };
+    format!("{instruction}\n## {}", assistant_heading.trim())
 }
 
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
     let trimmed = rendered_prompt.trim_end();
-    let Some(line_start) = trimmed.rfind('\n') else {
+    let Some(trailer_start) = [
+        "\n\nplease fulfill your response only:\n## ",
+        "\n\nplease fulfill your response in XML only:\n## ",
+    ]
+    .into_iter()
+    .filter_map(|prefix| trimmed.rfind(prefix))
+    .max() else {
         return (rendered_prompt, None);
     };
-    let candidate = trimmed[line_start + 1..].trim();
-    if candidate.starts_with("Follow the system prompt, give your ")
-        && candidate.contains(" formatted response")
-        && candidate.ends_with(':')
-    {
-        let prefix = trimmed[..line_start].trim_end();
+    let candidate = &trimmed[trailer_start + 2..];
+    let assistant_heading = candidate
+        .split_once("\n## ")
+        .map(|(_, heading)| heading)
+        .unwrap_or_default();
+    if !assistant_heading.is_empty() && !assistant_heading.contains('\n') {
+        let prefix = trimmed[..trailer_start].trim_end();
         return (prefix, Some(candidate.to_string()));
     }
     (rendered_prompt, None)
@@ -135,7 +146,10 @@ pub(crate) fn render_prompt_with_rendered_static(
     }
 
     out.push_str("\n\n");
-    out.push_str(&formatted_response_trailer(protocol_language));
+    out.push_str(&formatted_response_trailer(
+        protocol_language,
+        assistant_heading,
+    ));
     out
 }
 

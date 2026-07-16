@@ -976,7 +976,7 @@ fn stopped_turn_summary_is_structured_and_ui_neutral() {
     ];
 
     assert_eq!(stops[0].stop_reason, TurnStopReason::CancelledByUser);
-    assert_eq!(stops[0].repair_issue.as_deref(), Some("cancelled_by_user"));
+    assert_eq!(stops[0].repair_issue, None);
     assert_eq!(stops[0].stats.llm_calls, 0);
     assert!(stops[0].latest_usage.is_none());
     assert_eq!(

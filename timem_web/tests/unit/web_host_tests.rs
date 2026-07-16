@@ -163,6 +163,54 @@ fn pending_attachment_removal_is_session_scoped_and_deletes_the_stored_file() {
 }
 
 #[test]
+fn duplicate_pending_attachment_removal_is_idempotent_for_the_same_session() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(format!(
+        "timem_web_duplicate_remove_attachment_{}",
+        now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("upload_1_notes.md");
+    std::fs::write(&path, "test attachment").unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .attachments
+        .push(WebAttachment {
+            id: "upload_1".to_string(),
+            name: "notes.md".to_string(),
+            path: path.display().to_string(),
+            bytes: 15,
+        });
+
+    for _ in 0..5 {
+        let event = handle_command(
+            &state,
+            ClientCommand::AttachmentRemove {
+                session_id: "session_a".to_string(),
+                attachment_id: "upload_1".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            event,
+            Some(WireEvent::AttachmentRemoved {
+                session_id,
+                attachment_id,
+            }) if session_id == "session_a" && attachment_id == "upload_1"
+        ));
+    }
+    assert!(state.sessions.lock().unwrap()["session_a"]
+        .attachments
+        .is_empty());
+    assert!(!path.exists());
+    let _ = std::fs::remove_dir(&root);
+}
+
+#[test]
 fn failed_pending_attachment_file_removal_restores_the_session_entry() {
     let state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_restore_attachment_{}", now_ms()));
@@ -723,6 +771,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         active_context_id: context_id,
         primary_worker_id: worker_id,
         attachments: Vec::new(),
+        consumed_attachment_ids: BTreeSet::new(),
         messages: Vec::new(),
         turns: Vec::new(),
         active_turn_id: None,
@@ -1593,6 +1642,128 @@ fn user_supplement_is_retained_in_the_authoritative_web_session_snapshot() {
         retained.user_entries[1].text,
         "Use the second verification path"
     );
+}
+
+#[test]
+fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCEL_SPAM");
+    start_web_turn(&state, &session_id, "transfer a large file").unwrap();
+
+    for _ in 0..5 {
+        assert!(handle_command(
+            &state,
+            ClientCommand::TurnCancel {
+                session_id: session_id.clone(),
+            },
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    assert!(handle_command(
+        &state,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap()
+    .is_none());
+}
+
+#[test]
+fn rapid_submit_during_an_active_turn_is_treated_as_a_supplement() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "SUBMIT_RACE");
+    let first = start_web_turn(&state, &session_id, "initial upload task").unwrap();
+
+    let event = handle_command(
+        &state,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "stop if this is still running".to_string(),
+        },
+    )
+    .unwrap()
+    .expect("active submit should return the updated active turn");
+
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("expected turn update")
+    };
+    assert_eq!(turn.turn_id, first.turn_id);
+    assert_eq!(turn.user_entries.len(), 2);
+    assert_eq!(turn.user_entries[1].kind, "supplement");
+    assert_eq!(turn.user_entries[1].text, "stop if this is still running");
+}
+
+#[test]
+fn stale_supplement_after_cancel_completion_starts_a_new_turn() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "STALE_SUPPLEMENT");
+    let cancelled = start_web_turn(&state, &session_id, "cancel this").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+        session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == cancelled.turn_id)
+            .unwrap()
+            .state = "finished".to_string();
+    }
+
+    let event = handle_command(
+        &state,
+        ClientCommand::TurnSupplement {
+            session_id: session_id.clone(),
+            text: "new instruction after stop".to_string(),
+        },
+    )
+    .unwrap()
+    .expect("stale supplement should become a new turn");
+
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("expected turn update")
+    };
+    assert_ne!(turn.turn_id, cancelled.turn_id);
+    assert_eq!(turn.user_entries[0].kind, "task");
+    assert_eq!(turn.user_entries[0].text, "new instruction after stop");
+}
+
+#[test]
+fn stale_topic_reply_after_turn_completion_is_ignored_without_host_error() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "STALE_REPLY");
+    start_web_turn(&state, &session_id, "needs approval").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+
+    let event = handle_command(
+        &state,
+        ClientCommand::TopicReply {
+            session_id,
+            worker_id: None,
+            topic_name: "core.request.test".to_string(),
+            request_id: Some("request_1".to_string()),
+            decision: "accept".to_string(),
+            payload: json!({ "summary": "duplicate click" }),
+        },
+    )
+    .unwrap();
+
+    assert!(event.is_none());
 }
 
 #[test]

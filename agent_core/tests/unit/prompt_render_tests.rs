@@ -67,21 +67,29 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     assert!(!rendered.contains("slice_id:"));
     assert!(!rendered.contains("prompt_type:"));
     assert!(!rendered.contains("HIDDEN"));
-    assert!(rendered.ends_with("Follow the system prompt, give your Markdown formatted response:"));
+    assert!(rendered.ends_with("please fulfill your response only:\n## TIMEM_ASSISTANT"));
 }
 
 #[test]
-fn formatted_response_trailer_parser_preserves_protocol_name() {
+fn formatted_response_trailer_parser_preserves_assistant_heading() {
     let prompt = format!(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\n{}",
-        formatted_response_trailer("XML")
+        formatted_response_trailer("XML", "Ai7")
     );
     let (prefix, trailer) = split_formatted_response_trailer(&prompt);
     assert_eq!(prefix, "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]");
     assert_eq!(
-            trailer.as_deref(),
-            Some("Follow the system prompt, give your XML formatted response. It must start with <response>:")
-        );
+        trailer.as_deref(),
+        Some("please fulfill your response in XML only:\n## Ai7")
+    );
+}
+
+#[test]
+fn formatted_response_trailer_parser_rejects_missing_assistant_heading() {
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nplease fulfill your response only:\n## ";
+    let (prefix, trailer) = split_formatted_response_trailer(prompt);
+    assert_eq!(prefix, prompt);
+    assert_eq!(trailer, None);
 }
 
 #[test]
