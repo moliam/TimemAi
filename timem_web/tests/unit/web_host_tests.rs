@@ -2187,6 +2187,64 @@ fn rapid_submit_during_an_active_turn_is_treated_as_a_supplement() {
 }
 
 #[test]
+fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "MULTI_SUPPLEMENT_RACE");
+    let first = start_web_turn(&state, &session_id, "initial long task").unwrap();
+
+    for text in [
+        "first correction while still working",
+        "second correction after seeing output",
+        "third correction from a rapid send click",
+    ] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::TurnSubmit {
+                session_id: session_id.clone(),
+                text: text.to_string(),
+            },
+        )
+        .unwrap()
+        .expect("active submit should update the current turn");
+    }
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSupplement {
+            session_id: session_id.clone(),
+            text: "explicit supplement command stays in the same turn".to_string(),
+        },
+    )
+    .unwrap()
+    .expect("active supplement should update the current turn");
+
+    let sessions = state.sessions.lock().unwrap();
+    let retained = sessions[&session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == first.turn_id)
+        .unwrap();
+    assert_eq!(
+        retained
+            .user_entries
+            .iter()
+            .map(|entry| (entry.kind.as_str(), entry.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("task", "initial long task"),
+            ("supplement", "first correction while still working"),
+            ("supplement", "second correction after seeing output"),
+            ("supplement", "third correction from a rapid send click"),
+            (
+                "supplement",
+                "explicit supplement command stays in the same turn"
+            ),
+        ]
+    );
+}
+
+#[test]
 fn stale_supplement_after_cancel_completion_starts_a_new_turn() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "STALE_SUPPLEMENT");

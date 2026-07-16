@@ -1,4 +1,4 @@
-import { Activity, ChatHistoryRecord, ChatMessage, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
+import { Activity, ChatHistoryRecord, ChatMessage, ClientCommand, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
 
 export const MAX_RENDERED_MESSAGES = 1000;
 export const MAX_CLIENT_TURNS = 200;
@@ -21,6 +21,29 @@ export function trimTurns<T>(turns: T[]) {
 export function tailPath(path: string, maxChars = 28) {
   if (path.length <= maxChars) return path;
   return `…${path.slice(-(Math.max(2, maxChars) - 1))}`;
+}
+
+export type ComposerSendDecision =
+  | { kind: "skip"; reason: "no_session" | "empty_text" | "cancelling" }
+  | { kind: "send"; command: Extract<ClientCommand, { type: "turn_submit" | "turn_supplement" }>; text: string; clearDraftOnSuccess: true };
+
+export function composerSendDecision(
+  session: Pick<Session, "session_id" | "state"> | undefined,
+  text: string,
+  isCancelling: boolean,
+): ComposerSendDecision {
+  if (!session) return { kind: "skip", reason: "no_session" };
+  const trimmed = text.trim();
+  if (!trimmed) return { kind: "skip", reason: "empty_text" };
+  if (isCancelling) return { kind: "skip", reason: "cancelling" };
+  return {
+    kind: "send",
+    text: trimmed,
+    clearDraftOnSuccess: true,
+    command: session.state === "working"
+      ? { type: "turn_supplement", session_id: session.session_id, text: trimmed }
+      : { type: "turn_submit", session_id: session.session_id, text: trimmed },
+  };
 }
 
 function actionLifecycleKey(event: WebTurnEvent) {

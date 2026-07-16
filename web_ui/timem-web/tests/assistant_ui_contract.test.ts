@@ -105,8 +105,10 @@ describe("assistant-ui thread integration", () => {
     const start = source.indexOf("const sendText = useCallback");
     const end = source.indexOf("const uploadFile = useCallback", start);
     const sendText = source.slice(start, end);
-    expect(sendText).toContain('activeSession.state === "working"');
-    expect(sendText).toContain('{ type: "turn_supplement"');
+    expect(source).toContain("composerSendDecision");
+    expect(viewModelSource).toContain('session.state === "working"');
+    expect(viewModelSource).toContain('{ type: "turn_supplement"');
+    expect(sendText).toContain("composerSendDecision(");
     expect(source).toContain('value={draft}');
     expect(source).toContain('onSubmit={(event) => { event.preventDefault(); void submitDraft(); }}');
     expect(source).toContain('type="submit" title="Send message"');
@@ -254,9 +256,10 @@ describe("assistant-ui thread integration", () => {
     const start = source.indexOf("const sendText = useCallback");
     const end = source.indexOf("const uploadFile = useCallback", start);
     const sendText = source.slice(start, end);
-    expect(sendText).toContain("if (!sendCommand(command))");
+    expect(sendText).toContain("if (!sendCommand(decision.command))");
     expect(sendText).not.toContain("setSessions((current)");
     expect(sendText).toContain("return false;");
+    expect(source).toContain("if (await onSend(text)) setDraft(\"\");");
   });
 
   it("groups each task into user input, bounded process, and separate final delivery", () => {
