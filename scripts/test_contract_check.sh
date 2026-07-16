@@ -114,6 +114,7 @@ ci_required=(
   "scripts/real_tty_supplement_smoke.expect"
   "scripts/sensitive_scan.sh --current"
   "scripts/update_static_prompt_snapshot.sh --check"
+  "scripts/clippy_check.sh"
   "scripts/performance_guard.sh"
   "scripts/cross_host_resume_smoke.sh"
   "scripts/web_license_check.sh"

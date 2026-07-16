@@ -383,15 +383,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     let continue_work = match status_raw.as_str() {
         "finished" | "done" | "complete" => false,
         "working" | "in_progress" | "in progress" => true,
-        "" => {
-            if !actions_body.is_empty() {
-                true
-            } else if !final_answer.is_empty() {
-                false
-            } else {
-                true
-            }
-        }
+        "" => actions_body.is_empty() || final_answer.is_empty(),
         _ => {
             repair_issue = Some("status_must_be_working_or_finished".to_string());
             true
@@ -446,10 +438,13 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     if repair_issue.is_none() && !continue_work && final_answer.trim().is_empty() {
         repair_issue = Some("final_answer_required_when_status_finished".to_string());
     }
-    if repair_issue.is_none() && !final_answer.trim().is_empty() {
-        if status_raw != "finished" && status_raw != "done" && status_raw != "complete" {
-            repair_issue = Some("final_answer_requires_status_finished".to_string());
-        }
+    if repair_issue.is_none()
+        && !final_answer.trim().is_empty()
+        && status_raw != "finished"
+        && status_raw != "done"
+        && status_raw != "complete"
+    {
+        repair_issue = Some("final_answer_requires_status_finished".to_string());
     }
     let runtime_note: Option<String> = None;
     if repair_issue.is_none() && !continue_work && !next_actions.is_empty() {

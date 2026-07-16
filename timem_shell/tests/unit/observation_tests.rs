@@ -832,10 +832,10 @@ fn run_bash_without_intent_shows_plain_label() {
 #[test]
 fn panel_wraps_long_command_and_truncates_one_item_after_four_rows() {
     let mut panel = ObservationPanel::new(8, 44);
-    panel.apply(ObservationEvent::Active(format!(
-            "{}",
-            "rg --files -g '*.rs' | xargs wc -l && echo very-long-tail && echo more-output && echo another-long-part && echo segment-four && echo segment-five && echo segment-six && echo hidden-tail-after-limit"
-        )));
+    panel.apply(ObservationEvent::Active(
+        "rg --files -g '*.rs' | xargs wc -l && echo very-long-tail && echo more-output && echo another-long-part && echo segment-four && echo segment-five && echo segment-six && echo hidden-tail-after-limit"
+            .to_string(),
+    ));
     let rendered = render_observation_panel(&panel);
     let content_rows = rendered.lines().filter(|line| line.contains('┃')).count();
     assert_eq!(content_rows, 4);
@@ -900,12 +900,9 @@ fn long_free_talk_and_command_render_as_bounded_aligned_rows() {
     ));
     panel.apply(ObservationEvent::ActiveChild {
         text: format!(
-            "`{}`",
-            format!(
-                "{} tail-marker-should-not-render-after-limit",
-                "echo start; git status --short; git diff --stat; printf '%s' very-long-segment; "
-                    .repeat(12)
-            )
+            "`{} tail-marker-should-not-render-after-limit`",
+            "echo start; git status --short; git diff --stat; printf '%s' very-long-segment; "
+                .repeat(12)
         ),
         is_last: true,
     });

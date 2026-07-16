@@ -82,11 +82,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     let thought = response.free_talk.clone();
     let thought_keep_in_context = !thought.trim().is_empty();
 
-    let continue_work = if !final_answer.trim().is_empty() {
-        false
-    } else {
-        true
-    };
+    let continue_work = final_answer.trim().is_empty();
 
     let context_compacts = if repair_issue.is_none() {
         parse_context_compacts_from_fields(&response, &mut repair_issue)

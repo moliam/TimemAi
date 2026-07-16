@@ -1874,7 +1874,8 @@ fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
     const WORKERS: usize = 6;
     const TURNS_PER_WORKER: usize = 167;
     const TOTAL_TURNS: usize = WORKERS * TURNS_PER_WORKER;
-    assert!(TOTAL_TURNS > 1000);
+    let total_turns = WORKERS * TURNS_PER_WORKER;
+    assert!(total_turns > 1000);
 
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut host_threads = Vec::new();
@@ -2119,11 +2120,11 @@ fn wait_for_stress_turn_finished(
                     "{label} tool call count mismatch"
                 );
                 assert!(
-                    model_requests >= expected_tool_calls + 1,
+                    model_requests > expected_tool_calls,
                     "{label} should request the model for each action plus final answer"
                 );
                 assert!(
-                    model_responses >= expected_tool_calls + 1,
+                    model_responses > expected_tool_calls,
                     "{label} should receive the model for each action plus final answer"
                 );
                 if expect_round_limit {

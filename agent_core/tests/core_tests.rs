@@ -1298,7 +1298,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
 #[test]
 fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
     let mut core = test_core(
-        &"STATIC_PROMPT ".repeat(9_500),
+        "STATIC_PROMPT ".repeat(9_500),
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_static_dominant"),
     );
@@ -7638,7 +7638,7 @@ fn performance_guard_large_context_prompt_render_is_bounded() {
     for idx in 0..160 {
         let _ = core.begin_turn(&format!("user turn {idx}: {repeated_context}"), None);
         let step = core.apply_model_response(LlmResponse {
-            content: scored(&format!(
+            content: scored(format!(
                 r#"{{"status":"ALL_FINISHED","final_answer":"assistant turn {idx}: done"}}"#
             )),
             model_name: "qwen-plus".to_string(),
@@ -7675,13 +7675,13 @@ fn performance_guard_topic_generation_for_many_actions_is_bounded() {
 
     let mut core = core_with_builtin_capabilities("perf_many_action_topics");
     let actions = (0..150)
-        .map(|_| format!(r#"{{"self_tool":{{"type":"about_me","op":"read"}}}}"#))
+        .map(|_| r#"{"self_tool":{"type":"about_me","op":"read"}}"#.to_string())
         .collect::<Vec<_>>()
         .join(",");
 
     let _ = core.begin_turn("emit many action topics", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(&format!(
+        content: scored(format!(
             r#"{{"status":"working","working_still_action":[{actions}]}}"#
         )),
         model_name: "qwen-plus".to_string(),

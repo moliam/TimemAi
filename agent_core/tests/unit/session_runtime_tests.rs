@@ -2491,7 +2491,7 @@ fn session_turn_protocol_repair_failure_is_structured() {
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new((0..6).map(|idx| {
         Ok(llm(
-            &format!("{{not valid json repair attempt {idx}"),
+            format!("{{not valid json repair attempt {idx}"),
             5_000 + idx as u32,
             false,
         ))

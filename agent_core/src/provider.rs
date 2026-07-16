@@ -271,7 +271,7 @@ pub fn provider_request_audit_event(
 }
 
 pub fn provider_response_audit_event(status: u16, raw_body: &Value) -> Value {
-    let error_kind = if status < 200 || status >= 400 {
+    let error_kind = if !(200..400).contains(&status) {
         "http_error"
     } else {
         "http_success"

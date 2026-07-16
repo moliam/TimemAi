@@ -59,8 +59,10 @@ fn render_termimad_chunk(markdown: &str) -> String {
     if markdown.is_empty() {
         return String::new();
     }
-    let mut skin = termimad::MadSkin::default();
-    skin.table_border_chars = termimad::ROUNDED_TABLE_BORDER_CHARS;
+    let skin = termimad::MadSkin {
+        table_border_chars: termimad::ROUNDED_TABLE_BORDER_CHARS,
+        ..Default::default()
+    };
     let markdown = normalize_terminal_markdown(markdown);
     skin.term_text(&markdown).to_string()
 }

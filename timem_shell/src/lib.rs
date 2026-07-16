@@ -411,10 +411,8 @@ fn final_status_line(
     let view =
         runtime_token_status_view(stats, latest_usage, max_llm_input_tokens, stats.llm_calls);
     let mut parts = Vec::new();
-    if view.latest.is_some() {
-        if view.context_percent > 0 {
-            parts.push(format!("ctx[{}%]", view.context_percent));
-        }
+    if view.latest.is_some() && view.context_percent > 0 {
+        parts.push(format!("ctx[{}%]", view.context_percent));
     }
     parts.push(format!("▲{}", compact_count(view.total.input_tokens)));
     parts.push(format!("▼{}", compact_count(view.total.output_tokens)));
