@@ -80,7 +80,7 @@ describe("assistant-ui thread integration", () => {
   it("binds assistant-ui running state to the authoritative session lifecycle", () => {
     expect(source).toContain('isRunning: activeSession?.state === "working"');
     expect(source).toContain('cancelled ? "Cancelled" : "Completed"');
-    expect(viewModelSource).toContain('worker.worker_id === session.primary_worker_id');
+    expect(viewModelSource).toContain('worker.state === "working"');
   });
 
   it("deduplicates rapid cancel clicks and clears the guard when a turn finishes", () => {

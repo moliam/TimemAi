@@ -205,7 +205,7 @@ function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
 }
 
 export function finishTurn(session: Session, turnId: string | null | undefined, completion: TurnCompletion): Session {
-  const workers = session.workers.map((worker) => worker.worker_id === session.primary_worker_id
+  const workers = session.workers.map((worker) => worker.state === "working"
     ? { ...worker, state: "ready" }
     : worker);
   const state = aggregateSessionState(workers, "ready");
