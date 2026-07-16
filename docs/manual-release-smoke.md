@@ -82,3 +82,13 @@ Acceptance:
   waive failing unit, integration, Web, or script checks.
 - If a manual row fails, either fix it before release or explicitly document the
   unsupported environment and the reason.
+
+## Recent Local Evidence
+
+| Date | Commit | Host | Scope | Result |
+|---|---|---|---|---|
+| 2026-07-16 | `fd6ac7f` | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser | Fake-provider Web smoke on `timem-web --no-open`: initial desktop layout, task submit, rapid repeated Stop/Send during an active turn, second turn completion, console error check, 390px mobile viewport composer/overflow check. | Passed: no horizontal overflow, composer stayed visible, session state returned from busy to ready, no `active_turn_not_found`/runtime-error text, no browser console errors. |
+
+Rows not covered by this local smoke remain explicit manual release work:
+Safari, Firefox, iTerm2, Terminal.app, tmux, SSH, clean-machine install, and
+live-provider behavior with throwaway credentials.
