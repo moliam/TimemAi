@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, sessionContextUsage, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -167,6 +167,12 @@ describe("web topic view model", () => {
   it("keeps draft state identity stable when every draft belongs to a live session", () => {
     const drafts = { session_a: "draft A", session_b: "draft B" };
     expect(pruneSessionDrafts(drafts, ["session_a", "session_b"])).toBe(drafts);
+  });
+
+  it("moves the active session to a live session when a snapshot swaps out the old one", () => {
+    expect(resolveActiveSessionId("session_a", [session("session_a"), session("session_b")])).toBe("session_a");
+    expect(resolveActiveSessionId("session_old", [session("session_new"), session("session_other")])).toBe("session_new");
+    expect(resolveActiveSessionId("session_old", [])).toBe("");
   });
 
   it("does not send while cancellation is still in flight", () => {

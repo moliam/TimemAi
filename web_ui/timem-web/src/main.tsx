@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, sessionContextUsage, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -154,7 +154,7 @@ function TimemApp() {
   const applySnapshot = useCallback((snapshot: Snapshot) => {
     setServer(snapshot.server);
     setSessions(snapshot.sessions.map(boundSessionHistory));
-    setActiveSessionId((current) => current || snapshot.sessions[0]?.session_id || "");
+    setActiveSessionId((current) => resolveActiveSessionId(current, snapshot.sessions));
   }, []);
 
   const receive = useCallback((event: WireEvent) => {

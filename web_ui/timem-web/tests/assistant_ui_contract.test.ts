@@ -142,6 +142,12 @@ describe("assistant-ui thread integration", () => {
     expect(helloBranch).toContain("applySnapshot(event.snapshot);");
   });
 
+  it("moves active selection to a live session when a reconnect or mem snapshot swaps sessions", () => {
+    expect(viewModelSource).toContain("resolveActiveSessionId");
+    expect(source).toContain("resolveActiveSessionId(current, snapshot.sessions)");
+    expect(source).not.toContain("current || snapshot.sessions[0]?.session_id");
+  });
+
   it("renders live task usage and session context without replacing final telemetry", () => {
     expect(source).toContain("<ContextUsageBar session={activeSession}");
     expect(source).toContain("<LiveTurnUsage turn={turn}");
