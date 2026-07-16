@@ -141,10 +141,10 @@ the next tests to add when the corresponding area changes:
 
 | Area | Why current coverage is not absolute | Next supplement when touched |
 |---|---|---|
-| Terminal paste across emulator variants | Pseudo-TTY smoke proves bracketed paste mode and core behavior, but iTerm2, Terminal.app, tmux, and SSH can differ. | Add a small manual release checklist or automated tmux smoke if tmux becomes supported. |
-| Live provider behavior | Unit tests use provider response fixtures; live tests require credentials and network. | Add opt-in provider smoke scripts keyed off explicit env vars; never run them by default CI. |
-| Clean-machine install | Script logic and macOS/Linux CI runners are covered, but a fully destructive install/uninstall on a personal clean machine depends on host policy and package state. | Run a manual clean VM smoke before major public releases. |
-| Browser engine variants | Automated smoke covers the in-app Chromium browser; Safari and Firefox may differ in WebSocket reconnect, font metrics, and storage policy. | Add a small Safari/Firefox manual release matrix before the first broadly distributed Web release. |
+| Terminal paste across emulator variants | Pseudo-TTY smoke proves bracketed paste mode and core behavior, but iTerm2, Terminal.app, tmux, and SSH can differ. | Run the terminal matrix in `docs/manual-release-smoke.md` before broad releases or input/redraw changes. |
+| Live provider behavior | Unit tests use provider response fixtures; live tests require credentials and network. | Run the live-provider row in `docs/manual-release-smoke.md` with throwaway credentials when provider behavior is release-critical. |
+| Clean-machine install | Script logic and macOS/Linux CI runners are covered, but a fully destructive install/uninstall on a personal clean machine depends on host policy and package state. | Run the clean-machine row in `docs/manual-release-smoke.md` before major public releases. |
+| Browser engine variants | Automated smoke covers the in-app Chromium browser; Safari and Firefox may differ in WebSocket reconnect, font metrics, and storage policy. | Run the browser matrix in `docs/manual-release-smoke.md` before the first broadly distributed Web release. |
 
 ## Adversarial Audit Notes
 
@@ -177,3 +177,5 @@ Before tagging a release:
 6. Confirm README/help examples still match the effective CLI/env behavior.
 7. Confirm no internal URLs, local paths, API keys, or private credentials are
    present in tracked source or release notes.
+8. Run applicable rows from `docs/manual-release-smoke.md` when the release is
+   broad, host-facing, or touches terminal/Web/provider/install behavior.

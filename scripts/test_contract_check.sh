@@ -258,11 +258,35 @@ feature_doc_required=(
   "every new feature"
   "F32"
   "Local Web host and assistant-ui experience"
+  "docs/manual-release-smoke.md"
 )
 
 for pattern in "${feature_doc_required[@]}"; do
   if ! search_fixed "$pattern" "$feature_doc"; then
     echo "missing required feature management item: $pattern" >&2
+    exit 1
+  fi
+done
+
+manual_smoke_doc="docs/manual-release-smoke.md"
+if [ ! -f "$manual_smoke_doc" ]; then
+  echo "missing manual release smoke document: $manual_smoke_doc" >&2
+  exit 1
+fi
+
+manual_smoke_required=(
+  "Manual Release Smoke"
+  "Web Browser Matrix"
+  "Safari"
+  "Firefox"
+  "Terminal Emulator Matrix"
+  "Clean-Machine Install"
+  "Live Provider Smoke"
+)
+
+for pattern in "${manual_smoke_required[@]}"; do
+  if ! search_fixed "$pattern" "$manual_smoke_doc"; then
+    echo "missing required manual release smoke item: $pattern" >&2
     exit 1
   fi
 done
