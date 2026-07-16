@@ -147,6 +147,64 @@ fn history_page_loads_latest_then_older_without_overlap() {
 }
 
 #[test]
+fn history_readers_skip_malformed_jsonl_lines() {
+    let root = tmp_dir("malformed_history");
+    let store = SessionStore::new(&root);
+    let path = store.history_path_for_session("session_a");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let valid_1 = serde_json::to_string(&message(1)).unwrap();
+    let valid_2 = serde_json::to_string(&message(2)).unwrap();
+    fs::write(&path, format!("{valid_1}\n{{not valid json\n\n{valid_2}\n")).unwrap();
+
+    let records = read_all_history_records(&path).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].turn_id(), "turn_1");
+    assert_eq!(records[1].turn_id(), "turn_2");
+}
+
+#[test]
+fn history_page_cursor_counts_valid_records_when_bad_lines_exist() {
+    let root = tmp_dir("malformed_history_paging");
+    let store = SessionStore::new(&root);
+    let path = store.history_path_for_session("session_a");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut lines = Vec::new();
+    for index in 0..5 {
+        lines.push(serde_json::to_string(&message(index)).unwrap());
+        if index == 1 || index == 3 {
+            lines.push("not-json".to_string());
+        }
+    }
+    fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let latest = store.read_history_page("session_a", None, 2).unwrap();
+    assert_eq!(
+        latest
+            .records
+            .iter()
+            .map(ChatHistoryRecord::turn_id)
+            .collect::<Vec<_>>(),
+        vec!["turn_3", "turn_4"]
+    );
+    assert_eq!(latest.before_cursor.as_deref(), Some("3"));
+    assert!(latest.has_more);
+
+    let previous = store
+        .read_history_page("session_a", latest.before_cursor.as_deref(), 2)
+        .unwrap();
+    assert_eq!(
+        previous
+            .records
+            .iter()
+            .map(ChatHistoryRecord::turn_id)
+            .collect::<Vec<_>>(),
+        vec!["turn_1", "turn_2"]
+    );
+    assert_eq!(previous.before_cursor.as_deref(), Some("1"));
+    assert!(previous.has_more);
+}
+
+#[test]
 fn stored_sessions_are_host_agnostic_and_sorted_by_recent_update() {
     let root = tmp_dir("stored_sessions");
     let store = SessionStore::new(&root);

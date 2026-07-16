@@ -275,10 +275,11 @@ pub fn read_history_page_from_path(
         if line.trim().is_empty() {
             continue;
         }
+        let Some(record) = parse_chat_history_record_line(&line) else {
+            continue;
+        };
         let within_window = requested_end.is_none_or(|end| logical_index < end);
         if within_window {
-            let record = serde_json::from_str::<ChatHistoryRecord>(&line)
-                .map_err(|_| "chat_history_record_parse_failed")?;
             page.push_back((logical_index, record));
             while page.len() > limit {
                 page.pop_front();
@@ -309,12 +310,15 @@ pub fn read_all_history_records(path: &Path) -> Result<Vec<ChatHistoryRecord>, S
         if line.trim().is_empty() {
             continue;
         }
-        records.push(
-            serde_json::from_str::<ChatHistoryRecord>(&line)
-                .map_err(|_| "chat_history_record_parse_failed")?,
-        );
+        if let Some(record) = parse_chat_history_record_line(&line) {
+            records.push(record);
+        }
     }
     Ok(records)
+}
+
+fn parse_chat_history_record_line(line: &str) -> Option<ChatHistoryRecord> {
+    serde_json::from_str::<ChatHistoryRecord>(line).ok()
 }
 
 pub fn chat_history_prompt_format_hint(path: &Path) -> String {
