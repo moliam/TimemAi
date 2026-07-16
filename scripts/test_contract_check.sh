@@ -324,6 +324,7 @@ web_ui_required_test_names=(
   "duplicate_cancel_commands_are_idempotent_for_one_active_turn"
   "does not send while cancellation is still in flight"
   "keeps rapid repeated sends during a working turn as separate supplements"
+  "keeps a human click storm bounded and session scoped"
   "lets users remove pending attachments without losing access to long file names"
   "keeps working-turn input visually consistent with a normal send"
 )

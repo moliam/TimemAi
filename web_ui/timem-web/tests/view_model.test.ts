@@ -478,6 +478,53 @@ describe("web topic view model", () => {
     }
   });
 
+  it("keeps a human click storm bounded and session scoped", () => {
+    let sessions = Array.from({ length: 5 }, (_, index) => {
+      const active = upsertTurn(session(`storm_${index}`), turn(`turn_${index}`));
+      return updateSessionWorkerState(active, active.primary_worker_id, "working");
+    });
+    const acceptedSupplements = new Map<string, string[]>();
+
+    for (let index = 0; index < 600; index += 1) {
+      const targetIndex = index % sessions.length;
+      const target = sessions[targetIndex];
+      const isCancelling = index % 17 === 0;
+      const text = `rapid user input ${index}`;
+      const decision = composerSendDecision(target, text, isCancelling);
+      if (isCancelling) {
+        expect(decision).toEqual({ kind: "skip", reason: "cancelling" });
+      } else {
+        expect(decision).toMatchObject({
+          kind: "send",
+          command: { type: "turn_supplement", session_id: target.session_id, text },
+        });
+        acceptedSupplements.set(target.session_id, [
+          ...(acceptedSupplements.get(target.session_id) ?? []),
+          text,
+        ]);
+      }
+      sessions = sessions.map((current, sessionIndex) => sessionIndex === targetIndex ? appendTurnEvent(current, current.active_turn_id, {
+        event_id: `storm_event_${index}`,
+        source: "worker_activity",
+        payload: { kind: "progress", owner: current.session_id, index },
+        created_at_ms: index,
+      }) : current);
+    }
+
+    for (const current of sessions) {
+      const events = current.turns[0]?.events ?? [];
+      expect(events.length).toBeLessThanOrEqual(MAX_CLIENT_TURN_EVENTS);
+      expect(events.every((event) => event.payload.owner === current.session_id)).toBe(true);
+      expect(current.state).toBe("working");
+      expect(current.workers.every((worker) => worker.state === "working")).toBe(true);
+      expect(acceptedSupplements.get(current.session_id)?.length).toBeGreaterThan(80);
+      const finished = finishTurn(current, current.active_turn_id, { elapsed_ms: 42_000, stop_reason: "CancelledByUser" });
+      expect(finished.state).toBe("ready");
+      expect(finished.active_turn_id).toBeNull();
+      expect(finished.workers.every((worker) => worker.state === "ready")).toBe(true);
+    }
+  });
+
   it("bounds newly appended turns without changing chronological order", () => {
     let current = session("turn_pressure");
     for (let index = 0; index < MAX_CLIENT_TURNS + 25; index += 1) current = upsertTurn(current, turn(`turn_${index}`, "finished"));
