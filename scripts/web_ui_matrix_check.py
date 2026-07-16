@@ -115,6 +115,19 @@ HOST_RUNTIME_ROWS = {
 }
 
 
+VAGUE_EVIDENCE_TOKENS = {
+    "composerSendDecision",
+    "turnLiveUsage",
+    "sessionContextUsage",
+    "tailPath",
+    "self_tool chg_cwd",
+}
+
+
+def is_vague_evidence(token: str) -> bool:
+    return token in VAGUE_EVIDENCE_TOKENS or token.endswith(" tests")
+
+
 def main() -> int:
     if not MATRIX.exists():
         print(f"missing Web UI feature matrix: {MATRIX.relative_to(ROOT)}", file=sys.stderr)
@@ -138,6 +151,9 @@ def main() -> int:
         if not tokens:
             failures.append(f"{requirement}: missing backticked test evidence")
             continue
+        vague = [token for token in tokens if is_vague_evidence(token)]
+        if vague:
+            failures.append(f"{requirement}: vague evidence token must name a concrete test or file: {', '.join(vague)}")
         missing = [token for token in tokens if not evidence_exists(token)]
         if missing:
             failures.append(f"{requirement}: evidence not found: {', '.join(missing)}")
