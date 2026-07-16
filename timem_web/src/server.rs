@@ -1293,14 +1293,22 @@ fn try_append_turn_supplement(
         return Ok(None);
     }
     let worker_handle = primary_worker_handle(state, session_id)?;
-    match append_turn_user_entry(state, session_id, "supplement", text) {
+    let worker_supplement_text = text.clone();
+    match append_turn_supplement_with_pending_attachments(state, session_id, text) {
         Ok(turn) => {
-            worker_handle.add_user_supplement(
-                turn.user_entries
-                    .last()
-                    .map(|entry| entry.text.clone())
-                    .unwrap_or_default(),
-            );
+            let entry = turn.user_entries.last().cloned();
+            let mut supplement = entry
+                .as_ref()
+                .map(|entry| entry.text.clone())
+                .unwrap_or(worker_supplement_text);
+            if let Some(context) = entry
+                .as_ref()
+                .and_then(|entry| uploaded_files_context(&entry.attachments))
+            {
+                supplement.push_str("\n\n");
+                supplement.push_str(&context);
+            }
+            worker_handle.add_user_supplement(supplement);
             Ok(Some(turn))
         }
         Err(error) if error == "active_turn_not_found" => Ok(None),
@@ -1785,6 +1793,25 @@ fn append_turn_user_entry(
     kind: &str,
     text: String,
 ) -> Result<WebTurn, String> {
+    append_turn_user_entry_with_attachments(state, session_id, kind, text, Vec::new(), false)
+}
+
+fn append_turn_supplement_with_pending_attachments(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+) -> Result<WebTurn, String> {
+    append_turn_user_entry_with_attachments(state, session_id, "supplement", text, Vec::new(), true)
+}
+
+fn append_turn_user_entry_with_attachments(
+    state: &AppState,
+    session_id: &str,
+    kind: &str,
+    text: String,
+    attachments: Vec<WebAttachment>,
+    take_pending_attachments: bool,
+) -> Result<WebTurn, String> {
     let mut sessions = state
         .sessions
         .lock()
@@ -1796,6 +1823,11 @@ fn append_turn_user_entry(
         .active_turn_id
         .clone()
         .ok_or_else(|| "active_turn_not_found".to_string())?;
+    let attachments = if attachments.is_empty() && take_pending_attachments {
+        std::mem::take(&mut session.attachments)
+    } else {
+        attachments
+    };
     let turn = session
         .turns
         .iter_mut()
@@ -1804,7 +1836,7 @@ fn append_turn_user_entry(
     turn.user_entries.push(WebTurnUserEntry {
         kind: kind.to_string(),
         text,
-        attachments: Vec::new(),
+        attachments,
         created_at_ms: now_ms(),
     });
     if turn.user_entries.len() > MAX_TURN_USER_ENTRIES {
@@ -2062,24 +2094,27 @@ fn session_context(
         }
         WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => None,
     };
-    let uploaded_files = if attachments.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "## SYSTEM\nFiles explicitly uploaded by the user for this session:\n{}",
-            attachments
-                .iter()
-                .map(|file| format!("- {} ({})", file.name, file.path))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ))
-    };
+    let uploaded_files = uploaded_files_context(attachments);
     Ok(combine_additional_contexts([
         runtime.as_deref(),
         resume_notice.as_deref(),
         instructions.as_deref(),
         uploaded_files.as_deref(),
     ]))
+}
+
+fn uploaded_files_context(attachments: &[WebAttachment]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "## SYSTEM\nFiles explicitly uploaded by the user for this session:\n{}",
+        attachments
+            .iter()
+            .map(|file| format!("- {} ({})", file.name, file.path))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
 }
 
 fn sanitize_upload_name(name: &str) -> Result<String, String> {

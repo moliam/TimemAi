@@ -2055,6 +2055,102 @@ fn user_supplement_is_retained_in_the_authoritative_web_session_snapshot() {
 }
 
 #[test]
+fn active_turn_supplement_consumes_pending_attachments_into_the_same_turn() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "SUPPLEMENT_ATTACHMENT");
+    let turn = start_web_turn(&state, &session_id, "inspect initial state").unwrap();
+    let attachment = WebAttachment {
+        id: "upload_supplement".to_string(),
+        name: "extra-context.md".to_string(),
+        path: "/tmp/timem-web/extra-context.md".to_string(),
+        bytes: 128,
+    };
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut(&session_id)
+        .unwrap()
+        .attachments
+        .push(attachment.clone());
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "also use this attached context".to_string(),
+        },
+    )
+    .unwrap()
+    .expect("active submit should become an attached supplement");
+
+    let WireEvent::TurnUpdated { turn: updated, .. } = event else {
+        panic!("expected turn update")
+    };
+    assert_eq!(updated.turn_id, turn.turn_id);
+    assert_eq!(updated.user_entries.len(), 2);
+    assert_eq!(updated.user_entries[1].kind, "supplement");
+    assert_eq!(
+        updated.user_entries[1].attachments,
+        vec![attachment.clone()]
+    );
+    assert!(state.sessions.lock().unwrap()[&session_id]
+        .attachments
+        .is_empty());
+    assert!(uploaded_files_context(&updated.user_entries[1].attachments)
+        .unwrap()
+        .contains("extra-context.md (/tmp/timem-web/extra-context.md)"));
+}
+
+#[test]
+fn stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "STALE_SUPPLEMENT_ATTACHMENT");
+    let cancelled = start_web_turn(&state, &session_id, "cancel this").unwrap();
+    let attachment = WebAttachment {
+        id: "upload_after_cancel".to_string(),
+        name: "new-task.md".to_string(),
+        path: "/tmp/timem-web/new-task.md".to_string(),
+        bytes: 64,
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+        session.attachments.push(attachment.clone());
+        session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == cancelled.turn_id)
+            .unwrap()
+            .state = "finished".to_string();
+    }
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSupplement {
+            session_id: session_id.clone(),
+            text: "new task with file".to_string(),
+        },
+    )
+    .unwrap()
+    .expect("stale supplement should become a new turn with attachments");
+
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("expected turn update")
+    };
+    assert_ne!(turn.turn_id, cancelled.turn_id);
+    assert_eq!(turn.user_entries[0].kind, "task");
+    assert_eq!(turn.user_entries[0].attachments, vec![attachment]);
+    assert!(state.sessions.lock().unwrap()[&session_id]
+        .attachments
+        .is_empty());
+}
+
+#[test]
 fn turn_user_entries_are_persisted_with_raw_text_and_semantic_kind() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "HISTORY_KIND_WRITE");
