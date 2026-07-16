@@ -3557,7 +3557,7 @@ Markdown 协议动作已执行。"#,
             .unwrap_or(false)
     }));
     assert!(ui.events.iter().any(|event| {
-        event.as_action().map_or(false, |topic| {
+        event.as_action().is_some_and(|topic| {
             topic.action == "run_bash"
                 && topic.active
                 && topic.kind
