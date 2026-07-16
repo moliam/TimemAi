@@ -699,9 +699,9 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
     let banner = render_startup_banner(
         ".xxx_mem",
         &config,
-        std::path::Path::new("data"),
-        std::path::Path::new(".xxx_mem/audit/api_audit.json"),
-        std::path::Path::new(".xxx_mem/audit/action_audit.json"),
+        std::path::Path::new("/data"),
+        std::path::Path::new("/api_audit.json"),
+        std::path::Path::new("/action_audit.json"),
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
     );
