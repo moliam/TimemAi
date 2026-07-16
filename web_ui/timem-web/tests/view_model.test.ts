@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -183,6 +183,21 @@ describe("web topic view model", () => {
   it("does not send new tasks or supplements while a mem switch is pending", () => {
     expect(composerSendDecision(session("session_1"), "new task", false, true)).toEqual({ kind: "skip", reason: "mem_switching" });
     expect(composerSendDecision({ ...session("session_1"), state: "working" }, "late supplement", false, true)).toEqual({ kind: "skip", reason: "mem_switching" });
+  });
+
+  it("does not rename a session while mem switching or another rename is pending", () => {
+    expect(sessionRenameDecision("session_1", "Renamed", new Set(), true)).toEqual({ kind: "skip", reason: "mem_switching" });
+    expect(sessionRenameDecision("session_1", "Renamed", new Set(["session_1"]))).toEqual({ kind: "skip", reason: "already_pending" });
+    expect(sessionRenameDecision("session_1", "   ", new Set())).toEqual({ kind: "skip", reason: "empty_name" });
+    expect(sessionRenameDecision(undefined, "Renamed", new Set())).toEqual({ kind: "skip", reason: "no_session" });
+  });
+
+  it("builds a single session rename command from the trimmed display name", () => {
+    expect(sessionRenameDecision("session_1", "  Research Agent  ", new Set())).toEqual({
+      kind: "send",
+      displayName: "Research Agent",
+      command: { type: "session_rename", session_id: "session_1", display_name: "Research Agent" },
+    });
   });
 
   it("skips empty text and missing sessions before touching the socket", () => {
