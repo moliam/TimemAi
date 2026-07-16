@@ -115,14 +115,19 @@ python3 scripts/fake_openai_provider.py \
   >"$provider_log" 2>&1 &
 provider_pid="$!"
 
-for _ in $(seq 1 50); do
+for _ in $(seq 1 200); do
   if grep -q 'fake_provider_ready:' "$provider_log"; then
     break
+  fi
+  if ! kill -0 "$provider_pid" >/dev/null 2>&1; then
+    echo "fake provider exited before ready" >&2
+    cat "$provider_log" >&2 || true
+    exit 1
   fi
   sleep 0.1
 done
 if ! grep -q 'fake_provider_ready:' "$provider_log"; then
-  echo "fake provider did not start" >&2
+  echo "fake provider did not start within 20s" >&2
   cat "$provider_log" >&2 || true
   exit 1
 fi
