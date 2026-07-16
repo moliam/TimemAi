@@ -164,6 +164,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain("current || snapshot.sessions[0]?.session_id");
   });
 
+  it("remounts the assistant-ui thread root when switching sessions", () => {
+    expect(source).toContain('<ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">');
+  });
+
   it("renders live task usage and session context without replacing final telemetry", () => {
     expect(source).toContain("<ContextUsageBar session={activeSession}");
     expect(source).toContain("<LiveTurnUsage turn={turn}");
