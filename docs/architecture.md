@@ -889,7 +889,7 @@ model response protocol (`xml` by default; `markdown` and `json` optional). This
 is separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
 
 Each response parses into the same runtime envelope: optional `status`, optional
-`free_talk`, optional `next_actions`, optional `context_compact`, and
+`free_talk`, optional `working_still_action`, optional `context_compact`, and
 optional `final_answer`. Protocols may express completion differently: JSON and
 Markdown use their status field/section, while XML uses `<final_answer>` as the
 completion branch.
@@ -906,8 +906,8 @@ answer as the closing user-visible answer.
 ```mermaid
 stateDiagram-v2
     [*] --> ModelResponse
-    ModelResponse --> Final: status:finished + final_answer
-    ModelResponse --> ValidateActions: working/default + next_actions
+    ModelResponse --> Final: completion branch + final_answer
+    ModelResponse --> ValidateActions: working/default + working_still_action
     ValidateActions --> Repair: invalid JSON or invalid action shape
     Repair --> ModelResponse: one repair prompt_delta
     ValidateActions --> ExecuteActions: valid action protocol
@@ -935,7 +935,7 @@ remain JSON objects inside `<action_json>` blocks.
 ```json
 {
   "free_talk": "optional context-visible free talk or plan",
-  "next_actions": [
+  "working_still_action": [
     {
       "run_bash": {
         "cmd": "rg --files -g '*.rs' | xargs wc -l",
@@ -947,15 +947,15 @@ remain JSON objects inside `<action_json>` blocks.
 ```
 
 With omitted `status` or `status:"working"` in status-based protocols,
-`next_actions` or `context_compact` is required and `free_talk` is shown in the
-Thought/Action panel. With `status:"finished"`, `final_answer` is required and
-shown as the closing answer before runtime stops this task's action/model loop.
-In XML, `<final_answer>` is the completion branch and must not appear together
-with `<working_still_action>` or `<context_compact>`. If the model still needs
-evidence, it must stay working, run actions, and answer after the action result
-is visible. The parser also tolerates common provider drift such as a valid JSON
-envelope embedded in Markdown text, but it never shows raw protocol fragments to
-the user.
+`working_still_action` or `context_compact` is required and `free_talk` is shown
+in the Thought/Action panel. With `status:"finished"`, `final_answer` is
+required and shown as the closing answer before runtime stops this task's
+action/model loop. In XML, `<final_answer>` is the completion branch and must
+not appear together with `<working_still_action>` or `<context_compact>`. If the
+model still needs evidence, it must stay working, run actions, and answer after
+the action result is visible. The parser also tolerates common provider drift
+such as a valid JSON envelope embedded in Markdown text, but it never shows raw
+protocol fragments to the user.
 
 Action sections accept the equivalent runtime shapes across JSON, Markdown, and
 XML suites: tool-name action objects such as `{ "run_bash": { ... } }`, direct
@@ -979,15 +979,7 @@ model response:
     "discard": ["pd_1"],
     "offload": ["pd_2"],
     "summary": "Earlier work identified the retry redraw issue. Preserve the fix direction and test requirements."
-  },
-  "next_actions": [
-    {
-      "run_bash": {
-        "cmd": "rg -n 'retry_notice|render_thinking' timem_shell/src",
-        "timeout_ms": 5000
-      }
-    }
-  ]
+  }
 }
 ```
 
@@ -1017,7 +1009,9 @@ Fields:
 
 - The object key is the canonical tool name, such as `memmgr`, `run_bash`,
   `capmgr`, or `self_tool`. `memmgr` is the single model-facing interface for
-  durable memory, raw chat history, scratch memory, and dynamic context discard.
+  durable memory, raw chat history, and scratch memory. Dynamic context
+  reduction is handled by the response protocol's `context_compact` branch,
+  not by `memmgr`.
 - The object value is the action-specific argument object. Put each parameter
   in its own JSON field. The top-level parser validates this object against the
   manifest registry; concrete option meaning and validation belong to the
@@ -1114,11 +1108,11 @@ fallback instead.
 ```mermaid
 flowchart TB
     Model["Model envelope"] --> Core["agent_core validator"]
-    Core --> Memmgr["memmgr\ntype=durable/raw_chat/scratch/context"]
+    Core --> Memmgr["memmgr\ntype=durable/raw_chat/scratch"]
     Memmgr --> Chat["raw_chat query/sql/delete\nUI-visible chat records"]
     Memmgr --> Memory["durable schema/sql/write/delete\nlong-lived facts"]
-    Memmgr --> Scratch["scratch query/write/read/delete\ntyped notes and context offload"]
-    Memmgr --> Shrink["context discard\nremove delta context"]
+    Memmgr --> Scratch["scratch search/write/read/delete\ntemporary notes"]
+    Core --> Compact["response protocol context_compact\ndiscard/offload/summary"]
     Core --> SelfTool["self_tool\nTimem runtime self-info"]
     Core --> Bash["run_bash\nlocal command"]
 ```

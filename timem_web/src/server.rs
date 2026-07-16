@@ -1182,9 +1182,17 @@ fn try_append_turn_supplement(
     if !session_has_active_turn(state, session_id)? {
         return Ok(None);
     }
-    primary_worker_handle(state, session_id)?.add_user_supplement(text.clone());
+    let worker_handle = primary_worker_handle(state, session_id)?;
     match append_turn_user_entry(state, session_id, "supplement", text) {
-        Ok(turn) => Ok(Some(turn)),
+        Ok(turn) => {
+            worker_handle.add_user_supplement(
+                turn.user_entries
+                    .last()
+                    .map(|entry| entry.text.clone())
+                    .unwrap_or_default(),
+            );
+            Ok(Some(turn))
+        }
         Err(error) if error == "active_turn_not_found" => Ok(None),
         Err(error) => Err(error),
     }
