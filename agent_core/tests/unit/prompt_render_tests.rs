@@ -118,15 +118,15 @@ fn prompt_renderer_replaces_current_protocol_language() {
 }
 
 #[test]
-fn prompt_renderer_replaces_current_assistant_name() {
+fn prompt_renderer_replaces_assistant_id() {
     let rendered = render_static_prompt(
-        "YOUR ID is: {{CURRENT_ASSISTANT_NAME}}\n## CURRENT_ASSISTANT_NAME",
+        "YOUR ID is: {{ASSSISTANT_ID}}\n## ASSSISTANT_ID",
         &CapabilityRegistry::builtin(),
         &MarkdownSuiteV1,
         "Ai7",
     );
     assert!(rendered.contains("YOUR ID is: Ai7"));
     assert!(rendered.contains("## Ai7"));
-    assert!(!rendered.contains("{{CURRENT_ASSISTANT_NAME}}"));
-    assert!(!rendered.contains("CURRENT_ASSISTANT_NAME"));
+    assert!(!rendered.contains("{{ASSSISTANT_ID}}"));
+    assert!(!rendered.contains("ASSSISTANT_ID"));
 }

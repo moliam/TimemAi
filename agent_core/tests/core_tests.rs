@@ -297,6 +297,8 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
 
     assert!(prompt.contains("YOUR ID is: Ai4"));
     assert!(prompt.contains("## Ai4"));
+    assert!(!prompt.contains("ASSSISTANT_ID"));
+    assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
     assert!(!prompt.contains("CURRENT_ASSISTANT_NAME"));
     assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
 
@@ -314,6 +316,7 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("The following are results of Ai4 newly initiated actions:"));
+    assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
     assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
 }
 

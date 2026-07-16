@@ -678,11 +678,11 @@ time: 1782200000000
 ## USER
 new user input or mid-turn supplement
 
-## {{CURRENT_ASSISTANT_NAME}}
+## {{ASSSISTANT_ID}}
 raw model output recorded for continuity by default
 
 ## SYSTEM
-The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
+The following are results of {{ASSSISTANT_ID}} newly initiated actions:
 
 Action result: run_bash
 ...
@@ -801,7 +801,7 @@ Important invariants:
 - Every rendered dynamic delta has `delta_id` so runtime shrink review can refer
   to exact logical deltas.
 - Valid model-visible role blocks are `## USER`, the current assistant/session-worker
-  heading represented as `## {{CURRENT_ASSISTANT_NAME}}` in prompt examples, and
+  heading represented as `## {{ASSSISTANT_ID}}` in prompt examples, and
   `## SYSTEM`. Runtime replaces it with the actual worker role, such as `## ID0`.
 - The static prefix is sent through provider system-role/system-field support
   when available. Dynamic deltas go in the user message.
@@ -835,7 +835,7 @@ Algorithm:
 6. Append a temporary response trailer as the final user block without cache
    control: XML uses `Please continue your ID's response only in XML:`, while other
    suites use `Please continue your ID's response only:`; both are followed by
-   `## <CURRENT_ASSISTANT_NAME>`. The runtime resolves the assistant name before
+   `## <ASSSISTANT_ID>`. The runtime resolves the assistant ID before
    sending the prompt.
    This trailer is not a prompt delta and must not be merged into the latest
    delta cache block.
@@ -1041,7 +1041,7 @@ delta_id: pd_4
 time: 1782200001000
 
 ## SYSTEM
-The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
+The following are results of {{ASSSISTANT_ID}} newly initiated actions:
 
 Action result: memmgr
 type: raw_chat
@@ -1073,11 +1073,11 @@ delta containing the malformed assistant response and a `## SYSTEM` block with
 the concrete protocol error:
 
 ```text
-## <CURRENT_ASSISTANT_NAME>
+## <ASSSISTANT_ID>
 <the malformed model response>
 
 ## SYSTEM
-<CURRENT_ASSISTANT_NAME>'s previous response is not protocol compliant.
+<ASSSISTANT_ID>'s previous response is not protocol compliant.
 error: invalid_xml_response_root
 
 The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'.
