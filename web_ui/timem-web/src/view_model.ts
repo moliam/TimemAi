@@ -104,10 +104,14 @@ export function prependHistoryRecords(session: Session, records: ChatHistoryReco
   const existing = new Set(session.turns.map((turn) => turn.turn_id));
   const earlier = historicalTurns.filter((turn) => !existing.has(turn.turn_id));
   if (earlier.length === 0) return session;
+  const earlierTurnIds = new Set(earlier.map((turn) => turn.turn_id));
   return {
     ...session,
     turns: trimTurns([...earlier, ...session.turns]),
-    messages: trimMessages([...messagesFromHistoryRecords(records), ...session.messages]),
+    messages: trimMessages([
+      ...messagesFromHistoryRecords(records.filter((record) => earlierTurnIds.has(record.turn_id))),
+      ...session.messages,
+    ]),
   };
 }
 

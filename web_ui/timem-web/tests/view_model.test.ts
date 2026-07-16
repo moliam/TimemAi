@@ -157,7 +157,11 @@ describe("web topic view model", () => {
   });
 
   it("prepends older history without duplicating existing turns", () => {
-    const current = { ...session("session_1"), turns: [turn("turn_2", "finished")] };
+    const current = {
+      ...session("session_1"),
+      turns: [turn("turn_2", "finished")],
+      messages: [assistantMessage("current answer")],
+    };
     const records: ChatHistoryRecord[] = [
       { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 2, content: "older answer" },
       { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, content: "older" },
@@ -169,7 +173,7 @@ describe("web topic view model", () => {
     expect(updated.messages.map((message) => message.text)).toEqual([
       "older",
       "older answer",
-      "duplicate current",
+      "current answer",
     ]);
   });
 
