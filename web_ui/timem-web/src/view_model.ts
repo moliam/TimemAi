@@ -117,6 +117,13 @@ export function pruneSessionSubmissionLocks(
   return changed;
 }
 
+export function resolveActiveSessionId(currentSessionId: string, sessions: Pick<Session, "session_id">[]): string {
+  if (currentSessionId && sessions.some((session) => session.session_id === currentSessionId)) {
+    return currentSessionId;
+  }
+  return sessions[0]?.session_id ?? "";
+}
+
 export function composerSendDecision(
   session: Pick<Session, "session_id" | "state"> | undefined,
   text: string,
