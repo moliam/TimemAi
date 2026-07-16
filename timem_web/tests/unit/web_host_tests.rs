@@ -622,6 +622,138 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
 }
 
 #[test]
+fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_session"));
+    std::fs::create_dir_all(&root).unwrap();
+    let store_root = root.join("memory");
+    state.session_store = Arc::new(SessionStore::new(&store_root));
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.memory_dir = store_root.clone();
+    template.data_dir = root.join("data");
+    template.audit_file = root.join("audit.json");
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Recovered work".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let turn = start_web_turn(&state, &session_id, "remember this after restart").unwrap();
+    assert_eq!(turn.user_entries[0].text, "remember this after restart");
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.session_store = Arc::new(SessionStore::new(&store_root));
+    restarted.template = Arc::new(template);
+    let restored = restore_stored_sessions(&restarted).unwrap();
+    assert_eq!(restored, 1);
+
+    let sessions = restarted.sessions.lock().unwrap();
+    let restored_session = sessions.get(&session_id).unwrap();
+    assert_eq!(restored_session.display_name, "Recovered work");
+    assert_eq!(
+        std::fs::canonicalize(&restored_session.current_dir).unwrap(),
+        std::fs::canonicalize(&root).unwrap()
+    );
+    assert_eq!(restored_session.workers.len(), 1);
+    assert_eq!(restored_session.contexts.len(), 1);
+    assert_eq!(restored_session.messages.len(), 1);
+    assert_eq!(
+        restored_session.messages[0].text,
+        "remember this after restart"
+    );
+    assert!(restored_session.active_turn_id.is_none());
+    assert!(restored_session.resume_notice_pending);
+    drop(sessions);
+
+    let context = session_context(&restarted, &session_id, &[])
+        .unwrap()
+        .expect("restored session should inject resume context");
+    assert!(context.contains("This session was restored"));
+    assert!(context.contains("raw_chat_history.jsonl"));
+    assert!(context.contains("format: JSONL, one record per line."));
+    let context_after_first_use = session_context(&restarted, &session_id, &[])
+        .unwrap()
+        .unwrap_or_default();
+    assert!(!context_after_first_use.contains("This session was restored"));
+}
+
+#[test]
+fn history_page_command_loads_older_records_by_cursor() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    for index in 0..450 {
+        state
+            .session_store
+            .append_history_record(
+                session_id,
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::User,
+                    turn_id: format!("turn_{index}"),
+                    created_at_ms: index,
+                    content: format!("line {index}"),
+                },
+            )
+            .unwrap();
+    }
+
+    let first = handle_command(
+        &state,
+        ClientCommand::HistoryPage {
+            session_id: session_id.to_string(),
+            before_cursor: None,
+            limit: Some(200),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::HistoryPage {
+        records,
+        before_cursor,
+        has_more,
+        ..
+    } = first
+    else {
+        panic!("expected history page")
+    };
+    assert_eq!(records.len(), 200);
+    assert_eq!(records.first().unwrap().turn_id(), "turn_250");
+    assert_eq!(before_cursor.as_deref(), Some("250"));
+    assert!(has_more);
+
+    let second = handle_command(
+        &state,
+        ClientCommand::HistoryPage {
+            session_id: session_id.to_string(),
+            before_cursor,
+            limit: Some(200),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::HistoryPage {
+        records,
+        before_cursor,
+        has_more,
+        ..
+    } = second
+    else {
+        panic!("expected history page")
+    };
+    assert_eq!(records.len(), 200);
+    assert_eq!(records.first().unwrap().turn_id(), "turn_50");
+    assert_eq!(records.last().unwrap().turn_id(), "turn_249");
+    assert_eq!(before_cursor.as_deref(), Some("50"));
+    assert!(has_more);
+}
+
+#[test]
 fn session_runtime_env_rejects_unknown_empty_and_invalid_values() {
     let state = routing_test_state();
     assert_eq!(
@@ -738,6 +870,9 @@ fn routing_test_state() -> AppState {
         token: "test".to_string(),
         manager: Arc::new(Mutex::new(CoreSessionWorkerManager::new())),
         template: Arc::new(template),
+        session_store: Arc::new(SessionStore::new(
+            std::env::temp_dir().join(unique_web_id("timem_web_session_store_test")),
+        )),
         events,
         sessions: Arc::new(Mutex::new(sessions)),
     }
@@ -774,6 +909,9 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         consumed_attachment_ids: BTreeSet::new(),
         messages: Vec::new(),
         turns: Vec::new(),
+        history_before_cursor: None,
+        history_has_more: false,
+        resume_notice_pending: false,
         active_turn_id: None,
         pending_completion_message_id: None,
         work_instruction_mode: WorkInstructionLoadMode::Off,

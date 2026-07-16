@@ -116,6 +116,11 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   and any follow-up `user_supplement`.
 - Local host concerns such as where this shell process stores history or audit
   files.
+- Shell participation in core-owned Session persistence. Shell may choose the
+  default stored Session for this terminal process, append user/assistant/stats
+  records through `agent_core::session_store`, and inject the shared resume
+  notice as host-provided context. It must not invent a shell-only chat-history
+  schema that Web or future hosts cannot page and replay.
 - Choosing host policy for this terminal process, while using `agent_core`
   capability profiling so the active capability set matches the actual
   environment. Shell should not imply it is the only host that can have Bash;

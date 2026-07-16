@@ -216,6 +216,22 @@ Session-profile dialog. Its existing process environment and CLI options become
 that Session's profile. This keeps CLI behavior unchanged while preserving the
 same ownership model as Web.
 
+Session persistence and resume are core data capabilities, not Web-only state.
+`agent_core::session_store` owns the shared `StoredSession`,
+`ChatHistoryRecord`, history paging, and resume-notice schema used by Shell and
+Web. Hosts may render restored turns differently, but the persisted chat history
+format is JSONL with explicit `message` and `event` records so a future host can
+page and replay the same data. The first resume implementation intentionally
+does not persist live Worker/Context runtime state or running action queues:
+when a Session is restored, the host creates a fresh primary Worker and Context,
+then injects one `## SYSTEM` notice pointing the model to the raw chat history
+file and its exact format. The model should read that file only when needed for
+the current task, using bounded tools such as `tail`, `rg`, `jq`, or short
+scripts instead of loading the whole file into prompt context. Web restores the
+latest 200 history records by default and requests older pages in 200-record
+chunks; Shell uses the same Session store and appends its turns to the same raw
+history file so Web and Shell can continue the same mem-space work.
+
 ### `web_ui/`
 
 `web_ui/timem-web` owns assistant-ui/React composition, Markdown and syntax

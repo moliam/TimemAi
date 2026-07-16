@@ -45,6 +45,7 @@ pub mod runtime_context;
 #[path = "../../resources/capabilities/tools/self_tool.rs"]
 pub mod self_tool;
 pub mod session_runtime;
+pub mod session_store;
 pub mod session_worker;
 #[path = "../../resources/capabilities/tools/run_bash.rs"]
 pub mod shell_exec;
