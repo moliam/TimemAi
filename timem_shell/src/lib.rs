@@ -92,7 +92,7 @@ fn dim_line(text: &str) -> String {
 }
 
 pub fn format_token_count(value: u32) -> String {
-    if value % 1_000 == 0 && value >= 1_000 {
+    if value.checked_rem(1_000) == Some(0) && value >= 1_000 {
         format!("{}K", value / 1_000)
     } else {
         value.to_string()

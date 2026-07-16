@@ -2934,7 +2934,7 @@ impl AgentCore {
                 terms.iter().any(|term| text.contains(term))
             })
             .collect::<Vec<_>>();
-        rows.sort_by(|a, b| b.time_ms.cmp(&a.time_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.time_ms));
         rows.truncate(limit.clamp(1, 50));
         rows
     }
@@ -3074,7 +3074,7 @@ impl AgentCore {
                 ActionExecution::Completed(result) => result,
                 ActionExecution::NeedsApproval(_) => format!(
                     "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
-                    &command,
+                    command,
                 ),
             };
             (idx, action_for_audit, result)
@@ -3727,7 +3727,7 @@ impl FileMemoryStore {
                 }
             }
         }
-        rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
         rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
@@ -3735,7 +3735,7 @@ impl FileMemoryStore {
         self.guard
             .with_read(|| {
                 let mut rows = self.read_all_unlocked()?;
-                rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+                rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
                 rows.truncate(limit.clamp(1, 50));
                 Ok(rows)
             })
@@ -4240,7 +4240,7 @@ impl FileScratchStore {
                 terms.iter().any(|term| normalized.contains(term))
             });
         }
-        rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
         rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
@@ -4347,7 +4347,7 @@ impl FileChatHistoryStore {
         if !terms.is_empty() {
             rows.retain(|record| chat_record_matches(record, &terms));
         }
-        rows.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.started_at_ms));
         rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
