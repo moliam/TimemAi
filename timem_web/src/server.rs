@@ -64,7 +64,7 @@ struct AppState {
     token: String,
     manager: Arc<Mutex<CoreSessionWorkerManager>>,
     template: Arc<WorkerTemplate>,
-    session_store: Arc<SessionStore>,
+    mem: Arc<Mutex<WebMemState>>,
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
 }
@@ -72,12 +72,39 @@ struct AppState {
 #[derive(Clone)]
 struct WorkerTemplate {
     settings: Arc<Mutex<RuntimeSettings>>,
-    memory_dir: PathBuf,
-    audit_file: PathBuf,
     data_dir: PathBuf,
+    initial_space: String,
     env: BTreeMap<String, String>,
     current_dir: PathBuf,
     workspace_dirs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct WebMemState {
+    space: String,
+    layout: RuntimeDataLayout,
+    session_store: SessionStore,
+}
+
+impl WebMemState {
+    fn new(data_dir: PathBuf, space: String) -> Result<Self, String> {
+        validate_web_space_name(&space)?;
+        let layout = RuntimeDataLayout::new(data_dir, space.clone());
+        Ok(Self {
+            space,
+            session_store: SessionStore::new(layout.memory_dir()),
+            layout,
+        })
+    }
+
+    fn info(&self) -> WebMemInfo {
+        WebMemInfo {
+            space: self.space.clone(),
+            data_dir: self.layout.data_root().display().to_string(),
+            space_dir: self.layout.space_dir().display().to_string(),
+            memory_dir: self.layout.memory_dir().display().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -281,9 +308,18 @@ struct ServerInfo {
     version: String,
     protocol_version: u8,
     port: u16,
+    mem: WebMemInfo,
     runtime_options: Vec<WebRuntimeOption>,
     session_env_defaults: BTreeMap<String, String>,
     workspace_dirs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebMemInfo {
+    space: String,
+    data_dir: String,
+    space_dir: String,
+    memory_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -353,6 +389,9 @@ enum ClientCommand {
         key: String,
         value: String,
     },
+    MemSwitch {
+        space: String,
+    },
 }
 
 pub async fn run_from_env() -> Result<(), String> {
@@ -368,12 +407,15 @@ pub async fn run_from_env() -> Result<(), String> {
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-    let session_store = Arc::new(SessionStore::new(&template.memory_dir));
+    let mem = Arc::new(Mutex::new(WebMemState::new(
+        template.data_dir.clone(),
+        template.initial_space.clone(),
+    )?));
     let state = AppState {
         token: token.clone(),
         manager,
         template: Arc::new(template),
-        session_store,
+        mem,
         events,
         sessions,
     };
@@ -558,6 +600,18 @@ fn authorized(state: &AppState, auth: &AuthQuery) -> bool {
     auth.token.as_deref() == Some(state.token.as_str())
 }
 
+fn current_mem_state(state: &AppState) -> Result<WebMemState, String> {
+    state
+        .mem
+        .lock()
+        .map(|mem| mem.clone())
+        .map_err(|_| "mem_state_poisoned".to_string())
+}
+
+fn current_session_store(state: &AppState) -> Result<SessionStore, String> {
+    Ok(current_mem_state(state)?.session_store)
+}
+
 async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
     let (mut sender, mut receiver) = socket.split();
     if send_event(
@@ -590,7 +644,7 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
                         }
                         match serde_json::from_str::<ClientCommand>(&text) {
                             Ok(command) => {
-                                match handle_command(&state, command) {
+                                match handle_command(&state, port, command) {
                                     Ok(Some(event)) => if send_event(&mut sender, &event).await.is_err() { break; },
                                     Ok(None) => {}
                                     Err(error) => if send_event(&mut sender, &WireEvent::HostError { message: error }).await.is_err() {
@@ -628,7 +682,11 @@ async fn send_event(
     sender.send(Message::Text(text)).await.map_err(|_| ())
 }
 
-fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<WireEvent>, String> {
+fn handle_command(
+    state: &AppState,
+    port: u16,
+    command: ClientCommand,
+) -> Result<Option<WireEvent>, String> {
     match command {
         ClientCommand::SessionCreate {
             display_name,
@@ -714,7 +772,7 @@ fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<Wir
             before_cursor,
             limit,
         } => {
-            let page = state.session_store.read_history_page(
+            let page = current_session_store(state)?.read_history_page(
                 &session_id,
                 before_cursor.as_deref(),
                 limit.unwrap_or(200).min(200),
@@ -793,8 +851,55 @@ fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<Wir
                 session_env_defaults,
             });
         }
+        ClientCommand::MemSwitch { space } => {
+            let snapshot = switch_mem_space(state, port, &space)?;
+            let _ = state.events.send(WireEvent::Hello { snapshot });
+        }
     }
     Ok(None)
+}
+
+fn switch_mem_space(state: &AppState, port: u16, space: &str) -> Result<WebSnapshot, String> {
+    let space = space.trim();
+    validate_web_space_name(space)?;
+    let current_space = current_mem_state(state)?.space;
+    if current_space == space {
+        return Ok(snapshot_for(state, port));
+    }
+    let old_manager = {
+        let mut manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        for worker_id in manager
+            .statuses()
+            .into_iter()
+            .map(|status| status.identity.worker_id)
+            .collect::<Vec<_>>()
+        {
+            let _ = manager.request_shutdown(&worker_id);
+        }
+        std::mem::take(&mut *manager)
+    };
+    let _ = old_manager.shutdown_all();
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions.clear();
+    }
+    {
+        let mut mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        *mem = WebMemState::new(state.template.data_dir.clone(), space.to_string())?;
+    }
+    if restore_stored_sessions(state)? == 0 {
+        let _ = create_session(state, None, None, BTreeMap::new())?;
+    }
+    Ok(snapshot_for(state, port))
 }
 
 fn create_session(
@@ -872,7 +977,7 @@ fn create_session(
 }
 
 fn restore_stored_sessions(state: &AppState) -> Result<usize, String> {
-    let stored_sessions = state.session_store.list_sessions()?;
+    let stored_sessions = current_session_store(state)?.list_sessions()?;
     let mut restored = 0usize;
     for stored in stored_sessions {
         if restore_stored_session(state, stored).is_ok() {
@@ -906,7 +1011,7 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
             .max()
             .map(|value| value.saturating_add(1))
             .unwrap_or(0);
-        let history_page = state.session_store.read_history_page(
+        let history_page = current_session_store(state)?.read_history_page(
             &stored.session_id,
             None,
             SESSION_HISTORY_PAGE_LIMIT,
@@ -1087,7 +1192,7 @@ fn persist_web_session(state: &AppState, session_id: &str) -> Result<(), String>
             .ok_or_else(|| "session_not_found".to_string())?;
         stored_session_from_web_session(state, session)
     };
-    state.session_store.upsert_session(&stored)
+    current_session_store(state)?.upsert_session(&stored)
 }
 
 fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> StoredSession {
@@ -1129,8 +1234,13 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
         },
         last_turn_id: session.turns.last().map(|turn| turn.turn_id.clone()),
         raw_chat_history_path: state
-            .session_store
-            .history_path_for_session(&session.session_id)
+            .mem
+            .lock()
+            .map(|mem| {
+                mem.session_store
+                    .history_path_for_session(&session.session_id)
+            })
+            .unwrap_or_else(|_| PathBuf::from(""))
             .display()
             .to_string(),
     }
@@ -1292,12 +1402,14 @@ fn attach_worker_to_session_context(
         (session.runtime.clone(), PathBuf::from(&context.current_dir))
     };
 
-    let core = state
-        .template
-        .new_core_at(&current_dir, &runtime.settings, runtime.env.clone())?;
+    let mem = current_mem_state(state)?;
+    let core =
+        state
+            .template
+            .new_core_at(&mem, &current_dir, &runtime.settings, runtime.env.clone())?;
     let workspace = state
         .template
-        .workspace_at(&current_dir, runtime.env.clone());
+        .workspace_at(&mem, &current_dir, runtime.env.clone());
     let requested_display_name = display_name
         .as_deref()
         .map(str::trim)
@@ -1810,16 +1922,18 @@ fn append_chat_history_message(
         "system" => ChatHistoryRole::System,
         _ => ChatHistoryRole::System,
     };
-    let _ = state.session_store.append_history_record(
-        session_id,
-        &ChatHistoryRecord::Message {
-            role,
-            turn_id: turn_id.to_string(),
-            created_at_ms,
-            kind: kind.map(ToString::to_string),
-            content,
-        },
-    );
+    if let Ok(store) = current_session_store(state) {
+        let _ = store.append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role,
+                turn_id: turn_id.to_string(),
+                created_at_ms,
+                kind: kind.map(ToString::to_string),
+                content,
+            },
+        );
+    }
 }
 
 fn append_chat_history_event(
@@ -1835,17 +1949,19 @@ fn append_chat_history_event(
     let mut extra = BTreeMap::new();
     extra.insert("source".to_string(), Value::String(source.to_string()));
     extra.insert("payload".to_string(), payload);
-    let _ = state.session_store.append_history_record(
-        session_id,
-        &ChatHistoryRecord::Event {
-            role: ChatHistoryRole::System,
-            turn_id: turn_id.to_string(),
-            created_at_ms,
-            kind,
-            content,
-            extra,
-        },
-    );
+    if let Ok(store) = current_session_store(state) {
+        let _ = store.append_history_record(
+            session_id,
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id: turn_id.to_string(),
+                created_at_ms,
+                kind,
+                content,
+                extra,
+            },
+        );
+    }
 }
 
 fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEventKind {
@@ -1929,7 +2045,7 @@ fn session_context(
     let resume_notice = if session.resume_notice_pending {
         Some(
             SessionResumeNotice {
-                history_path: state.session_store.history_path_for_session(session_id),
+                history_path: current_session_store(state)?.history_path_for_session(session_id),
                 current_dir: PathBuf::from(&current_dir),
             }
             .render(),
@@ -2442,17 +2558,19 @@ fn handle_scoped_worker_event(
             if let Some(turn_id) = turn_id.as_deref() {
                 let mut extra = BTreeMap::new();
                 extra.insert("completion".to_string(), completion.clone());
-                let _ = state.session_store.append_history_record(
-                    session_id,
-                    &ChatHistoryRecord::Event {
-                        role: ChatHistoryRole::System,
-                        turn_id: turn_id.to_string(),
-                        created_at_ms: now_ms_i64(),
-                        kind: ChatHistoryEventKind::Stats,
-                        content: "Turn completed.".to_string(),
-                        extra,
-                    },
-                );
+                if let Ok(store) = current_session_store(state) {
+                    let _ = store.append_history_record(
+                        session_id,
+                        &ChatHistoryRecord::Event {
+                            role: ChatHistoryRole::System,
+                            turn_id: turn_id.to_string(),
+                            created_at_ms: now_ms_i64(),
+                            kind: ChatHistoryEventKind::Stats,
+                            content: "Turn completed.".to_string(),
+                            extra,
+                        },
+                    );
+                }
             }
             let _ = persist_web_session(state, session_id);
             let _ = state.events.send(WireEvent::TurnFinished { session_id: session_id.to_string(), turn_id, outcome: json!({ "text": outcome.text, "message_id": message_id, "completion": completion }) });
@@ -2548,17 +2666,44 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
         .map(|settings| session_env_values(&settings))
         .unwrap_or_default();
     let workspace_dirs = web_workspace_dirs(&state.template);
+    let mem = current_mem_state(state)
+        .map(|mem| mem.info())
+        .unwrap_or_else(|_| WebMemInfo {
+            space: "unknown".to_string(),
+            data_dir: String::new(),
+            space_dir: String::new(),
+            memory_dir: String::new(),
+        });
     WebSnapshot {
         server: ServerInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: 1,
             port,
+            mem,
             runtime_options,
             session_env_defaults,
             workspace_dirs,
         },
         sessions,
     }
+}
+
+fn validate_web_space_name(space: &str) -> Result<(), String> {
+    let trimmed = space.trim();
+    if trimmed.is_empty() {
+        return Err("mem_space_empty".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("mem_space_invalid".to_string());
+    }
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || Path::new(trimmed).is_absolute()
+    {
+        return Err("mem_space_must_be_name_not_path".to_string());
+    }
+    Ok(())
 }
 
 fn web_workspace_dirs(template: &WorkerTemplate) -> Vec<String> {
@@ -2639,7 +2784,6 @@ impl WorkerTemplate {
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(default_data_root);
-        let layout = RuntimeDataLayout::new(data_dir.clone(), &space);
         let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
         let workspace_dirs =
             load_workspace_dirs_from_path(&agent_core::workspace_config_file(&data_dir))
@@ -2661,9 +2805,8 @@ impl WorkerTemplate {
                     &env,
                 ),
             })),
-            memory_dir: layout.memory_dir(),
-            audit_file: layout.api_audit_file(),
             data_dir,
+            initial_space: space,
             env: env
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
@@ -2675,30 +2818,27 @@ impl WorkerTemplate {
 
     fn new_core_at(
         &self,
+        mem: &WebMemState,
         current_dir: &Path,
         settings: &RuntimeSettings,
         session_env: BTreeMap<String, String>,
     ) -> Result<AgentCore, String> {
-        std::fs::create_dir_all(&self.memory_dir).map_err(|error| error.to_string())?;
-        let mut core = AgentCore::new(
-            STATIC_PROMPT,
-            settings.config.core_profile(),
-            &self.memory_dir,
-        );
+        let memory_dir = mem.layout.memory_dir();
+        let audit_file = mem.layout.api_audit_file();
+        std::fs::create_dir_all(&memory_dir).map_err(|error| error.to_string())?;
+        let mut core = AgentCore::new(STATIC_PROMPT, settings.config.core_profile(), &memory_dir);
         core.change_prompt_cwd(current_dir.display().to_string())?;
         core.set_response_protocol(settings.config.response_protocol);
         core.configure_runtime_from_host(&settings.config, settings.bash_approval_mode);
         core.configure_self_tool_runtime(
             session_env,
             SelfToolPaths {
-                space_dir: absolute_path(self.memory_dir.parent().unwrap_or(&self.memory_dir)),
-                memory_dir: absolute_path(&self.memory_dir),
-                memory_file: absolute_path(self.memory_dir.join("memory.jsonl")),
-                scratch_file: absolute_path(self.memory_dir.join("scratch_notes.jsonl")),
-                api_audit_file: absolute_path(&self.audit_file),
-                action_audit_file: absolute_path(
-                    self.audit_file.with_file_name("action_audit.json"),
-                ),
+                space_dir: absolute_path(memory_dir.parent().unwrap_or(&memory_dir)),
+                memory_dir: absolute_path(&memory_dir),
+                memory_file: absolute_path(memory_dir.join("memory.jsonl")),
+                scratch_file: absolute_path(memory_dir.join("scratch_notes.jsonl")),
+                api_audit_file: absolute_path(&audit_file),
+                action_audit_file: absolute_path(audit_file.with_file_name("action_audit.json")),
             },
         );
         if let Ok(registry) =
@@ -2711,12 +2851,13 @@ impl WorkerTemplate {
 
     fn workspace_at(
         &self,
+        mem: &WebMemState,
         current_dir: &Path,
         session_env: BTreeMap<String, String>,
     ) -> CoreSessionWorkerWorkspace {
         let mut workspace = CoreSessionWorkerWorkspace::new(
             self.data_dir.clone(),
-            self.audit_file.clone(),
+            mem.layout.api_audit_file(),
             "timem_web",
             "user_local_machine",
         );
