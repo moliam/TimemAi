@@ -116,6 +116,7 @@ describe("assistant-ui thread integration", () => {
     const helloEnd = source.indexOf('if (event.type === "session_created")', helloStart);
     const helloBranch = source.slice(helloStart, helloEnd);
     expect(helloBranch).toContain("clearAllPendingCommands();");
+    expect(helloBranch).toContain("setDecisions([]);");
     expect(helloBranch).toContain("applySnapshot(event.snapshot);");
   });
 
