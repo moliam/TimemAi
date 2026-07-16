@@ -449,17 +449,19 @@ export function applyCoreTopicToSession(
   makeAssistantMessage: (text: string, id?: string) => ChatMessage,
 ): Session {
   if (session.session_id !== event.session_id) return session;
-  if (event.worker_id && !session.workers.some((worker) => worker.worker_id === event.worker_id)) return session;
-  if (event.context_id && !session.contexts.some((context) => context.context_id === event.context_id)) return session;
+  const isLifecycle = event.topic.name === "core.lifecycle";
+  if (!isLifecycle && event.worker_id && !session.workers.some((worker) => worker.worker_id === event.worker_id)) return session;
+  if (!isLifecycle && event.context_id && !session.contexts.some((context) => context.context_id === event.context_id)) return session;
   const contextState = event.payload.context_state;
   const reportedDir = contextState && typeof contextState === "object" && typeof (contextState as Record<string, unknown>).cwd === "string"
     ? (contextState as Record<string, string>).cwd
     : undefined;
   const targetContextId = event.context_id ?? session.active_context_id;
-  const contexts = reportedDir
+  let contexts = reportedDir
     ? session.contexts.map((context) => context.context_id === targetContextId ? { ...context, current_dir: reportedDir } : context)
     : session.contexts;
   const currentDir = reportedDir && targetContextId === session.active_context_id ? reportedDir : session.current_dir;
+  let workers = session.workers;
   if (event.topic.name === "core.model.response") {
     const finalAnswer = typeof event.payload.final_answer === "string" ? event.payload.final_answer.trim() : "";
     const messageId = typeof event.payload.ui_message_id === "string" ? event.payload.ui_message_id : undefined;
@@ -472,15 +474,48 @@ export function applyCoreTopicToSession(
   }
   if (event.topic.name === "core.lifecycle") {
     const worker = event.payload.worker;
+    if (event.worker_id && event.context_id) {
+      const contextExists = contexts.some((context) => context.context_id === event.context_id);
+      if (!contextExists) {
+        contexts = [
+          ...contexts,
+          {
+            context_id: event.context_id,
+            current_dir: reportedDir ?? session.current_dir,
+            worker_ids: [event.worker_id],
+          },
+        ];
+      } else {
+        contexts = contexts.map((context) => (
+          context.context_id === event.context_id && !context.worker_ids.includes(event.worker_id!)
+            ? { ...context, worker_ids: [...context.worker_ids, event.worker_id!] }
+            : context
+        ));
+      }
+      if (!workers.some((item) => item.worker_id === event.worker_id)) {
+        const workerPayload = worker && typeof worker === "object" ? worker as Record<string, unknown> : {};
+        workers = [
+          ...workers,
+          {
+            worker_id: event.worker_id,
+            context_id: event.context_id,
+            display_name: typeof workerPayload.display_name === "string" ? workerPayload.display_name : event.worker_id,
+            ordinal: typeof workerPayload.ordinal === "number" ? workerPayload.ordinal : workers.length,
+            state: "ready",
+            parent_worker_id: typeof workerPayload.parent_worker_id === "string" ? workerPayload.parent_worker_id : null,
+          },
+        ];
+      }
+    }
     const displayName = worker && typeof worker === "object" && typeof (worker as Record<string, unknown>).display_name === "string"
       ? (worker as Record<string, string>).display_name
       : session.display_name;
     const maxLlmInputTokens = typeof event.payload.max_llm_input_tokens === "number"
       ? event.payload.max_llm_input_tokens
       : session.max_llm_input_tokens;
-    const workers = event.worker_id
-      ? session.workers.map((item) => item.worker_id === event.worker_id ? { ...item, display_name: displayName, state: "ready" } : item)
-      : session.workers;
+    workers = event.worker_id
+      ? workers.map((item) => item.worker_id === event.worker_id ? { ...item, display_name: displayName, state: "ready" } : item)
+      : workers;
     return { ...session, workers, contexts, current_dir: currentDir, max_llm_input_tokens: maxLlmInputTokens, state: aggregateSessionState(workers, session.state) };
   }
   return currentDir === session.current_dir && contexts === session.contexts ? session : { ...session, contexts, current_dir: currentDir };
