@@ -31,7 +31,7 @@ fn cache_planner_marks_only_recent_dynamic_tail() {
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>();
 
-    assert!(cached_texts.iter().any(|text| *text == "STATIC"));
+    assert!(cached_texts.contains(&"STATIC"));
     assert!(!cached_texts.iter().any(|text| text.contains("delta 2")));
     assert!(cached_texts.iter().any(|text| text.contains("delta 3")));
     assert!(cached_texts.iter().any(|text| text.contains("delta 4")));

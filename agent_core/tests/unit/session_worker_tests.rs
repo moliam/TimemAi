@@ -1459,7 +1459,7 @@ impl ModelClient for ProtocolTurnStressModel {
             has_own_supplement,
             saw_cross_session_marker,
         });
-        if turn_idx % 10 == 0 && !has_own_supplement {
+        if turn_idx.checked_rem(10) == Some(0) && !has_own_supplement {
             let started = Instant::now();
             while started.elapsed() < Duration::from_millis(80) {
                 if should_cancel() {
