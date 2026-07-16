@@ -4,13 +4,13 @@ use super::{
     merge_queued_input, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
     paste_marker_segments, paste_recovery_return_edit_clear_lines,
     paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
-    push_thinking_supplement_bytes, queued_input_drain_from_bytes, queued_text_to_supplements,
-    random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
-    read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
-    reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
-    render_approval_choices, render_config_apply_report, render_config_menu,
-    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
-    render_paste_recovery_choices, render_paste_recovery_prompt,
+    provider_config_from_env, push_thinking_supplement_bytes, queued_input_drain_from_bytes,
+    queued_text_to_supplements, random_spinner_tick, raw_multiline_paste_display,
+    raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
+    read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
+    reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
+    render_config_menu, render_expand_output_choices, render_expand_output_prompt,
+    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
     render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
     render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
     render_stale_context_prompt, render_startup_banner, render_startup_status_block,
@@ -18,8 +18,9 @@ use super::{
     render_work_instructions_load_choices, render_work_instructions_load_prompt,
     render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
     rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
-    runtime_help_text, sanitize_user_input, shell_runtime_info_entries, shell_session_env_values,
-    shell_session_profile, startup_control_hint, strip_ansi, strip_paste_markers,
+    runtime_help_text, sanitize_user_input, shell_runtime_info_entries,
+    shell_session_effective_env, shell_session_env_values, shell_session_profile,
+    shell_session_work_dir, startup_control_hint, strip_ansi, strip_paste_markers,
     submitted_input_rows, take_shell_resume_notice, thinking_supplement_terminal_mode,
     timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
     workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
@@ -40,7 +41,7 @@ fn epoch_millis() -> u128 {
 use agent_core::{
     session_store::{
         ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole, SessionStore, StoredSession,
-        StoredSessionState,
+        StoredSessionProfile, StoredSessionState,
     },
     stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
     OutputExpansionRequest, ResponseProtocolKind, RoundLimitDecisionRequest,
@@ -65,6 +66,7 @@ use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use timem_shell::CliOptions;
 use timem_shell::{
     workspace_menu_report, ApiProtocol, HostStatusLevel, ProviderConfig, SPINNER_ICONS,
 };
@@ -2046,6 +2048,154 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     assert!(
         take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending).is_none()
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
+    let root = std::env::temp_dir().join(format!("timem_shell_session_cwd_{}", epoch_millis()));
+    let launch_dir = root.join("launch");
+    let restored_dir = root.join("restored");
+    fs::create_dir_all(&launch_dir).unwrap();
+    fs::create_dir_all(&restored_dir).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    let config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+    };
+    store
+        .upsert_session(&StoredSession {
+            session_id: "web_session_cwd".to_string(),
+            display_name: "Recovered Web".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            current_dir: restored_dir.display().to_string(),
+            profile: shell_session_profile(&config),
+            env: shell_session_env_values(
+                &config,
+                BashApprovalMode::Approve,
+                WorkInstructionLoadMode::Silent,
+            ),
+            state: StoredSessionState::Ready,
+            last_turn_id: None,
+            raw_chat_history_path: store
+                .history_path_for_session("web_session_cwd")
+                .display()
+                .to_string(),
+        })
+        .unwrap();
+
+    let loaded = load_or_create_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &launch_dir,
+    );
+    let work_dir = shell_session_work_dir(&loaded, &launch_dir);
+    let canonical_restored_dir = fs::canonicalize(&restored_dir).unwrap();
+    assert_eq!(work_dir, canonical_restored_dir);
+
+    let mut core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test".to_string(),
+        },
+        store.root(),
+    );
+    core.change_prompt_cwd(work_dir.to_string_lossy()).unwrap();
+    assert_eq!(core.current_prompt_cwd(), canonical_restored_dir.as_path());
+
+    let mut pending = true;
+    let notice = take_shell_resume_notice(&store, &loaded.session_id, &work_dir, &mut pending)
+        .expect("resume notice should use restored cwd");
+    assert!(notice.contains(&format!(
+        "Current cwd: {}",
+        canonical_restored_dir.display()
+    )));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
+    let root = std::env::temp_dir().join(format!("timem_shell_session_env_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let launch_env = HashMap::from([
+        ("TIMEM_API_KEY".to_string(), "test-key".to_string()),
+        ("TIMEM_GATEWAY_PROVIDER".to_string(), "aliyun".to_string()),
+        ("TIMEM_MODEL".to_string(), "launch-model".to_string()),
+        (
+            "TIMEM_RESPONSE_PROTOCOL".to_string(),
+            "markdown".to_string(),
+        ),
+    ]);
+    let session = StoredSession {
+        session_id: "web_session_env".to_string(),
+        display_name: "Recovered Web".to_string(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        current_dir: workspace.display().to_string(),
+        profile: StoredSessionProfile {
+            provider: "aliyun".to_string(),
+            model: "stored-model".to_string(),
+            api_protocol: "openai-compatible".to_string(),
+            response_protocol: "xml".to_string(),
+        },
+        env: BTreeMap::from([
+            ("TIMEM_GATEWAY_PROVIDER".to_string(), "aliyun".to_string()),
+            ("TIMEM_MODEL".to_string(), "stored-model".to_string()),
+            (
+                "TIMEM_API_PROTOCOL".to_string(),
+                "openai-compatible".to_string(),
+            ),
+            ("TIMEM_RESPONSE_PROTOCOL".to_string(), "xml".to_string()),
+            (
+                "TIMEM_BASE_URL".to_string(),
+                "https://stored.example/v1".to_string(),
+            ),
+            ("TIMEM_TIMEOUT".to_string(), "77".to_string()),
+        ]),
+        state: StoredSessionState::Ready,
+        last_turn_id: None,
+        raw_chat_history_path: root
+            .join("memory/sessions/web_session_env/raw_chat_history.jsonl")
+            .display()
+            .to_string(),
+    };
+
+    let merged = shell_session_effective_env(&launch_env, &session);
+    let restored = provider_config_from_env(&CliOptions::default(), &merged).unwrap();
+    assert_eq!(restored.model, "stored-model");
+    assert_eq!(restored.base_url, "https://stored.example/v1");
+    assert_eq!(restored.timeout_secs, 77);
+    assert_eq!(
+        merged.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str),
+        Some("xml")
+    );
+
+    let cli_override = provider_config_from_env(
+        &CliOptions {
+            model: Some("cli-model".to_string()),
+            base_url: Some("https://cli.example/v1".to_string()),
+            ..CliOptions::default()
+        },
+        &merged,
+    )
+    .unwrap();
+    assert_eq!(cli_override.model, "cli-model");
+    assert_eq!(cli_override.base_url, "https://cli.example/v1");
+
     fs::remove_dir_all(root).unwrap();
 }
 
