@@ -1823,16 +1823,16 @@ fn append_turn_user_entry_with_attachments(
         .active_turn_id
         .clone()
         .ok_or_else(|| "active_turn_not_found".to_string())?;
-    let attachments = if attachments.is_empty() && take_pending_attachments {
-        std::mem::take(&mut session.attachments)
-    } else {
-        attachments
-    };
     let turn = session
         .turns
         .iter_mut()
         .find(|turn| turn.turn_id == active_turn_id)
         .ok_or_else(|| "active_turn_not_found".to_string())?;
+    let attachments = if attachments.is_empty() && take_pending_attachments {
+        std::mem::take(&mut session.attachments)
+    } else {
+        attachments
+    };
     turn.user_entries.push(WebTurnUserEntry {
         kind: kind.to_string(),
         text,
