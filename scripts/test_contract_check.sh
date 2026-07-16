@@ -326,6 +326,7 @@ web_ui_required_test_names=(
   "guards one browser draft submission while preserving text typed during the pending send"
   "keeps drafts and pending send guards isolated by session"
   "prunes stale drafts and pending send locks when a snapshot swaps out sessions"
+  "recovers from an in-flight old-mem send after a mem snapshot swaps sessions"
   "moves the active session to a live session when a snapshot swaps out the old one"
   "moves active selection to a live session when a reconnect or mem snapshot swaps sessions"
   "uses session terminology consistently for the creation workflow"

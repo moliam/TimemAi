@@ -164,6 +164,32 @@ describe("web topic view model", () => {
     expect(pruneSessionSubmissionLocks(locks, liveSessions)).toBe(false);
   });
 
+  it("recovers from an in-flight old-mem send after a mem snapshot swaps sessions", () => {
+    let drafts = { old_session: "old mem pending text" };
+    const locks = { current: new Set<string>() };
+    const submitted = reserveSessionDraftSubmission(locks, "old_session", drafts);
+    expect(submitted).toEqual({ sessionId: "old_session", text: "old mem pending text" });
+
+    const liveSessions = ["new_session"];
+    drafts = pruneSessionDrafts(drafts, liveSessions);
+    expect(pruneSessionSubmissionLocks(locks, liveSessions)).toBe(true);
+    expect(drafts).toEqual({});
+    expect(Array.from(locks.current)).toEqual([]);
+
+    const activeSessionId = resolveActiveSessionId("old_session", [session("new_session")]);
+    drafts = setSessionDraft(drafts, activeSessionId, "fresh task in new mem");
+    const reserved = reserveSessionDraftSubmission(locks, activeSessionId, drafts);
+    expect(reserved).toEqual({ sessionId: "new_session", text: "fresh task in new mem" });
+
+    const decision = composerSendDecision(session(activeSessionId), reserved!.text, false);
+    expect(decision).toEqual({
+      kind: "send",
+      text: "fresh task in new mem",
+      clearDraftOnSuccess: true,
+      command: { type: "turn_submit", session_id: "new_session", text: "fresh task in new mem" },
+    });
+  });
+
   it("keeps draft state identity stable when every draft belongs to a live session", () => {
     const drafts = { session_a: "draft A", session_b: "draft B" };
     expect(pruneSessionDrafts(drafts, ["session_a", "session_b"])).toBe(drafts);
