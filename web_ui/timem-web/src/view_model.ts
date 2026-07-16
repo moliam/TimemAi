@@ -331,6 +331,7 @@ function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[]
 
 export function appendTurnEvent(session: Session, turnId: string | null | undefined, event: WebTurnEvent): Session {
   if (!turnId) return session;
+  if (!turnEventBelongsToSession(session, event)) return session;
   return {
     ...session,
     turns: session.turns.map((turn) => turn.turn_id === turnId
@@ -343,6 +344,16 @@ export function appendTurnEvent(session: Session, turnId: string | null | undefi
         }
       : turn),
   };
+}
+
+function turnEventBelongsToSession(session: Session, event: WebTurnEvent): boolean {
+  if (event.source !== "core_topic") return true;
+  const topicEvent = event.payload as unknown as CoreTopicEvent;
+  if (topicEvent.session_id !== session.session_id) return false;
+  const isLifecycle = topicEvent.topic?.name === "core.lifecycle";
+  if (!isLifecycle && topicEvent.worker_id && !session.workers.some((worker) => worker.worker_id === topicEvent.worker_id)) return false;
+  if (!isLifecycle && topicEvent.context_id && !session.contexts.some((context) => context.context_id === topicEvent.context_id)) return false;
+  return true;
 }
 
 function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {

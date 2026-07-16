@@ -798,6 +798,49 @@ describe("web topic view model", () => {
     expect(sessionTwo.state).toBe("ready");
   });
 
+  it("does not append a core topic event to another session with the same turn id", () => {
+    const sharedTurnId = "turn_shared";
+    const event: WebTurnEvent = {
+      event_id: "event_session_1",
+      source: "core_topic",
+      payload: topic("core.model.response", { final_answer: "only session one", continue_work: false }) as unknown as Record<string, unknown>,
+      created_at_ms: 2,
+    };
+
+    const sessionOne = appendTurnEvent(upsertTurn(session("session_1"), turn(sharedTurnId)), sharedTurnId, event);
+    const sessionTwo = appendTurnEvent(upsertTurn(session("session_2"), turn(sharedTurnId)), sharedTurnId, event);
+
+    expect(sessionOne.turns[0]?.events).toHaveLength(1);
+    expect(sessionOne.turns[0]?.final_answer).toBe("only session one");
+    expect(sessionTwo.turns[0]?.events).toHaveLength(0);
+    expect(sessionTwo.turns[0]?.final_answer).toBeNull();
+  });
+
+  it("does not append scoped core topics for unknown workers or contexts", () => {
+    const current = upsertTurn(session("session_1"), turn("turn_1"));
+    const unknownWorkerEvent: WebTurnEvent = {
+      event_id: "event_unknown_worker",
+      source: "core_topic",
+      payload: {
+        ...topic("core.action", { action: "run_bash", event: "start", input: { cmd: "pwd" } }),
+        worker_id: "worker_missing",
+      } as unknown as Record<string, unknown>,
+      created_at_ms: 2,
+    };
+    const unknownContextEvent: WebTurnEvent = {
+      event_id: "event_unknown_context",
+      source: "core_topic",
+      payload: {
+        ...topic("core.action", { action: "run_bash", event: "start", input: { cmd: "pwd" } }),
+        context_id: "context_missing",
+      } as unknown as Record<string, unknown>,
+      created_at_ms: 3,
+    };
+
+    expect(appendTurnEvent(current, "turn_1", unknownWorkerEvent).turns[0]?.events).toHaveLength(0);
+    expect(appendTurnEvent(current, "turn_1", unknownContextEvent).turns[0]?.events).toHaveLength(0);
+  });
+
   it("keeps a matched agent working without changing unrelated sessions", () => {
     const response = { ...topic("core.model.response", { final_answer: "progress", continue_work: true }), session_id: "session_b" };
     const agentA = applyCoreTopicToSession(session("session_a"), response, assistantMessage);
