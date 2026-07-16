@@ -327,6 +327,7 @@ workflow_required=(
   "push:"
   "pull_request:"
   "scripts/ci.sh"
+  '"1.0"'
   "ubuntu-latest"
   "macos-latest"
   "expect"
