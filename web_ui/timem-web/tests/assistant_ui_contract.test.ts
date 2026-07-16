@@ -144,9 +144,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
     expect(source).toContain("disabled={pending || locked}");
     expect(source).toContain('disabled={pendingMemSwitch} onClick={() => beginRename(session)}');
-    expect(source).toContain("if (pendingMemSwitch) {");
-    expect(source).toContain('setRenamingSessionId("");');
+    expect(source).toContain("sessionRenameDecision(");
     expect(viewModelSource).toContain('"mem_switching"');
+    expect(viewModelSource).toContain('"already_pending"');
   });
 
   it("clears stale pending browser guards when a reconnect snapshot arrives", () => {
@@ -177,7 +177,8 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("supports agent rename and a distinct animated working state", () => {
-    expect(source).toContain('type: "session_rename"');
+    expect(viewModelSource).toContain('type: "session_rename"');
+    expect(viewModelSource).toContain("sessionRenameDecision");
     expect(source).toContain('event.type === "session_renamed"');
     expect(source).toContain("session-working-icon");
     expect(source).toContain("session-rename-input");

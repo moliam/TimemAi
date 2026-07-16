@@ -27,6 +27,10 @@ export type ComposerSendDecision =
   | { kind: "skip"; reason: "no_session" | "empty_text" | "cancelling" | "mem_switching" }
   | { kind: "send"; command: Extract<ClientCommand, { type: "turn_submit" | "turn_supplement" }>; text: string; clearDraftOnSuccess: true };
 
+export type SessionRenameDecision =
+  | { kind: "skip"; reason: "no_session" | "empty_name" | "already_pending" | "mem_switching" }
+  | { kind: "send"; command: Extract<ClientCommand, { type: "session_rename" }>; displayName: string };
+
 export type DraftSubmissionLock = { current: boolean };
 export type SessionDraftSubmissionLocks = { current: Set<string> };
 export type SessionDrafts = Record<string, string>;
@@ -142,6 +146,24 @@ export function composerSendDecision(
     command: session.state === "working"
       ? { type: "turn_supplement", session_id: session.session_id, text: trimmed }
       : { type: "turn_submit", session_id: session.session_id, text: trimmed },
+  };
+}
+
+export function sessionRenameDecision(
+  sessionId: string | undefined,
+  draftName: string,
+  pendingSessionIds: ReadonlySet<string>,
+  isMemSwitching = false,
+): SessionRenameDecision {
+  if (!sessionId) return { kind: "skip", reason: "no_session" };
+  if (isMemSwitching) return { kind: "skip", reason: "mem_switching" };
+  const displayName = draftName.trim();
+  if (!displayName) return { kind: "skip", reason: "empty_name" };
+  if (pendingSessionIds.has(sessionId)) return { kind: "skip", reason: "already_pending" };
+  return {
+    kind: "send",
+    displayName,
+    command: { type: "session_rename", session_id: sessionId, display_name: displayName },
   };
 }
 

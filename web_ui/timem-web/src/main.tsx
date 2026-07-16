@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -139,18 +139,25 @@ function TimemApp() {
   }, []);
 
   const finishRename = useCallback((sessionId: string) => {
-    if (pendingMemSwitch) {
+    const decision = sessionRenameDecision(
+      sessionId,
+      renameDraft,
+      pendingRenameSessionIdsRef.current,
+      pendingMemSwitch,
+    );
+    if (decision.kind === "skip") {
       setRenamingSessionId("");
       setRenameDraft("");
       return;
     }
-    const displayName = renameDraft.trim();
-    if (displayName && addPendingKey(pendingRenameSessionIdsRef, setPendingRenameSessionIds, sessionId)) {
-      if (!sendCommand({ type: "session_rename", session_id: sessionId, display_name: displayName })) {
+    if (addPendingKey(pendingRenameSessionIdsRef, setPendingRenameSessionIds, sessionId)) {
+      if (!sendCommand(decision.command)) {
         removePendingKey(pendingRenameSessionIdsRef, setPendingRenameSessionIds, sessionId);
+        setRenamingSessionId("");
+        setRenameDraft("");
         return;
       }
-      setSessions((current) => current.map((session) => session.session_id === sessionId ? { ...session, display_name: displayName } : session));
+      setSessions((current) => current.map((session) => session.session_id === sessionId ? { ...session, display_name: decision.displayName } : session));
     }
     setRenamingSessionId("");
     setRenameDraft("");
