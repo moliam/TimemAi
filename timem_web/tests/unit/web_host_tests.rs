@@ -2133,6 +2133,40 @@ fn stale_topic_reply_after_turn_completion_is_ignored_without_host_error() {
 }
 
 #[test]
+fn stale_work_instruction_reply_during_new_active_turn_is_ignored() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "STALE_WORK_INSTRUCTION_REPLY");
+    let active = start_web_turn(&state, &session_id, "new active task").unwrap();
+
+    let event = handle_command(
+        &state,
+        ClientCommand::TopicReply {
+            session_id: session_id.clone(),
+            worker_id: None,
+            topic_name: CORE_TOPIC_WORK_INSTRUCTION_LOAD.to_string(),
+            request_id: Some("old_work_instruction_request".to_string()),
+            decision: "accept".to_string(),
+            payload: json!({ "summary": "stale AGENTS.md approval" }),
+        },
+    )
+    .unwrap();
+
+    assert!(event.is_none());
+    let sessions = state.sessions.lock().unwrap();
+    let turn = sessions[&session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == active.turn_id)
+        .unwrap();
+    assert_eq!(turn.user_entries.len(), 1);
+    assert_eq!(turn.user_entries[0].kind, "task");
+    assert!(sessions[&session_id]
+        .pending_work_instruction_turn
+        .is_none());
+    assert_eq!(sessions[&session_id].work_instruction_allowed, None);
+}
+
+#[test]
 fn active_turn_event_windows_are_bounded_and_session_isolated() {
     const SESSION_COUNT: usize = 5;
     const EVENTS_PER_SESSION: usize = MAX_TURN_EVENTS + 75;

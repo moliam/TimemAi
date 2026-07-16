@@ -746,17 +746,18 @@ fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<Wir
                 _ => return Err("invalid_topic_reply_decision".to_string()),
             };
             let approval_summary = decision_summary(&topic_name, decision, &payload);
-            if topic_name == CORE_TOPIC_WORK_INSTRUCTION_LOAD
-                && resolve_work_instruction_decision(
+            if topic_name == CORE_TOPIC_WORK_INSTRUCTION_LOAD {
+                if resolve_work_instruction_decision(
                     state,
                     &session_id,
                     request_id.as_deref(),
                     decision,
-                )?
-            {
-                let turn =
-                    append_turn_user_entry(state, &session_id, "approval", approval_summary)?;
-                return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+                )? {
+                    let turn =
+                        append_turn_user_entry(state, &session_id, "approval", approval_summary)?;
+                    return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+                }
+                return Ok(None);
             }
             if !session_has_active_turn(state, &session_id)? {
                 return Ok(None);
