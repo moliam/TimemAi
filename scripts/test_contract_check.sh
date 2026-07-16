@@ -327,6 +327,8 @@ web_ui_required_test_names=(
   "keeps drafts and pending send guards isolated by session"
   "prunes stale drafts and pending send locks when a snapshot swaps out sessions"
   "moves the active session to a live session when a snapshot swaps out the old one"
+  "does not send new tasks or supplements while a mem switch is pending"
+  "locks old-session interactions while a mem switch snapshot is pending"
   "does not send while cancellation is still in flight"
   "keeps rapid repeated sends during a working turn as separate supplements"
   "keeps a human click storm bounded and session scoped"

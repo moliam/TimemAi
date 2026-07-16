@@ -326,10 +326,14 @@ function TimemApp() {
       activeSession,
       text,
       activeSession ? cancellingSessionIds.current.has(activeSession.session_id) : false,
+      pendingMemSwitch,
     );
     if (decision.kind === "skip") {
       if (decision.reason === "cancelling" && activeSession) {
         const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() };
+        setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
+      } else if (decision.reason === "mem_switching") {
+        const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession?.session_id ?? "system", tone: "notice", title: "Switching mem", detail: "Wait for the new mem space to load before sending another message.", createdAt: Date.now() };
         setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
       }
       return false;
@@ -340,10 +344,10 @@ function TimemApp() {
       return false;
     }
     return decision.clearDraftOnSuccess;
-  }, [activeSession, sendCommand]);
+  }, [activeSession, pendingMemSwitch, sendCommand]);
 
   const uploadFile = useCallback(async (file: File) => {
-    if (!activeSession) return;
+    if (!activeSession || pendingMemSwitch) return;
     const token = queryToken();
     if (!token) return;
     const form = new FormData();
@@ -355,15 +359,16 @@ function TimemApp() {
       const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "error", title: "File upload failed", detail: error instanceof Error ? error.message : "upload_failed", createdAt: Date.now() };
       setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
     }
-  }, [activeSession]);
+  }, [activeSession, pendingMemSwitch]);
 
   const loadMoreHistory = useCallback((session: Session) => {
+    if (pendingMemSwitch) return;
     if (!session.history_has_more || !session.history_before_cursor) return;
     if (!addPendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, session.session_id)) return;
     if (!sendCommand({ type: "history_page", session_id: session.session_id, before_cursor: session.history_before_cursor, limit: 200 })) {
       removePendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, session.session_id);
     }
-  }, [addPendingKey, removePendingKey, sendCommand]);
+  }, [addPendingKey, pendingMemSwitch, removePendingKey, sendCommand]);
 
   const runtimeMessages = useMemo<readonly ThreadMessageLike[]>(() => activeMessages.map((message) => ({
     id: message.id,
@@ -373,7 +378,7 @@ function TimemApp() {
   const [auiMessages, setAuiMessages] = useState<readonly ThreadMessageLike[]>(runtimeMessages);
   useEffect(() => setAuiMessages(runtimeMessages), [runtimeMessages]);
   const cancelActiveTurn = useCallback(async () => {
-    if (!activeSession || activeSession.state !== "working") return;
+    if (!activeSession || activeSession.state !== "working" || pendingMemSwitch) return;
     if (cancellingSessionIds.current.has(activeSession.session_id)) return;
     cancellingSessionIds.current.add(activeSession.session_id);
     setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
@@ -381,7 +386,7 @@ function TimemApp() {
       cancellingSessionIds.current.delete(activeSession.session_id);
       setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
     }
-  }, [activeSession, sendCommand]);
+  }, [activeSession, pendingMemSwitch, sendCommand]);
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages: auiMessages,
     setMessages: setAuiMessages,
@@ -402,7 +407,7 @@ function TimemApp() {
       {showMobileSessions && <button className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => setShowMobileSessions(false)}/>}
       <aside className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}>
         <div className="brand"><Sparkles size={18}/><span>Timem</span><small>local</small><button className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => setShowMobileSessions(false)}><X size={17}/></button></div>
-        <button className="new-session" onClick={() => { setShowNewSession(true); setShowMobileSessions(false); }}><Plus size={16}/> New session</button>
+        <button className="new-session" disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); setShowMobileSessions(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
           {sessions.map((session) => <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""}`}>
             <button className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={`${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={`${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} onClick={() => setExpandedSessionIds((current) => {
@@ -454,6 +459,7 @@ function TimemApp() {
         <TimemThread
           activeSession={activeSession}
           sessionIds={sessions.map((session) => session.session_id)}
+          sessionInteractionLocked={pendingMemSwitch}
           decisions={sessionDecisions}
           fileInput={fileInput}
           isCancelling={!!activeSession && cancellingSessionIdSet.has(activeSession.session_id)}
@@ -465,7 +471,7 @@ function TimemApp() {
           onCancel={cancelActiveTurn}
           onUpload={uploadFile}
           onRemoveAttachment={(attachmentId) => {
-            if (!activeSession) return;
+            if (!activeSession || pendingMemSwitch) return;
             const key = `${activeSession.session_id}:${attachmentId}`;
             if (!addPendingKey(pendingAttachmentRemoveIdsRef, setPendingAttachmentRemoveIds, key)) return;
             if (!sendCommand({ type: "attachment_remove", session_id: activeSession.session_id, attachment_id: attachmentId })) {
@@ -473,6 +479,7 @@ function TimemApp() {
             }
           }}
           onDecisionReply={(decision, decisionValue) => {
+            if (pendingMemSwitch) return;
             const key = decisionKey(decision);
             if (!addPendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key)) return;
             const event = decision.event;
@@ -489,6 +496,7 @@ function TimemApp() {
         <div className="activity-list">{sessionActivities.map((activity) => <div className={`activity ${activity.tone}`} key={activity.id}><span className="activity-mark">{activity.tone === "thinking" ? "✦" : activity.tone === "action" ? "↳" : activity.tone === "warning" ? "!" : activity.tone === "error" ? "×" : "i"}</span><div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="activity-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)} />}</div></div>)}</div>
       </aside>}
       {showNewSession && <NewSessionDialog workspaces={server?.workspace_dirs ?? []} runtimeDefaults={server?.session_env_defaults ?? {}} creating={creatingSession} onClose={() => { if (!creatingSessionRef.current) setShowNewSession(false); }} onCreate={(displayName, workspaceDir, env) => {
+        if (pendingMemSwitch) return;
         if (creatingSessionRef.current) return;
         creatingSessionRef.current = true;
         setCreatingSession(true);
@@ -515,9 +523,10 @@ const MAX_RENDERED_TURN_EVENTS = 200;
 const INITIAL_RENDERED_TURNS = 24;
 const TURN_HISTORY_PAGE_SIZE = 24;
 
-function TimemThread({ activeSession, sessionIds, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply }: {
+function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply }: {
   activeSession: Session | undefined;
   sessionIds: string[];
+  sessionInteractionLocked: boolean;
   decisions: Decision[];
   fileInput: React.RefObject<HTMLInputElement | null>;
   isCancelling: boolean;
@@ -580,6 +589,7 @@ function TimemThread({ activeSession, sessionIds, decisions, fileInput, isCancel
   }, [latestTurnVersion]);
 
   const loadEarlierTurns = () => {
+    if (sessionInteractionLocked) return;
     if (hiddenTurnCount === 0 && (!activeSession || !canLoadStoredHistory || loadingHistory)) return;
     if (viewportRef.current) {
       previousScrollMetrics.current = {
@@ -620,17 +630,18 @@ function TimemThread({ activeSession, sessionIds, decisions, fileInput, isCancel
           scrollHeight: event.currentTarget.scrollHeight,
           clientHeight: event.currentTarget.clientHeight,
         });
-        if (event.currentTarget.scrollTop <= 48 && (hiddenTurnCount > 0 || canLoadStoredHistory)) loadEarlierTurns();
+        if (!sessionInteractionLocked && event.currentTarget.scrollTop <= 48 && (hiddenTurnCount > 0 || canLoadStoredHistory)) loadEarlierTurns();
       }}
     >
       {(activeSession?.turns.length ?? 0) === 0 &&
         <div className="welcome"><Sparkles size={24}/><h2>Ready when you are.</h2><p>Ask Timem to investigate, write, or work with your local environment.</p></div>
       }
-      {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button className="load-history" disabled={loadingHistory} onClick={loadEarlierTurns}>{loadingHistory ? "Loading earlier history…" : hiddenTurnCount > 0 ? `Load ${Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks` : "Load earlier history"}</button>}
+      {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button className="load-history" disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory ? "Loading earlier history…" : hiddenTurnCount > 0 ? `Load ${Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks` : "Load earlier history"}</button>}
       {visibleTurns.map((turn) => <TurnInteraction
         key={turn.turn_id}
         turn={turn}
         decisions={decisions.filter((decision) => decision.turnId === turn.turn_id)}
+        sessionInteractionLocked={sessionInteractionLocked}
         pendingDecisionKeys={pendingDecisionKeys}
         onDecisionReply={onDecisionReply}
       />)}
@@ -638,15 +649,15 @@ function TimemThread({ activeSession, sessionIds, decisions, fileInput, isCancel
         <ThreadPrimitive.ScrollToBottom asChild><button className="scroll-to-bottom" title="Scroll to latest" aria-label="Scroll to latest"><ArrowDown size={16}/></button></ThreadPrimitive.ScrollToBottom>
         {!!activeSession?.attachments.length && <div className="attachment-strip" aria-label="Files attached to the next message">{activeSession.attachments.map((attachment) => {
           const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);
-          return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`} aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`} disabled={removing} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
+          return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`} aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`} disabled={removing || sessionInteractionLocked} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
         })}</div>}
         {activeSession && <div className="composer-cwd" title={activeSession.current_dir}><FolderOpen size={13}/><span>{activeSession.current_dir}</span></div>}
         <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitDraft(); }}>
           <textarea
             value={draft}
-            placeholder={activeSession?.state === "working" ? "继续输入…" : "Ask Timem anything about this workspace…"}
+            placeholder={sessionInteractionLocked ? "Switching mem…" : activeSession?.state === "working" ? "继续输入…" : "Ask Timem anything about this workspace…"}
             aria-label="Message Timem"
-            disabled={!activeSession}
+            disabled={!activeSession || sessionInteractionLocked}
             onChange={(event) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, event.target.value))}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -655,14 +666,14 @@ function TimemThread({ activeSession, sessionIds, decisions, fileInput, isCancel
               }
             }}
           />
-          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className="send-button" type="submit" title="Send message" aria-label="Send message" disabled={!activeSession || !draft.trim() || submittingDraft}><Send size={17}/></button>{activeSession?.state === "working" && <button className="stop-button" type="button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling} onClick={() => void onCancel()}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
+          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" disabled={sessionInteractionLocked} onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" disabled={sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className="send-button" type="submit" title="Send message" aria-label="Send message" disabled={!activeSession || !draft.trim() || submittingDraft || sessionInteractionLocked}><Send size={17}/></button>{activeSession?.state === "working" && <button className="stop-button" type="button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void onCancel()}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
   </ThreadPrimitive.Root>;
 }
 
-function TurnInteraction({ turn, decisions, pendingDecisionKeys, onDecisionReply }: { turn: WebTurn; decisions: Decision[]; pendingDecisionKeys: Set<string>; onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void }) {
+function TurnInteraction({ turn, decisions, sessionInteractionLocked, pendingDecisionKeys, onDecisionReply }: { turn: WebTurn; decisions: Decision[]; sessionInteractionLocked: boolean; pendingDecisionKeys: Set<string>; onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void }) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
   const previousUpdateCount = useRef(turn.events.length + decisions.length);
@@ -712,7 +723,7 @@ function TurnInteraction({ turn, decisions, pendingDecisionKeys, onDecisionReply
       }}>
         {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>}
         {visibleEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={turn.turn_id}/>)}
-        {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
+        {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
         {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
         {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className="working-indicator"><span className="pulse"/> Waiting for the first runtime update…</div>}
       </div>
@@ -968,11 +979,11 @@ function decisionKey(decision: Decision) {
   return `${decision.event.session_id}:${decision.event.topic.name}:${String(decision.event.payload.request_id ?? "")}`;
 }
 
-function InlineDecision({ decision, pending, position, total, onReply }: { decision: Decision; pending: boolean; position: number; total: number; onReply: (decision: "accept" | "decline") => void }) {
+function InlineDecision({ decision, pending, locked, position, total, onReply }: { decision: Decision; pending: boolean; locked: boolean; position: number; total: number; onReply: (decision: "accept" | "decline") => void }) {
   return <section className="inline-decision" aria-label="Decision required">
     <div className="inline-decision-heading"><span className="eyebrow">RUNTIME REQUEST{total > 1 ? ` · ${position} OF ${total}` : ""}</span><h2>{decision.title}</h2></div>
     <pre>{decision.detail}</pre>
-    <div className="decision-actions"><button className="secondary" disabled={pending} onClick={() => onReply("decline")}>Decline</button><button className="primary" disabled={pending} onClick={() => onReply("accept")}><Check size={16}/> {pending ? "Sending…" : "Continue"}</button></div>
+    <div className="decision-actions"><button className="secondary" disabled={pending || locked} onClick={() => onReply("decline")}>Decline</button><button className="primary" disabled={pending || locked} onClick={() => onReply("accept")}><Check size={16}/> {pending ? "Sending…" : "Continue"}</button></div>
   </section>;
 }
 

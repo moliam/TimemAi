@@ -124,13 +124,26 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
     expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
     expect(source).toContain("pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)");
-    expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft}");
+    expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft || sessionInteractionLocked}");
     expect(source).toContain("pendingAttachmentRemoveIdsRef");
     expect(source).toContain("pendingDecisionKeysRef");
     expect(source).toContain("pendingRenameSessionIdsRef");
     expect(source).toContain("pendingRuntimeKeysRef");
     expect(source).toContain("addPendingKey(");
     expect(source).toContain("clearAllPendingCommands");
+  });
+
+  it("locks old-session interactions while a mem switch snapshot is pending", () => {
+    expect(source).toContain("sessionInteractionLocked={pendingMemSwitch}");
+    expect(source).toContain("disabled={pendingMemSwitch}");
+    expect(source).toContain("if (pendingMemSwitch) return;");
+    expect(source).toContain('reason === "mem_switching"');
+    expect(source).toContain("disabled={!activeSession || sessionInteractionLocked}");
+    expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft || sessionInteractionLocked}");
+    expect(source).toContain("disabled={loadingHistory || sessionInteractionLocked}");
+    expect(source).toContain("disabled={removing || sessionInteractionLocked}");
+    expect(source).toContain("disabled={pending || locked}");
+    expect(viewModelSource).toContain('"mem_switching"');
   });
 
   it("clears stale pending browser guards when a reconnect snapshot arrives", () => {
@@ -247,7 +260,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="pending-attachment-name"');
     expect(source).toContain('title={attachment.name}');
     expect(source).toContain("pendingAttachmentRemoveIds.has");
-    expect(source).toContain("disabled={removing}");
+    expect(source).toContain("disabled={removing || sessionInteractionLocked}");
     expect(source).toContain('aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`}');
     expect(styles).toContain(".pending-attachment-name");
     expect(styles).toContain("text-overflow: ellipsis");
