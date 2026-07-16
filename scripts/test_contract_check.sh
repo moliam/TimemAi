@@ -347,6 +347,11 @@ if ! search_fixed "scripts/update_static_prompt_snapshot.sh --check" scripts/ci.
   exit 1
 fi
 
+if ! search_fixed "scripts/clippy_check.sh" docs/test-strategy.md docs/feature-test-management.md scripts/ci.sh; then
+  echo "clippy warning gate must remain documented and wired into CI" >&2
+  exit 1
+fi
+
 workflow=".github/workflows/ci.yml"
 if [ ! -f "$workflow" ]; then
   echo "missing GitHub Actions workflow: $workflow" >&2
