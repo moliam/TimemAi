@@ -187,6 +187,15 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("session-working-icon");
     expect(source).toContain("session-rename-input");
     expect(styles).toContain("@keyframes session-working-glow");
+    expect(styles).toContain("@keyframes working-blue-pulse");
+    expect(styles).toContain(".working-chip .pulse");
+    expect(styles).toContain("background: #3b82f6");
+  });
+
+  it("keeps model thought text readable during live work", () => {
+    expect(source).toContain('className={`turn-work-item ${activity.tone}`}');
+    expect(styles).toContain(".turn-work-item.thinking { font-size: 13.5px;");
+    expect(styles).toContain(".turn-work-item.thinking .message-content { font-size: 13.5px;");
   });
 
   it("expands each session into its scoped worker status list", () => {
