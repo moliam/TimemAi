@@ -1,5 +1,6 @@
 use super::*;
 use agent_core::session_runtime::ModelClient;
+use agent_core::session_store::read_all_history_records;
 use agent_core::{
     core_initialized_topic_event, CoreProfile, CoreSessionState, CoreSessionWorkerWorkspace,
     CoreTopic, CoreTopicEvent, LlmResponse, TurnOutcome, UsageStats, CORE_TOPIC_ACTION,
@@ -1940,6 +1941,72 @@ fn user_supplement_is_retained_in_the_authoritative_web_session_snapshot() {
     assert_eq!(
         retained.user_entries[1].text,
         "Use the second verification path"
+    );
+}
+
+#[test]
+fn turn_user_entries_are_persisted_with_raw_text_and_semantic_kind() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "HISTORY_KIND_WRITE");
+    let turn = start_web_turn(&state, &session_id, "initial task").unwrap();
+
+    handle_command(
+        &state,
+        ClientCommand::TurnSupplement {
+            session_id: session_id.clone(),
+            text: "mid-turn correction".to_string(),
+        },
+    )
+    .unwrap();
+    handle_command(
+        &state,
+        ClientCommand::TopicReply {
+            session_id: session_id.clone(),
+            worker_id: None,
+            topic_name: "core.request.test".to_string(),
+            request_id: Some("request_1".to_string()),
+            decision: "accept".to_string(),
+            payload: json!({ "summary": "approved local command" }),
+        },
+    )
+    .unwrap();
+
+    let records =
+        read_all_history_records(&state.session_store.history_path_for_session(&session_id))
+            .unwrap();
+    let user_messages = records
+        .into_iter()
+        .filter_map(|record| match record {
+            ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id,
+                kind,
+                content,
+                ..
+            } => Some((turn_id, kind, content)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        user_messages,
+        vec![
+            (
+                turn.turn_id.clone(),
+                Some("task".to_string()),
+                "initial task".to_string()
+            ),
+            (
+                turn.turn_id.clone(),
+                Some("supplement".to_string()),
+                "mid-turn correction".to_string()
+            ),
+            (
+                turn.turn_id,
+                Some("approval".to_string()),
+                "Accepted: approved local command".to_string()
+            ),
+        ]
     );
 }
 

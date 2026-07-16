@@ -104,22 +104,41 @@ fn main() {
     let mut work_instruction_mode =
         work_instruction_mode_from_sources(options.work_instructions.as_deref(), &env);
     let current_work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (mut work_instruction_context, work_instruction_notice) = match work_instruction_mode {
-        WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(&current_work_dir),
-        WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => (None, None),
-    };
     let mut profiler = RuntimeProfiler::default();
-    let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
+    let mut stored_session = load_or_create_shell_session(
+        &session_store,
+        &config,
+        bash_approval_mode,
+        work_instruction_mode,
+        &current_work_dir,
+    );
+    let session_env = shell_session_effective_env(&env, &stored_session);
+    config = match provider_config_from_env(&options, &session_env) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("[config_error] restored_session_config_invalid: {err}");
+            std::process::exit(2);
+        }
+    };
+    bash_approval_mode =
+        bash_approval_mode_from_sources(options.bash_approval.as_deref(), &session_env);
+    work_instruction_mode =
+        work_instruction_mode_from_sources(options.work_instructions.as_deref(), &session_env);
     let response_protocol = options
         .response_protocol
         .as_deref()
-        .or_else(|| env.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str))
+        .or_else(|| {
+            session_env
+                .get("TIMEM_RESPONSE_PROTOCOL")
+                .map(String::as_str)
+        })
         .map(ResponseProtocolKind::from_name)
         .unwrap_or_default();
     config.response_protocol = response_protocol;
+    let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
     core.set_response_protocol(response_protocol);
     core.configure_self_tool_runtime(
-        env.clone().into_iter().collect(),
+        session_env.clone().into_iter().collect(),
         SelfToolPaths {
             space_dir: absolute_path(layout.space_dir()),
             memory_dir: absolute_path(memory_dir.clone()),
@@ -130,7 +149,7 @@ fn main() {
         },
     );
     if let Some(capabilities_dir) =
-        capabilities_dir_from_sources(options.capabilities_dir.as_deref(), &env)
+        capabilities_dir_from_sources(options.capabilities_dir.as_deref(), &session_env)
     {
         match CapabilityRegistry::builtin_with_overlay_dir(&capabilities_dir) {
             Ok(registry) => core.set_capability_registry(registry),
@@ -142,13 +161,12 @@ fn main() {
     }
     core.configure_runtime_from_host(&config, bash_approval_mode);
     let session_runtime_info = runtime_info_context(&shell_runtime_info_entries(&core));
-    let mut stored_session = load_or_create_shell_session(
-        &session_store,
-        &config,
-        bash_approval_mode,
-        work_instruction_mode,
-        &current_work_dir,
-    );
+    let session_work_dir = shell_session_work_dir(&stored_session, &current_work_dir);
+    let _ = core.change_prompt_cwd(session_work_dir.to_string_lossy());
+    let (mut work_instruction_context, work_instruction_notice) = match work_instruction_mode {
+        WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(&session_work_dir),
+        WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => (None, None),
+    };
     let session = stored_session.session_id.clone();
     let mut resume_notice_pending = true;
     let mut workspace_pending = !load_workspace_dirs_from_path(&workspace_config).is_empty();
@@ -165,7 +183,7 @@ fn main() {
         let resume_notice = take_shell_resume_notice(
             &session_store,
             &session,
-            &current_work_dir,
+            &session_work_dir,
             &mut resume_notice_pending,
         );
         let context = combine_additional_contexts([
@@ -209,7 +227,7 @@ fn main() {
             &config,
             bash_approval_mode,
             work_instruction_mode,
-            &current_work_dir,
+            core.current_prompt_cwd(),
         );
         return;
     }
@@ -316,13 +334,14 @@ fn main() {
         }
         if input == "/config" {
             prompt_status.clear_before_exit();
+            let prompt_cwd = core.current_prompt_cwd().to_path_buf();
             if run_config_menu(
                 &mut config,
                 &mut core,
                 &mut bash_approval_mode,
                 &mut work_instruction_mode,
                 &mut work_instruction_context,
-                &current_work_dir,
+                &prompt_cwd,
             ) {
                 println!(
                     "{}",
@@ -386,16 +405,17 @@ fn main() {
             interactive_approval: true,
             supplement_input: ThinkingSupplementInput::new(),
         };
+        let prompt_cwd = core.current_prompt_cwd().to_path_buf();
         let turn_work_instruction_context = resolve_work_instruction_context_for_turn(
             work_instruction_mode,
-            &current_work_dir,
+            &prompt_cwd,
             &session,
             &mut turn_ui,
         );
         let resume_notice = take_shell_resume_notice(
             &session_store,
             &session,
-            &current_work_dir,
+            &session_work_dir,
             &mut resume_notice_pending,
         );
         let turn_additional_context = combine_additional_contexts([
@@ -457,7 +477,7 @@ fn main() {
             &config,
             bash_approval_mode,
             work_instruction_mode,
-            &current_work_dir,
+            core.current_prompt_cwd(),
         );
         last_dialog_activity = Instant::now();
     }
@@ -551,6 +571,26 @@ fn load_or_create_shell_session(
 
 fn stored_session_is_resumable(session: &StoredSession) -> bool {
     !session.session_id.trim().is_empty() && Path::new(&session.current_dir).is_dir()
+}
+
+fn shell_session_work_dir(session: &StoredSession, fallback: &Path) -> PathBuf {
+    let current_dir = PathBuf::from(&session.current_dir);
+    if current_dir.is_dir() {
+        std::fs::canonicalize(&current_dir).unwrap_or(current_dir)
+    } else {
+        std::fs::canonicalize(fallback).unwrap_or_else(|_| fallback.to_path_buf())
+    }
+}
+
+fn shell_session_effective_env(
+    launch_env: &HashMap<String, String>,
+    session: &StoredSession,
+) -> HashMap<String, String> {
+    let mut merged = launch_env.clone();
+    for (key, value) in &session.env {
+        merged.insert(key.clone(), value.clone());
+    }
+    merged
 }
 
 fn shell_session_profile(config: &agent_core::ProviderConfig) -> StoredSessionProfile {

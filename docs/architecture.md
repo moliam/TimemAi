@@ -178,7 +178,12 @@ creation, `timem_web` copies the current host defaults and applies a validated
 allowlist of Session overrides for provider, model, wire/response protocols,
 base URL, token limits, timeout, approval/work-instruction policy, and API key.
 Existing Sessions are immutable when host defaults change; later Sessions see
-the new defaults. API keys remain in the server-side Session runtime and are
+the new defaults. The persisted `StoredSession.env` and `StoredSession.profile`
+are part of cross-host resume, not Web-only UI state. When Shell or Web resumes
+a stored Session, it must rebuild the active core/provider configuration from
+that Session environment while preserving explicit launch-time CLI overrides as
+the highest-priority source.
+API keys remain in the server-side Session runtime and are
 never serialized into snapshots or topics. A Session owns explicit
 `contexts[]` and `workers[]` registries. All of its workers share the Session
 profile, while each Context owns its prompt/workspace state. Different Sessions
