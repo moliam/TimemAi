@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, enqueueDecision, finishTurn, prependHistoryRecords, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, enqueueDecision, finishTurn, prependHistoryRecords, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -322,21 +322,24 @@ function TimemApp() {
   }, [receive]);
 
   const sendText = useCallback(async (text: string): Promise<boolean> => {
-    if (!activeSession || !text.trim()) return false;
-    if (cancellingSessionIds.current.has(activeSession.session_id)) {
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() };
+    const decision = composerSendDecision(
+      activeSession,
+      text,
+      activeSession ? cancellingSessionIds.current.has(activeSession.session_id) : false,
+    );
+    if (decision.kind === "skip") {
+      if (decision.reason === "cancelling" && activeSession) {
+        const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() };
+        setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
+      }
+      return false;
+    }
+    if (!sendCommand(decision.command)) {
+      const activity: Activity = { id: crypto.randomUUID(), sessionId: decision.command.session_id, tone: "error", title: "Not connected", detail: "Reconnect to Timem Web before sending another message.", createdAt: Date.now() };
       setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
       return false;
     }
-    const command: ClientCommand = activeSession.state === "working"
-      ? { type: "turn_supplement", session_id: activeSession.session_id, text: text.trim() }
-      : { type: "turn_submit", session_id: activeSession.session_id, text: text.trim() };
-    if (!sendCommand(command)) {
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "error", title: "Not connected", detail: "Reconnect to Timem Web before sending another message.", createdAt: Date.now() };
-      setActivities((current) => [activity, ...current]);
-      return false;
-    }
-    return true;
+    return decision.clearDraftOnSuccess;
   }, [activeSession, sendCommand]);
 
   const uploadFile = useCallback(async (file: File) => {

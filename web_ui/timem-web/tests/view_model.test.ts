@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, enqueueDecision, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, enqueueDecision, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -63,6 +63,54 @@ const actionEvent = (
 });
 
 describe("web topic view model", () => {
+  it("submits a new user turn when the active session is ready", () => {
+    const current = session("session_1");
+    expect(composerSendDecision(current, "  start task  ", false)).toEqual({
+      kind: "send",
+      text: "start task",
+      clearDraftOnSuccess: true,
+      command: { type: "turn_submit", session_id: "session_1", text: "start task" },
+    });
+  });
+
+  it("sends working-session text as a supplement instead of disabling input", () => {
+    const current = { ...session("session_1"), state: "working" };
+    expect(composerSendDecision(current, "  add this constraint  ", false)).toEqual({
+      kind: "send",
+      text: "add this constraint",
+      clearDraftOnSuccess: true,
+      command: { type: "turn_supplement", session_id: "session_1", text: "add this constraint" },
+    });
+  });
+
+  it("keeps rapid repeated sends during a working turn as separate supplements", () => {
+    const current = { ...session("session_1"), state: "working" };
+    const decisions = ["first correction", "second correction", "third correction"].map((text) => composerSendDecision(current, text, false));
+    expect(decisions.map((decision) => decision.kind)).toEqual(["send", "send", "send"]);
+    expect(decisions.map((decision) => decision.kind === "send" ? decision.command : undefined)).toEqual([
+      { type: "turn_supplement", session_id: "session_1", text: "first correction" },
+      { type: "turn_supplement", session_id: "session_1", text: "second correction" },
+      { type: "turn_supplement", session_id: "session_1", text: "third correction" },
+    ]);
+  });
+
+  it("does not send while cancellation is still in flight", () => {
+    const current = { ...session("session_1"), state: "working" };
+    expect(composerSendDecision(current, "do not race stop", true)).toEqual({ kind: "skip", reason: "cancelling" });
+  });
+
+  it("skips empty text and missing sessions before touching the socket", () => {
+    expect(composerSendDecision(session("session_1"), "   \n\t", false)).toEqual({ kind: "skip", reason: "empty_text" });
+    expect(composerSendDecision(undefined, "hello", false)).toEqual({ kind: "skip", reason: "no_session" });
+  });
+
+  it("treats stopped or error sessions as explicit new submit attempts for the host to validate", () => {
+    expect(composerSendDecision({ ...session("session_1"), state: "error" }, "recover", false)).toMatchObject({
+      kind: "send",
+      command: { type: "turn_submit", session_id: "session_1", text: "recover" },
+    });
+  });
+
   it("shows the tail of a long cwd while retaining short paths verbatim", () => {
     expect(tailPath("/short/workspace")).toBe("/short/workspace");
     const rendered = tailPath("/Users/example/very/long/company/project/packages/web-ui", 24);
