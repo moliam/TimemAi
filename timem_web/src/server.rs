@@ -1036,7 +1036,9 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
             }
         }
     }
-    turns.into_values().collect()
+    let mut restored = turns.into_values().collect::<Vec<_>>();
+    restored.sort_by_key(|turn| turn.created_at_ms);
+    restored
 }
 
 fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatMessage> {
