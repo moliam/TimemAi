@@ -140,15 +140,19 @@ checks. If a dimension is not applicable, record that residual decision in
 1. shell script syntax checks
 2. module boundary check via `scripts/module_boundary_check.sh`
 3. install logic tests
-4. sensitive scan over tracked files
-5. `cargo fmt --check`
-6. `cargo test --workspace`
-7. performance guard via `scripts/performance_guard.sh`
-8. repeated edge regression via `scripts/edge_regression.sh`
-9. Web dependency install, frontend tests, and reproducible production build
-10. CLI and Web release builds
-11. real TTY smoke through `expect`
-12. whitespace check
+4. contract checks and static prompt expansion snapshot checks
+5. sensitive scan over tracked files
+6. KVC replay script check
+7. `cargo fmt --check`
+8. clippy warning gate via `scripts/clippy_check.sh`
+9. `cargo test --workspace`
+10. Web dependency license scan, frontend tests, and reproducible production build
+11. performance guard via `scripts/performance_guard.sh`
+12. repeated edge regression via `scripts/edge_regression.sh`
+13. CLI and Web release builds
+14. cross-host resume smoke
+15. real TTY smoke through `expect`
+16. whitespace check
 
 `scripts/edge_regression.sh` defaults to two iterations. Increase pressure with:
 
