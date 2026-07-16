@@ -10,6 +10,8 @@ use std::sync::atomic::AtomicUsize;
 use std::thread;
 use std::time::{Duration, Instant};
 
+const TEST_PORT: u16 = 12345;
+
 #[test]
 fn parses_basic_web_launch_options() {
     let options = WebLaunchOptions::parse(&[
@@ -131,6 +133,7 @@ fn pending_attachment_removal_is_session_scoped_and_deletes_the_stored_file() {
 
     let event = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::AttachmentRemove {
             session_id: "session_a".to_string(),
             attachment_id: "upload_1".to_string(),
@@ -152,6 +155,7 @@ fn pending_attachment_removal_is_session_scoped_and_deletes_the_stored_file() {
     assert_eq!(
         handle_command(
             &state,
+            TEST_PORT,
             ClientCommand::AttachmentRemove {
                 session_id: "session_b".to_string(),
                 attachment_id: "upload_1".to_string(),
@@ -190,6 +194,7 @@ fn duplicate_pending_attachment_removal_is_idempotent_for_the_same_session() {
     for _ in 0..5 {
         let event = handle_command(
             &state,
+            TEST_PORT,
             ClientCommand::AttachmentRemove {
                 session_id: "session_a".to_string(),
                 attachment_id: "upload_1".to_string(),
@@ -305,6 +310,7 @@ fn runtime_update_refreshes_new_session_defaults_without_rewriting_existing_sess
 
     assert!(handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::RuntimeUpdate {
             key: "TIMEM_MODEL".to_string(),
             value: "future-session-model".to_string(),
@@ -391,9 +397,8 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
         })),
-        memory_dir: PathBuf::from("/tmp/memory"),
-        audit_file: PathBuf::from("/tmp/audit.json"),
         data_dir: PathBuf::from("/tmp/data"),
+        initial_space: ".test_mem".to_string(),
         env: BTreeMap::new(),
         current_dir: PathBuf::from("/work/a"),
         workspace_dirs: vec![PathBuf::from("/work/a"), PathBuf::from("/work/b")],
@@ -424,12 +429,12 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
     template.current_dir = root.clone();
     template.workspace_dirs = vec![root.clone()];
     template.data_dir = root.join("data");
-    template.memory_dir = root.join("memory");
-    template.audit_file = root.join("audit.json");
     state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
 
     let event = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Review".to_string()),
             workspace_dir: Some(root.display().to_string()),
@@ -463,9 +468,8 @@ fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
     template.current_dir = root.clone();
     template.workspace_dirs = vec![root.clone()];
     template.data_dir = root.join("data");
-    template.memory_dir = root.join("memory");
-    template.audit_file = root.join("audit.json");
     state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
 
     let session_id = create_session(
         &state,
@@ -483,6 +487,7 @@ fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
 
     let renamed = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::SessionRename {
             session_id: session_id.clone(),
             display_name: "Build session".to_string(),
@@ -511,9 +516,8 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     template.current_dir = root.clone();
     template.workspace_dirs = vec![root.clone()];
     template.data_dir = root.join("data");
-    template.memory_dir = root.join("memory");
-    template.audit_file = root.join("audit.json");
     state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
 
     let first_env = BTreeMap::from([
         (
@@ -627,14 +631,14 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_session"));
     std::fs::create_dir_all(&root).unwrap();
-    let store_root = root.join("memory");
-    state.session_store = Arc::new(SessionStore::new(&store_root));
+    let data_dir = root.join("data");
+    let space = "restore_mem";
+    set_test_mem(&state, data_dir.clone(), space);
     let mut template = (*state.template).clone();
     template.current_dir = root.clone();
     template.workspace_dirs = vec![root.clone()];
-    template.memory_dir = store_root.clone();
-    template.data_dir = root.join("data");
-    template.audit_file = root.join("audit.json");
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
     state.template = Arc::new(template.clone());
     state.sessions.lock().unwrap().clear();
 
@@ -650,8 +654,8 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
 
     let mut restarted = routing_test_state();
     restarted.sessions.lock().unwrap().clear();
-    restarted.session_store = Arc::new(SessionStore::new(&store_root));
     restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
     let restored = restore_stored_sessions(&restarted).unwrap();
     assert_eq!(restored, 1);
 
@@ -783,9 +787,9 @@ fn restored_web_turns_preserve_user_entry_kinds() {
 fn history_page_command_loads_older_records_by_cursor() {
     let state = routing_test_state();
     let session_id = "session_a";
+    let store = current_session_store(&state).unwrap();
     for index in 0..450 {
-        state
-            .session_store
+        store
             .append_history_record(
                 session_id,
                 &ChatHistoryRecord::Message {
@@ -801,6 +805,7 @@ fn history_page_command_loads_older_records_by_cursor() {
 
     let first = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::HistoryPage {
             session_id: session_id.to_string(),
             before_cursor: None,
@@ -825,6 +830,7 @@ fn history_page_command_loads_older_records_by_cursor() {
 
     let second = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::HistoryPage {
             session_id: session_id.to_string(),
             before_cursor,
@@ -853,7 +859,9 @@ fn history_page_command_loads_older_records_by_cursor() {
 fn history_page_command_skips_malformed_records_without_breaking_cursor() {
     let state = routing_test_state();
     let session_id = "session_a";
-    let history_path = state.session_store.history_path_for_session(session_id);
+    let history_path = current_session_store(&state)
+        .unwrap()
+        .history_path_for_session(session_id);
     std::fs::create_dir_all(history_path.parent().unwrap()).unwrap();
     let lines = [
         serde_json::to_string(&ChatHistoryRecord::Message {
@@ -886,6 +894,7 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
 
     let event = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::HistoryPage {
             session_id: session_id.to_string(),
             before_cursor: None,
@@ -913,6 +922,101 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
     );
     assert_eq!(before_cursor.as_deref(), Some("1"));
     assert!(has_more);
+}
+
+#[test]
+fn snapshot_reports_the_active_mem_space_and_paths() {
+    let state = routing_test_state();
+    let snapshot = snapshot_for(&state, TEST_PORT);
+
+    assert_eq!(snapshot.server.mem.space, ".test_mem");
+    assert!(snapshot.server.mem.data_dir.contains("timem_web_data_test"));
+    assert!(snapshot.server.mem.space_dir.ends_with(".test_mem"));
+    assert!(snapshot.server.mem.memory_dir.ends_with(".test_mem/memory"));
+}
+
+#[test]
+fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
+    let mut state = routing_test_state();
+    let data_dir_raw = std::env::temp_dir().join(unique_web_id("timem_web_mem_switch"));
+    std::fs::create_dir_all(&data_dir_raw).unwrap();
+    let data_dir = std::fs::canonicalize(data_dir_raw).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = data_dir.clone();
+    template.workspace_dirs = vec![data_dir.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = "alpha".to_string();
+    state.template = Arc::new(template);
+    set_test_mem(&state, data_dir.clone(), "alpha");
+    state.sessions.lock().unwrap().clear();
+
+    let alpha_session = create_session(
+        &state,
+        Some("Alpha work".to_string()),
+        None,
+        BTreeMap::new(),
+    )
+    .unwrap();
+    start_web_turn(&state, &alpha_session, "alpha task").unwrap();
+
+    set_test_mem(&state, data_dir.clone(), "beta");
+    state.sessions.lock().unwrap().clear();
+    let beta_session =
+        create_session(&state, Some("Beta work".to_string()), None, BTreeMap::new()).unwrap();
+    start_web_turn(&state, &beta_session, "beta task").unwrap();
+
+    set_test_mem(&state, data_dir, "alpha");
+    state.sessions.lock().unwrap().clear();
+    restore_stored_sessions(&state).unwrap();
+    assert!(state.sessions.lock().unwrap().contains_key(&alpha_session));
+    assert!(!state.sessions.lock().unwrap().contains_key(&beta_session));
+
+    let mut events = state.events.subscribe();
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemSwitch {
+            space: "beta".to_string(),
+        },
+    )
+    .unwrap()
+    .is_none());
+
+    let WireEvent::Hello { snapshot } = events.try_recv().unwrap() else {
+        panic!("expected hello snapshot after mem switch")
+    };
+    assert_eq!(snapshot.server.mem.space, "beta");
+    assert!(snapshot
+        .sessions
+        .iter()
+        .any(|session| session.session_id == beta_session));
+    assert!(!snapshot
+        .sessions
+        .iter()
+        .any(|session| session.session_id == alpha_session));
+}
+
+#[test]
+fn mem_switch_rejects_paths_and_parent_traversal() {
+    let state = routing_test_state();
+    for space in [
+        "",
+        ".",
+        "..",
+        "../other",
+        "/tmp/mem",
+        "alpha/beta",
+        "alpha..beta",
+    ] {
+        assert!(handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemSwitch {
+                space: space.to_string(),
+            },
+        )
+        .is_err());
+    }
 }
 
 #[test]
@@ -1010,9 +1114,8 @@ fn routing_test_state() -> AppState {
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
         })),
-        memory_dir: PathBuf::from("/tmp/memory"),
-        audit_file: PathBuf::from("/tmp/audit.json"),
-        data_dir: PathBuf::from("/tmp/data"),
+        data_dir: std::env::temp_dir().join(unique_web_id("timem_web_data_test")),
+        initial_space: ".test_mem".to_string(),
         env: BTreeMap::new(),
         current_dir: PathBuf::from("/work"),
         workspace_dirs: vec![PathBuf::from("/work")],
@@ -1031,13 +1134,17 @@ fn routing_test_state() -> AppState {
     AppState {
         token: "test".to_string(),
         manager: Arc::new(Mutex::new(CoreSessionWorkerManager::new())),
-        template: Arc::new(template),
-        session_store: Arc::new(SessionStore::new(
-            std::env::temp_dir().join(unique_web_id("timem_web_session_store_test")),
+        mem: Arc::new(Mutex::new(
+            WebMemState::new(template.data_dir.clone(), template.initial_space.clone()).unwrap(),
         )),
+        template: Arc::new(template),
         events,
         sessions: Arc::new(Mutex::new(sessions)),
     }
+}
+
+fn set_test_mem(state: &AppState, data_dir: PathBuf, space: &str) {
+    *state.mem.lock().unwrap() = WebMemState::new(data_dir, space.to_string()).unwrap();
 }
 
 fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> WebSession {
@@ -1591,6 +1698,7 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
 
     handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TurnCancel {
             session_id: session_id.to_string(),
         },
@@ -1609,6 +1717,7 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
 
     handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TurnSubmit {
             session_id: session_id.to_string(),
             text: "continue".to_string(),
@@ -1923,6 +2032,7 @@ fn user_supplement_is_retained_in_the_authoritative_web_session_snapshot() {
     let turn = start_web_turn(&state, &session_id, "Inspect the project").unwrap();
     handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "Use the second verification path".to_string(),
@@ -1952,6 +2062,7 @@ fn turn_user_entries_are_persisted_with_raw_text_and_semantic_kind() {
 
     handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "mid-turn correction".to_string(),
@@ -1960,6 +2071,7 @@ fn turn_user_entries_are_persisted_with_raw_text_and_semantic_kind() {
     .unwrap();
     handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TopicReply {
             session_id: session_id.clone(),
             worker_id: None,
@@ -1971,9 +2083,12 @@ fn turn_user_entries_are_persisted_with_raw_text_and_semantic_kind() {
     )
     .unwrap();
 
-    let records =
-        read_all_history_records(&state.session_store.history_path_for_session(&session_id))
-            .unwrap();
+    let records = read_all_history_records(
+        &current_session_store(&state)
+            .unwrap()
+            .history_path_for_session(&session_id),
+    )
+    .unwrap();
     let user_messages = records
         .into_iter()
         .filter_map(|record| match record {
@@ -2019,6 +2134,7 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
     for _ in 0..5 {
         assert!(handle_command(
             &state,
+            TEST_PORT,
             ClientCommand::TurnCancel {
                 session_id: session_id.clone(),
             },
@@ -2035,6 +2151,7 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
     }
     assert!(handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TurnCancel {
             session_id: session_id.clone(),
         },
@@ -2051,6 +2168,7 @@ fn rapid_submit_during_an_active_turn_is_treated_as_a_supplement() {
 
     let event = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TurnSubmit {
             session_id: session_id.clone(),
             text: "stop if this is still running".to_string(),
@@ -2088,6 +2206,7 @@ fn stale_supplement_after_cancel_completion_starts_a_new_turn() {
 
     let event = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "new instruction after stop".to_string(),
@@ -2118,6 +2237,7 @@ fn stale_topic_reply_after_turn_completion_is_ignored_without_host_error() {
 
     let event = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TopicReply {
             session_id,
             worker_id: None,
@@ -2140,6 +2260,7 @@ fn stale_work_instruction_reply_during_new_active_turn_is_ignored() {
 
     let event = handle_command(
         &state,
+        TEST_PORT,
         ClientCommand::TopicReply {
             session_id: session_id.clone(),
             worker_id: None,

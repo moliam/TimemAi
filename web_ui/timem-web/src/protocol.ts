@@ -130,6 +130,12 @@ export type Snapshot = {
     version: string;
     protocol_version: number;
     port: number;
+    mem: {
+      space: string;
+      data_dir: string;
+      space_dir: string;
+      memory_dir: string;
+    };
     runtime_options: Array<{ key: string; value: string; applies_to: "new_sessions" | string }>;
     session_env_defaults: Record<string, string>;
     workspace_dirs: string[];
@@ -161,6 +167,7 @@ export type ClientCommand =
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
   | { type: "history_page"; session_id: string; before_cursor?: string | null; limit?: number }
   | { type: "runtime_update"; key: string; value: string }
+  | { type: "mem_switch"; space: string }
   | {
       type: "topic_reply";
       session_id: string;

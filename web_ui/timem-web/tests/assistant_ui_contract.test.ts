@@ -12,7 +12,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("ThreadPrimitive.Root");
     expect(source).toContain("ThreadPrimitive.Viewport");
     expect(source).toContain("ThreadPrimitive.ViewportFooter");
-    expect(source).toContain("ComposerPrimitive.Root");
+    expect(source).toContain('form className="composer"');
     expect(source).toContain("<TurnInteraction");
   });
 
@@ -98,7 +98,19 @@ describe("assistant-ui thread integration", () => {
     const sendText = source.slice(start, end);
     expect(sendText).toContain("cancellingSessionIds.current.has(activeSession.session_id)");
     expect(sendText).toContain("Cancellation in progress");
-    expect(sendText).toContain("return;");
+    expect(sendText).toContain("return false;");
+  });
+
+  it("keeps sending enabled during a working turn by bypassing assistant-ui Send", () => {
+    const start = source.indexOf("const sendText = useCallback");
+    const end = source.indexOf("const uploadFile = useCallback", start);
+    const sendText = source.slice(start, end);
+    expect(sendText).toContain('activeSession.state === "working"');
+    expect(sendText).toContain('{ type: "turn_supplement"');
+    expect(source).toContain('value={draft}');
+    expect(source).toContain('onSubmit={(event) => { event.preventDefault(); void submitDraft(); }}');
+    expect(source).toContain('type="submit" title="Send message"');
+    expect(source).not.toContain("ComposerPrimitive.Send");
   });
 
   it("uses synchronous pending guards for rapid repeated browser clicks", () => {
@@ -244,7 +256,7 @@ describe("assistant-ui thread integration", () => {
     const sendText = source.slice(start, end);
     expect(sendText).toContain("if (!sendCommand(command))");
     expect(sendText).not.toContain("setSessions((current)");
-    expect(sendText).toContain("return;");
+    expect(sendText).toContain("return false;");
   });
 
   it("groups each task into user input, bounded process, and separate final delivery", () => {

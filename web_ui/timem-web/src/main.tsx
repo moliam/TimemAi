@@ -1,4 +1,4 @@
-import { AssistantRuntimeProvider, ComposerPrimitive, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
+import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
 import { ArrowDown, Check, CheckCheck, ChevronRight, CircleStop, Copy, Cpu, FolderOpen, Gauge, LoaderCircle, Menu, Palette, Paperclip, PanelRight, Pencil, Plus, Send, Settings2, Sparkles, Terminal, Wrench, X } from "lucide-react";
 import { Children, Dispatch, isValidElement, MutableRefObject, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -46,6 +46,7 @@ function TimemApp() {
   const [showRuntime, setShowRuntime] = useState(false);
   const [showAppearance, setShowAppearance] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
+  const [showMemSwitch, setShowMemSwitch] = useState(false);
   const [renamingSessionId, setRenamingSessionId] = useState("");
   const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(() => new Set());
   const [renameDraft, setRenameDraft] = useState("");
@@ -59,6 +60,7 @@ function TimemApp() {
   const [pendingRenameSessionIds, setPendingRenameSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingRuntimeKeys, setPendingRuntimeKeys] = useState<Set<string>>(() => new Set());
   const [pendingHistorySessionIds, setPendingHistorySessionIds] = useState<Set<string>>(() => new Set());
+  const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
   const creatingSessionRef = useRef(false);
   const pendingAttachmentRemoveIdsRef = useRef<Set<string>>(new Set());
   const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
@@ -116,6 +118,7 @@ function TimemApp() {
     setPendingRenameSessionIds(new Set());
     setPendingRuntimeKeys(new Set());
     setPendingHistorySessionIds(new Set());
+    setPendingMemSwitch(false);
   }, []);
 
   useEffect(() => {
@@ -318,12 +321,12 @@ function TimemApp() {
     };
   }, [receive]);
 
-  const sendText = useCallback(async (text: string) => {
-    if (!activeSession || !text.trim()) return;
+  const sendText = useCallback(async (text: string): Promise<boolean> => {
+    if (!activeSession || !text.trim()) return false;
     if (cancellingSessionIds.current.has(activeSession.session_id)) {
       const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() };
       setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
-      return;
+      return false;
     }
     const command: ClientCommand = activeSession.state === "working"
       ? { type: "turn_supplement", session_id: activeSession.session_id, text: text.trim() }
@@ -331,8 +334,9 @@ function TimemApp() {
     if (!sendCommand(command)) {
       const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "error", title: "Not connected", detail: "Reconnect to Timem Web before sending another message.", createdAt: Date.now() };
       setActivities((current) => [activity, ...current]);
-      return;
+      return false;
     }
+    return true;
   }, [activeSession, sendCommand]);
 
   const uploadFile = useCallback(async (file: File) => {
@@ -365,6 +369,16 @@ function TimemApp() {
   })), [activeMessages]);
   const [auiMessages, setAuiMessages] = useState<readonly ThreadMessageLike[]>(runtimeMessages);
   useEffect(() => setAuiMessages(runtimeMessages), [runtimeMessages]);
+  const cancelActiveTurn = useCallback(async () => {
+    if (!activeSession || activeSession.state !== "working") return;
+    if (cancellingSessionIds.current.has(activeSession.session_id)) return;
+    cancellingSessionIds.current.add(activeSession.session_id);
+    setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+    if (!sendCommand({ type: "turn_cancel", session_id: activeSession.session_id })) {
+      cancellingSessionIds.current.delete(activeSession.session_id);
+      setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+    }
+  }, [activeSession, sendCommand]);
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages: auiMessages,
     setMessages: setAuiMessages,
@@ -374,16 +388,7 @@ function TimemApp() {
       const first = message.content[0];
       if (first?.type === "text") await sendText(first.text);
     },
-    onCancel: async () => {
-      if (!activeSession || activeSession.state !== "working") return;
-      if (cancellingSessionIds.current.has(activeSession.session_id)) return;
-      cancellingSessionIds.current.add(activeSession.session_id);
-      setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
-      if (!sendCommand({ type: "turn_cancel", session_id: activeSession.session_id })) {
-        cancellingSessionIds.current.delete(activeSession.session_id);
-        setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
-      }
-    },
+    onCancel: cancelActiveTurn,
   });
 
   const sessionActivities = activities.filter((activity) => activity.sessionId === activeSession?.session_id);
@@ -419,7 +424,10 @@ function TimemApp() {
             {renamingSessionId !== session.session_id && <button className="session-rename" title={`Rename ${session.display_name}`} aria-label={`Rename ${session.display_name}`} onClick={() => beginRename(session)}><Pencil size={13}/></button>}
           </div>{expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`}/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}</div>)}
         </nav>
-        <div className="sidebar-footer"><span className={`connection ${connected ? "online" : "offline"}`}/>{connected ? "Local runtime connected" : "Reconnecting…"}</div>
+        <div className="sidebar-footer">
+          <div className="connection-row"><span className={`connection ${connected ? "online" : "offline"}`}/>{connected ? "Local runtime connected" : "Reconnecting…"}</div>
+          <div className="mem-row" title={server?.mem?.memory_dir ?? ""}><span>mem</span><code>{server?.mem?.space ?? "…"}</code><button className="mem-switch-button" disabled={!connected || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}>{pendingMemSwitch ? "Switching…" : "Switch"}</button></div>
+        </div>
       </aside>
       <main className="chat-shell">
         <header className="chat-header">
@@ -449,6 +457,8 @@ function TimemApp() {
           pendingDecisionKeys={pendingDecisionKeys}
           loadingHistory={activeSession ? pendingHistorySessionIds.has(activeSession.session_id) : false}
           onLoadMoreHistory={loadMoreHistory}
+          onSend={sendText}
+          onCancel={cancelActiveTurn}
           onUpload={uploadFile}
           onRemoveAttachment={(attachmentId) => {
             if (!activeSession) return;
@@ -485,6 +495,14 @@ function TimemApp() {
           setCreatingSession(false);
         }
       }} />}
+      {showMemSwitch && <MemSwitchDialog current={server?.mem?.space ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) setShowMemSwitch(false); }} onSwitch={(space) => {
+        setPendingMemSwitch(true);
+        if (sendCommand({ type: "mem_switch", space })) {
+          setShowMemSwitch(false);
+        } else {
+          setPendingMemSwitch(false);
+        }
+      }}/>}
     </div>
   </AssistantRuntimeProvider>;
 }
@@ -493,7 +511,7 @@ const MAX_RENDERED_TURN_EVENTS = 200;
 const INITIAL_RENDERED_TURNS = 24;
 const TURN_HISTORY_PAGE_SIZE = 24;
 
-function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, onLoadMoreHistory, onUpload, onRemoveAttachment, onDecisionReply }: {
+function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply }: {
   activeSession: Session | undefined;
   decisions: Decision[];
   fileInput: React.RefObject<HTMLInputElement | null>;
@@ -502,6 +520,8 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
   pendingDecisionKeys: Set<string>;
   loadingHistory: boolean;
   onLoadMoreHistory: (session: Session) => void;
+  onSend: (text: string) => Promise<boolean>;
+  onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void;
@@ -510,6 +530,7 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
   const followThreadLatest = useRef(true);
   const [visibleTurnCount, setVisibleTurnCount] = useState(INITIAL_RENDERED_TURNS);
+  const [draft, setDraft] = useState("");
   const turns = activeSession?.turns ?? [];
   const hiddenTurnCount = Math.max(0, turns.length - visibleTurnCount);
   const canLoadStoredHistory = !!activeSession?.history_has_more && !!activeSession.history_before_cursor;
@@ -555,6 +576,11 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
       onLoadMoreHistory(activeSession);
     }
   };
+  const submitDraft = async () => {
+    const text = draft.trim();
+    if (!text) return;
+    if (await onSend(text)) setDraft("");
+  };
 
   return <ThreadPrimitive.Root className="aui-thread">
     <ThreadPrimitive.Viewport
@@ -590,10 +616,22 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
           return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`} aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`} disabled={removing} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
         })}</div>}
         {activeSession && <div className="composer-cwd" title={activeSession.current_dir}><FolderOpen size={13}/><span>{activeSession.current_dir}</span></div>}
-        <ComposerPrimitive.Root className="composer">
-          <ComposerPrimitive.Input placeholder={activeSession?.state === "working" ? "继续输入…" : "Ask Timem anything about this workspace…"} aria-label="Message Timem" />
-          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><ComposerPrimitive.Send asChild><button className="send-button" title="Send message" aria-label="Send message"><Send size={17}/></button></ComposerPrimitive.Send>{activeSession?.state === "working" && <ComposerPrimitive.Cancel asChild><button className="stop-button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button></ComposerPrimitive.Cancel>}</div></div>
-        </ComposerPrimitive.Root>
+        <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitDraft(); }}>
+          <textarea
+            value={draft}
+            placeholder={activeSession?.state === "working" ? "继续输入…" : "Ask Timem anything about this workspace…"}
+            aria-label="Message Timem"
+            disabled={!activeSession}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                void submitDraft();
+              }
+            }}
+          />
+          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className="send-button" type="submit" title="Send message" aria-label="Send message" disabled={!activeSession || !draft.trim()}><Send size={17}/></button>{activeSession?.state === "working" && <button className="stop-button" type="button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling} onClick={() => void onCancel()}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
+        </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
   </ThreadPrimitive.Root>;
@@ -884,6 +922,21 @@ function NewSessionDialog({ workspaces, runtimeDefaults, creating, onClose, onCr
   const updateEnv = (key: string, value: string) => setEnv((current) => ({ ...current, [key]: value }));
   const cleanedEnv = () => Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value));
   return <div className="modal-backdrop" role="presentation"><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session"><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2><div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)}/></label><label>Workspace<select value={workspaceDir} disabled={creating} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.map((workspace) => <option value={workspace} key={workspace}>{workspace}</option>)}</select></label><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span>{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option><option value="markdown">markdown</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>}</label>)}</div></details></div><div className="decision-actions"><button className="secondary" disabled={creating} onClick={onClose}>Cancel</button><button className="primary" disabled={creating} onClick={() => onCreate(displayName.trim(), workspaceDir, cleanedEnv())}><Plus size={16}/> {creating ? "Creating…" : "Create session"}</button></div></section></div>;
+}
+
+function MemSwitchDialog({ current, pending, onClose, onSwitch }: {
+  current: string;
+  pending: boolean;
+  onClose: () => void;
+  onSwitch: (space: string) => void;
+}) {
+  const [space, setSpace] = useState(current);
+  const cleaned = space.trim();
+  const invalid = !cleaned || cleaned === "." || cleaned === ".." || cleaned.includes("/") || cleaned.includes("\\") || cleaned.includes("..");
+  return <div className="modal-backdrop" role="presentation"><section className="decision-modal session-modal mem-switch-modal" role="dialog" aria-modal="true" aria-label="Switch memory space"><span className="eyebrow">MEM SPACE</span><h2>Switch memory space</h2><p>Switching mem stops current workers, swaps out current sessions, then loads sessions from the selected mem space.</p><label>Mem space<input autoFocus value={space} disabled={pending} placeholder=".test_mem" onChange={(event) => setSpace(event.target.value)} onKeyDown={(event) => {
+    if (event.key === "Enter" && !pending && !invalid) onSwitch(cleaned);
+    if (event.key === "Escape") onClose();
+  }}/></label><p className="mem-hint">Use a space name, not a filesystem path. Examples: <code>.test_mem</code>, <code>project_a</code>.</p><div className="decision-actions"><button className="secondary" disabled={pending} onClick={onClose}>Cancel</button><button className="primary" disabled={pending || invalid || cleaned === current} onClick={() => onSwitch(cleaned)}>{pending ? "Switching…" : "Switch mem"}</button></div></section></div>;
 }
 
 function decisionKey(decision: Decision) {
