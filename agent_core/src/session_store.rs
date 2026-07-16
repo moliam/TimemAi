@@ -47,6 +47,8 @@ pub enum ChatHistoryRecord {
         role: ChatHistoryRole,
         turn_id: String,
         created_at_ms: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
         content: String,
     },
     Event {
@@ -326,6 +328,7 @@ pub fn chat_history_prompt_format_hint(path: &Path) -> String {
         role: ChatHistoryRole::User,
         turn_id: "...".to_string(),
         created_at_ms: 123,
+        kind: None,
         content: "...".to_string(),
     };
     let event = ChatHistoryRecord::Event {
@@ -337,7 +340,7 @@ pub fn chat_history_prompt_format_hint(path: &Path) -> String {
         extra: BTreeMap::new(),
     };
     format!(
-        "Refer to chat history when necessary:\npath: {}\nformat: JSONL, one record per line.\nrecord types:\n- {}\n- {}\nAdditional event fields may appear depending on kind.",
+        "Refer to chat history when necessary:\npath: {}\nformat: JSONL, one record per line.\nrecord types:\n- {}\n- {}\nMessage records may include optional kind for user entries: task, supplement, or approval.\nAdditional event fields may appear depending on kind.",
         path.display(),
         serde_json::to_string(&message).expect("chat history message example serializes"),
         serde_json::to_string(&event).expect("chat history event example serializes")

@@ -691,24 +691,28 @@ fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
             role: ChatHistoryRole::User,
             turn_id: "turn_10".to_string(),
             created_at_ms: 10,
+            kind: None,
             content: "first by time".to_string(),
         },
         ChatHistoryRecord::Message {
             role: ChatHistoryRole::Assistant,
             turn_id: "turn_10".to_string(),
             created_at_ms: 11,
+            kind: None,
             content: "first answer".to_string(),
         },
         ChatHistoryRecord::Message {
             role: ChatHistoryRole::User,
             turn_id: "turn_2".to_string(),
             created_at_ms: 20,
+            kind: None,
             content: "second by time".to_string(),
         },
         ChatHistoryRecord::Message {
             role: ChatHistoryRole::Assistant,
             turn_id: "turn_2".to_string(),
             created_at_ms: 21,
+            kind: None,
             content: "second answer".to_string(),
         },
     ];
@@ -726,6 +730,55 @@ fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
 }
 
 #[test]
+fn restored_web_turns_preserve_user_entry_kinds() {
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 10,
+            kind: Some("task".to_string()),
+            content: "original task".to_string(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 11,
+            kind: Some("supplement".to_string()),
+            content: "mid-turn supplement".to_string(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 12,
+            kind: Some("approval".to_string()),
+            content: "approved request".to_string(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 13,
+            kind: Some("unknown_legacy_kind".to_string()),
+            content: "legacy text".to_string(),
+        },
+    ];
+
+    let turns = restored_turns_from_history_records(&records);
+    assert_eq!(
+        turns[0]
+            .user_entries
+            .iter()
+            .map(|entry| (entry.kind.as_str(), entry.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("task", "original task"),
+            ("supplement", "mid-turn supplement"),
+            ("approval", "approved request"),
+            ("task", "legacy text"),
+        ]
+    );
+}
+
+#[test]
 fn history_page_command_loads_older_records_by_cursor() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -738,6 +791,7 @@ fn history_page_command_loads_older_records_by_cursor() {
                     role: ChatHistoryRole::User,
                     turn_id: format!("turn_{index}"),
                     created_at_ms: index,
+                    kind: None,
                     content: format!("line {index}"),
                 },
             )
@@ -805,6 +859,7 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
             role: ChatHistoryRole::User,
             turn_id: "turn_0".to_string(),
             created_at_ms: 0,
+            kind: None,
             content: "first valid".to_string(),
         })
         .unwrap(),
@@ -813,6 +868,7 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
             role: ChatHistoryRole::Assistant,
             turn_id: "turn_1".to_string(),
             created_at_ms: 1,
+            kind: None,
             content: "second valid".to_string(),
         })
         .unwrap(),
@@ -820,6 +876,7 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
             role: ChatHistoryRole::User,
             turn_id: "turn_2".to_string(),
             created_at_ms: 2,
+            kind: None,
             content: "third valid".to_string(),
         })
         .unwrap(),

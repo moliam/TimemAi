@@ -113,6 +113,31 @@ describe("web topic view model", () => {
     expect(turns[0].final_answer).toBe("old answer");
   });
 
+  it("restores task, supplement, and approval user entries inside one turn", () => {
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, kind: "task", content: "original task" },
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 2, kind: "supplement", content: "mid-turn correction" },
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 3, kind: "approval", content: "approved run_bash" },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 4, content: "done" },
+    ];
+
+    const turns = turnsFromHistoryRecords(records);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].user_entries).toEqual([
+      { kind: "task", text: "original task", attachments: [], created_at_ms: 1 },
+      { kind: "supplement", text: "mid-turn correction", attachments: [], created_at_ms: 2 },
+      { kind: "approval", text: "approved run_bash", attachments: [], created_at_ms: 3 },
+    ]);
+    expect(turns[0].final_answer).toBe("done");
+  });
+
+  it("falls back to task for unknown historical user entry kinds", () => {
+    const turns = turnsFromHistoryRecords([
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, kind: "legacy_custom", content: "legacy text" },
+    ]);
+    expect(turns[0].user_entries[0]).toMatchObject({ kind: "task", text: "legacy text" });
+  });
+
   it("prepends older history without duplicating existing turns", () => {
     const current = { ...session("session_1"), turns: [turn("turn_2", "finished")] };
     const records: ChatHistoryRecord[] = [

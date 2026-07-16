@@ -79,6 +79,7 @@ required_patterns=(
   "performance_guard_many_observation_events_render_bounded"
   "session_turn_preserves_cache_plan_with_xml_response_protocol"
   "restored_web_turns_follow_history_time_not_turn_id_lexical_order"
+  "restored_web_turns_preserve_user_entry_kinds"
 )
 
 for pattern in "${required_patterns[@]}"; do

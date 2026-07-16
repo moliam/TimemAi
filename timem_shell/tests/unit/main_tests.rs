@@ -2095,6 +2095,7 @@ fn shell_can_resume_web_style_session_history() {
                 role: ChatHistoryRole::User,
                 turn_id: "turn_web_1".to_string(),
                 created_at_ms: 2,
+                kind: None,
                 content: "web user question".to_string(),
             },
         )
@@ -2122,6 +2123,7 @@ fn shell_can_resume_web_style_session_history() {
                 role: ChatHistoryRole::Assistant,
                 turn_id: "turn_web_1".to_string(),
                 created_at_ms: 4,
+                kind: None,
                 content: "web final answer".to_string(),
             },
         )

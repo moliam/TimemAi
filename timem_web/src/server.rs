@@ -974,6 +974,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 role,
                 turn_id,
                 created_at_ms,
+                kind,
                 content,
             } => {
                 let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
@@ -988,7 +989,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
                 match role {
                     ChatHistoryRole::User => turn.user_entries.push(WebTurnUserEntry {
-                        kind: "task".to_string(),
+                        kind: history_user_entry_kind(kind.as_deref()).to_string(),
                         text: content,
                         attachments: Vec::new(),
                         created_at_ms: created_at_ms as u128,
@@ -1047,6 +1048,7 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
             role,
             turn_id,
             created_at_ms,
+            kind: _,
             content,
         } => {
             let role = match role {
@@ -1063,6 +1065,13 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
             })
         }
         ChatHistoryRecord::Event { .. } => None,
+    }
+}
+
+fn history_user_entry_kind(kind: Option<&str>) -> &str {
+    match kind {
+        Some(kind @ ("task" | "supplement" | "approval")) => kind,
+        _ => "task",
     }
 }
 
@@ -1581,6 +1590,7 @@ fn append_message(
             session_id,
             &turn_id,
             &role_for_history,
+            None,
             created_at_ms,
             text_for_history,
         );
@@ -1640,6 +1650,7 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
         session_id,
         &turn_id,
         "user",
+        Some("task"),
         created_at_ms,
         text.to_string(),
     );
@@ -1685,17 +1696,19 @@ fn append_turn_user_entry(
         .last()
         .map(|entry| entry.created_at_ms as i64)
         .unwrap_or_else(now_ms_i64);
-    let content = turn_snapshot
-        .user_entries
-        .last()
-        .map(|entry| format!("{}: {}", entry.kind, entry.text))
+    let last_entry = turn_snapshot.user_entries.last().cloned();
+    let content = last_entry
+        .as_ref()
+        .map(|entry| entry.text.clone())
         .unwrap_or_default();
+    let history_kind = last_entry.as_ref().map(|entry| entry.kind.as_str());
     drop(sessions);
     append_chat_history_message(
         state,
         session_id,
         &active_turn_id,
         "user",
+        history_kind,
         created_at_ms,
         content,
     );
@@ -1778,6 +1791,7 @@ fn append_chat_history_message(
     session_id: &str,
     turn_id: &str,
     role: &str,
+    kind: Option<&str>,
     created_at_ms: i64,
     content: String,
 ) {
@@ -1793,6 +1807,7 @@ fn append_chat_history_message(
             role,
             turn_id: turn_id.to_string(),
             created_at_ms,
+            kind: kind.map(ToString::to_string),
             content,
         },
     );

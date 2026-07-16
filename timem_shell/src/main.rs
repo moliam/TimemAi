@@ -633,6 +633,7 @@ fn append_shell_history_message(
             role,
             turn_id: turn_id.to_string(),
             created_at_ms: now_ms_i64(),
+            kind: None,
             content: content.to_string(),
         },
     );
