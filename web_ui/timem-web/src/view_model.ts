@@ -450,6 +450,7 @@ export function applyCoreTopicToSession(
 ): Session {
   if (session.session_id !== event.session_id) return session;
   if (event.worker_id && !session.workers.some((worker) => worker.worker_id === event.worker_id)) return session;
+  if (event.context_id && !session.contexts.some((context) => context.context_id === event.context_id)) return session;
   const contextState = event.payload.context_state;
   const reportedDir = contextState && typeof contextState === "object" && typeof (contextState as Record<string, unknown>).cwd === "string"
     ? (contextState as Record<string, string>).cwd
