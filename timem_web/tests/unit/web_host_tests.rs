@@ -754,6 +754,69 @@ fn history_page_command_loads_older_records_by_cursor() {
 }
 
 #[test]
+fn history_page_command_skips_malformed_records_without_breaking_cursor() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let history_path = state.session_store.history_path_for_session(session_id);
+    std::fs::create_dir_all(history_path.parent().unwrap()).unwrap();
+    let lines = [
+        serde_json::to_string(&ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_0".to_string(),
+            created_at_ms: 0,
+            content: "first valid".to_string(),
+        })
+        .unwrap(),
+        "partial json from interrupted append".to_string(),
+        serde_json::to_string(&ChatHistoryRecord::Message {
+            role: ChatHistoryRole::Assistant,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 1,
+            content: "second valid".to_string(),
+        })
+        .unwrap(),
+        serde_json::to_string(&ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_2".to_string(),
+            created_at_ms: 2,
+            content: "third valid".to_string(),
+        })
+        .unwrap(),
+    ];
+    std::fs::write(&history_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let event = handle_command(
+        &state,
+        ClientCommand::HistoryPage {
+            session_id: session_id.to_string(),
+            before_cursor: None,
+            limit: Some(2),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::HistoryPage {
+        records,
+        before_cursor,
+        has_more,
+        ..
+    } = event
+    else {
+        panic!("expected history page")
+    };
+
+    assert_eq!(
+        records
+            .iter()
+            .map(ChatHistoryRecord::turn_id)
+            .collect::<Vec<_>>(),
+        vec!["turn_1", "turn_2"]
+    );
+    assert_eq!(before_cursor.as_deref(), Some("1"));
+    assert!(has_more);
+}
+
+#[test]
 fn session_runtime_env_rejects_unknown_empty_and_invalid_values() {
     let state = routing_test_state();
     assert_eq!(
