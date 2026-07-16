@@ -335,6 +335,13 @@ web_ui_required_test_names=(
   "keeps a human click storm bounded and session scoped"
   "lets users remove pending attachments without losing access to long file names"
   "keeps working-turn input visually consistent with a normal send"
+  "pairs duplicate concurrent actions in order without collapsing either invocation"
+  "renders context compaction outside chat messages with a reduced-motion fallback"
+  "uses the Markdown highlighter for final answers and Bash activity commands"
+  "shows host and session errors outside the default-hidden diagnostic panel"
+  "defaults the diagnostic activity panel to hidden"
+  "bounds a reconnect snapshot with many turns and high-frequency events"
+  "keeps repeated live event bursts bounded and isolated across sessions"
 )
 
 for pattern in "${web_ui_required_test_names[@]}"; do
