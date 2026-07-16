@@ -117,9 +117,10 @@ describe("assistant-ui thread integration", () => {
 
   it("uses synchronous pending guards for rapid repeated browser clicks", () => {
     expect(source).toContain("creatingSessionRef.current");
-    expect(source).toContain("const submittingDraftRef = useRef(false);");
-    expect(source).toContain("reserveDraftSubmission(submittingDraftRef, draft)");
-    expect(source).toContain("finishDraftSubmission(submittingDraftRef, current, text, sent)");
+    expect(source).toContain("const [draftsBySession, setDraftsBySession]");
+    expect(source).toContain("const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());");
+    expect(source).toContain("reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession)");
+    expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, current, reserved.sessionId, reserved.text, sent)");
     expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft}");
     expect(source).toContain("pendingAttachmentRemoveIdsRef");
     expect(source).toContain("pendingDecisionKeysRef");
@@ -263,7 +264,7 @@ describe("assistant-ui thread integration", () => {
     expect(sendText).toContain("if (!sendCommand(decision.command))");
     expect(sendText).not.toContain("setSessions((current)");
     expect(sendText).toContain("return false;");
-    expect(source).toContain("setDraft((current) => finishDraftSubmission(submittingDraftRef, current, text, sent));");
+    expect(source).toContain("setDraftsBySession((current) => finishSessionDraftSubmission(submittingDraftSessionIdsRef, current, reserved.sessionId, reserved.text, sent));");
     expect(source).not.toContain("setDraft(\"\");");
   });
 

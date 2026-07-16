@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, enqueueDecision, finishDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, removePendingAttachment, requestDecision, reserveDraftSubmission, sessionContextUsage, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, sessionContextUsage, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -114,6 +114,39 @@ describe("web topic view model", () => {
     const submitted = reserveDraftSubmission(lock, "retry me");
     expect(finishDraftSubmission(lock, "retry me", submitted, false)).toBe("retry me");
     expect(lock.current).toBe(false);
+  });
+
+  it("keeps drafts and pending send guards isolated by session", () => {
+    let drafts: Record<string, string> = {};
+    drafts = setSessionDraft(drafts, "session_a", "draft for A");
+    drafts = setSessionDraft(drafts, "session_b", "draft for B");
+    expect(draftForSession(drafts, "session_a")).toBe("draft for A");
+    expect(draftForSession(drafts, "session_b")).toBe("draft for B");
+
+    const locks = { current: new Set<string>() };
+    const submittedA = reserveSessionDraftSubmission(locks, "session_a", drafts);
+    expect(submittedA).toEqual({ sessionId: "session_a", text: "draft for A" });
+    expect(reserveSessionDraftSubmission(locks, "session_a", drafts)).toBeNull();
+    expect(reserveSessionDraftSubmission(locks, "session_b", drafts)).toEqual({ sessionId: "session_b", text: "draft for B" });
+  });
+
+  it("does not erase another session draft or text typed after a pending send", () => {
+    let drafts = {
+      session_a: "first A",
+      session_b: "keep B",
+    };
+    const locks = { current: new Set<string>() };
+    const submittedA = reserveSessionDraftSubmission(locks, "session_a", drafts);
+    expect(submittedA?.text).toBe("first A");
+
+    drafts = setSessionDraft(drafts, "session_a", "second A typed while first A sends");
+    drafts = finishSessionDraftSubmission(locks, drafts, "session_a", submittedA!.text, true);
+    expect(draftForSession(drafts, "session_a")).toBe("second A typed while first A sends");
+    expect(draftForSession(drafts, "session_b")).toBe("keep B");
+
+    const submittedB = reserveSessionDraftSubmission(locks, "session_b", drafts);
+    drafts = finishSessionDraftSubmission(locks, drafts, "session_b", submittedB!.text, true);
+    expect(draftForSession(drafts, "session_b")).toBe("");
   });
 
   it("does not send while cancellation is still in flight", () => {

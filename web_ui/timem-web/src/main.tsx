@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, enqueueDecision, finishDraftSubmission, finishTurn, prependHistoryRecords, removePendingAttachment, requestDecision, reserveDraftSubmission, sessionContextUsage, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, sessionContextUsage, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -533,10 +533,13 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
   const followThreadLatest = useRef(true);
   const [visibleTurnCount, setVisibleTurnCount] = useState(INITIAL_RENDERED_TURNS);
-  const [draft, setDraft] = useState("");
-  const submittingDraftRef = useRef(false);
-  const [submittingDraft, setSubmittingDraft] = useState(false);
+  const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
+  const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());
+  const [submittingDraftSessionIds, setSubmittingDraftSessionIds] = useState<Set<string>>(() => new Set());
   const turns = activeSession?.turns ?? [];
+  const activeSessionId = activeSession?.session_id;
+  const draft = draftForSession(draftsBySession, activeSessionId);
+  const submittingDraft = !!activeSessionId && submittingDraftSessionIds.has(activeSessionId);
   const hiddenTurnCount = Math.max(0, turns.length - visibleTurnCount);
   const canLoadStoredHistory = !!activeSession?.history_has_more && !!activeSession.history_before_cursor;
   const visibleTurns = hiddenTurnCount > 0 ? turns.slice(-visibleTurnCount) : turns;
@@ -582,15 +585,15 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
     }
   };
   const submitDraft = async () => {
-    const text = reserveDraftSubmission(submittingDraftRef, draft);
-    if (text === null) return;
-    setSubmittingDraft(true);
+    const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
+    if (reserved === null) return;
+    setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     let sent = false;
     try {
-      sent = await onSend(text);
+      sent = await onSend(reserved.text);
     } finally {
-      setDraft((current) => finishDraftSubmission(submittingDraftRef, current, text, sent));
-      setSubmittingDraft(false);
+      setDraftsBySession((current) => finishSessionDraftSubmission(submittingDraftSessionIdsRef, current, reserved.sessionId, reserved.text, sent));
+      setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     }
   };
 
@@ -634,7 +637,7 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
             placeholder={activeSession?.state === "working" ? "继续输入…" : "Ask Timem anything about this workspace…"}
             aria-label="Message Timem"
             disabled={!activeSession}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, event.target.value))}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
