@@ -67,7 +67,9 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     assert!(!rendered.contains("slice_id:"));
     assert!(!rendered.contains("prompt_type:"));
     assert!(!rendered.contains("HIDDEN"));
-    assert!(rendered.ends_with("Please continue your ID's response only:\n## TIMEM_ASSISTANT"));
+    assert!(rendered.ends_with(
+        "Now please continue your ID's response part as required in protocol:\n## TIMEM_ASSISTANT"
+    ));
 }
 
 #[test]
@@ -80,13 +82,13 @@ fn formatted_response_trailer_parser_preserves_assistant_heading() {
     assert_eq!(prefix, "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]");
     assert_eq!(
         trailer.as_deref(),
-        Some("Please continue your ID's response only in XML:\n## Ai7")
+        Some("Now please continue your ID's response part in XML as required in protocol:\n## Ai7")
     );
 }
 
 #[test]
 fn formatted_response_trailer_parser_rejects_missing_assistant_heading() {
-    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nPlease continue your ID's response only:\n## ";
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nNow please continue your ID's response part as required in protocol:\n## ";
     let (prefix, trailer) = split_formatted_response_trailer(prompt);
     assert_eq!(prefix, prompt);
     assert_eq!(trailer, None);

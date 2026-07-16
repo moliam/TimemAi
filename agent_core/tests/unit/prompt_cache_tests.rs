@@ -60,18 +60,18 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     assert!(parts.new_delta.contains("delta1"));
     assert!(!parts
         .new_delta
-        .contains("Please continue your ID's response only"));
+        .contains("Now please continue your ID's response part"));
 
     let blocks = plan_prompt_cache(&prompt);
     assert_eq!(blocks.len(), 3);
     assert!(blocks[1].text.contains("delta1"));
     assert!(!blocks[1]
         .text
-        .contains("Please continue your ID's response only"));
+        .contains("Now please continue your ID's response part"));
     assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
     assert_eq!(
         blocks[2].text,
-        "Please continue your ID's response only in XML:\n## Ai3"
+        "Now please continue your ID's response part in XML as required in protocol:\n## Ai3"
     );
     assert_eq!(blocks[2].cache, CacheControl::None);
 }
