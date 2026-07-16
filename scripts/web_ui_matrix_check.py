@@ -59,6 +59,23 @@ def command_is_ci_evidence(token: str) -> bool:
     return token in read(CI_SCRIPT)
 
 
+def evidence_in_roots(token: str, roots: list[pathlib.Path]) -> bool:
+    if token in {"SessionN"}:
+        return search_roots(token, roots)
+    if token == "self_tool chg_cwd":
+        return search_roots("chg_cwd", roots)
+    if token.endswith(" tests"):
+        return search_roots(token.removesuffix(" tests"), roots)
+    if token == "host_error handling in frontend contract tests":
+        return search_roots("host_error", roots)
+    if "/" not in token and token.endswith((".ts", ".tsx", ".rs", ".sh", ".md")):
+        for root in roots:
+            for path in iter_files(root):
+                if path.name == token:
+                    return True
+    return search_roots(token, roots)
+
+
 def evidence_exists(token: str) -> bool:
     if token in {"SessionN"}:
         return search_roots(token, TEST_ROOTS)
@@ -75,6 +92,27 @@ def evidence_exists(token: str) -> bool:
     if command_is_ci_evidence(token):
         return True
     return search_roots(token, TEST_ROOTS)
+
+
+HOST_RUNTIME_ROWS = {
+    "Authenticated local host",
+    "Session creation and naming",
+    "Per-session runtime profile",
+    "Multi-session topic isolation",
+    "Worker hierarchy and state",
+    "Stop/cancel under human pressure",
+    "Send during active work",
+    "Stale supplement recovery",
+    "Attachments",
+    "Inline decisions",
+    "Work instructions",
+    "Current cwd display",
+    "Final answer rendering",
+    "Usage and context status",
+    "History and resume",
+    "Mem switching",
+    "Scroll and bounded rendering",
+}
 
 
 def main() -> int:
@@ -103,6 +141,16 @@ def main() -> int:
         missing = [token for token in tokens if not evidence_exists(token)]
         if missing:
             failures.append(f"{requirement}: evidence not found: {', '.join(missing)}")
+        if requirement in HOST_RUNTIME_ROWS:
+            has_host = any(evidence_in_roots(token, [ROOT / "timem_web" / "tests"]) for token in tokens)
+            has_frontend = any(evidence_in_roots(token, [ROOT / "web_ui" / "timem-web" / "tests"]) for token in tokens)
+            if not has_host or not has_frontend:
+                missing_sides = []
+                if not has_host:
+                    missing_sides.append("timem_web host/runtime test evidence")
+                if not has_frontend:
+                    missing_sides.append("web_ui frontend test evidence")
+                failures.append(f"{requirement}: missing cross-boundary evidence: {', '.join(missing_sides)}")
     if failures:
         print("web_ui_matrix_check failed:", file=sys.stderr)
         for failure in failures:
