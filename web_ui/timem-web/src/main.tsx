@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, enqueueDecision, finishTurn, prependHistoryRecords, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, enqueueDecision, finishDraftSubmission, finishTurn, prependHistoryRecords, removePendingAttachment, requestDecision, reserveDraftSubmission, sessionContextUsage, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -582,15 +582,14 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
     }
   };
   const submitDraft = async () => {
-    if (submittingDraftRef.current) return;
-    const text = draft.trim();
-    if (!text) return;
-    submittingDraftRef.current = true;
+    const text = reserveDraftSubmission(submittingDraftRef, draft);
+    if (text === null) return;
     setSubmittingDraft(true);
+    let sent = false;
     try {
-      if (await onSend(text)) setDraft("");
+      sent = await onSend(text);
     } finally {
-      submittingDraftRef.current = false;
+      setDraft((current) => finishDraftSubmission(submittingDraftRef, current, text, sent));
       setSubmittingDraft(false);
     }
   };

@@ -118,9 +118,8 @@ describe("assistant-ui thread integration", () => {
   it("uses synchronous pending guards for rapid repeated browser clicks", () => {
     expect(source).toContain("creatingSessionRef.current");
     expect(source).toContain("const submittingDraftRef = useRef(false);");
-    expect(source).toContain("if (submittingDraftRef.current) return;");
-    expect(source).toContain("submittingDraftRef.current = true;");
-    expect(source).toContain("submittingDraftRef.current = false;");
+    expect(source).toContain("reserveDraftSubmission(submittingDraftRef, draft)");
+    expect(source).toContain("finishDraftSubmission(submittingDraftRef, current, text, sent)");
     expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft}");
     expect(source).toContain("pendingAttachmentRemoveIdsRef");
     expect(source).toContain("pendingDecisionKeysRef");
@@ -264,7 +263,8 @@ describe("assistant-ui thread integration", () => {
     expect(sendText).toContain("if (!sendCommand(decision.command))");
     expect(sendText).not.toContain("setSessions((current)");
     expect(sendText).toContain("return false;");
-    expect(source).toContain("if (await onSend(text)) setDraft(\"\");");
+    expect(source).toContain("setDraft((current) => finishDraftSubmission(submittingDraftRef, current, text, sent));");
+    expect(source).not.toContain("setDraft(\"\");");
   });
 
   it("groups each task into user input, bounded process, and separate final delivery", () => {
