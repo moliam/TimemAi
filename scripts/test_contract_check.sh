@@ -275,6 +275,33 @@ if [ ! -f "$manual_smoke_doc" ]; then
   exit 1
 fi
 
+web_ui_matrix_doc="docs/web-ui-feature-test-matrix.md"
+if [ ! -f "$web_ui_matrix_doc" ]; then
+  echo "missing Web UI feature/test matrix: $web_ui_matrix_doc" >&2
+  exit 1
+fi
+
+web_ui_matrix_required=(
+  "Web UI Feature-Test Matrix"
+  "Send during active work"
+  "rapid_submit_during_an_active_turn_is_treated_as_a_supplement"
+  "repeated_user_sends_during_an_active_turn_are_ordered_supplements"
+  "active_turn_supplement_consumes_pending_attachments_into_the_same_turn"
+  "failed_active_turn_supplement_does_not_drop_pending_attachments"
+  "Stop/cancel under human pressure"
+  "duplicate_cancel_commands_are_idempotent_for_one_active_turn"
+  "Multi-session topic isolation"
+  "Attachments"
+  "Scroll and bounded rendering"
+)
+
+for pattern in "${web_ui_matrix_required[@]}"; do
+  if ! search_fixed "$pattern" "$web_ui_matrix_doc"; then
+    echo "missing required Web UI feature/test matrix item: $pattern" >&2
+    exit 1
+  fi
+done
+
 manual_smoke_required=(
   "Manual Release Smoke"
   "Web Browser Matrix"
@@ -317,7 +344,7 @@ for pattern in "${test_strategy_required[@]}"; do
   fi
 done
 
-for id in $(seq 1 28); do
+for id in $(seq 1 33); do
   feature_id="$(printf 'F%02d' "$id")"
   if ! search_fixed "| $feature_id |" "$feature_doc"; then
     echo "missing required feature row: $feature_id" >&2
