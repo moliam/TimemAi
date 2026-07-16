@@ -371,10 +371,8 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             "context compact" | "context_compact" | "compact" => {
                 context_compact_body = section.body.clone();
             }
-            "" => {
-                if !has_sections && has_action_blocks && actions_body.is_empty() {
-                    actions_body = section.body.clone();
-                }
+            "" if !has_sections && has_action_blocks && actions_body.is_empty() => {
+                actions_body = section.body.clone();
             }
             _ => {}
         }
