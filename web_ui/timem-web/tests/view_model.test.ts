@@ -514,6 +514,29 @@ describe("web topic view model", () => {
     expect(finished.workers.find((worker) => worker.worker_id === finished.primary_worker_id)?.state).toBe("ready");
   });
 
+  it("clears all worker working states when a cancelled session turn finishes", () => {
+    let current = upsertTurn(session("session_1"), turn("turn_cancelled"));
+    current.contexts.push({ context_id: "context_child", current_dir: "/work/child", worker_ids: ["worker_child"] });
+    current.workers.push({
+      worker_id: "worker_child",
+      context_id: "context_child",
+      display_name: "ID1",
+      ordinal: 1,
+      state: "working",
+      parent_worker_id: current.primary_worker_id,
+    });
+    current = updateSessionWorkerState(current, current.primary_worker_id, "working");
+
+    const finished = finishTurn(current, "turn_cancelled", {
+      elapsed_ms: 42_000,
+      stop_reason: "CancelledByUser",
+    });
+
+    expect(finished.active_turn_id).toBeNull();
+    expect(finished.state).toBe("ready");
+    expect(finished.workers.map((worker) => worker.state)).toEqual(["ready", "ready"]);
+  });
+
   it("deduplicates replayed turn events by the host event id", () => {
     const active = upsertTurn(session("session_1"), turn("turn_1"));
     const event = { event_id: "stable_event", source: "worker_activity", payload: { kind: "model_retry" }, created_at_ms: 2 };
