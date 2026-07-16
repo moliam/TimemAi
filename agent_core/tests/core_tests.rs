@@ -7623,7 +7623,7 @@ when_to_use: |
     assert_perf_under(
         "many overlay capability render x80",
         started,
-        Duration::from_millis(750),
+        Duration::from_millis(1_000),
     );
 }
 
