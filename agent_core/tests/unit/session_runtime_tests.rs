@@ -295,6 +295,40 @@ impl TurnUi for DeclineLongRunningCommandUi {
 }
 
 #[test]
+fn session_turn_uses_provider_config_response_protocol_over_core_state() {
+    let dir = tmp_dir("runtime_config_protocol_wins");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Json);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"<response><final_answer>xml config wins</final_answer></response>"#,
+        1_000,
+        false,
+    ))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "hello",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "xml config wins");
+    assert_eq!(outcome.repair_issue, None);
+}
+
+#[test]
 fn session_turn_retries_transient_provider_errors_and_reports_status() {
     let dir = tmp_dir("retry_transient_provider_error");
     let audit = dir.join("audit.json");
@@ -349,7 +383,7 @@ fn session_turn_repairs_empty_model_content() {
     let mut model = ReplayModel::new([
         Ok(llm("", 1_000, false)),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"空回复修复后成功。"}"#,
+            "## Status\nfinished\n\n## Final_Answer\n空回复修复后成功。",
             1_100,
             false,
         )),
@@ -398,6 +432,7 @@ fn session_turn_repairs_any_non_protocol_model_content() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Ok(llm("plain text that does not match protocol", 1_000, false)),
@@ -942,6 +977,7 @@ fn session_turn_emits_repair_topic_for_each_protocol_repair_attempt() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Ok(llm("first malformed response", 1_000, false)),
@@ -1791,16 +1827,23 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     let dir = tmp_dir("session_cache_plan");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"status":"working","free_talk":"查询 scratch 后继续。","working_still_action":{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}}"#,
+            r#"<response>
+<free_talk>查询 scratch 后继续。</free_talk>
+<working_still_action>
+<action_json><![CDATA[[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}]]]></action_json>
+</working_still_action>
+</response>"#,
             5_000,
             false,
         )),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"没有找到相关 scratch。"}"#,
+            r#"<response><final_answer>没有找到相关 scratch。</final_answer></response>"#,
             5_800,
             false,
         )),
@@ -1860,6 +1903,7 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
     core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -1996,6 +2040,7 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
     );
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -2567,7 +2612,7 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
 
     let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
     let seed_step = core.apply_model_response(llm(
-        r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#,
+        r#"<response><final_answer>seeded</final_answer></response>"#,
         13_253,
         false,
     ));

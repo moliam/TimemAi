@@ -41,6 +41,7 @@ pub fn run_session_turn_with_model_client(
     mut profiler: Option<&mut RuntimeProfiler>,
     model_client: &mut dyn ModelClient,
 ) -> TurnOutcome {
+    core.set_response_protocol(config.response_protocol);
     let turn_id = format!("turn_{}", epoch_millis());
     core.record_turn_start_audit(request.audit_file, request.session, &turn_id, request.input);
     let start = Instant::now();

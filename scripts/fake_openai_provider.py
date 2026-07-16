@@ -46,12 +46,15 @@ class Handler(BaseHTTPRequestHandler):
         if "CROSS_HOST_RESUME_SMOKE" in prompt:
             content = (
                 "<response>"
-                "<status>ALL_FINISHED</status>"
                 "<final_answer>CROSS_HOST_RESUME_OK</final_answer>"
                 "</response>"
             )
         elif "TTY_STRESS" in prompt and "STRESS_ACTION_DONE" in prompt:
-            content = "## Status\nfinished\n\n## Final_Answer\nSTRESS_OK"
+            content = (
+                "<response>"
+                "<final_answer>STRESS_OK</final_answer>"
+                "</response>"
+            )
         elif "TTY_STRESS" in prompt:
             time.sleep(self.response_delay)
             free_talk = (
@@ -60,29 +63,42 @@ class Handler(BaseHTTPRequestHandler):
                 "同时出现时仍然能稳定换行、保持边框宽度，并且不会重复残留旧行。"
             )
             content = (
-                "## Free_talk\n"
+                "<response>"
+                "<free_talk><![CDATA["
                 + free_talk
-                + "\n\n## Working_Still_Action\n```action\n"
+                + "]]></free_talk>"
+                "<working_still_action><action_json><![CDATA["
                 + json.dumps(
-                    {
-                        "run_bash": {
-                            "cmd": (
-                                "printf 'STRESS_ACTION_DONE\\n'; "
-                                "sleep 1; "
-                                "printf '长输出-一二三四五六七八九十-abcdefghijklmnopqrstuvwxyz-1234567890-│└─\\n'"
-                            ),
-                            "timeout_ms": 5000,
+                    [
+                        {
+                            "run_bash": {
+                                "cmd": (
+                                    "printf 'STRESS_ACTION_DONE\\n'; "
+                                    "sleep 1; "
+                                    "printf '长输出-一二三四五六七八九十-abcdefghijklmnopqrstuvwxyz-1234567890-│└─\\n'"
+                                ),
+                                "timeout_ms": 5000,
+                            },
                         },
-                    },
+                    ],
                     ensure_ascii=False,
                 )
-                + "\n```"
+                + "]]></action_json></working_still_action>"
+                "</response>"
             )
         elif "## USER" in prompt and "SUPPLEMENT_OK" in prompt:
-            content = "## Status\nfinished\n\n## Final_Answer\nSUPPLEMENT_OK"
+            content = (
+                "<response>"
+                "<final_answer>SUPPLEMENT_OK</final_answer>"
+                "</response>"
+            )
         else:
             time.sleep(self.response_delay)
-            content = "## Status\nfinished\n\n## Final_Answer\nNO_SUPPLEMENT"
+            content = (
+                "<response>"
+                "<final_answer>NO_SUPPLEMENT</final_answer>"
+                "</response>"
+            )
 
         self.send_json(
             200,

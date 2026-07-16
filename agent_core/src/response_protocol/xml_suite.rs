@@ -1,6 +1,5 @@
 use super::{
-    markdown_suite, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
-    ResponseProtocolSuite,
+    ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite,
 };
 use crate::capability::CapabilityRegistry;
 use serde_json::Value;
@@ -54,11 +53,11 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
 pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let trimmed = content.trim();
     let protocol_text = strip_surrounding_xml_fence(trimmed).unwrap_or(trimmed);
-    if protocol_text.starts_with('{') || protocol_text.starts_with('[') {
-        return super::json_suite::parse_envelope(protocol_text, capabilities);
-    }
-    if starts_with_markdown_protocol(protocol_text) {
-        return markdown_suite::parse_markdown_envelope(protocol_text, capabilities);
+    if protocol_text.starts_with('{')
+        || protocol_text.starts_with('[')
+        || starts_with_markdown_protocol(protocol_text)
+    {
+        return malformed_xml_response("xml_response_root_missing");
     }
     if looks_like_external_tool_call_protocol(protocol_text) {
         return malformed_xml_response("external_tool_call_protocol");
@@ -74,18 +73,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         if protocol_text.starts_with('<') {
             return malformed_xml_response(classify_xml_root_issue(protocol_text));
         }
-        return ParsedEnvelope {
-            final_answer: protocol_text.to_string(),
-            continue_work: false,
-            thought: String::new(),
-            thought_keep_in_context: false,
-            next_actions: vec![],
-            action_groups: vec![],
-            context_compacts: vec![],
-            memory_candidates: vec![],
-            runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
-            repair_issue: None,
-        };
+        return malformed_xml_response("xml_response_root_missing");
     };
 
     let mut repair_issue = response.flow_issue.clone();

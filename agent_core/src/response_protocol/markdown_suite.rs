@@ -253,6 +253,10 @@ fn malformed_markdown_response(issue: &str) -> ParsedEnvelope {
 pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let trimmed = content.trim();
 
+    if trimmed.is_empty() {
+        return malformed_markdown_response("empty_response");
+    }
+
     // JSON fallback
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         return super::json_suite::parse_envelope(content, capabilities);
