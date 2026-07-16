@@ -534,6 +534,8 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
   const followThreadLatest = useRef(true);
   const [visibleTurnCount, setVisibleTurnCount] = useState(INITIAL_RENDERED_TURNS);
   const [draft, setDraft] = useState("");
+  const submittingDraftRef = useRef(false);
+  const [submittingDraft, setSubmittingDraft] = useState(false);
   const turns = activeSession?.turns ?? [];
   const hiddenTurnCount = Math.max(0, turns.length - visibleTurnCount);
   const canLoadStoredHistory = !!activeSession?.history_has_more && !!activeSession.history_before_cursor;
@@ -580,9 +582,17 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
     }
   };
   const submitDraft = async () => {
+    if (submittingDraftRef.current) return;
     const text = draft.trim();
     if (!text) return;
-    if (await onSend(text)) setDraft("");
+    submittingDraftRef.current = true;
+    setSubmittingDraft(true);
+    try {
+      if (await onSend(text)) setDraft("");
+    } finally {
+      submittingDraftRef.current = false;
+      setSubmittingDraft(false);
+    }
   };
 
   return <ThreadPrimitive.Root className="aui-thread">
@@ -633,7 +643,7 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
               }
             }}
           />
-          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className="send-button" type="submit" title="Send message" aria-label="Send message" disabled={!activeSession || !draft.trim()}><Send size={17}/></button>{activeSession?.state === "working" && <button className="stop-button" type="button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling} onClick={() => void onCancel()}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
+          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className="send-button" type="submit" title="Send message" aria-label="Send message" disabled={!activeSession || !draft.trim() || submittingDraft}><Send size={17}/></button>{activeSession?.state === "working" && <button className="stop-button" type="button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling} onClick={() => void onCancel()}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>

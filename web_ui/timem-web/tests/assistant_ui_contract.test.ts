@@ -117,6 +117,11 @@ describe("assistant-ui thread integration", () => {
 
   it("uses synchronous pending guards for rapid repeated browser clicks", () => {
     expect(source).toContain("creatingSessionRef.current");
+    expect(source).toContain("const submittingDraftRef = useRef(false);");
+    expect(source).toContain("if (submittingDraftRef.current) return;");
+    expect(source).toContain("submittingDraftRef.current = true;");
+    expect(source).toContain("submittingDraftRef.current = false;");
+    expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft}");
     expect(source).toContain("pendingAttachmentRemoveIdsRef");
     expect(source).toContain("pendingDecisionKeysRef");
     expect(source).toContain("pendingRenameSessionIdsRef");
