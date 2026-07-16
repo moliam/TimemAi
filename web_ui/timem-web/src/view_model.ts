@@ -417,13 +417,21 @@ export function sessionContextUsage(session: Session): import("./protocol").Usag
   return undefined;
 }
 
+export function decisionKey(decision: Decision) {
+  const requestId = typeof decision.event.payload.request_id === "string" ? decision.event.payload.request_id : "";
+  return [
+    decision.event.session_id,
+    decision.event.context_id ?? "",
+    decision.event.worker_id ?? "",
+    decision.event.topic.name,
+    requestId,
+  ].join("\u0000");
+}
+
 export function enqueueDecision(decisions: Decision[], incoming: Decision) {
-  const incomingRequestId = typeof incoming.event.payload.request_id === "string" ? incoming.event.payload.request_id : "";
+  const incomingKey = decisionKey(incoming);
   const exists = decisions.some((decision) => {
-    const requestId = typeof decision.event.payload.request_id === "string" ? decision.event.payload.request_id : "";
-    return decision.event.session_id === incoming.event.session_id
-      && decision.event.topic.name === incoming.event.topic.name
-      && requestId === incomingRequestId;
+    return decisionKey(decision) === incomingKey;
   });
   return exists ? decisions : [...decisions, incoming];
 }

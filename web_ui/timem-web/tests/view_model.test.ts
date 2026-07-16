@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -629,6 +629,15 @@ describe("web topic view model", () => {
     expect(queued).toHaveLength(2);
     expect(queued.map((decision) => decision.event.session_id)).toEqual(["session_1", "session_2"]);
     expect(clearDecisionsForSession(queued, "session_1")).toEqual([second]);
+  });
+
+  it("queues concurrent decisions from different workers in the same session", () => {
+    const primary = requestDecision({ ...topic("core.request", { request_id: "req_shared" }, "waiting_user"), context_id: "context_primary", worker_id: "worker_primary" })!;
+    const child = requestDecision({ ...topic("core.request", { request_id: "req_shared" }, "waiting_user"), context_id: "context_child", worker_id: "worker_child" })!;
+    const queued = enqueueDecision(enqueueDecision(enqueueDecision([], primary), child), primary);
+    expect(queued).toHaveLength(2);
+    expect(queued.map((decision) => decision.event.worker_id)).toEqual(["worker_primary", "worker_child"]);
+    expect(decisionKey(primary)).not.toBe(decisionKey(child));
   });
 
   it("clears only the resumed workers decision within a shared session", () => {
