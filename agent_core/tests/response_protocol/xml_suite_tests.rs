@@ -58,6 +58,28 @@ fn parses_final_answer() {
 }
 
 #[test]
+fn xml_protocol_rejects_json_markdown_and_plain_text_roots() {
+    let cases = [
+        r#"{"final_answer":"done"}"#,
+        r#"[{"run_bash":{"cmd":"pwd"}}]"#,
+        "## Final_Answer\n\ndone",
+        "plain final prose",
+    ];
+
+    for raw in cases {
+        let env = parse_xml_envelope(raw, &caps());
+        assert_eq!(
+            env.repair_issue.as_deref(),
+            Some("xml_response_root_missing"),
+            "raw={raw}"
+        );
+        assert!(env.final_answer.is_empty(), "raw={raw}");
+        assert!(env.next_actions.is_empty(), "raw={raw}");
+        assert!(env.action_groups.is_empty(), "raw={raw}");
+    }
+}
+
+#[test]
 fn root_repair_moves_free_talk_inside_response_with_matching_action_branch() {
     let malformed = r#"<free_talk>searching</free_talk>
 <response><working_still_action>...</working_still_action></response>"#;

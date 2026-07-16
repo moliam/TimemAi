@@ -581,6 +581,7 @@ impl CoreSessionWorker {
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();
             let workspace = worker_config.workspace.clone();
+            core.set_response_protocol(config.response_protocol);
             core.set_assistant_speaker_name(&identity.display_name);
             let init_event = core_initialized_topic_event_with_worker(
                 &identity.session_id,

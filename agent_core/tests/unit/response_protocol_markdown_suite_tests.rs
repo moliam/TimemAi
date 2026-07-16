@@ -54,6 +54,14 @@ fn plain_prose_becomes_final_answer() {
 }
 
 #[test]
+fn empty_markdown_response_requests_repair() {
+    let env = parse_markdown_envelope("  \n\t", &caps());
+    assert_eq!(env.repair_issue.as_deref(), Some("empty_response"));
+    assert!(env.final_answer.is_empty());
+    assert!(env.next_actions.is_empty());
+}
+
+#[test]
 fn external_tool_call_protocol_requests_repair_instead_of_plain_answer() {
     let input = r#"<tool_call>
 {"name": "run_bash", "arguments": {"cmd": "gh run list", "timeout_ms": 5000}}

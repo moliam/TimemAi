@@ -204,6 +204,54 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
 }
 
 #[test]
+fn session_worker_lifecycle_uses_provider_config_response_protocol_over_core_state() {
+    let dir = tmp_dir("lifecycle_config_protocol_wins");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let mut config = test_config();
+    config.response_protocol = ResponseProtocolKind::Xml;
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        config,
+        test_worker_config(&dir, "session_worker_protocol_sync", 1),
+        SupplementReplayModel {
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+
+    let lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+    let lifecycle = lifecycle
+        .as_topics_first_lifecycle()
+        .expect("worker lifecycle topic");
+    assert_eq!(lifecycle.response_protocol, "xml");
+
+    worker.handle().request_shutdown().unwrap();
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should stop")
+        {
+            CoreSessionWorkerEvent::WorkerStopped => break,
+            CoreSessionWorkerEvent::Topics(_) => {}
+            other => panic!("unexpected event while stopping worker: {other:?}"),
+        }
+    }
+    worker.shutdown().unwrap();
+}
+
+#[test]
 fn session_worker_rename_emits_updated_identity_topic() {
     let dir = tmp_dir("rename");
     let core = AgentCore::new(
