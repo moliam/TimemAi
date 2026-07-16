@@ -113,6 +113,7 @@ ci_required=(
   "scripts/real_tty_smoke.expect"
   "scripts/real_tty_supplement_smoke.expect"
   "scripts/sensitive_scan.sh --current"
+  "python3 scripts/web_ui_matrix_check.py"
   "scripts/update_static_prompt_snapshot.sh --check"
   "scripts/clippy_check.sh"
   "scripts/performance_guard.sh"
