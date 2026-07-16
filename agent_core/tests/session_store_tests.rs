@@ -47,6 +47,7 @@ fn message(turn: usize) -> ChatHistoryRecord {
         role: ChatHistoryRole::User,
         turn_id: format!("turn_{turn}"),
         created_at_ms: turn as i64,
+        kind: None,
         content: format!("message {turn}"),
     }
 }
@@ -63,6 +64,7 @@ fn chat_history_records_round_trip_as_jsonl() {
             role: ChatHistoryRole::User,
             turn_id: "turn_1".to_string(),
             created_at_ms: 10,
+            kind: None,
             content: "hello".to_string(),
         },
         ChatHistoryRecord::Event {
@@ -108,6 +110,33 @@ fn prompt_format_hint_examples_are_generated_from_real_schema() {
         assert!(value.get("content").is_some());
         serde_json::from_value::<ChatHistoryRecord>(value).unwrap();
     }
+}
+
+#[test]
+fn chat_history_user_entry_kind_is_optional_and_round_trips() {
+    let without_kind = ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 10,
+        kind: None,
+        content: "plain task".to_string(),
+    };
+    let text = serde_json::to_string(&without_kind).unwrap();
+    assert!(!text.contains("\"kind\""));
+
+    let with_kind = ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 11,
+        kind: Some("supplement".to_string()),
+        content: "extra instruction".to_string(),
+    };
+    let value = serde_json::to_value(&with_kind).unwrap();
+    assert_eq!(value["kind"], "supplement");
+    assert_eq!(
+        serde_json::from_value::<ChatHistoryRecord>(value).unwrap(),
+        with_kind
+    );
 }
 
 #[test]

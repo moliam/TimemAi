@@ -126,7 +126,10 @@ export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[]
     turn.created_at_ms = Math.min(turn.created_at_ms, record.created_at_ms);
     if (record.type === "message") {
       if (record.role === "user") {
-        turn.user_entries.push({ kind: "task", text: record.content, attachments: [], created_at_ms: record.created_at_ms });
+        const kind = record.kind && ["task", "supplement", "approval"].includes(record.kind)
+          ? record.kind
+          : "task";
+        turn.user_entries.push({ kind, text: record.content, attachments: [], created_at_ms: record.created_at_ms });
       } else if (record.role === "assistant") {
         turn.final_answer = record.content;
       }

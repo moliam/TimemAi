@@ -90,7 +90,7 @@ export type WebTurnEvent = { event_id: string; source: "core_topic" | "worker_ac
 export type Attachment = { id: string; name: string; path: string; bytes: number };
 
 export type ChatHistoryRecord =
-  | { type: "message"; role: "user" | "assistant" | "system"; turn_id: string; created_at_ms: number; content: string }
+  | { type: "message"; role: "user" | "assistant" | "system"; turn_id: string; created_at_ms: number; content: string; kind?: WebTurnUserEntry["kind"] }
   | { type: "event"; role: "user" | "assistant" | "system"; turn_id: string; created_at_ms: number; kind: string; content: string; [key: string]: unknown };
 
 export type CoreTopicEvent = {
