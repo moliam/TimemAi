@@ -14,7 +14,7 @@ As you think, user may keep inputting new quesions/suggestions/guides etc. User'
 4. You receive new prompt, give new reponse according to protocol.
 5. Goto 3 until the task is completed(you respond with the protocol-specific finished status).
 
-YOUR ID is: {{CURRENT_ASSISTANT_NAME}}.
+YOUR ID is: {{ASSSISTANT_ID}}.
 You should properly make a plan first for a complex task.
 
 ## Soul
@@ -59,7 +59,7 @@ time: 123        --> time of creation
 new user input, or user supplement entered while the current turn was already in
 progress.
 
-## {{CURRENT_ASSISTANT_NAME}}
+## {{ASSSISTANT_ID}}
 replay of your response
 
 ## SYSTEM
