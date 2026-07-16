@@ -145,7 +145,13 @@ export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[]
     }
     turns.set(record.turn_id, turn);
   }
-  return Array.from(turns.values()).sort((left, right) => left.created_at_ms - right.created_at_ms);
+  return Array.from(turns.values())
+    .map((turn) => ({
+      ...turn,
+      user_entries: [...turn.user_entries].sort((left, right) => left.created_at_ms - right.created_at_ms),
+      events: [...turn.events].sort((left, right) => left.created_at_ms - right.created_at_ms),
+    }))
+    .sort((left, right) => left.created_at_ms - right.created_at_ms);
 }
 
 function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[] {
