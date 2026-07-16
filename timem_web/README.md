@@ -1,17 +1,49 @@
 # Timem Web Host
 
-`timem-web` is Timem's loopback-only browser host. It creates `agent_core`
-session workers, exposes a token-protected WebSocket/API surface, and serves
-the embedded React application from `web_ui/timem-web`.
+`timem-web` is Timem's local browser host. It is not a separate agent runtime:
+it creates and manages `agent_core` session workers, serves the embedded
+assistant-ui frontend, and forwards structured core topics to the browser.
 
 ```bash
+timem-web
+# or, from source:
 cargo run -p timem_web
 ```
 
-The host chooses a port in `12345..=23456`; `--port` selects a specific port in
-that range. It prints the local URL once at startup. Do not expose that URL or
-its token outside the local machine.
+## Runtime Model
 
-Before modifying frontend code, follow the rebuild and test sequence in
-[`web_ui/README.md`](../web_ui/README.md). The frontend production assets are
-tracked because `build.rs` embeds them into the Rust binary.
+- Binds only to `127.0.0.1`.
+- Chooses a port in `12345..=23456`; `--port` selects a specific port.
+- Generates a per-process access token for HTTP/WebSocket requests.
+- Opens the authenticated local page in the default browser when possible.
+- Keeps provider calls, prompt building, memory, tools, and response parsing in
+  `agent_core`.
+
+## Sessions
+
+A Web Session owns a runtime profile/env snapshot plus its Context and Worker
+registries. Today the UI creates one default Context and one primary Worker per
+Session, but the host already routes child-worker topics through the primary
+conversation. Different Sessions can use different model/provider settings.
+
+Session state, chat history, and resume metadata are persisted through
+`agent_core::session_store` so Shell and Web can continue the same mem-space
+work.
+
+## Frontend Assets
+
+The production frontend is built from `web_ui/timem-web` and tracked under
+`web_ui/timem-web/dist` because `build.rs` embeds those files into this Rust
+binary. Release users do not need Node or a separate assistant-ui checkout.
+
+Before changing frontend behavior, follow
+[`web_ui/README.md`](../web_ui/README.md), then run at least:
+
+```bash
+pnpm --dir web_ui/timem-web test --run
+pnpm --dir web_ui/timem-web build
+cargo test -p timem_web
+```
+
+Read [`module_boundary.md`](module_boundary.md) before changing host/core
+responsibilities.

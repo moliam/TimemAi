@@ -1,9 +1,47 @@
 # Timem Architecture
 
 Timem provides terminal and local-browser hosts for the reusable Timem Rust
-agent core. Each host owns its input and rendering. `agent_core` owns the reusable runtime,
-provider transport, memory, model protocol parsing, capability execution, and
-structured core/UI topic protocol.
+agent core. Each host owns its input and rendering. `agent_core` owns the
+reusable runtime, provider transport, memory, model protocol parsing,
+capability execution, session persistence, and structured core/UI topic
+protocol.
+
+## Current Product Shape
+
+Timem is now a multi-host local agent:
+
+- `timem` is the native terminal host.
+- `timem-web` is a loopback-only browser host with an assistant-ui frontend.
+- Both hosts run the same `agent_core` and use the same memory/session store.
+
+The split is intentional. Core owns reusable behavior and emits structured
+events. Hosts own presentation, input, and host-only ergonomics. A feature that
+affects model behavior, provider calls, memory, tools, sessions, protocol
+parsing, or cross-host state belongs in core/resources. A feature that only
+changes terminal or browser presentation belongs in the host/UI layer.
+
+## Reading Order
+
+For a new contributor, read these in order:
+
+1. [`README.md`](../README.md): project overview, install, run, and docs map.
+2. [`install-and-configuration.md`](install-and-configuration.md): operational
+   setup, provider examples, and runtime data layout.
+3. This file: runtime architecture and module ownership.
+4. [`core-ui-topic-protocol.md`](core-ui-topic-protocol.md): cross-language
+   topic contract between core and hosts.
+5. [`capability-system.md`](capability-system.md): tool manifests and executor
+   registration.
+6. [`test-strategy.md`](test-strategy.md) and
+   [`feature-test-management.md`](feature-test-management.md): quality gates and
+   feature coverage ledger.
+
+For module-local work, also read:
+
+- [`agent_core/module_boundary.md`](../agent_core/module_boundary.md)
+- [`timem_shell/module_boundary.md`](../timem_shell/module_boundary.md)
+- [`timem_web/module_boundary.md`](../timem_web/module_boundary.md)
+- [`web_ui/module_boundary.md`](../web_ui/module_boundary.md)
 
 ## Goals
 

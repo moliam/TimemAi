@@ -13,7 +13,7 @@ Host-specific release checks that cannot run in default CI are listed in
 
 ## Two Quality Axes
 
-Every feature test must be reviewed against two product-facing axes:
+Every feature test must be reviewed against these product-facing axes:
 
 1. Agent Core interaction correctness
 
@@ -25,17 +25,21 @@ Every feature test must be reviewed against two product-facing axes:
 
 2. UI display correctness
 
-   The shell and Web UIs must accurately and clearly represent what the runtime is doing.
-   These tests prove observation rendering, status/token lines, config/banner
-   layout, input editing, paste recovery, menus, elapsed time, cancellation
-   prompts, and that model free_talk/progress/action semantics are rendered in
-   the intended UI surfaces without leaking raw protocol names. Prefer render
-   contract tests plus real pseudo-TTY smoke for the shell, and reducer,
-   production-build, Web-host routing, and real-browser smoke for the Web UI.
+   Shell and Web must accurately and clearly represent what the runtime is
+   doing. Shell tests prove observation rendering, status/token lines,
+   config/banner layout, input editing, paste recovery, menus, elapsed time,
+   cancellation prompts, and model free_talk/action semantics. Web tests prove
+   session isolation, scoped topics, active-turn supplements, inline decisions,
+   cancellation pressure, attachments, history paging, per-session profiles,
+   cwd changes, context compaction display, final-answer telemetry, and bounded
+   rendering. Prefer shell render contracts plus real pseudo-TTY smoke/stress,
+   and Web host tests, frontend reducer/render tests, production builds, and
+   release browser smoke.
 
 A behavior that crosses both axes needs tests on both sides. For example,
-model-output parsing must prove that Agent Core can execute the action and that
-the UI can render the same model output as the correct intent/action display.
+model-output parsing must prove that Agent Core can execute the action, Shell
+can render the structured topic, and Web can render the same structured topic
+without leaking it into another Session.
 
 ## Four Coverage Dimensions
 
