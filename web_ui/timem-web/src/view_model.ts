@@ -154,16 +154,22 @@ export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[]
     .sort((left, right) => left.created_at_ms - right.created_at_ms);
 }
 
+type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }> & { role: "user" | "assistant" };
+
+function isChatMessageHistoryRecord(record: ChatHistoryRecord): record is ChatMessageHistoryRecord {
+  return record.type === "message" && (record.role === "user" || record.role === "assistant");
+}
+
 function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[] {
-  return records.flatMap((record) => {
-    if (record.type !== "message" || (record.role !== "user" && record.role !== "assistant")) return [];
-    return [{
+  return records
+    .filter(isChatMessageHistoryRecord)
+    .sort((left, right) => left.created_at_ms - right.created_at_ms)
+    .map((record) => ({
       id: `history_msg_${record.turn_id}_${record.created_at_ms}_${record.role}`,
       role: record.role,
       text: record.content,
       created_at_ms: record.created_at_ms,
-    }];
-  });
+    }));
 }
 
 export function appendTurnEvent(session: Session, turnId: string | null | undefined, event: WebTurnEvent): Session {

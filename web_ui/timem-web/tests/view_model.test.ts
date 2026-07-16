@@ -159,13 +159,18 @@ describe("web topic view model", () => {
   it("prepends older history without duplicating existing turns", () => {
     const current = { ...session("session_1"), turns: [turn("turn_2", "finished")] };
     const records: ChatHistoryRecord[] = [
-      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, content: "older" },
       { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 2, content: "older answer" },
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, content: "older" },
       { type: "message", role: "user", turn_id: "turn_2", created_at_ms: 3, content: "duplicate current" },
     ];
     const updated = prependHistoryRecords(current, records);
     expect(updated.turns.map((item) => item.turn_id)).toEqual(["turn_1", "turn_2"]);
     expect(updated.turns[0].final_answer).toBe("older answer");
+    expect(updated.messages.map((message) => message.text)).toEqual([
+      "older",
+      "older answer",
+      "duplicate current",
+    ]);
   });
 
   it("keeps one session working when a subworker finishes and hides its final answer", () => {
