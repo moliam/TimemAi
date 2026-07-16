@@ -24,6 +24,7 @@ def extract_text(value):
 
 class Handler(BaseHTTPRequestHandler):
     response_delay = 0.0
+    capture_prompt_file = None
 
     def log_message(self, _format, *_args):
         return
@@ -38,7 +39,18 @@ class Handler(BaseHTTPRequestHandler):
 
         messages = body.get("messages", [])
         prompt = "\n".join(extract_text(message.get("content", "")) for message in messages)
-        if "TTY_STRESS" in prompt and "STRESS_ACTION_DONE" in prompt:
+        if self.capture_prompt_file:
+            with open(self.capture_prompt_file, "a", encoding="utf-8") as capture:
+                capture.write(prompt)
+                capture.write("\n---TIMEM_FAKE_PROVIDER_REQUEST---\n")
+        if "CROSS_HOST_RESUME_SMOKE" in prompt:
+            content = (
+                "<response>"
+                "<status>ALL_FINISHED</status>"
+                "<final_answer>CROSS_HOST_RESUME_OK</final_answer>"
+                "</response>"
+            )
+        elif "TTY_STRESS" in prompt and "STRESS_ACTION_DONE" in prompt:
             content = "## Status\nfinished\n\n## Final_Answer\nSTRESS_OK"
         elif "TTY_STRESS" in prompt:
             time.sleep(self.response_delay)
@@ -97,8 +109,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--delay", type=float, default=2.0)
+    parser.add_argument("--capture-prompt-file")
     args = parser.parse_args()
     Handler.response_delay = args.delay
+    Handler.capture_prompt_file = args.capture_prompt_file
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"fake_provider_ready:{server.server_port}", flush=True)
     try:

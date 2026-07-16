@@ -109,6 +109,7 @@ ci_required=(
   "scripts/sensitive_scan.sh --current"
   "scripts/update_static_prompt_snapshot.sh --check"
   "scripts/performance_guard.sh"
+  "scripts/cross_host_resume_smoke.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
