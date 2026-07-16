@@ -471,6 +471,40 @@ describe("web topic view model", () => {
     expect(afterCwd.current_dir).toBe("/work");
   });
 
+  it("accepts lifecycle topics that introduce a new scoped worker and context", () => {
+    const current = { ...session("session_1"), display_name: "Session0" };
+    const lifecycle: CoreTopicEvent = {
+      ...topic("core.lifecycle", {
+        worker: {
+          display_name: "ID1",
+          ordinal: 1,
+          parent_worker_id: current.primary_worker_id,
+        },
+        context_state: { cwd: "/work/subtask" },
+        max_llm_input_tokens: 128_000,
+      }),
+      context_id: "context_subtask",
+      worker_id: "worker_subtask",
+    };
+
+    const updated = applyCoreTopicToSession(current, lifecycle, assistantMessage);
+    expect(updated.display_name).toBe("Session0");
+    expect(updated.contexts.find((context) => context.context_id === "context_subtask")).toEqual({
+      context_id: "context_subtask",
+      current_dir: "/work/subtask",
+      worker_ids: ["worker_subtask"],
+    });
+    expect(updated.workers.find((worker) => worker.worker_id === "worker_subtask")).toEqual({
+      worker_id: "worker_subtask",
+      context_id: "context_subtask",
+      display_name: "ID1",
+      ordinal: 1,
+      state: "ready",
+      parent_worker_id: current.primary_worker_id,
+    });
+    expect(updated.max_llm_input_tokens).toBe(128_000);
+  });
+
   it("updates worker lifecycle metadata without replacing the session display name", () => {
     const current = { ...session("session_1"), display_name: "Session0" };
     const lifecycle: CoreTopicEvent = {

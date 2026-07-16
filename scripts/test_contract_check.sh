@@ -332,6 +332,7 @@ web_ui_required_test_names=(
   "uses session terminology consistently for the creation workflow"
   "supports agent rename and a distinct animated working state"
   "expands each session into its scoped worker status list"
+  "accepts lifecycle topics that introduce a new scoped worker and context"
   "binds assistant-ui running state to the authoritative session lifecycle"
   "creates sessions with independent runtime environment overrides"
   "does not send new tasks or supplements while a mem switch is pending"
