@@ -355,6 +355,7 @@ web_ui_required_test_names=(
   "pairs action lifecycle events when nested input object key order changes"
   "applies a model response only to the session named by the core topic"
   "applies a structured cwd update only to the matching session"
+  "rejects core topics scoped to an unknown context before mutating a session"
   "keeps a matched agent working without changing unrelated sessions"
   "renders context compaction outside chat messages with a reduced-motion fallback"
   "keeps context compaction as a typed system activity with token metrics"

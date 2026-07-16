@@ -452,6 +452,25 @@ describe("web topic view model", () => {
     expect(unknown).toBe(current);
   });
 
+  it("rejects core topics scoped to an unknown context before mutating a session", () => {
+    const current = session("session_1");
+    const unknownContextResponse: CoreTopicEvent = {
+      ...topic("core.model.response", { continue_work: false, final_answer: "wrong context answer" }),
+      context_id: "context_missing",
+    };
+    const afterResponse = applyCoreTopicToSession(current, unknownContextResponse, assistantMessage);
+    expect(afterResponse).toBe(current);
+    expect(afterResponse.messages).toEqual([]);
+
+    const unknownContextCwd: CoreTopicEvent = {
+      ...topic("core.action", { context_state: { cwd: "/wrong/context" } }),
+      context_id: "context_missing",
+    };
+    const afterCwd = applyCoreTopicToSession(current, unknownContextCwd, assistantMessage);
+    expect(afterCwd).toBe(current);
+    expect(afterCwd.current_dir).toBe("/work");
+  });
+
   it("updates worker lifecycle metadata without replacing the session display name", () => {
     const current = { ...session("session_1"), display_name: "Session0" };
     const lifecycle: CoreTopicEvent = {
