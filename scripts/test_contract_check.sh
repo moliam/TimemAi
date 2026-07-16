@@ -338,6 +338,7 @@ web_ui_required_test_names=(
   "does not rename a session while mem switching or another rename is pending"
   "locks old-session interactions while a mem switch snapshot is pending"
   "does not send while cancellation is still in flight"
+  "keeps draft text and releases the pending guard when cancellation blocks a reserved send"
   "sends a new task after a cancelled active turn is marked finished"
   "keeps rapid repeated sends during a working turn as separate supplements"
   "keeps a human click storm bounded and session scoped"
