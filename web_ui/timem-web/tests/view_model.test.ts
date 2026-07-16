@@ -299,6 +299,15 @@ describe("web topic view model", () => {
     expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["completed", "timeout"]);
   });
 
+  it("pairs action lifecycle events even when input object key order changes", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_1", "start", "running", { cmd: "printf ok", timeout_ms: 5000 }),
+      actionEvent("event_2", "finish", "completed", { timeout_ms: 5000, cmd: "printf ok" }),
+    ]);
+    expect(events).toHaveLength(1);
+    expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
+  });
+
   it("keeps a background action visibly active after its launch event finishes", () => {
     const events = coalesceActionLifecycle([
       actionEvent("event_1", "start", "running", { cmd: "cargo test", background: true }),

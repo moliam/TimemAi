@@ -173,7 +173,16 @@ function actionLifecycleKey(event: WebTurnEvent) {
   if (topicEvent.topic?.name !== "core.action") return undefined;
   const action = typeof topicEvent.payload.action === "string" ? topicEvent.payload.action : "";
   if (!action) return undefined;
-  return `${action}:${JSON.stringify(topicEvent.payload.input ?? null)}`;
+  return `${action}:${stableValueKey(topicEvent.payload.input ?? null)}`;
+}
+
+function stableValueKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableValueKey).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableValueKey(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 export function coalesceActionLifecycle(events: WebTurnEvent[]) {
