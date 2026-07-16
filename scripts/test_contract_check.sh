@@ -283,21 +283,53 @@ fi
 
 web_ui_matrix_required=(
   "Web UI Feature-Test Matrix"
+  "| Authenticated local host |"
+  "| Session creation and naming |"
+  "| Per-session runtime profile |"
+  "| Multi-session topic isolation |"
+  "| Worker hierarchy and state |"
+  "| Stop/cancel under human pressure |"
   "Send during active work"
-  "rapid_submit_during_an_active_turn_is_treated_as_a_supplement"
-  "repeated_user_sends_during_an_active_turn_are_ordered_supplements"
-  "active_turn_supplement_consumes_pending_attachments_into_the_same_turn"
-  "failed_active_turn_supplement_does_not_drop_pending_attachments"
-  "Stop/cancel under human pressure"
-  "duplicate_cancel_commands_are_idempotent_for_one_active_turn"
-  "Multi-session topic isolation"
-  "Attachments"
-  "Scroll and bounded rendering"
+  "| Stale supplement recovery |"
+  "| Attachments |"
+  "| Inline decisions |"
+  "| Work instructions |"
+  "| Current cwd display |"
+  "| Turn process rendering |"
+  "| Final answer rendering |"
+  "| Usage and context status |"
+  "| History and resume |"
+  "| Mem switching |"
+  "| Appearance |"
+  "| Scroll and bounded rendering |"
+  "| Diagnostics and host errors |"
+  "| Release packaging |"
 )
 
 for pattern in "${web_ui_matrix_required[@]}"; do
   if ! search_fixed "$pattern" "$web_ui_matrix_doc"; then
     echo "missing required Web UI feature/test matrix item: $pattern" >&2
+    exit 1
+  fi
+done
+
+web_ui_required_test_names=(
+  "rapid_submit_during_an_active_turn_is_treated_as_a_supplement"
+  "repeated_user_sends_during_an_active_turn_are_ordered_supplements"
+  "active_turn_supplement_consumes_pending_attachments_into_the_same_turn"
+  "failed_active_turn_supplement_does_not_drop_pending_attachments"
+  "stale_supplement_after_cancel_completion_starts_a_new_turn"
+  "stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task"
+  "duplicate_cancel_commands_are_idempotent_for_one_active_turn"
+  "does not send while cancellation is still in flight"
+  "keeps rapid repeated sends during a working turn as separate supplements"
+  "lets users remove pending attachments without losing access to long file names"
+  "keeps working-turn input visually consistent with a normal send"
+)
+
+for pattern in "${web_ui_required_test_names[@]}"; do
+  if ! search_fixed "$pattern" timem_web/tests web_ui/timem-web/tests; then
+    echo "missing required Web UI regression test implementation: $pattern" >&2
     exit 1
   fi
 done
