@@ -139,6 +139,11 @@ function TimemApp() {
   }, []);
 
   const finishRename = useCallback((sessionId: string) => {
+    if (pendingMemSwitch) {
+      setRenamingSessionId("");
+      setRenameDraft("");
+      return;
+    }
     const displayName = renameDraft.trim();
     if (displayName && addPendingKey(pendingRenameSessionIdsRef, setPendingRenameSessionIds, sessionId)) {
       if (!sendCommand({ type: "session_rename", session_id: sessionId, display_name: displayName })) {
@@ -149,7 +154,7 @@ function TimemApp() {
     }
     setRenamingSessionId("");
     setRenameDraft("");
-  }, [addPendingKey, removePendingKey, renameDraft, sendCommand]);
+  }, [addPendingKey, pendingMemSwitch, removePendingKey, renameDraft, sendCommand]);
 
   const applySnapshot = useCallback((snapshot: Snapshot) => {
     setServer(snapshot.server);
@@ -420,6 +425,7 @@ function TimemApp() {
               autoFocus
               value={renameDraft}
               aria-label={`Rename ${session.display_name}`}
+              disabled={pendingMemSwitch}
               onChange={(event) => setRenameDraft(event.target.value)}
               onBlur={() => finishRename(session.session_id)}
               onKeyDown={(event) => {
@@ -429,7 +435,7 @@ function TimemApp() {
             /> : <button className="session" title={session.current_dir} onClick={() => { setActiveSessionId(session.session_id); setShowMobileSessions(false); }}>
               {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Agent working"/> : <span className={`session-dot ${session.state}`}/>}<span className="session-identity"><span className="session-name">{session.display_name}</span><span className="session-cwd">{tailPath(session.current_dir)}</span>{session.runtime_profile && <span className="session-profile">{session.runtime_profile.provider}:{session.runtime_profile.model}</span>}</span><span className="session-state">{session.state === "working" ? "busy" : ""}</span>
             </button>}
-            {renamingSessionId !== session.session_id && <button className="session-rename" title={`Rename ${session.display_name}`} aria-label={`Rename ${session.display_name}`} onClick={() => beginRename(session)}><Pencil size={13}/></button>}
+            {renamingSessionId !== session.session_id && <button className="session-rename" title={`Rename ${session.display_name}`} aria-label={`Rename ${session.display_name}`} disabled={pendingMemSwitch} onClick={() => beginRename(session)}><Pencil size={13}/></button>}
           </div>{expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`}/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}</div>)}
         </nav>
         <div className="sidebar-footer">
@@ -508,6 +514,8 @@ function TimemApp() {
         }
       }} />}
       {showMemSwitch && <MemSwitchDialog current={server?.mem?.space ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) setShowMemSwitch(false); }} onSwitch={(space) => {
+        setRenamingSessionId("");
+        setRenameDraft("");
         setPendingMemSwitch(true);
         if (sendCommand({ type: "mem_switch", space })) {
           setShowMemSwitch(false);

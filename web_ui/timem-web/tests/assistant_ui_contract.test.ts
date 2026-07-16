@@ -143,6 +143,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("disabled={loadingHistory || sessionInteractionLocked}");
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
     expect(source).toContain("disabled={pending || locked}");
+    expect(source).toContain('disabled={pendingMemSwitch} onClick={() => beginRename(session)}');
+    expect(source).toContain("if (pendingMemSwitch) {");
+    expect(source).toContain('setRenamingSessionId("");');
     expect(viewModelSource).toContain('"mem_switching"');
   });
 
