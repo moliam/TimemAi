@@ -8,6 +8,8 @@ The authoritative feature-to-test ledger is
 `docs/feature-test-management.md`. When adding or changing a feature, update
 that ledger in the same change so the feature, test suites, covered boundaries,
 and remaining supplement decisions stay visible.
+Host-specific release checks that cannot run in default CI are listed in
+`docs/manual-release-smoke.md`.
 
 ## Two Quality Axes
 
