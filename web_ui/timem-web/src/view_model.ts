@@ -27,6 +27,27 @@ export type ComposerSendDecision =
   | { kind: "skip"; reason: "no_session" | "empty_text" | "cancelling" }
   | { kind: "send"; command: Extract<ClientCommand, { type: "turn_submit" | "turn_supplement" }>; text: string; clearDraftOnSuccess: true };
 
+export type DraftSubmissionLock = { current: boolean };
+
+export function reserveDraftSubmission(lock: DraftSubmissionLock, draft: string): string | null {
+  if (lock.current) return null;
+  const text = draft.trim();
+  if (!text) return null;
+  lock.current = true;
+  return text;
+}
+
+export function finishDraftSubmission(
+  lock: DraftSubmissionLock,
+  draft: string,
+  submittedText: string | null,
+  sent: boolean,
+): string {
+  lock.current = false;
+  if (!sent || submittedText === null) return draft;
+  return draft.trim() === submittedText ? "" : draft;
+}
+
 export function composerSendDecision(
   session: Pick<Session, "session_id" | "state"> | undefined,
   text: string,

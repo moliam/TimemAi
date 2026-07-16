@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, enqueueDecision, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, enqueueDecision, finishDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, removePendingAttachment, requestDecision, reserveDraftSubmission, sessionContextUsage, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -92,6 +92,28 @@ describe("web topic view model", () => {
       { type: "turn_supplement", session_id: "session_1", text: "second correction" },
       { type: "turn_supplement", session_id: "session_1", text: "third correction" },
     ]);
+  });
+
+  it("guards one browser draft submission while preserving text typed during the pending send", () => {
+    const lock = { current: false };
+    const submitted = reserveDraftSubmission(lock, "  first message  ");
+    expect(submitted).toBe("first message");
+    expect(lock.current).toBe(true);
+    expect(reserveDraftSubmission(lock, "double click")).toBeNull();
+
+    const draftAfterTypingDuringSend = finishDraftSubmission(lock, "second message typed while sending", submitted, true);
+    expect(draftAfterTypingDuringSend).toBe("second message typed while sending");
+    expect(lock.current).toBe(false);
+
+    const retried = reserveDraftSubmission(lock, draftAfterTypingDuringSend);
+    expect(retried).toBe("second message typed while sending");
+  });
+
+  it("keeps the original draft when the transport send fails", () => {
+    const lock = { current: false };
+    const submitted = reserveDraftSubmission(lock, "retry me");
+    expect(finishDraftSubmission(lock, "retry me", submitted, false)).toBe("retry me");
+    expect(lock.current).toBe(false);
   });
 
   it("does not send while cancellation is still in flight", () => {

@@ -323,6 +323,7 @@ web_ui_required_test_names=(
   "stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task"
   "duplicate_cancel_commands_are_idempotent_for_one_active_turn"
   "uses synchronous pending guards for rapid repeated browser clicks"
+  "guards one browser draft submission while preserving text typed during the pending send"
   "does not send while cancellation is still in flight"
   "keeps rapid repeated sends during a working turn as separate supplements"
   "keeps a human click storm bounded and session scoped"
