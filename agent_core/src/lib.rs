@@ -397,12 +397,12 @@ pub(crate) struct ScratchContextOffload {
     slice_ids: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChatHistoryRecord {
-    pub session: String,
-    pub turn_id: String,
-    pub started_at_ms: i64,
-    pub user_input: String,
-    pub assistant_output: String,
+pub(crate) struct RawChatHistoryRecord {
+    session: String,
+    turn_id: String,
+    started_at_ms: i64,
+    user_input: String,
+    assistant_output: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4328,7 +4328,7 @@ impl FileChatHistoryStore {
         limit: usize,
         after_ms: Option<i64>,
         before_ms: Option<i64>,
-    ) -> std::io::Result<Vec<ChatHistoryRecord>> {
+    ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         self.guard
             .with_read(|| self.query_unlocked(query, limit, after_ms, before_ms))
             .map_err(std::io::Error::other)?
@@ -4340,7 +4340,7 @@ impl FileChatHistoryStore {
         limit: usize,
         after_ms: Option<i64>,
         before_ms: Option<i64>,
-    ) -> std::io::Result<Vec<ChatHistoryRecord>> {
+    ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         let terms = search_terms(query);
         let mut rows = self.read_all_unlocked()?;
         rows.retain(|record| time_in_window(record.started_at_ms, after_ms, before_ms));
@@ -4403,14 +4403,14 @@ impl FileChatHistoryStore {
         })?
     }
 
-    fn read_all(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
+    fn read_all(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         self.guard
             .with_read(|| self.read_all_unlocked())
             .map_err(std::io::Error::other)?
     }
 
-    fn read_all_unlocked(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
-        let mut rows = Vec::<ChatHistoryRecord>::new();
+    fn read_all_unlocked(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
+        let mut rows = Vec::<RawChatHistoryRecord>::new();
         for audit_file in self.audit_files() {
             for value in read_audit_events_unlocked(&audit_file)? {
                 let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -4432,7 +4432,7 @@ impl FileChatHistoryStore {
                         if user_input.is_empty() {
                             continue;
                         }
-                        rows.push(ChatHistoryRecord {
+                        rows.push(RawChatHistoryRecord {
                             session: value
                                 .get("session")
                                 .and_then(Value::as_str)
@@ -4460,7 +4460,7 @@ impl FileChatHistoryStore {
                         {
                             existing.assistant_output = assistant_output.to_string();
                         } else {
-                            rows.push(ChatHistoryRecord {
+                            rows.push(RawChatHistoryRecord {
                                 session: value
                                     .get("session")
                                     .and_then(Value::as_str)
@@ -4687,7 +4687,7 @@ fn turn_id_millis(turn_id: &str) -> Option<i64> {
         .and_then(|value| value.parse::<i64>().ok())
 }
 
-fn chat_record_matches(record: &ChatHistoryRecord, terms: &[String]) -> bool {
+fn chat_record_matches(record: &RawChatHistoryRecord, terms: &[String]) -> bool {
     let haystack = format!(
         "{} {} {} {}",
         record.session, record.turn_id, record.user_input, record.assistant_output
