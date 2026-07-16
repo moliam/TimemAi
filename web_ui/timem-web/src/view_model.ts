@@ -1,4 +1,4 @@
-import { Activity, ChatMessage, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
+import { Activity, ChatHistoryRecord, ChatMessage, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
 
 export const MAX_RENDERED_MESSAGES = 1000;
 export const MAX_CLIENT_TURNS = 200;
@@ -96,6 +96,65 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
     active_turn_id: incoming.state === "working" ? incoming.turn_id : session.active_turn_id,
     turns,
   };
+}
+
+export function prependHistoryRecords(session: Session, records: ChatHistoryRecord[]): Session {
+  const historicalTurns = turnsFromHistoryRecords(records);
+  if (historicalTurns.length === 0) return session;
+  const existing = new Set(session.turns.map((turn) => turn.turn_id));
+  const earlier = historicalTurns.filter((turn) => !existing.has(turn.turn_id));
+  if (earlier.length === 0) return session;
+  return {
+    ...session,
+    turns: trimTurns([...earlier, ...session.turns]),
+    messages: trimMessages([...messagesFromHistoryRecords(records), ...session.messages]),
+  };
+}
+
+export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[] {
+  const turns = new Map<string, WebTurn>();
+  for (const record of records) {
+    const turn = turns.get(record.turn_id) ?? {
+      turn_id: record.turn_id,
+      state: "restored",
+      created_at_ms: record.created_at_ms,
+      user_entries: [],
+      events: [],
+      final_answer: null,
+      completion: null,
+    };
+    turn.created_at_ms = Math.min(turn.created_at_ms, record.created_at_ms);
+    if (record.type === "message") {
+      if (record.role === "user") {
+        turn.user_entries.push({ kind: "task", text: record.content, attachments: [], created_at_ms: record.created_at_ms });
+      } else if (record.role === "assistant") {
+        turn.final_answer = record.content;
+      }
+    } else if (record.type === "event") {
+      const payload = typeof record.payload === "object" && record.payload !== null ? record.payload as Record<string, unknown> : { kind: record.kind, content: record.content };
+      const source = typeof record.source === "string" ? record.source : "history";
+      turn.events.push({
+        event_id: `history_event_${record.turn_id}_${record.created_at_ms}_${turn.events.length}`,
+        source,
+        payload,
+        created_at_ms: record.created_at_ms,
+      });
+    }
+    turns.set(record.turn_id, turn);
+  }
+  return Array.from(turns.values()).sort((left, right) => left.created_at_ms - right.created_at_ms);
+}
+
+function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[] {
+  return records.flatMap((record) => {
+    if (record.type !== "message" || (record.role !== "user" && record.role !== "assistant")) return [];
+    return [{
+      id: `history_msg_${record.turn_id}_${record.created_at_ms}_${record.role}`,
+      role: record.role,
+      text: record.content,
+      created_at_ms: record.created_at_ms,
+    }];
+  });
 }
 
 export function appendTurnEvent(session: Session, turnId: string | null | undefined, event: WebTurnEvent): Session {

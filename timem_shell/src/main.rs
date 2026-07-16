@@ -1,5 +1,9 @@
 use agent_core::capability::CapabilityRegistry;
 use agent_core::self_tool::SelfToolPaths;
+use agent_core::session_store::{
+    ChatHistoryRecord, ChatHistoryRole, SessionResumeNotice, SessionStore, StoredSession,
+    StoredSessionProfile, StoredSessionState,
+};
 use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, ResponseProtocolKind, UsageStats};
 use crossterm::event::Event;
 use reedline::{
@@ -9,7 +13,7 @@ use reedline::{
 };
 use serde_json::json;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::CStr;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -93,6 +97,7 @@ fn main() {
     let audit_file = layout.api_audit_file();
     let action_audit_file = layout.action_audit_file();
     let memory_dir = layout.memory_dir();
+    let session_store = SessionStore::new(&memory_dir);
     let workspace_config = workspace_config_file(&data_root);
     let mut bash_approval_mode =
         bash_approval_mode_from_sources(options.bash_approval.as_deref(), &env);
@@ -137,12 +142,35 @@ fn main() {
     }
     core.configure_runtime_from_host(&config, bash_approval_mode);
     let session_runtime_info = runtime_info_context(&shell_runtime_info_entries(&core));
-    let session = session_id();
+    let mut stored_session = load_or_create_shell_session(
+        &session_store,
+        &config,
+        bash_approval_mode,
+        work_instruction_mode,
+        &current_work_dir,
+    );
+    let session = stored_session.session_id.clone();
+    let mut resume_notice_pending = true;
     let mut workspace_pending = !load_workspace_dirs_from_path(&workspace_config).is_empty();
 
     if let Some(input) = options.once_json_input.as_deref() {
+        let turn_id = shell_turn_id();
+        append_shell_history_message(
+            &session_store,
+            &session,
+            &turn_id,
+            ChatHistoryRole::User,
+            input,
+        );
+        let resume_notice = take_shell_resume_notice(
+            &session_store,
+            &session,
+            &current_work_dir,
+            &mut resume_notice_pending,
+        );
         let context = combine_additional_contexts([
             session_runtime_info.as_deref(),
+            resume_notice.as_deref(),
             work_instruction_context.as_deref(),
             options.supporting_context.as_deref(),
         ]);
@@ -170,6 +198,18 @@ fn main() {
                 "status": "done",
                 "elapsed_ms": outcome.elapsed.as_millis()
             })
+        );
+        append_shell_turn_result(
+            &session_store,
+            &mut stored_session,
+            &session,
+            &turn_id,
+            &render_turn_outcome_text(&outcome),
+            &outcome,
+            &config,
+            bash_approval_mode,
+            work_instruction_mode,
+            &current_work_dir,
         );
         return;
     }
@@ -310,6 +350,14 @@ fn main() {
         }
 
         rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
+        let turn_id = shell_turn_id();
+        append_shell_history_message(
+            &session_store,
+            &session,
+            &turn_id,
+            ChatHistoryRole::User,
+            &input,
+        );
 
         let idle = last_dialog_activity.elapsed();
         let dynamic_context_tokens = core.dynamic_context_estimated_tokens();
@@ -344,8 +392,15 @@ fn main() {
             &session,
             &mut turn_ui,
         );
+        let resume_notice = take_shell_resume_notice(
+            &session_store,
+            &session,
+            &current_work_dir,
+            &mut resume_notice_pending,
+        );
         let turn_additional_context = combine_additional_contexts([
             session_runtime_info.as_deref(),
+            resume_notice.as_deref(),
             turn_work_instruction_context.as_deref(),
             workspace_ctx.as_deref(),
         ]);
@@ -392,6 +447,18 @@ fn main() {
                 config.max_llm_input_tokens,
             );
         }
+        append_shell_turn_result(
+            &session_store,
+            &mut stored_session,
+            &session,
+            &turn_id,
+            &render_turn_outcome_text(&outcome),
+            &outcome,
+            &config,
+            bash_approval_mode,
+            work_instruction_mode,
+            &current_work_dir,
+        );
         last_dialog_activity = Instant::now();
     }
 }
@@ -449,6 +516,195 @@ fn absolute_path(path: PathBuf) -> PathBuf {
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
     }
+}
+
+fn load_or_create_shell_session(
+    session_store: &SessionStore,
+    config: &agent_core::ProviderConfig,
+    bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
+    current_dir: &Path,
+) -> StoredSession {
+    if let Ok(Some(session)) = session_store
+        .list_sessions()
+        .map(|sessions| sessions.into_iter().find(stored_session_is_resumable))
+    {
+        return session;
+    }
+    let session_id = "shell_default".to_string();
+    StoredSession {
+        session_id: session_id.clone(),
+        display_name: "ShellSession".to_string(),
+        created_at_ms: now_ms_i64(),
+        updated_at_ms: now_ms_i64(),
+        current_dir: current_dir.display().to_string(),
+        profile: shell_session_profile(config),
+        env: shell_session_env_values(config, bash_approval_mode, work_instruction_mode),
+        state: StoredSessionState::Ready,
+        last_turn_id: None,
+        raw_chat_history_path: session_store
+            .history_path_for_session(&session_id)
+            .display()
+            .to_string(),
+    }
+}
+
+fn stored_session_is_resumable(session: &StoredSession) -> bool {
+    !session.session_id.trim().is_empty() && Path::new(&session.current_dir).is_dir()
+}
+
+fn shell_session_profile(config: &agent_core::ProviderConfig) -> StoredSessionProfile {
+    StoredSessionProfile {
+        provider: config.provider.clone(),
+        model: config.model.clone(),
+        api_protocol: config.api_protocol.label().to_string(),
+        response_protocol: config.response_protocol.name().to_string(),
+    }
+}
+
+fn shell_session_env_values(
+    config: &agent_core::ProviderConfig,
+    bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "TIMEM_GATEWAY_PROVIDER".to_string(),
+            config.provider.clone(),
+        ),
+        ("TIMEM_MODEL".to_string(), config.model.clone()),
+        (
+            "TIMEM_API_PROTOCOL".to_string(),
+            config.api_protocol.label().to_string(),
+        ),
+        (
+            "TIMEM_RESPONSE_PROTOCOL".to_string(),
+            config.response_protocol.name().to_string(),
+        ),
+        ("TIMEM_BASE_URL".to_string(), config.base_url.clone()),
+        ("TIMEM_TIMEOUT".to_string(), config.timeout_secs.to_string()),
+        (
+            "TIMEM_MAX_LLM_INPUT".to_string(),
+            config.max_llm_input_tokens.to_string(),
+        ),
+        (
+            "TIMEM_MAX_LLM_OUTPUT".to_string(),
+            config.max_llm_output_tokens.to_string(),
+        ),
+        (
+            "TIMEM_BASH_APPROVAL".to_string(),
+            agent_core::bash_approval_mode_label(bash_approval_mode).to_string(),
+        ),
+        (
+            "TIMEM_WORK_INSTRUCTIONS".to_string(),
+            agent_core::work_instruction_mode_label(work_instruction_mode).to_string(),
+        ),
+    ])
+}
+
+fn take_shell_resume_notice(
+    session_store: &SessionStore,
+    session_id: &str,
+    current_dir: &Path,
+    pending: &mut bool,
+) -> Option<String> {
+    if !std::mem::take(pending) {
+        return None;
+    }
+    Some(
+        SessionResumeNotice {
+            history_path: session_store.history_path_for_session(session_id),
+            current_dir: current_dir.to_path_buf(),
+        }
+        .render(),
+    )
+}
+
+fn append_shell_history_message(
+    session_store: &SessionStore,
+    session_id: &str,
+    turn_id: &str,
+    role: ChatHistoryRole,
+    content: &str,
+) {
+    let _ = session_store.append_history_record(
+        session_id,
+        &ChatHistoryRecord::Message {
+            role,
+            turn_id: turn_id.to_string(),
+            created_at_ms: now_ms_i64(),
+            content: content.to_string(),
+        },
+    );
+}
+
+fn append_shell_turn_result(
+    session_store: &SessionStore,
+    stored_session: &mut StoredSession,
+    session_id: &str,
+    turn_id: &str,
+    assistant_text: &str,
+    outcome: &timem_shell::TurnOutcome,
+    config: &agent_core::ProviderConfig,
+    bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
+    current_dir: &Path,
+) {
+    append_shell_history_message(
+        session_store,
+        session_id,
+        turn_id,
+        ChatHistoryRole::Assistant,
+        assistant_text,
+    );
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        "payload".to_string(),
+        json!({
+            "stats": outcome.stats,
+            "elapsed_ms": outcome.elapsed.as_millis(),
+            "repair_issue": outcome.repair_issue,
+            "stop_reason": outcome.stop_reason,
+        }),
+    );
+    let _ = session_store.append_history_record(
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: turn_id.to_string(),
+            created_at_ms: now_ms_i64(),
+            kind: agent_core::session_store::ChatHistoryEventKind::Stats,
+            content: "turn stats".to_string(),
+            extra,
+        },
+    );
+    stored_session.updated_at_ms = now_ms_i64();
+    stored_session.current_dir = current_dir.display().to_string();
+    stored_session.profile = shell_session_profile(config);
+    stored_session.env =
+        shell_session_env_values(config, bash_approval_mode, work_instruction_mode);
+    stored_session.state = if outcome.stop_reason.is_some() {
+        StoredSessionState::Interrupted
+    } else {
+        StoredSessionState::Ready
+    };
+    stored_session.last_turn_id = Some(turn_id.to_string());
+    stored_session.raw_chat_history_path = session_store
+        .history_path_for_session(session_id)
+        .display()
+        .to_string();
+    let _ = session_store.upsert_session(stored_session);
+}
+
+fn shell_turn_id() -> String {
+    format!("shell_turn_{}", now_ms_i64())
+}
+
+fn now_ms_i64() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 struct CliTurnUi<'a> {
@@ -3542,10 +3798,6 @@ fn epoch_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-}
-
-fn session_id() -> String {
-    format!("shell_{}", epoch_millis())
 }
 
 fn time_label() -> String {

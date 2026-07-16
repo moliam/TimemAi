@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, enqueueDecision, finishTurn, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, enqueueDecision, finishTurn, prependHistoryRecords, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -58,11 +58,13 @@ function TimemApp() {
   const [pendingDecisionKeys, setPendingDecisionKeys] = useState<Set<string>>(() => new Set());
   const [pendingRenameSessionIds, setPendingRenameSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingRuntimeKeys, setPendingRuntimeKeys] = useState<Set<string>>(() => new Set());
+  const [pendingHistorySessionIds, setPendingHistorySessionIds] = useState<Set<string>>(() => new Set());
   const creatingSessionRef = useRef(false);
   const pendingAttachmentRemoveIdsRef = useRef<Set<string>>(new Set());
   const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
   const pendingRenameSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingRuntimeKeysRef = useRef<Set<string>>(new Set());
+  const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const fileInput = useRef<HTMLInputElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   const activeMessages = activeSession?.messages ?? [];
@@ -106,12 +108,14 @@ function TimemApp() {
     pendingDecisionKeysRef.current.clear();
     pendingRenameSessionIdsRef.current.clear();
     pendingRuntimeKeysRef.current.clear();
+    pendingHistorySessionIdsRef.current.clear();
     setCreatingSession(false);
     setCancellingSessionIdSet(new Set());
     setPendingAttachmentRemoveIds(new Set());
     setPendingDecisionKeys(new Set());
     setPendingRenameSessionIds(new Set());
     setPendingRuntimeKeys(new Set());
+    setPendingHistorySessionIds(new Set());
   }, []);
 
   useEffect(() => {
@@ -206,6 +210,17 @@ function TimemApp() {
         : session));
       return;
     }
+    if (event.type === "history_page") {
+      removePendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, event.session_id);
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? {
+            ...prependHistoryRecords(session, event.records),
+            history_before_cursor: event.before_cursor ?? null,
+            history_has_more: event.has_more,
+          }
+        : session));
+      return;
+    }
     if (event.type === "worker_activity") {
       const kind = String(event.event.kind ?? "worker_event");
       if (kind !== "model_request" && kind !== "model_response") {
@@ -257,7 +272,7 @@ function TimemApp() {
         const ordinal = typeof item.ordinal === "number" ? item.ordinal : 0;
         setSessions((current) => current.some((session) => session.session_id === sessionId)
           ? current
-          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], messages: [], turns: [], active_turn_id: null }]);
+          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
         setActiveSessionId((current) => current || sessionId);
       }
     }
@@ -332,6 +347,14 @@ function TimemApp() {
       setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
     }
   }, [activeSession]);
+
+  const loadMoreHistory = useCallback((session: Session) => {
+    if (!session.history_has_more || !session.history_before_cursor) return;
+    if (!addPendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, session.session_id)) return;
+    if (!sendCommand({ type: "history_page", session_id: session.session_id, before_cursor: session.history_before_cursor, limit: 200 })) {
+      removePendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, session.session_id);
+    }
+  }, [addPendingKey, removePendingKey, sendCommand]);
 
   const runtimeMessages = useMemo<readonly ThreadMessageLike[]>(() => activeMessages.map((message) => ({
     id: message.id,
@@ -422,6 +445,8 @@ function TimemApp() {
           isCancelling={!!activeSession && cancellingSessionIdSet.has(activeSession.session_id)}
           pendingAttachmentRemoveIds={pendingAttachmentRemoveIds}
           pendingDecisionKeys={pendingDecisionKeys}
+          loadingHistory={activeSession ? pendingHistorySessionIds.has(activeSession.session_id) : false}
+          onLoadMoreHistory={loadMoreHistory}
           onUpload={uploadFile}
           onRemoveAttachment={(attachmentId) => {
             if (!activeSession) return;
@@ -466,13 +491,15 @@ const MAX_RENDERED_TURN_EVENTS = 200;
 const INITIAL_RENDERED_TURNS = 24;
 const TURN_HISTORY_PAGE_SIZE = 24;
 
-function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, onUpload, onRemoveAttachment, onDecisionReply }: {
+function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, onLoadMoreHistory, onUpload, onRemoveAttachment, onDecisionReply }: {
   activeSession: Session | undefined;
   decisions: Decision[];
   fileInput: React.RefObject<HTMLInputElement | null>;
   isCancelling: boolean;
   pendingAttachmentRemoveIds: Set<string>;
   pendingDecisionKeys: Set<string>;
+  loadingHistory: boolean;
+  onLoadMoreHistory: (session: Session) => void;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void;
@@ -483,6 +510,7 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
   const [visibleTurnCount, setVisibleTurnCount] = useState(INITIAL_RENDERED_TURNS);
   const turns = activeSession?.turns ?? [];
   const hiddenTurnCount = Math.max(0, turns.length - visibleTurnCount);
+  const canLoadStoredHistory = !!activeSession?.history_has_more && !!activeSession.history_before_cursor;
   const visibleTurns = hiddenTurnCount > 0 ? turns.slice(-visibleTurnCount) : turns;
   const latestTurn = turns.at(-1);
   const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
@@ -495,7 +523,7 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
     if (!viewport || !previous) return;
     viewport.scrollTop = preservePrependScrollTop(previous, viewport.scrollHeight);
     previousScrollMetrics.current = null;
-  }, [visibleTurnCount]);
+  }, [visibleTurnCount, turns.length]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -511,14 +539,19 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
   }, [latestTurnVersion]);
 
   const loadEarlierTurns = () => {
-    if (hiddenTurnCount === 0) return;
+    if (hiddenTurnCount === 0 && (!activeSession || !canLoadStoredHistory || loadingHistory)) return;
     if (viewportRef.current) {
       previousScrollMetrics.current = {
         scrollTop: viewportRef.current.scrollTop,
         scrollHeight: viewportRef.current.scrollHeight,
       };
     }
-    setVisibleTurnCount((count) => Math.min(turns.length, count + TURN_HISTORY_PAGE_SIZE));
+    if (hiddenTurnCount > 0) {
+      setVisibleTurnCount((count) => Math.min(turns.length, count + TURN_HISTORY_PAGE_SIZE));
+    } else if (activeSession) {
+      setVisibleTurnCount((count) => count + TURN_HISTORY_PAGE_SIZE);
+      onLoadMoreHistory(activeSession);
+    }
   };
 
   return <ThreadPrimitive.Root className="aui-thread">
@@ -534,13 +567,13 @@ function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendin
           scrollHeight: event.currentTarget.scrollHeight,
           clientHeight: event.currentTarget.clientHeight,
         });
-        if (event.currentTarget.scrollTop <= 48 && hiddenTurnCount > 0) loadEarlierTurns();
+        if (event.currentTarget.scrollTop <= 48 && (hiddenTurnCount > 0 || canLoadStoredHistory)) loadEarlierTurns();
       }}
     >
       {(activeSession?.turns.length ?? 0) === 0 &&
         <div className="welcome"><Sparkles size={24}/><h2>Ready when you are.</h2><p>Ask Timem to investigate, write, or work with your local environment.</p></div>
       }
-      {hiddenTurnCount > 0 && <button className="load-history" onClick={loadEarlierTurns}>Load {Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks</button>}
+      {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button className="load-history" disabled={loadingHistory} onClick={loadEarlierTurns}>{loadingHistory ? "Loading earlier history…" : hiddenTurnCount > 0 ? `Load ${Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks` : "Load earlier history"}</button>}
       {visibleTurns.map((turn) => <TurnInteraction
         key={turn.turn_id}
         turn={turn}

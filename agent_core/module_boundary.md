@@ -70,6 +70,11 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   structured turn input. Core consumes these values when assembling model
   context; reusable runtime loops should not hard-code a terminal host identity.
 - Memory, scratch, raw chat, context shrink/compact, and conflict handling.
+- Cross-host Session persistence schemas. Core owns `StoredSession`,
+  `ChatHistoryRecord`, history paging, and resume-notice format so Shell, Web,
+  iOS, and future hosts share one JSONL history contract. The first resume
+  layer stores session metadata and raw chat/event records, not live
+  Worker/Context execution state.
 - Local tool execution abstractions that return structured action evidence.
 - Registered command-tool foreground/background execution semantics. Core owns
   background job ids, persisted status/output files, polling, cancellation,

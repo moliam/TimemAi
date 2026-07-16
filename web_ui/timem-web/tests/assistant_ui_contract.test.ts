@@ -34,7 +34,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("TURN_HISTORY_PAGE_SIZE = 24");
     expect(source).toContain("previousScrollMetrics.current");
     expect(source).toContain("preservePrependScrollTop(previous, viewport.scrollHeight)");
-    expect(source).toContain("Load {Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks");
+    expect(source).toContain("canLoadStoredHistory");
+    expect(source).toContain('sendCommand({ type: "history_page"');
+    expect(source).toContain("Loading earlier history…");
     expect(styles).toContain(".load-history");
   });
 

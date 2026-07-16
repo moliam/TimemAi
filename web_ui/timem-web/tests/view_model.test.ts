@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, enqueueDecision, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, trimMessages, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, enqueueDecision, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, removePendingAttachment, requestDecision, sessionContextUsage, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -23,6 +23,8 @@ const session = (sessionId: string): Session => ({
   attachments: [],
   messages: [],
   turns: [],
+  history_before_cursor: null,
+  history_has_more: false,
   active_turn_id: null,
 });
 
@@ -96,6 +98,31 @@ describe("web topic view model", () => {
     ]);
     expect(events).toHaveLength(1);
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("background_running");
+  });
+
+  it("reconstructs turns from stored chat history records", () => {
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, content: "old task" },
+      { type: "event", role: "system", turn_id: "turn_1", created_at_ms: 2, kind: "action", content: "ran bash", source: "core_topic", payload: { topic: { name: "core.action" }, payload: { action: "run_bash" } } },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 3, content: "old answer" },
+    ];
+    const turns = turnsFromHistoryRecords(records);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].user_entries[0].text).toBe("old task");
+    expect(turns[0].events[0].source).toBe("core_topic");
+    expect(turns[0].final_answer).toBe("old answer");
+  });
+
+  it("prepends older history without duplicating existing turns", () => {
+    const current = { ...session("session_1"), turns: [turn("turn_2", "finished")] };
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, content: "older" },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 2, content: "older answer" },
+      { type: "message", role: "user", turn_id: "turn_2", created_at_ms: 3, content: "duplicate current" },
+    ];
+    const updated = prependHistoryRecords(current, records);
+    expect(updated.turns.map((item) => item.turn_id)).toEqual(["turn_1", "turn_2"]);
+    expect(updated.turns[0].final_answer).toBe("older answer");
   });
 
   it("keeps one session working when a subworker finishes and hides its final answer", () => {

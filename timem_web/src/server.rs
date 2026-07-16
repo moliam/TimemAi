@@ -1,3 +1,7 @@
+use agent_core::session_store::{
+    ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole, SessionResumeNotice, SessionStore,
+    StoredSession, StoredSessionProfile, StoredSessionState,
+};
 use agent_core::{
     apply_runtime_config_value, combine_additional_contexts, default_data_root,
     load_workspace_dirs_from_path, provider_config_from_sources, runtime_config_menu_report,
@@ -44,6 +48,7 @@ const PORT_START: u16 = 12_345;
 const PORT_END: u16 = 23_456;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
 const MAX_SESSION_MESSAGES: usize = 2_000;
 const MAX_SESSION_TURNS: usize = 200;
 const MAX_TURN_EVENTS: usize = 500;
@@ -59,6 +64,7 @@ struct AppState {
     token: String,
     manager: Arc<Mutex<CoreSessionWorkerManager>>,
     template: Arc<WorkerTemplate>,
+    session_store: Arc<SessionStore>,
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
 }
@@ -99,6 +105,10 @@ struct WebSession {
     consumed_attachment_ids: BTreeSet<String>,
     messages: Vec<WebChatMessage>,
     turns: Vec<WebTurn>,
+    history_before_cursor: Option<String>,
+    history_has_more: bool,
+    #[serde(skip)]
+    resume_notice_pending: bool,
     active_turn_id: Option<String>,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
@@ -252,6 +262,12 @@ enum WireEvent {
         session_id: String,
         attachment_id: String,
     },
+    HistoryPage {
+        session_id: String,
+        records: Vec<ChatHistoryRecord>,
+        before_cursor: Option<String>,
+        has_more: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -319,6 +335,11 @@ enum ClientCommand {
         session_id: String,
         attachment_id: String,
     },
+    HistoryPage {
+        session_id: String,
+        before_cursor: Option<String>,
+        limit: Option<usize>,
+    },
     TopicReply {
         session_id: String,
         worker_id: Option<String>,
@@ -347,16 +368,20 @@ pub async fn run_from_env() -> Result<(), String> {
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+    let session_store = Arc::new(SessionStore::new(&template.memory_dir));
     let state = AppState {
         token: token.clone(),
         manager,
         template: Arc::new(template),
+        session_store,
         events,
         sessions,
     };
 
-    let default_session = create_session(&state, None, None, BTreeMap::new())?;
-    let _ = default_session;
+    if restore_stored_sessions(&state)? == 0 {
+        let default_session = create_session(&state, None, None, BTreeMap::new())?;
+        let _ = default_session;
+    }
     spawn_event_bridge(state.clone());
 
     let listener = bind_loopback(launch.port).await?;
@@ -637,6 +662,7 @@ fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<Wir
                 .get_mut(&session_id)
                 .ok_or_else(|| "session_not_found".to_string())?
                 .display_name = display_name.clone();
+            persist_web_session(state, &session_id)?;
             return Ok(Some(WireEvent::SessionRenamed {
                 session_id,
                 display_name,
@@ -681,6 +707,29 @@ fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<Wir
             return Ok(Some(WireEvent::AttachmentRemoved {
                 session_id,
                 attachment_id,
+            }));
+        }
+        ClientCommand::HistoryPage {
+            session_id,
+            before_cursor,
+            limit,
+        } => {
+            let page = state.session_store.read_history_page(
+                &session_id,
+                before_cursor.as_deref(),
+                limit.unwrap_or(200).min(200),
+            )?;
+            if let Ok(mut sessions) = state.sessions.lock() {
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.history_before_cursor = page.before_cursor.clone();
+                    session.history_has_more = page.has_more;
+                }
+            }
+            return Ok(Some(WireEvent::HistoryPage {
+                session_id,
+                records: page.records,
+                before_cursor: page.before_cursor,
+                has_more: page.has_more,
             }));
         }
         ClientCommand::TopicReply {
@@ -797,6 +846,9 @@ fn create_session(
                 consumed_attachment_ids: BTreeSet::new(),
                 messages: Vec::new(),
                 turns: Vec::new(),
+                history_before_cursor: None,
+                history_has_more: false,
+                resume_notice_pending: false,
                 active_turn_id: None,
                 pending_completion_message_id: None,
                 work_instruction_mode: runtime.settings.work_instruction_mode,
@@ -814,7 +866,262 @@ fn create_session(
         }
         return Err(error);
     }
+    persist_web_session(state, &session_id)?;
     Ok(session_id)
+}
+
+fn restore_stored_sessions(state: &AppState) -> Result<usize, String> {
+    let stored_sessions = state.session_store.list_sessions()?;
+    let mut restored = 0usize;
+    for stored in stored_sessions {
+        if restore_stored_session(state, stored).is_ok() {
+            restored += 1;
+        }
+    }
+    Ok(restored)
+}
+
+fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(), String> {
+    let current_dir = PathBuf::from(&stored.current_dir);
+    if !current_dir.is_dir() {
+        return Err("stored_session_workspace_not_found".to_string());
+    }
+    let settings = state.template.session_settings(&stored.env)?;
+    let session_env = state.template.session_env(&settings, &stored.env);
+    let runtime = WebSessionRuntime {
+        settings,
+        env: session_env,
+    };
+    let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
+    let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        let ordinal = sessions
+            .values()
+            .map(|session| session.ordinal)
+            .max()
+            .map(|value| value.saturating_add(1))
+            .unwrap_or(0);
+        let history_page = state.session_store.read_history_page(
+            &stored.session_id,
+            None,
+            SESSION_HISTORY_PAGE_LIMIT,
+        )?;
+        let history_records = history_page.records;
+        let messages = restored_messages_from_history_records(&history_records);
+        let turns = restored_turns_from_history_records(&history_records);
+        sessions.insert(
+            stored.session_id.clone(),
+            WebSession {
+                session_id: stored.session_id.clone(),
+                display_name: stored.display_name.clone(),
+                ordinal,
+                state: match stored.state {
+                    StoredSessionState::Error => "error",
+                    StoredSessionState::Interrupted | StoredSessionState::Ready => "ready",
+                }
+                .to_string(),
+                current_dir: current_dir.display().to_string(),
+                max_llm_input_tokens,
+                runtime_profile,
+                contexts: Vec::new(),
+                workers: Vec::new(),
+                active_context_id: String::new(),
+                primary_worker_id: String::new(),
+                attachments: Vec::new(),
+                consumed_attachment_ids: BTreeSet::new(),
+                messages,
+                turns,
+                history_before_cursor: history_page.before_cursor,
+                history_has_more: history_page.has_more,
+                resume_notice_pending: true,
+                active_turn_id: None,
+                pending_completion_message_id: None,
+                work_instruction_mode: runtime.settings.work_instruction_mode,
+                work_instruction_allowed: None,
+                pending_work_instruction_turn: None,
+                runtime,
+            },
+        );
+    }
+    create_context_with_worker(
+        state,
+        &stored.session_id,
+        current_dir,
+        Some(stored.display_name),
+        None,
+        true,
+    )?;
+    Ok(())
+}
+
+fn restored_messages_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebChatMessage> {
+    records
+        .iter()
+        .cloned()
+        .filter_map(web_message_from_history_record)
+        .collect()
+}
+
+fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebTurn> {
+    let mut turns = BTreeMap::<String, WebTurn>::new();
+    for record in records.iter().cloned() {
+        match record {
+            ChatHistoryRecord::Message {
+                role,
+                turn_id,
+                created_at_ms,
+                content,
+            } => {
+                let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
+                    turn_id: turn_id.clone(),
+                    state: "restored".to_string(),
+                    created_at_ms: created_at_ms as u128,
+                    user_entries: Vec::new(),
+                    events: Vec::new(),
+                    final_answer: None,
+                    completion: None,
+                });
+                turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
+                match role {
+                    ChatHistoryRole::User => turn.user_entries.push(WebTurnUserEntry {
+                        kind: "task".to_string(),
+                        text: content,
+                        attachments: Vec::new(),
+                        created_at_ms: created_at_ms as u128,
+                    }),
+                    ChatHistoryRole::Assistant => {
+                        turn.final_answer = Some(content);
+                    }
+                    ChatHistoryRole::System => {}
+                }
+            }
+            ChatHistoryRecord::Event {
+                turn_id,
+                created_at_ms,
+                kind,
+                content: _,
+                mut extra,
+                ..
+            } => {
+                let payload = extra
+                    .remove("payload")
+                    .unwrap_or_else(|| json!({"kind": format!("{kind:?}")}));
+                let source = extra
+                    .remove("source")
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "history".to_string());
+                let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
+                    turn_id: turn_id.clone(),
+                    state: "restored".to_string(),
+                    created_at_ms: created_at_ms as u128,
+                    user_entries: Vec::new(),
+                    events: Vec::new(),
+                    final_answer: None,
+                    completion: None,
+                });
+                turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
+                turn.events.push(WebTurnEvent {
+                    event_id: format!(
+                        "history_event_{turn_id}_{created_at_ms}_{}",
+                        turn.events.len()
+                    ),
+                    source,
+                    payload,
+                    created_at_ms: created_at_ms as u128,
+                });
+            }
+        }
+    }
+    turns.into_values().collect()
+}
+
+fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatMessage> {
+    match record {
+        ChatHistoryRecord::Message {
+            role,
+            turn_id,
+            created_at_ms,
+            content,
+        } => {
+            let role = match role {
+                ChatHistoryRole::User => "user",
+                ChatHistoryRole::Assistant => "assistant",
+                ChatHistoryRole::System => return None,
+            };
+            Some(WebChatMessage {
+                id: format!("history_msg_{turn_id}_{created_at_ms}_{role}"),
+                role: role.to_string(),
+                text: content,
+                created_at_ms: created_at_ms as u128,
+                completion: None,
+            })
+        }
+        ChatHistoryRecord::Event { .. } => None,
+    }
+}
+
+fn persist_web_session(state: &AppState, session_id: &str) -> Result<(), String> {
+    let stored = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        stored_session_from_web_session(state, session)
+    };
+    state.session_store.upsert_session(&stored)
+}
+
+fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> StoredSession {
+    StoredSession {
+        session_id: session.session_id.clone(),
+        display_name: session.display_name.clone(),
+        created_at_ms: session
+            .turns
+            .first()
+            .map(|turn| turn.created_at_ms as i64)
+            .unwrap_or_else(now_ms_i64),
+        updated_at_ms: now_ms_i64(),
+        current_dir: session.current_dir.clone(),
+        profile: StoredSessionProfile {
+            provider: session.runtime.settings.config.provider.clone(),
+            model: session.runtime.settings.config.model.clone(),
+            api_protocol: session
+                .runtime
+                .settings
+                .config
+                .api_protocol
+                .label()
+                .to_string(),
+            response_protocol: session
+                .runtime
+                .settings
+                .config
+                .response_protocol
+                .name()
+                .to_string(),
+        },
+        env: session_env_values(&session.runtime.settings),
+        state: if session.state == "error" {
+            StoredSessionState::Error
+        } else if session.active_turn_id.is_some() || session.state == "working" {
+            StoredSessionState::Interrupted
+        } else {
+            StoredSessionState::Ready
+        },
+        last_turn_id: session.turns.last().map(|turn| turn.turn_id.clone()),
+        raw_chat_history_path: state
+            .session_store
+            .history_path_for_session(&session.session_id)
+            .display()
+            .to_string(),
+    }
 }
 
 fn session_has_active_turn(state: &AppState, session_id: &str) -> Result<bool, String> {
@@ -1256,10 +1563,25 @@ fn append_message(
         .get_mut(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
     let message_id = message.id.clone();
+    let turn_id = session.active_turn_id.clone();
+    let role_for_history = message.role.clone();
+    let text_for_history = message.text.clone();
+    let created_at_ms = message.created_at_ms as i64;
     session.messages.push(message);
     if session.messages.len() > MAX_SESSION_MESSAGES {
         let excess = session.messages.len() - MAX_SESSION_MESSAGES;
         session.messages.drain(..excess);
+    }
+    drop(sessions);
+    if let Some(turn_id) = turn_id {
+        append_chat_history_message(
+            state,
+            session_id,
+            &turn_id,
+            &role_for_history,
+            created_at_ms,
+            text_for_history,
+        );
     }
     Ok(message_id)
 }
@@ -1308,6 +1630,18 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
         let excess = session.messages.len() - MAX_SESSION_MESSAGES;
         session.messages.drain(..excess);
     }
+    let turn_id = turn.turn_id.clone();
+    let created_at_ms = turn.created_at_ms as i64;
+    drop(sessions);
+    append_chat_history_message(
+        state,
+        session_id,
+        &turn_id,
+        "user",
+        created_at_ms,
+        text.to_string(),
+    );
+    let _ = persist_web_session(state, session_id);
     Ok(turn)
 }
 
@@ -1343,7 +1677,28 @@ fn append_turn_user_entry(
         let excess = turn.user_entries.len() - MAX_TURN_USER_ENTRIES;
         turn.user_entries.drain(..excess);
     }
-    Ok(turn.clone())
+    let turn_snapshot = turn.clone();
+    let created_at_ms = turn_snapshot
+        .user_entries
+        .last()
+        .map(|entry| entry.created_at_ms as i64)
+        .unwrap_or_else(now_ms_i64);
+    let content = turn_snapshot
+        .user_entries
+        .last()
+        .map(|entry| format!("{}: {}", entry.kind, entry.text))
+        .unwrap_or_default();
+    drop(sessions);
+    append_chat_history_message(
+        state,
+        session_id,
+        &active_turn_id,
+        "user",
+        created_at_ms,
+        content,
+    );
+    let _ = persist_web_session(state, session_id);
+    Ok(turn_snapshot)
 }
 
 fn rollback_web_turn(
@@ -1393,10 +1748,115 @@ fn append_active_turn_event(
         let excess = turn.events.len() - MAX_TURN_EVENTS;
         turn.events.drain(..excess);
     }
+    let history_event = turn
+        .events
+        .last()
+        .map(|event| (event.created_at_ms as i64, event.payload.clone()));
+    let turn_id = active_turn_id.clone();
+    drop(sessions);
+    if let Some((created_at_ms, payload)) = history_event {
+        append_chat_history_event(
+            state,
+            session_id,
+            &turn_id,
+            created_at_ms,
+            chat_history_kind_for_source(source, &payload),
+            source,
+            payload,
+        );
+    }
     Some(ActiveTurnEventRef {
         turn_id: active_turn_id,
         event_id,
     })
+}
+
+fn append_chat_history_message(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+    role: &str,
+    created_at_ms: i64,
+    content: String,
+) {
+    let role = match role {
+        "user" => ChatHistoryRole::User,
+        "assistant" => ChatHistoryRole::Assistant,
+        "system" => ChatHistoryRole::System,
+        _ => ChatHistoryRole::System,
+    };
+    let _ = state.session_store.append_history_record(
+        session_id,
+        &ChatHistoryRecord::Message {
+            role,
+            turn_id: turn_id.to_string(),
+            created_at_ms,
+            content,
+        },
+    );
+}
+
+fn append_chat_history_event(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+    created_at_ms: i64,
+    kind: ChatHistoryEventKind,
+    source: &str,
+    payload: Value,
+) {
+    let content = history_event_content(source, &payload);
+    let mut extra = BTreeMap::new();
+    extra.insert("source".to_string(), Value::String(source.to_string()));
+    extra.insert("payload".to_string(), payload);
+    let _ = state.session_store.append_history_record(
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: turn_id.to_string(),
+            created_at_ms,
+            kind,
+            content,
+            extra,
+        },
+    );
+}
+
+fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEventKind {
+    if source == "core_topic" {
+        let topic_name = payload
+            .get("topic")
+            .and_then(|topic| topic.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if topic_name == "core.action" {
+            return ChatHistoryEventKind::Action;
+        }
+        if topic_name == "core.protocol_repair" {
+            return ChatHistoryEventKind::Repair;
+        }
+        if topic_name == "core.context_compact" {
+            return ChatHistoryEventKind::ContextCompact;
+        }
+        if topic_name == "core.model.response" {
+            return ChatHistoryEventKind::Progress;
+        }
+    }
+    ChatHistoryEventKind::RuntimeNotice
+}
+
+fn history_event_content(source: &str, payload: &Value) -> String {
+    let compact = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    format!("{source}: {}", compact_text_for_history(&compact, 2_000))
+}
+
+fn compact_text_for_history(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out = text.chars().take(max_chars).collect::<String>();
+    out.push('…');
+    out
 }
 
 fn decision_summary(topic_name: &str, decision: HostDecision, payload: &Value) -> String {
@@ -1421,15 +1881,36 @@ fn session_context(
     session_id: &str,
     attachments: &[WebAttachment],
 ) -> Result<Option<String>, String> {
-    let session = state
-        .sessions
-        .lock()
-        .map_err(|_| "session_store_poisoned")?
-        .get(session_id)
-        .ok_or_else(|| "session_not_found".to_string())?
-        .clone();
+    let session = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let mut session = session.clone();
+        if session.resume_notice_pending {
+            if let Some(stored) = sessions.get_mut(session_id) {
+                stored.resume_notice_pending = false;
+            }
+            session.resume_notice_pending = true;
+        }
+        session
+    };
     let current_dir = session.current_dir;
     let runtime = runtime_info_context(&["host: local_web", "transport: websocket"]);
+    let resume_notice = if session.resume_notice_pending {
+        Some(
+            SessionResumeNotice {
+                history_path: state.session_store.history_path_for_session(session_id),
+                current_dir: PathBuf::from(&current_dir),
+            }
+            .render(),
+        )
+    } else {
+        None
+    };
     let instructions = match session.work_instruction_mode {
         WorkInstructionLoadMode::Silent => {
             work_instruction_load_report(Path::new(&current_dir)).context
@@ -1453,6 +1934,7 @@ fn session_context(
     };
     Ok(combine_additional_contexts([
         runtime.as_deref(),
+        resume_notice.as_deref(),
         instructions.as_deref(),
         uploaded_files.as_deref(),
     ]))
@@ -1751,6 +2233,7 @@ fn handle_scoped_worker_event(
                             }
                         }
                     }
+                    let _ = persist_web_session(state, session_id);
                 }
                 if let Some(response) = event.as_model_response() {
                     if !response.final_answer.is_empty()
@@ -1930,6 +2413,22 @@ fn handle_scoped_worker_event(
                 } else {
                     (None, None)
                 };
+            if let Some(turn_id) = turn_id.as_deref() {
+                let mut extra = BTreeMap::new();
+                extra.insert("completion".to_string(), completion.clone());
+                let _ = state.session_store.append_history_record(
+                    session_id,
+                    &ChatHistoryRecord::Event {
+                        role: ChatHistoryRole::System,
+                        turn_id: turn_id.to_string(),
+                        created_at_ms: now_ms_i64(),
+                        kind: ChatHistoryEventKind::Stats,
+                        content: "Turn completed.".to_string(),
+                        extra,
+                    },
+                );
+            }
+            let _ = persist_web_session(state, session_id);
             let _ = state.events.send(WireEvent::TurnFinished { session_id: session_id.to_string(), turn_id, outcome: json!({ "text": outcome.text, "message_id": message_id, "completion": completion }) });
         }
         CoreSessionWorkerEvent::WorkerStopped => {
@@ -2647,6 +3146,10 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+fn now_ms_i64() -> i64 {
+    now_ms() as i64
 }
 
 fn unique_web_id(prefix: &str) -> String {

@@ -54,6 +54,8 @@ export type Session = {
   attachments: Attachment[];
   messages: ChatMessage[];
   turns: WebTurn[];
+  history_before_cursor?: string | null;
+  history_has_more?: boolean;
   active_turn_id?: string | null;
 };
 
@@ -86,6 +88,10 @@ export type WebTurnUserEntry = { kind: "task" | "supplement" | "approval" | stri
 export type WebTurnEvent = { event_id: string; source: "core_topic" | "worker_activity" | string; payload: Record<string, unknown>; created_at_ms: number };
 
 export type Attachment = { id: string; name: string; path: string; bytes: number };
+
+export type ChatHistoryRecord =
+  | { type: "message"; role: "user" | "assistant" | "system"; turn_id: string; created_at_ms: number; content: string }
+  | { type: "event"; role: "user" | "assistant" | "system"; turn_id: string; created_at_ms: number; kind: string; content: string; [key: string]: unknown };
 
 export type CoreTopicEvent = {
   session_id: string;
@@ -142,7 +148,8 @@ export type WireEvent =
   | { type: "host_error"; message: string }
   | { type: "host_config_updated"; key: string; value: string; session_env_defaults: Record<string, string> }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
-  | { type: "attachment_removed"; session_id: string; attachment_id: string };
+  | { type: "attachment_removed"; session_id: string; attachment_id: string }
+  | { type: "history_page"; session_id: string; records: ChatHistoryRecord[]; before_cursor?: string | null; has_more: boolean };
 
 export type ClientCommand =
   | { type: "session_create"; display_name?: string; workspace_dir?: string; env?: Record<string, string> }
@@ -152,6 +159,7 @@ export type ClientCommand =
   | { type: "turn_supplement"; session_id: string; text: string }
   | { type: "turn_cancel"; session_id: string }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
+  | { type: "history_page"; session_id: string; before_cursor?: string | null; limit?: number }
   | { type: "runtime_update"; key: string; value: string }
   | {
       type: "topic_reply";
