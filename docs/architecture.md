@@ -541,6 +541,16 @@ authoritative completed-task aggregate. Web sessions retain their own
 `max_llm_input_tokens` from lifecycle state, so context percentages and usage
 never depend on a global UI setting or leak across sessions.
 
+Web command handling is deliberately idempotent under high-pressure human
+clicking. The browser uses same-event-loop local guards for Stop, Create
+Session, attachment removal, inline decisions, rename, and runtime config
+updates so repeated clicks show immediate feedback instead of issuing duplicate
+commands. The server remains authoritative: repeated Stop is harmless, Send
+during an active turn becomes a supplement, stale supplements can start a new
+turn after cancellation/completion, repeated attachment removal for the same
+session is treated as success, and stale decision replies after a turn has
+finished are ignored before they reach a worker.
+
 Stopped-turn outcomes are returned as `TurnStopSummary`/`TurnStopDetail`
 structure. The terminal host renders those structures into Chinese shell text;
 other hosts should render the same fields in their own UI instead of depending
@@ -801,12 +811,13 @@ Algorithm:
    exact slice boundaries.
 4. Mark the latest `DYNAMIC_TAIL_CACHE_BLOCKS = 3` dynamic blocks cacheable.
 5. Leave older dynamic blocks unmarked.
-6. Append the temporary
-   `Follow the system prompt, give your <protocol> formatted response:` trailer
-   as the final user block without cache control, for example
-   `Follow the system prompt, give your XML formatted response:`. This trailer
-   is not a prompt delta and must not be merged into the latest delta cache
-   block.
+6. Append a temporary response trailer as the final user block without cache
+   control: XML uses `please fulfill your response in XML only:`, while other
+   suites use `please fulfill your response only:`; both are followed by
+   `## <CURRENT_ASSISTANT_NAME>`. The runtime resolves the assistant name before
+   sending the prompt.
+   This trailer is not a prompt delta and must not be merged into the latest
+   delta cache block.
 
 This is a tail-checkpoint strategy, not an old-deltas strategy. It deliberately
 marks the newest prompt tail cacheable. For append-only conversations, the
@@ -1182,7 +1193,13 @@ infer the user's semantic goal from the natural-language text.
 
 Normal commands use `cmd`. A positive model-provided `timeout_ms` is the
 runtime wait budget and is not upper-clamped by core. The execution path remains
-cancel-aware so host/UI cancellation can stop the active command. If such a
+cancel-aware so host/UI cancellation can stop the active command. Parallel Bash
+groups share one cancellation signal with the owning Session turn; the collector
+continues polling that signal while child actions run instead of blocking on a
+single thread join. Cancellation terminates the command's Unix process group so
+transport children such as `scp`/`ssh` do not survive after the outer shell exits.
+This applies both before and after command approval, including the case where one
+parallel action has already completed while another remains active. If such a
 command is still running after the long-command threshold, core emits a
 structured host decision request with elapsed/remaining time asking whether to
 keep waiting. If the host/user stops waiting, core terminates the active process

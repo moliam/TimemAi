@@ -95,6 +95,8 @@ struct WebSession {
     active_context_id: String,
     primary_worker_id: String,
     attachments: Vec<WebAttachment>,
+    #[serde(skip)]
+    consumed_attachment_ids: BTreeSet<String>,
     messages: Vec<WebChatMessage>,
     turns: Vec<WebTurn>,
     active_turn_id: Option<String>,
@@ -652,13 +654,12 @@ fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<Wir
         }
         ClientCommand::TurnSubmit { session_id, text } => {
             let text = nonempty_text(text, "turn text")?;
-            let turn = submit_turn(state, &session_id, text)?;
+            let turn = submit_or_supplement_turn(state, &session_id, text)?;
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
         }
         ClientCommand::TurnSupplement { session_id, text } => {
             let text = nonempty_text(text, "supplement")?;
-            primary_worker_handle(state, &session_id)?.add_user_supplement(text.clone());
-            let turn = append_turn_user_entry(state, &session_id, "supplement", text)?;
+            let turn = append_supplement_or_submit_turn(state, &session_id, text)?;
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
         }
         ClientCommand::TurnCancel { session_id } => {
@@ -708,6 +709,9 @@ fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<Wir
                     append_turn_user_entry(state, &session_id, "approval", approval_summary)?;
                 return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
             }
+            if !session_has_active_turn(state, &session_id)? {
+                return Ok(None);
+            }
             let mut reply = TopicReply::new(session_id.clone(), topic_name, decision, payload);
             if let Some(request_id) = request_id {
                 reply = reply.with_request_id(request_id);
@@ -718,8 +722,11 @@ fn handle_command(state: &AppState, command: ClientCommand) -> Result<Option<Wir
                 worker_id.as_deref(),
                 reply,
             )?;
-            let turn = append_turn_user_entry(state, &session_id, "approval", approval_summary)?;
-            return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+            return match append_turn_user_entry(state, &session_id, "approval", approval_summary) {
+                Ok(turn) => Ok(Some(WireEvent::TurnUpdated { session_id, turn })),
+                Err(error) if error == "active_turn_not_found" => Ok(None),
+                Err(error) => Err(error),
+            };
         }
         ClientCommand::RuntimeUpdate { key, value } => {
             let value = nonempty_text(value, "runtime config value")?;
@@ -787,6 +794,7 @@ fn create_session(
                 active_context_id: String::new(),
                 primary_worker_id: String::new(),
                 attachments: Vec::new(),
+                consumed_attachment_ids: BTreeSet::new(),
                 messages: Vec::new(),
                 turns: Vec::new(),
                 active_turn_id: None,
@@ -807,6 +815,60 @@ fn create_session(
         return Err(error);
     }
     Ok(session_id)
+}
+
+fn session_has_active_turn(state: &AppState, session_id: &str) -> Result<bool, String> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    Ok(session
+        .active_turn_id
+        .as_ref()
+        .is_some_and(|turn_id| session.turns.iter().any(|turn| turn.turn_id == *turn_id)))
+}
+
+fn submit_or_supplement_turn(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+) -> Result<WebTurn, String> {
+    if session_has_active_turn(state, session_id)? {
+        if let Some(turn) = try_append_turn_supplement(state, session_id, text.clone())? {
+            return Ok(turn);
+        }
+    }
+    submit_turn(state, session_id, text)
+}
+
+fn append_supplement_or_submit_turn(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+) -> Result<WebTurn, String> {
+    match try_append_turn_supplement(state, session_id, text.clone())? {
+        Some(turn) => Ok(turn),
+        None => submit_turn(state, session_id, text),
+    }
+}
+
+fn try_append_turn_supplement(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+) -> Result<Option<WebTurn>, String> {
+    if !session_has_active_turn(state, session_id)? {
+        return Ok(None);
+    }
+    primary_worker_handle(state, session_id)?.add_user_supplement(text.clone());
+    match append_turn_user_entry(state, session_id, "supplement", text) {
+        Ok(turn) => Ok(Some(turn)),
+        Err(error) if error == "active_turn_not_found" => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn create_context_with_worker(
@@ -1482,6 +1544,9 @@ fn remove_pending_attachment(
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
+        if session.consumed_attachment_ids.contains(attachment_id) {
+            return Ok(());
+        }
         let position = session
             .attachments
             .iter()
@@ -1491,8 +1556,14 @@ fn remove_pending_attachment(
     };
 
     match std::fs::remove_file(&attachment.path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => {
+            mark_attachment_consumed(state, session_id, attachment_id);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            mark_attachment_consumed(state, session_id, attachment_id);
+            Ok(())
+        }
         Err(_) => {
             let mut sessions = state
                 .sessions
@@ -1503,6 +1574,16 @@ fn remove_pending_attachment(
                 session.attachments.insert(restore_at, attachment);
             }
             Err("attachment_remove_failed".to_string())
+        }
+    }
+}
+
+fn mark_attachment_consumed(state: &AppState, session_id: &str, attachment_id: &str) {
+    if let Ok(mut sessions) = state.sessions.lock() {
+        if let Some(session) = sessions.get_mut(session_id) {
+            session
+                .consumed_attachment_ids
+                .insert(attachment_id.to_string());
         }
     }
 }

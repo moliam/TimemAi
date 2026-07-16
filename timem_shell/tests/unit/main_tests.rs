@@ -292,7 +292,7 @@ fn cancelled_turn_message_does_not_look_like_model_failure() {
     assert!(text.is_empty());
     assert_eq!(stats.llm_calls, 0);
     assert!(latest_usage.is_none());
-    assert_eq!(issue.as_deref(), Some("cancelled_by_user"));
+    assert_eq!(issue, None);
     assert_eq!(
         stop_reason,
         Some(timem_shell::TurnStopReason::CancelledByUser)

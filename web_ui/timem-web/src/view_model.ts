@@ -127,10 +127,14 @@ function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
 }
 
 export function finishTurn(session: Session, turnId: string | null | undefined, completion: TurnCompletion): Session {
-  const state = aggregateSessionState(session.workers, "ready");
-  if (!turnId) return { ...session, state };
+  const workers = session.workers.map((worker) => worker.worker_id === session.primary_worker_id
+    ? { ...worker, state: "ready" }
+    : worker);
+  const state = aggregateSessionState(workers, "ready");
+  if (!turnId) return { ...session, workers, state };
   return {
     ...session,
+    workers,
     state,
     active_turn_id: session.active_turn_id === turnId ? null : session.active_turn_id,
     turns: session.turns.map((turn) => turn.turn_id === turnId ? { ...turn, state: "finished", completion } : turn),

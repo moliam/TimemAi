@@ -6,6 +6,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::collections::VecDeque;
+use std::{fs, thread};
 
 fn tmp_dir(name: &str) -> std::path::PathBuf {
     let mut dir = std::env::temp_dir();
@@ -81,6 +82,11 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", raw.replace('\'', "'\\''"))
 }
 
+#[cfg(unix)]
+fn process_is_executing(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
 fn audit_event_count(events: &[Value], event_type: &str) -> usize {
     events
         .iter()
@@ -123,6 +129,39 @@ impl ModelClient for ReplayModel {
 
 struct PollingReplayModel {
     inner: ReplayModel,
+}
+
+struct CancelAfterDelayUi {
+    started: Instant,
+    delay: Duration,
+}
+
+impl TurnUi for CancelAfterDelayUi {
+    fn is_cancel_requested(&mut self) -> bool {
+        self.started.elapsed() >= self.delay
+    }
+}
+
+struct ApproveAndCancelAfterDelayUi {
+    started: Instant,
+    delay: Duration,
+    approvals: u32,
+}
+
+impl TurnUi for ApproveAndCancelAfterDelayUi {
+    fn is_cancel_requested(&mut self) -> bool {
+        self.started.elapsed() >= self.delay
+    }
+
+    fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
+        match request {
+            HostDecisionRequest::UserApproval(_) => {
+                self.approvals += 1;
+                HostDecision::Accept
+            }
+            other => other.safe_default().into(),
+        }
+    }
 }
 
 impl PollingReplayModel {
@@ -1268,6 +1307,210 @@ finished
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn session_turn_cancels_parallel_long_running_bash_actions() {
+    let dir = tmp_dir("cancel_parallel_bash_session");
+    let audit = dir.join("audit.json");
+    let pid_a = dir.join("child_a.pid");
+    let pid_b = dir.join("child_b.pid");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    let started = Instant::now();
+    let mut ui = CancelAfterDelayUi {
+        started,
+        delay: Duration::from_millis(150),
+    };
+    let command_a = format!(
+        "tail -f /dev/null & echo $! > {}; wait",
+        shell_quote(&pid_a)
+    );
+    let command_b = format!(
+        "tail -f /dev/null & echo $! > {}; wait",
+        shell_quote(&pid_b)
+    );
+    let response = format!(
+        r#"## Working_Still_Action
+```action
+[[
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
+]]
+```"#,
+        serde_json::to_string(&command_a).unwrap(),
+        serde_json::to_string(&command_b).unwrap(),
+    );
+    let mut model = ReplayModel::new([Ok(llm(response, 1_000, false))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "执行两个长时间上传任务",
+            session: "web_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "parallel cancellation took {:?}",
+        started.elapsed()
+    );
+    for pid_file in [&pid_a, &pid_b] {
+        let child_pid = fs::read_to_string(pid_file)
+            .expect("parallel child pid should be recorded")
+            .trim()
+            .parse::<u32>()
+            .expect("parallel child pid should be numeric");
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !process_is_executing(child_pid),
+            "parallel descendant process {child_pid} survived cancellation"
+        );
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_action() {
+    let dir = tmp_dir("cancel_parallel_after_completed_action");
+    let audit = dir.join("audit.json");
+    let completed_marker = dir.join("completed.txt");
+    let running_pid = dir.join("running.pid");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    let started = Instant::now();
+    let mut ui = CancelAfterDelayUi {
+        started,
+        delay: Duration::from_millis(200),
+    };
+    let completed_command = format!("printf uploaded > {}", shell_quote(&completed_marker));
+    let running_command = format!(
+        "tail -f /dev/null & echo $! > {}; wait",
+        shell_quote(&running_pid)
+    );
+    let response = format!(
+        r#"## Working_Still_Action
+```action
+[[
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
+]]
+```"#,
+        serde_json::to_string(&completed_command).unwrap(),
+        serde_json::to_string(&running_command).unwrap(),
+    );
+    let mut model = ReplayModel::new([Ok(llm(response, 1_000, false))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "并行上传两个文件，然后停止仍在运行的上传",
+            session: "web_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    assert!(
+        completed_marker.exists(),
+        "fast parallel action did not finish"
+    );
+    let pid = fs::read_to_string(&running_pid)
+        .expect("running action should record its descendant pid")
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    assert!(!process_is_executing(pid), "running action survived Stop");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_turn_stop_cancels_parallel_bash_after_approval() {
+    let dir = tmp_dir("cancel_approved_parallel_bash");
+    let audit = dir.join("audit.json");
+    let pid_a = dir.join("approved_a.pid");
+    let pid_b = dir.join("approved_b.pid");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
+    let mut config = test_config();
+    let started = Instant::now();
+    let mut ui = ApproveAndCancelAfterDelayUi {
+        started,
+        delay: Duration::from_millis(200),
+        approvals: 0,
+    };
+    let commands = [&pid_a, &pid_b].map(|pid_file| {
+        format!(
+            "tail -f /dev/null & echo $! > {}; wait",
+            shell_quote(pid_file)
+        )
+    });
+    let response = format!(
+        r#"## Working_Still_Action
+```action
+[[
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
+]]
+```"#,
+        serde_json::to_string(&commands[0]).unwrap(),
+        serde_json::to_string(&commands[1]).unwrap(),
+    );
+    let mut model = ReplayModel::new([Ok(llm(response, 1_000, false))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "审批并行上传后停止",
+            session: "web_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(ui.approvals, 2);
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    for pid_file in [&pid_a, &pid_b] {
+        let pid = fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(!process_is_executing(pid), "approved action survived Stop");
+    }
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[test]
 fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_order() {
     let dir = tmp_dir("mixed_parallel_action_group_session");
@@ -1589,7 +1832,7 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     assert_eq!(first_blocks[2].cache, crate::CacheControl::None);
     assert_eq!(
         first_blocks[2].text,
-        crate::prompt_render::formatted_response_trailer("XML")
+        crate::prompt_render::formatted_response_trailer("XML", "TIMEM_ASSISTANT")
     );
 
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
@@ -2120,7 +2363,7 @@ fn session_turn_can_cancel_before_provider_call_without_network() {
     );
 
     assert!(outcome.text.is_empty());
-    assert_eq!(outcome.repair_issue.as_deref(), Some("cancelled_by_user"));
+    assert_eq!(outcome.repair_issue, None);
     assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
     assert_eq!(
         outcome.stop_summary.as_ref().map(|summary| &summary.detail),

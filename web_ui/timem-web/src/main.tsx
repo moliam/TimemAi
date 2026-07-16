@@ -1,6 +1,6 @@
 import { AssistantRuntimeProvider, ComposerPrimitive, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
 import { ArrowDown, Check, CheckCheck, ChevronRight, CircleStop, Copy, Cpu, FolderOpen, Gauge, LoaderCircle, Menu, Palette, Paperclip, PanelRight, Pencil, Plus, Send, Settings2, Sparkles, Terminal, Wrench, X } from "lucide-react";
-import { Children, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Children, Dispatch, isValidElement, MutableRefObject, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
@@ -51,6 +51,18 @@ function TimemApp() {
   const [renameDraft, setRenameDraft] = useState("");
   const [server, setServer] = useState<Snapshot["server"] | null>(null);
   const socket = useRef<WebSocket | null>(null);
+  const cancellingSessionIds = useRef<Set<string>>(new Set());
+  const [cancellingSessionIdSet, setCancellingSessionIdSet] = useState<Set<string>>(() => new Set());
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [pendingAttachmentRemoveIds, setPendingAttachmentRemoveIds] = useState<Set<string>>(() => new Set());
+  const [pendingDecisionKeys, setPendingDecisionKeys] = useState<Set<string>>(() => new Set());
+  const [pendingRenameSessionIds, setPendingRenameSessionIds] = useState<Set<string>>(() => new Set());
+  const [pendingRuntimeKeys, setPendingRuntimeKeys] = useState<Set<string>>(() => new Set());
+  const creatingSessionRef = useRef(false);
+  const pendingAttachmentRemoveIdsRef = useRef<Set<string>>(new Set());
+  const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
+  const pendingRenameSessionIdsRef = useRef<Set<string>>(new Set());
+  const pendingRuntimeKeysRef = useRef<Set<string>>(new Set());
   const fileInput = useRef<HTMLInputElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   const activeMessages = activeSession?.messages ?? [];
@@ -71,6 +83,49 @@ function TimemApp() {
     return true;
   }, []);
 
+  const addPendingKey = useCallback((ref: MutableRefObject<Set<string>>, setState: Dispatch<SetStateAction<Set<string>>>, key: string) => {
+    if (ref.current.has(key)) return false;
+    ref.current.add(key);
+    setState((current) => new Set(current).add(key));
+    return true;
+  }, []);
+
+  const removePendingKey = useCallback((ref: MutableRefObject<Set<string>>, setState: Dispatch<SetStateAction<Set<string>>>, key: string) => {
+    ref.current.delete(key);
+    setState((current) => {
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
+  const clearAllPendingCommands = useCallback(() => {
+    creatingSessionRef.current = false;
+    cancellingSessionIds.current.clear();
+    pendingAttachmentRemoveIdsRef.current.clear();
+    pendingDecisionKeysRef.current.clear();
+    pendingRenameSessionIdsRef.current.clear();
+    pendingRuntimeKeysRef.current.clear();
+    setCreatingSession(false);
+    setCancellingSessionIdSet(new Set());
+    setPendingAttachmentRemoveIds(new Set());
+    setPendingDecisionKeys(new Set());
+    setPendingRenameSessionIds(new Set());
+    setPendingRuntimeKeys(new Set());
+  }, []);
+
+  useEffect(() => {
+    const workingIds = new Set(sessions.filter((session) => session.state === "working").map((session) => session.session_id));
+    let changed = false;
+    for (const sessionId of Array.from(cancellingSessionIds.current)) {
+      if (!workingIds.has(sessionId)) {
+        cancellingSessionIds.current.delete(sessionId);
+        changed = true;
+      }
+    }
+    if (changed) setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+  }, [sessions]);
+
   const beginRename = useCallback((session: Session) => {
     setRenamingSessionId(session.session_id);
     setRenameDraft(session.display_name);
@@ -78,12 +133,16 @@ function TimemApp() {
 
   const finishRename = useCallback((sessionId: string) => {
     const displayName = renameDraft.trim();
-    if (displayName && sendCommand({ type: "session_rename", session_id: sessionId, display_name: displayName })) {
+    if (displayName && addPendingKey(pendingRenameSessionIdsRef, setPendingRenameSessionIds, sessionId)) {
+      if (!sendCommand({ type: "session_rename", session_id: sessionId, display_name: displayName })) {
+        removePendingKey(pendingRenameSessionIdsRef, setPendingRenameSessionIds, sessionId);
+        return;
+      }
       setSessions((current) => current.map((session) => session.session_id === sessionId ? { ...session, display_name: displayName } : session));
     }
     setRenamingSessionId("");
     setRenameDraft("");
-  }, [renameDraft, sendCommand]);
+  }, [addPendingKey, removePendingKey, renameDraft, sendCommand]);
 
   const applySnapshot = useCallback((snapshot: Snapshot) => {
     setServer(snapshot.server);
@@ -97,11 +156,14 @@ function TimemApp() {
       return;
     }
     if (event.type === "session_created") {
+      creatingSessionRef.current = false;
+      setCreatingSession(false);
       setSessions((current) => upsertSession(current, event.session));
       setActiveSessionId(event.session.session_id);
       return;
     }
     if (event.type === "session_renamed") {
+      removePendingKey(pendingRenameSessionIdsRef, setPendingRenameSessionIds, event.session_id);
       setSessions((current) => current.map((session) => session.session_id === event.session_id ? { ...session, display_name: event.display_name } : session));
       return;
     }
@@ -113,11 +175,13 @@ function TimemApp() {
       return;
     }
     if (event.type === "host_error") {
+      clearAllPendingCommands();
       const activity: Activity = { id: crypto.randomUUID(), sessionId: "system", tone: "error", title: "Runtime error", detail: event.message, createdAt: Date.now() };
       setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
       return;
     }
     if (event.type === "host_config_updated") {
+      removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, event.key);
       setServer((current) => current ? {
         ...current,
         runtime_options: current.runtime_options.map((option) => option.key === event.key ? { ...option, value: event.value } : option),
@@ -136,6 +200,7 @@ function TimemApp() {
       return;
     }
     if (event.type === "attachment_removed") {
+      removePendingKey(pendingAttachmentRemoveIdsRef, setPendingAttachmentRemoveIds, `${event.session_id}:${event.attachment_id}`);
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? removePendingAttachment(session, event.attachment_id)
         : session));
@@ -163,6 +228,8 @@ function TimemApp() {
       return;
     }
     if (event.type === "turn_finished") {
+      cancellingSessionIds.current.delete(event.session_id);
+      setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? finishTurn(attachTurnCompletion(session, event.outcome.message_id, event.outcome.completion ?? {}), event.turn_id, event.outcome.completion ?? {})
         : session));
@@ -236,6 +303,11 @@ function TimemApp() {
 
   const sendText = useCallback(async (text: string) => {
     if (!activeSession || !text.trim()) return;
+    if (cancellingSessionIds.current.has(activeSession.session_id)) {
+      const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() };
+      setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
+      return;
+    }
     const command: ClientCommand = activeSession.state === "working"
       ? { type: "turn_supplement", session_id: activeSession.session_id, text: text.trim() }
       : { type: "turn_submit", session_id: activeSession.session_id, text: text.trim() };
@@ -272,11 +344,21 @@ function TimemApp() {
     messages: auiMessages,
     setMessages: setAuiMessages,
     convertMessage: (message) => message,
+    isRunning: activeSession?.state === "working",
     onNew: async (message) => {
       const first = message.content[0];
       if (first?.type === "text") await sendText(first.text);
     },
-    onCancel: async () => { if (activeSession) sendCommand({ type: "turn_cancel", session_id: activeSession.session_id }); },
+    onCancel: async () => {
+      if (!activeSession || activeSession.state !== "working") return;
+      if (cancellingSessionIds.current.has(activeSession.session_id)) return;
+      cancellingSessionIds.current.add(activeSession.session_id);
+      setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+      if (!sendCommand({ type: "turn_cancel", session_id: activeSession.session_id })) {
+        cancellingSessionIds.current.delete(activeSession.session_id);
+        setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+      }
+    },
   });
 
   const sessionActivities = activities.filter((activity) => activity.sessionId === activeSession?.session_id);
@@ -326,21 +408,37 @@ function TimemApp() {
         </header>
         {showAppearance && <AppearancePanel appearance={appearance} onChange={setAppearance} onClose={() => setShowAppearance(false)}/>}
         {visibleError && <div className="host-error-banner" role="alert"><span><strong>{visibleError.title}</strong>{visibleError.detail && ` · ${visibleError.detail}`}</span><button className="icon-button" title="Dismiss error" onClick={() => setActivities((current) => current.filter((activity) => activity.id !== visibleError.id))}><X size={15}/></button></div>}
-        {showRuntime && <RuntimePanel server={server} onUpdate={(key, value) => sendCommand({ type: "runtime_update", key, value })}/>}
+        {showRuntime && <RuntimePanel server={server} pendingKeys={pendingRuntimeKeys} onUpdate={(key, value) => {
+          if (!addPendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, key)) return;
+          if (!sendCommand({ type: "runtime_update", key, value })) {
+            removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, key);
+          }
+        }}/>}
         <ContextUsageBar session={activeSession}/>
         <TimemThread
           activeSession={activeSession}
           decisions={sessionDecisions}
           fileInput={fileInput}
+          isCancelling={!!activeSession && cancellingSessionIdSet.has(activeSession.session_id)}
+          pendingAttachmentRemoveIds={pendingAttachmentRemoveIds}
+          pendingDecisionKeys={pendingDecisionKeys}
           onUpload={uploadFile}
           onRemoveAttachment={(attachmentId) => {
             if (!activeSession) return;
-            sendCommand({ type: "attachment_remove", session_id: activeSession.session_id, attachment_id: attachmentId });
+            const key = `${activeSession.session_id}:${attachmentId}`;
+            if (!addPendingKey(pendingAttachmentRemoveIdsRef, setPendingAttachmentRemoveIds, key)) return;
+            if (!sendCommand({ type: "attachment_remove", session_id: activeSession.session_id, attachment_id: attachmentId })) {
+              removePendingKey(pendingAttachmentRemoveIdsRef, setPendingAttachmentRemoveIds, key);
+            }
           }}
           onDecisionReply={(decision, decisionValue) => {
+            const key = decisionKey(decision);
+            if (!addPendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key)) return;
             const event = decision.event;
             if (sendCommand({ type: "topic_reply", session_id: event.session_id, worker_id: event.worker_id ?? undefined, topic_name: event.topic.name, request_id: typeof event.payload.request_id === "string" ? event.payload.request_id : undefined, decision: decisionValue, payload: { summary: decision.detail } })) {
               setDecisions((current) => current.filter((candidate) => candidate !== decision));
+            } else {
+              removePendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key);
             }
           }}
         />
@@ -349,7 +447,17 @@ function TimemApp() {
         <header><button className="icon-button" title="Close activity panel" aria-label="Close activity panel" onClick={() => setShowActivity(false)}><X size={16}/></button></header>
         <div className="activity-list">{sessionActivities.map((activity) => <div className={`activity ${activity.tone}`} key={activity.id}><span className="activity-mark">{activity.tone === "thinking" ? "✦" : activity.tone === "action" ? "↳" : activity.tone === "warning" ? "!" : activity.tone === "error" ? "×" : "i"}</span><div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="activity-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)} />}</div></div>)}</div>
       </aside>}
-      {showNewSession && <NewSessionDialog workspaces={server?.workspace_dirs ?? []} runtimeDefaults={server?.session_env_defaults ?? {}} onClose={() => setShowNewSession(false)} onCreate={(displayName, workspaceDir, env) => { if (sendCommand({ type: "session_create", display_name: displayName || undefined, workspace_dir: workspaceDir || undefined, env })) setShowNewSession(false); }} />}
+      {showNewSession && <NewSessionDialog workspaces={server?.workspace_dirs ?? []} runtimeDefaults={server?.session_env_defaults ?? {}} creating={creatingSession} onClose={() => { if (!creatingSessionRef.current) setShowNewSession(false); }} onCreate={(displayName, workspaceDir, env) => {
+        if (creatingSessionRef.current) return;
+        creatingSessionRef.current = true;
+        setCreatingSession(true);
+        if (sendCommand({ type: "session_create", display_name: displayName || undefined, workspace_dir: workspaceDir || undefined, env })) {
+          setShowNewSession(false);
+        } else {
+          creatingSessionRef.current = false;
+          setCreatingSession(false);
+        }
+      }} />}
     </div>
   </AssistantRuntimeProvider>;
 }
@@ -358,10 +466,13 @@ const MAX_RENDERED_TURN_EVENTS = 200;
 const INITIAL_RENDERED_TURNS = 24;
 const TURN_HISTORY_PAGE_SIZE = 24;
 
-function TimemThread({ activeSession, decisions, fileInput, onUpload, onRemoveAttachment, onDecisionReply }: {
+function TimemThread({ activeSession, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, onUpload, onRemoveAttachment, onDecisionReply }: {
   activeSession: Session | undefined;
   decisions: Decision[];
   fileInput: React.RefObject<HTMLInputElement | null>;
+  isCancelling: boolean;
+  pendingAttachmentRemoveIds: Set<string>;
+  pendingDecisionKeys: Set<string>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void;
@@ -434,22 +545,26 @@ function TimemThread({ activeSession, decisions, fileInput, onUpload, onRemoveAt
         key={turn.turn_id}
         turn={turn}
         decisions={decisions.filter((decision) => decision.turnId === turn.turn_id)}
+        pendingDecisionKeys={pendingDecisionKeys}
         onDecisionReply={onDecisionReply}
       />)}
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button className="scroll-to-bottom" title="Scroll to latest" aria-label="Scroll to latest"><ArrowDown size={16}/></button></ThreadPrimitive.ScrollToBottom>
-        {!!activeSession?.attachments.length && <div className="attachment-strip" aria-label="Files attached to the next message">{activeSession.attachments.map((attachment) => <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={`Remove ${attachment.name}`} aria-label={`Remove ${attachment.name}`} onClick={() => onRemoveAttachment(attachment.id)}><X size={13}/></button></div>)}</div>}
+        {!!activeSession?.attachments.length && <div className="attachment-strip" aria-label="Files attached to the next message">{activeSession.attachments.map((attachment) => {
+          const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);
+          return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`} aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`} disabled={removing} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
+        })}</div>}
         {activeSession && <div className="composer-cwd" title={activeSession.current_dir}><FolderOpen size={13}/><span>{activeSession.current_dir}</span></div>}
         <ComposerPrimitive.Root className="composer">
           <ComposerPrimitive.Input placeholder={activeSession?.state === "working" ? "继续输入…" : "Ask Timem anything about this workspace…"} aria-label="Message Timem" />
-          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><ComposerPrimitive.Send asChild><button className="send-button" title="Send message" aria-label="Send message"><Send size={17}/></button></ComposerPrimitive.Send>{activeSession?.state === "working" && <ComposerPrimitive.Cancel asChild><button className="stop-button" title="Cancel current turn"><CircleStop size={17}/> Stop</button></ComposerPrimitive.Cancel>}</div></div>
+          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><ComposerPrimitive.Send asChild><button className="send-button" title="Send message" aria-label="Send message"><Send size={17}/></button></ComposerPrimitive.Send>{activeSession?.state === "working" && <ComposerPrimitive.Cancel asChild><button className="stop-button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button></ComposerPrimitive.Cancel>}</div></div>
         </ComposerPrimitive.Root>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
   </ThreadPrimitive.Root>;
 }
 
-function TurnInteraction({ turn, decisions, onDecisionReply }: { turn: WebTurn; decisions: Decision[]; onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void }) {
+function TurnInteraction({ turn, decisions, pendingDecisionKeys, onDecisionReply }: { turn: WebTurn; decisions: Decision[]; pendingDecisionKeys: Set<string>; onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void }) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
   const previousUpdateCount = useRef(turn.events.length + decisions.length);
@@ -499,7 +614,7 @@ function TurnInteraction({ turn, decisions, onDecisionReply }: { turn: WebTurn; 
       }}>
         {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>}
         {visibleEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={turn.turn_id}/>)}
-        {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
+        {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
         {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
         {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className="working-indicator"><span className="pulse"/> Waiting for the first runtime update…</div>}
       </div>
@@ -645,8 +760,9 @@ function fencedCode(language: string, code: string) {
 
 function CompletionCard({ completion }: { completion: NonNullable<ChatMessage["completion"]> }) {
   const stats = completion.stats ?? {};
+  const cancelled = completion.stop_reason?.toLowerCase() === "cancelledbyuser";
   const facts = [
-    ["Completed", formatDuration(completion.elapsed_ms)],
+    [cancelled ? "Cancelled" : "Completed", formatDuration(completion.elapsed_ms)],
     ["LLM", stats.llm_calls],
     ["Input", formatOptionalTokens(stats.prompt_tokens)],
     ["Output", formatOptionalTokens(stats.completion_tokens)],
@@ -659,7 +775,7 @@ function CompletionCard({ completion }: { completion: NonNullable<ChatMessage["c
   ].filter(([, value]) => value !== undefined && value !== null && value !== "" && value !== 0) as Array<[string, string | number]>;
   return <div className="completion-card" aria-label="Turn completion statistics">
     {facts.map(([label, value]) => <span key={label}><b>{label}</b> {value}</span>)}
-    {isNotableStopReason(completion.stop_reason) && <span className="completion-status"><b>Status</b> {completion.stop_reason}</span>}
+    {!cancelled && isNotableStopReason(completion.stop_reason) && <span className="completion-status"><b>Status</b> {completion.stop_reason}</span>}
     {completion.repair_issue && <span className="completion-status warning"><b>Last repair</b> {completion.repair_issue}</span>}
   </div>;
 }
@@ -696,10 +812,14 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function RuntimePanel({ server, onUpdate }: { server: Snapshot["server"] | null; onUpdate: (key: string, value: string) => void }) {
+function RuntimePanel({ server, pendingKeys, onUpdate }: { server: Snapshot["server"] | null; pendingKeys: Set<string>; onUpdate: (key: string, value: string) => void }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   if (!server) return <section className="runtime-card"><Cpu size={16}/><span>Loading runtime settings…</span></section>;
-  return <section className="runtime-card runtime-settings"><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/> localhost:{server.port}</span></div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => <label key={option.key}><span>{option.key}</span><div><input value={drafts[option.key] ?? option.value} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))}/><button className="secondary compact" disabled={(drafts[option.key] ?? option.value) === option.value} onClick={() => onUpdate(option.key, drafts[option.key] ?? option.value)}>Apply</button></div></label>)}</div></section>;
+  return <section className="runtime-card runtime-settings"><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/> localhost:{server.port}</span></div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
+    const value = drafts[option.key] ?? option.value;
+    const pending = pendingKeys.has(option.key);
+    return <label key={option.key}><span>{option.key}</span><div><input value={value} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))}/><button className="secondary compact" disabled={pending || value === option.value} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
+  })}</div></section>;
 }
 
 const SESSION_RUNTIME_FIELDS = [
@@ -716,9 +836,10 @@ const SESSION_RUNTIME_FIELDS = [
   ["TIMEM_WORK_INSTRUCTIONS", "AGENTS/CLAUDE loading", "work_instructions"],
 ] as const;
 
-function NewSessionDialog({ workspaces, runtimeDefaults, onClose, onCreate }: {
+function NewSessionDialog({ workspaces, runtimeDefaults, creating, onClose, onCreate }: {
   workspaces: string[];
   runtimeDefaults: Snapshot["server"]["session_env_defaults"];
+  creating: boolean;
   onClose: () => void;
   onCreate: (displayName: string, workspaceDir: string, env: Record<string, string>) => void;
 }) {
@@ -727,18 +848,18 @@ function NewSessionDialog({ workspaces, runtimeDefaults, onClose, onCreate }: {
   const [env, setEnv] = useState<Record<string, string>>({});
   const updateEnv = (key: string, value: string) => setEnv((current) => ({ ...current, [key]: value }));
   const cleanedEnv = () => Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value));
-  return <div className="modal-backdrop" role="presentation"><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session"><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2><div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" onChange={(event) => setDisplayName(event.target.value)}/></label><label>Workspace<select value={workspaceDir} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.map((workspace) => <option value={workspace} key={workspace}>{workspace}</option>)}</select></label><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span>{kind === "api_protocol" ? <select value={env[key] ?? ""} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option><option value="markdown">markdown</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>}</label>)}</div></details></div><div className="decision-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" onClick={() => onCreate(displayName.trim(), workspaceDir, cleanedEnv())}><Plus size={16}/> Create session</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session"><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2><div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)}/></label><label>Workspace<select value={workspaceDir} disabled={creating} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.map((workspace) => <option value={workspace} key={workspace}>{workspace}</option>)}</select></label><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span>{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option><option value="markdown">markdown</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>}</label>)}</div></details></div><div className="decision-actions"><button className="secondary" disabled={creating} onClick={onClose}>Cancel</button><button className="primary" disabled={creating} onClick={() => onCreate(displayName.trim(), workspaceDir, cleanedEnv())}><Plus size={16}/> {creating ? "Creating…" : "Create session"}</button></div></section></div>;
 }
 
 function decisionKey(decision: Decision) {
   return `${decision.event.session_id}:${decision.event.topic.name}:${String(decision.event.payload.request_id ?? "")}`;
 }
 
-function InlineDecision({ decision, position, total, onReply }: { decision: Decision; position: number; total: number; onReply: (decision: "accept" | "decline") => void }) {
+function InlineDecision({ decision, pending, position, total, onReply }: { decision: Decision; pending: boolean; position: number; total: number; onReply: (decision: "accept" | "decline") => void }) {
   return <section className="inline-decision" aria-label="Decision required">
     <div className="inline-decision-heading"><span className="eyebrow">RUNTIME REQUEST{total > 1 ? ` · ${position} OF ${total}` : ""}</span><h2>{decision.title}</h2></div>
     <pre>{decision.detail}</pre>
-    <div className="decision-actions"><button className="secondary" onClick={() => onReply("decline")}>Decline</button><button className="primary" onClick={() => onReply("accept")}><Check size={16}/> Continue</button></div>
+    <div className="decision-actions"><button className="secondary" disabled={pending} onClick={() => onReply("decline")}>Decline</button><button className="primary" disabled={pending} onClick={() => onReply("accept")}><Check size={16}/> {pending ? "Sending…" : "Continue"}</button></div>
   </section>;
 }
 

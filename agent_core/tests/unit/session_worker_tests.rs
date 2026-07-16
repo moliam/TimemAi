@@ -698,7 +698,6 @@ impl ModelClient for ApprovalReplayModel {
 
 struct AssistantHeadingModel {
     expected_heading: String,
-    calls: u32,
 }
 
 impl ModelClient for AssistantHeadingModel {
@@ -709,17 +708,12 @@ impl ModelClient for AssistantHeadingModel {
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
-        self.calls += 1;
-        if self.calls == 1 {
-            assert!(!prompt.contains(&self.expected_heading));
-        } else {
-            assert!(
-                prompt.contains(&self.expected_heading),
-                "prompt should contain assistant heading {}:\n{}",
-                self.expected_heading,
-                prompt
-            );
-        }
+        assert!(
+            prompt.contains(&self.expected_heading),
+            "prompt should contain assistant heading {}:\n{}",
+            self.expected_heading,
+            prompt
+        );
         Ok(LlmResponse {
             content: "## Status\nfinished\n\n## Final_Answer\nok".to_string(),
             model_name: "test-model".to_string(),
@@ -753,7 +747,6 @@ fn session_worker_identity_sets_prompt_assistant_heading() {
         test_worker_config(&dir, "session_worker_heading", 4),
         AssistantHeadingModel {
             expected_heading: "## ID4".to_string(),
-            calls: 0,
         },
     );
 

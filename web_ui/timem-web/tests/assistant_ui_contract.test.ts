@@ -75,6 +75,40 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain('["Shrunk", formatTokens(stats.shrunk_tokens)]');
   });
 
+  it("binds assistant-ui running state to the authoritative session lifecycle", () => {
+    expect(source).toContain('isRunning: activeSession?.state === "working"');
+    expect(source).toContain('cancelled ? "Cancelled" : "Completed"');
+    expect(viewModelSource).toContain('worker.worker_id === session.primary_worker_id');
+  });
+
+  it("deduplicates rapid cancel clicks and clears the guard when a turn finishes", () => {
+    expect(source).toContain("const cancellingSessionIds = useRef<Set<string>>(new Set());");
+    expect(source).toContain("const [cancellingSessionIdSet");
+    expect(source).toContain('if (cancellingSessionIds.current.has(activeSession.session_id)) return;');
+    expect(source).toContain('cancellingSessionIds.current.add(activeSession.session_id);');
+    expect(source).toContain('cancellingSessionIds.current.delete(event.session_id);');
+    expect(source).toContain('{isCancelling ? "Stopping…" : "Stop"}');
+  });
+
+  it("blocks send while cancellation is still in flight", () => {
+    const start = source.indexOf("const sendText = useCallback");
+    const end = source.indexOf("const uploadFile = useCallback", start);
+    const sendText = source.slice(start, end);
+    expect(sendText).toContain("cancellingSessionIds.current.has(activeSession.session_id)");
+    expect(sendText).toContain("Cancellation in progress");
+    expect(sendText).toContain("return;");
+  });
+
+  it("uses synchronous pending guards for rapid repeated browser clicks", () => {
+    expect(source).toContain("creatingSessionRef.current");
+    expect(source).toContain("pendingAttachmentRemoveIdsRef");
+    expect(source).toContain("pendingDecisionKeysRef");
+    expect(source).toContain("pendingRenameSessionIdsRef");
+    expect(source).toContain("pendingRuntimeKeysRef");
+    expect(source).toContain("addPendingKey(");
+    expect(source).toContain("clearAllPendingCommands");
+  });
+
   it("renders live task usage and session context without replacing final telemetry", () => {
     expect(source).toContain("<ContextUsageBar session={activeSession}");
     expect(source).toContain("<LiveTurnUsage turn={turn}");
@@ -115,7 +149,8 @@ describe("assistant-ui thread integration", () => {
   it("uses session terminology consistently for the creation workflow", () => {
     expect(source).toContain("New session");
     expect(source).toContain('aria-label="Create session"');
-    expect(source).toContain("Create session</button>");
+    expect(source).toContain('creating ? "Creating…" : "Create session"');
+    expect(source).toContain("disabled={creating}");
     expect(source).not.toContain("New agent");
   });
 
@@ -172,7 +207,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('type: "attachment_remove"');
     expect(source).toContain('className="pending-attachment-name"');
     expect(source).toContain('title={attachment.name}');
-    expect(source).toContain('aria-label={`Remove ${attachment.name}`}');
+    expect(source).toContain("pendingAttachmentRemoveIds.has");
+    expect(source).toContain("disabled={removing}");
+    expect(source).toContain('aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`}');
     expect(styles).toContain(".pending-attachment-name");
     expect(styles).toContain("text-overflow: ellipsis");
   });
