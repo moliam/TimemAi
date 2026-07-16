@@ -23,6 +23,10 @@ making changes. Keep it short, concrete, and enforceable.
   cancellation, retries, and realistic terminal interaction where relevant.
 - Do not use real user private facts, paths, keys, internal URLs, or personal
   conversations as test fixtures or public docs.
+- User-facing docs are part of the product. When behavior, architecture,
+  install/run flow, host support, or release gates change, update README and
+  the relevant docs in the same change. Keep README as a concise entry point;
+  move detailed design, protocol, and test matrices under `docs/`.
 
 ## Architecture boundaries
 
