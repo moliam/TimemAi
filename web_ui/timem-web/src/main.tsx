@@ -156,6 +156,7 @@ function TimemApp() {
 
   const receive = useCallback((event: WireEvent) => {
     if (event.type === "hello") {
+      clearAllPendingCommands();
       applySnapshot(event.snapshot);
       return;
     }

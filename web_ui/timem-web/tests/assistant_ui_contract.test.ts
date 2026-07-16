@@ -111,6 +111,14 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("clearAllPendingCommands");
   });
 
+  it("clears stale pending browser guards when a reconnect snapshot arrives", () => {
+    const helloStart = source.indexOf('if (event.type === "hello")');
+    const helloEnd = source.indexOf('if (event.type === "session_created")', helloStart);
+    const helloBranch = source.slice(helloStart, helloEnd);
+    expect(helloBranch).toContain("clearAllPendingCommands();");
+    expect(helloBranch).toContain("applySnapshot(event.snapshot);");
+  });
+
   it("renders live task usage and session context without replacing final telemetry", () => {
     expect(source).toContain("<ContextUsageBar session={activeSession}");
     expect(source).toContain("<LiveTurnUsage turn={turn}");
