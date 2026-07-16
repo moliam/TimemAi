@@ -3793,13 +3793,6 @@ fn startup_control_hint() -> &'static str {
     "输入 /help 查看控制命令。"
 }
 
-fn epoch_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
 fn time_label() -> String {
     local_time_label()
 }
