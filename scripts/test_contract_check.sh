@@ -351,6 +351,7 @@ web_ui_required_test_names=(
   "uses an explicit session-created event and session-scoped inline decisions"
   "does not turn work-instruction bookkeeping into user-visible activity"
   "pairs duplicate concurrent actions in order without collapsing either invocation"
+  "pairs action lifecycle events even when input object key order changes"
   "applies a model response only to the session named by the core topic"
   "applies a structured cwd update only to the matching session"
   "keeps a matched agent working without changing unrelated sessions"
