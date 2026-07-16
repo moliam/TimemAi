@@ -19,6 +19,16 @@ impl ActionRuntime for ToggleCancelRuntime<'_> {
     }
 }
 
+struct CancelAfterFileRuntime {
+    path: PathBuf,
+}
+
+impl ActionRuntime for CancelAfterFileRuntime {
+    fn should_cancel(&mut self) -> bool {
+        self.path.exists()
+    }
+}
+
 #[derive(Default)]
 struct CancelAfterLongRunningPromptRuntime {
     prompts: Vec<LongRunningCommandStatus>,
@@ -125,9 +135,8 @@ fn normal_bash_cancel_terminates_the_entire_process_group() {
         "bash -c 'trap \"\" TERM; tail -f /dev/null' & echo $! > {}; wait",
         shell_quote_path(&child_pid_file)
     );
-    let cancelled = AtomicBool::new(false);
-    let mut runtime = ToggleCancelRuntime {
-        cancelled: &cancelled,
+    let mut runtime = CancelAfterFileRuntime {
+        path: child_pid_file.clone(),
     };
 
     let started = Instant::now();
@@ -633,6 +642,14 @@ fn process_running_treats_zombie_as_not_running() {
         "exited child pid {pid} should not be reported as running"
     );
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn terminate_process_ignores_missing_pid_without_signalling_broadly() {
+    let missing_pid = i32::MAX as u32;
+    terminate_process(missing_pid);
+    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
 }
 
 #[test]

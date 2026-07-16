@@ -1544,47 +1544,71 @@ fn shell_quote_path(path: &Path) -> String {
 fn terminate_process(pid: u32) {
     #[cfg(unix)]
     {
-        let group = format!("-{}", pid);
+        terminate_process_unix(pid);
+    }
+    #[cfg(not(unix))]
+    {
         let status = Command::new("/bin/kill")
             .arg("-TERM")
-            .arg(&group)
+            .arg(pid.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
         if status.as_ref().is_ok_and(|s| s.success()) {
             thread::sleep(Duration::from_millis(100));
-            if process_group_running(pid) {
+            if process_running(pid) {
                 let _ = Command::new("/bin/kill")
                     .arg("-KILL")
-                    .arg(&group)
+                    .arg(pid.to_string())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
             }
-            return;
-        }
-    }
-    let status = Command::new("/bin/kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if status.as_ref().is_ok_and(|s| s.success()) {
-        thread::sleep(Duration::from_millis(100));
-        if process_running(pid) {
-            let _ = Command::new("/bin/kill")
-                .arg("-KILL")
-                .arg(pid.to_string())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
         }
     }
 }
 
 #[cfg(unix)]
+fn terminate_process_unix(pid: u32) {
+    let pid = pid as libc::pid_t;
+    let pgid = unsafe { libc::getpgid(pid) };
+    if pgid < 0 {
+        return;
+    }
+    if pgid == pid && pgid != unsafe { libc::getpgrp() } {
+        signal_process_group(pgid, libc::SIGTERM);
+        thread::sleep(Duration::from_millis(100));
+        if process_group_running(pgid as u32) {
+            signal_process_group(pgid, libc::SIGKILL);
+        }
+        return;
+    }
+    signal_process(pid, libc::SIGTERM);
+    thread::sleep(Duration::from_millis(100));
+    if process_running(pid as u32) {
+        signal_process(pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(unix)]
+fn signal_process(pid: libc::pid_t, signal: libc::c_int) {
+    if pid > 1 && pid != unsafe { libc::getpid() } {
+        let _ = unsafe { libc::kill(pid, signal) };
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
+    if pgid > 1 && pgid != unsafe { libc::getpgrp() } {
+        let _ = unsafe { libc::kill(-pgid, signal) };
+    }
+}
+
+#[cfg(unix)]
 fn process_group_running(group_leader_pid: u32) -> bool {
+    if group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
+        return false;
+    }
     let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
