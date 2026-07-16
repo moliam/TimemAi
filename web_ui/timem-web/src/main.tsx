@@ -632,7 +632,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
     }
   };
 
-  return <ThreadPrimitive.Root className="aui-thread">
+  return <ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">
     <ThreadPrimitive.Viewport
       ref={viewportRef}
       className="chat-scroll aui-thread-viewport"
