@@ -8,9 +8,9 @@ pub(crate) fn formatted_response_trailer(
     assistant_heading: &str,
 ) -> String {
     let instruction = if protocol_language.trim().eq_ignore_ascii_case("XML") {
-        "Please continue your ID's response only in XML:"
+        "Now please continue your ID's response part in XML as required in protocol:"
     } else {
-        "Please continue your ID's response only:"
+        "Now please continue your ID's response part as required in protocol:"
     };
     format!("{instruction}\n## {}", assistant_heading.trim())
 }
@@ -18,8 +18,8 @@ pub(crate) fn formatted_response_trailer(
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
     let trimmed = rendered_prompt.trim_end();
     let Some(trailer_start) = [
-        "\n\nPlease continue your ID's response only:\n## ",
-        "\n\nPlease continue your ID's response only in XML:\n## ",
+        "\n\nNow please continue your ID's response part as required in protocol:\n## ",
+        "\n\nNow please continue your ID's response part in XML as required in protocol:\n## ",
     ]
     .into_iter()
     .filter_map(|prefix| trimmed.rfind(prefix))
