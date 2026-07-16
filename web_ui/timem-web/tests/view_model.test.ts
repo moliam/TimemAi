@@ -308,6 +308,29 @@ describe("web topic view model", () => {
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
   });
 
+  it("pairs action lifecycle events when nested input object key order changes", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_1", "start", "running", {
+        args: {
+          cmd: "printf ok",
+          env: { BETA: "2", ALPHA: "1" },
+          files: [{ path: "b.txt", mode: "read" }, { mode: "write", path: "a.txt" }],
+        },
+        timeout_ms: 5000,
+      }),
+      actionEvent("event_2", "finish", "completed", {
+        timeout_ms: 5000,
+        args: {
+          files: [{ mode: "read", path: "b.txt" }, { path: "a.txt", mode: "write" }],
+          env: { ALPHA: "1", BETA: "2" },
+          cmd: "printf ok",
+        },
+      }),
+    ]);
+    expect(events).toHaveLength(1);
+    expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
+  });
+
   it("keeps a background action visibly active after its launch event finishes", () => {
     const events = coalesceActionLifecycle([
       actionEvent("event_1", "start", "running", { cmd: "cargo test", background: true }),
