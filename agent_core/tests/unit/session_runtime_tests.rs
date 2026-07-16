@@ -84,6 +84,28 @@ fn shell_quote(path: &Path) -> String {
 
 #[cfg(unix)]
 fn process_is_executing(pid: u32) -> bool {
+    let mut status = 0;
+    let wait = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if wait == pid as libc::pid_t {
+        return false;
+    }
+    if wait == 0 {
+        return true;
+    }
+    if let Ok(output) = std::process::Command::new("/bin/ps")
+        .arg("-o")
+        .arg("stat=")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output()
+    {
+        if !output.status.success() {
+            return false;
+        }
+        let stat = String::from_utf8_lossy(&output.stdout);
+        let state = stat.trim();
+        return !state.is_empty() && !state.starts_with('Z') && !state.contains('Z');
+    }
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
