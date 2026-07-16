@@ -180,6 +180,22 @@ describe("web topic view model", () => {
     expect(composerSendDecision(current, "do not race stop", true)).toEqual({ kind: "skip", reason: "cancelling" });
   });
 
+  it("sends a new task after a cancelled active turn is marked finished", () => {
+    const active = upsertTurn(session("session_1"), turn("turn_cancelled"));
+    const working = updateSessionWorkerState(active, active.primary_worker_id, "working");
+    const finished = finishTurn(working, "turn_cancelled", {
+      elapsed_ms: 42_000,
+      stop_reason: "CancelledByUser",
+    });
+
+    expect(composerSendDecision(finished, "resume as a fresh task", false)).toEqual({
+      kind: "send",
+      text: "resume as a fresh task",
+      clearDraftOnSuccess: true,
+      command: { type: "turn_submit", session_id: "session_1", text: "resume as a fresh task" },
+    });
+  });
+
   it("does not send new tasks or supplements while a mem switch is pending", () => {
     expect(composerSendDecision(session("session_1"), "new task", false, true)).toEqual({ kind: "skip", reason: "mem_switching" });
     expect(composerSendDecision({ ...session("session_1"), state: "working" }, "late supplement", false, true)).toEqual({ kind: "skip", reason: "mem_switching" });
