@@ -685,6 +685,47 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
 }
 
 #[test]
+fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_10".to_string(),
+            created_at_ms: 10,
+            content: "first by time".to_string(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::Assistant,
+            turn_id: "turn_10".to_string(),
+            created_at_ms: 11,
+            content: "first answer".to_string(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_2".to_string(),
+            created_at_ms: 20,
+            content: "second by time".to_string(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::Assistant,
+            turn_id: "turn_2".to_string(),
+            created_at_ms: 21,
+            content: "second answer".to_string(),
+        },
+    ];
+
+    let turns = restored_turns_from_history_records(&records);
+    assert_eq!(
+        turns
+            .iter()
+            .map(|turn| turn.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["turn_10", "turn_2"]
+    );
+    assert_eq!(turns[0].user_entries[0].text, "first by time");
+    assert_eq!(turns[1].user_entries[0].text, "second by time");
+}
+
+#[test]
 fn history_page_command_loads_older_records_by_cursor() {
     let state = routing_test_state();
     let session_id = "session_a";
