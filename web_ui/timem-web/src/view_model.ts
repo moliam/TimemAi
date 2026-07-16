@@ -24,7 +24,7 @@ export function tailPath(path: string, maxChars = 28) {
 }
 
 export type ComposerSendDecision =
-  | { kind: "skip"; reason: "no_session" | "empty_text" | "cancelling" }
+  | { kind: "skip"; reason: "no_session" | "empty_text" | "cancelling" | "mem_switching" }
   | { kind: "send"; command: Extract<ClientCommand, { type: "turn_submit" | "turn_supplement" }>; text: string; clearDraftOnSuccess: true };
 
 export type DraftSubmissionLock = { current: boolean };
@@ -128,10 +128,12 @@ export function composerSendDecision(
   session: Pick<Session, "session_id" | "state"> | undefined,
   text: string,
   isCancelling: boolean,
+  isMemSwitching = false,
 ): ComposerSendDecision {
   if (!session) return { kind: "skip", reason: "no_session" };
   const trimmed = text.trim();
   if (!trimmed) return { kind: "skip", reason: "empty_text" };
+  if (isMemSwitching) return { kind: "skip", reason: "mem_switching" };
   if (isCancelling) return { kind: "skip", reason: "cancelling" };
   return {
     kind: "send",
