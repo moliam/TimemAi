@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "== shell scripts syntax =="
-bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/ci.sh
+bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_license_check.sh scripts/ci.sh
 python3 -m py_compile scripts/fake_openai_provider.py
 
 echo "== module boundary =="
@@ -34,6 +34,9 @@ cargo test --workspace
 
 echo "== web dependencies =="
 pnpm --dir web_ui/timem-web install --frozen-lockfile
+
+echo "== web dependency licenses =="
+scripts/web_license_check.sh
 
 echo "== web tests =="
 pnpm --dir web_ui/timem-web test
