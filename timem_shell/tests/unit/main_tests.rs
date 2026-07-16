@@ -1659,10 +1659,7 @@ fn paste_marker_matching_ignores_stale_preserved_records_when_placeholder_matche
             content: "new-a\nnew-b\nnew-c".to_string(),
         },
     ];
-    let raw = format!(
-        "问题 {}",
-        format!("{PASTE_START_MARKER}[ pasted 3 lines ]{PASTE_END_MARKER}")
-    );
+    let raw = format!("问题 {PASTE_START_MARKER}[ pasted 3 lines ]{PASTE_END_MARKER}");
 
     assert_eq!(paste_recovery_summary_from_markers(&raw, &records), None);
     assert_eq!(

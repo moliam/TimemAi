@@ -856,12 +856,10 @@ fn fit_with_ellipsis(text: &str, width: usize) -> String {
 
 fn pad_display_width(text: &str, width: usize) -> String {
     let current = display_width(text);
-    if current > width {
-        truncate_display_width(text, width)
-    } else if current == width {
-        text.to_string()
-    } else {
-        format!("{}{}", text, " ".repeat(width - current))
+    match current.cmp(&width) {
+        std::cmp::Ordering::Greater => truncate_display_width(text, width),
+        std::cmp::Ordering::Equal => text.to_string(),
+        std::cmp::Ordering::Less => format!("{}{}", text, " ".repeat(width - current)),
     }
 }
 

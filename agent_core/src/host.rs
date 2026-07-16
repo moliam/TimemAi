@@ -389,7 +389,7 @@ pub struct CoreWorkInstructionLoadTopic {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CoreGlobalWorkerStatus {
     pub working_worker_count: usize,
 }
@@ -398,14 +398,6 @@ impl CoreGlobalWorkerStatus {
     pub fn new(working_worker_count: usize) -> Self {
         Self {
             working_worker_count,
-        }
-    }
-}
-
-impl Default for CoreGlobalWorkerStatus {
-    fn default() -> Self {
-        Self {
-            working_worker_count: 0,
         }
     }
 }
@@ -791,9 +783,7 @@ impl CoreTopicEvent {
         if self.topic.name != CORE_TOPIC_WORK_INSTRUCTION_LOAD {
             return None;
         }
-        if self.payload.get("status").is_none() {
-            return None;
-        }
+        self.payload.get("status")?;
         Some(CoreWorkInstructionLoadTopic {
             status: self.payload["status"].as_str()?.to_string(),
             directory: self.payload["directory"].as_str()?.to_string(),

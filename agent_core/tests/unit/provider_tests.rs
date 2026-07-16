@@ -283,12 +283,12 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
     assert_eq!(messages[1].get("cache_control"), None);
     assert_eq!(messages[2].get("cache_control"), None);
 
-    for idx in 3..=5 {
-        assert!(messages[idx]["content"]
+    for (idx, message) in messages.iter().enumerate().take(6).skip(3) {
+        assert!(message["content"]
             .as_str()
             .unwrap()
             .contains(&format!("delta {idx}")));
-        assert_eq!(messages[idx]["cache_control"]["type"], "ephemeral");
+        assert_eq!(message["cache_control"]["type"], "ephemeral");
     }
 }
 

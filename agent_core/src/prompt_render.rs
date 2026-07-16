@@ -106,7 +106,7 @@ pub(crate) fn render_prompt_with_rendered_static(
     assistant_heading: &str,
     protocol_language: &str,
 ) -> String {
-    let mut out = format!("{}", rendered_static_prompt);
+    let mut out = rendered_static_prompt.to_string();
 
     for delta in deltas {
         let slices = render_delta_slices(delta);

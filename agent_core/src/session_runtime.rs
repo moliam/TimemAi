@@ -299,7 +299,7 @@ pub fn run_session_turn_with_model_client(
     };
     outcome =
         outcome.with_running_jobs(core.refresh_running_shell_jobs_for_session(request.session));
-    if let Some(profiler) = profiler.as_deref_mut() {
+    if let Some(profiler) = profiler {
         profiler.record_turn(elapsed, model_wait_this_turn);
     }
     core.record_turn_final_audit(request.audit_file, request.session, &turn_id, &outcome);

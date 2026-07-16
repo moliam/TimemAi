@@ -2702,7 +2702,7 @@ impl WorkerTemplate {
             },
         );
         if let Ok(registry) =
-            CapabilityRegistry::builtin_with_overlay_dir(&self.data_dir.join("capabilities"))
+            CapabilityRegistry::builtin_with_overlay_dir(self.data_dir.join("capabilities"))
         {
             core.set_capability_registry(registry);
         }
@@ -3188,7 +3188,12 @@ fn generate_token() -> Result<String, String> {
     std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(|error| format!("secure_access_token_generation_failed:{error}"))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut token, "{byte:02x}");
+    }
+    Ok(token)
 }
 
 fn nonempty_text(text: String, label: &str) -> Result<String, String> {

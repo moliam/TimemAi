@@ -1353,11 +1353,11 @@ fn execute_one_bash_structured_with_prompt_after(
 fn long_running_command_prompt_after() -> Duration {
     #[cfg(test)]
     {
-        return Duration::from_millis(
+        Duration::from_millis(
             LONG_RUNNING_COMMAND_PROMPT_AFTER_MS
                 .load(Ordering::Relaxed)
                 .max(1),
-        );
+        )
     }
     #[cfg(not(test))]
     {
@@ -1507,25 +1507,22 @@ fn process_running(pid: u32) -> bool {
         if wait == 0 {
             return true;
         }
-        match Command::new("/bin/ps")
+        if let Ok(output) = Command::new("/bin/ps")
             .arg("-o")
             .arg("stat=")
             .arg("-p")
             .arg(pid.to_string())
             .output()
         {
-            Ok(output) => {
-                if !output.status.success() {
-                    return false;
-                }
-                let stat = String::from_utf8_lossy(&output.stdout);
-                let state = stat.trim();
-                if state.starts_with('Z') || state.contains('Z') {
-                    return false;
-                }
-                return !state.is_empty();
+            if !output.status.success() {
+                return false;
             }
-            Err(_) => {}
+            let stat = String::from_utf8_lossy(&output.stdout);
+            let state = stat.trim();
+            if state.starts_with('Z') || state.contains('Z') {
+                return false;
+            }
+            return !state.is_empty();
         }
     }
     Command::new("/bin/kill")
