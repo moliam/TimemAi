@@ -28,6 +28,8 @@ export type ComposerSendDecision =
   | { kind: "send"; command: Extract<ClientCommand, { type: "turn_submit" | "turn_supplement" }>; text: string; clearDraftOnSuccess: true };
 
 export type DraftSubmissionLock = { current: boolean };
+export type SessionDraftSubmissionLocks = { current: Set<string> };
+export type SessionDrafts = Record<string, string>;
 
 export function reserveDraftSubmission(lock: DraftSubmissionLock, draft: string): string | null {
   if (lock.current) return null;
@@ -46,6 +48,44 @@ export function finishDraftSubmission(
   lock.current = false;
   if (!sent || submittedText === null) return draft;
   return draft.trim() === submittedText ? "" : draft;
+}
+
+export function draftForSession(drafts: SessionDrafts, sessionId: string | undefined): string {
+  return sessionId ? drafts[sessionId] ?? "" : "";
+}
+
+export function setSessionDraft(drafts: SessionDrafts, sessionId: string | undefined, value: string): SessionDrafts {
+  if (!sessionId) return drafts;
+  if (!value) {
+    const { [sessionId]: _removed, ...remaining } = drafts;
+    return remaining;
+  }
+  return { ...drafts, [sessionId]: value };
+}
+
+export function reserveSessionDraftSubmission(
+  locks: SessionDraftSubmissionLocks,
+  sessionId: string | undefined,
+  drafts: SessionDrafts,
+): { sessionId: string; text: string } | null {
+  if (!sessionId || locks.current.has(sessionId)) return null;
+  const text = draftForSession(drafts, sessionId).trim();
+  if (!text) return null;
+  locks.current.add(sessionId);
+  return { sessionId, text };
+}
+
+export function finishSessionDraftSubmission(
+  locks: SessionDraftSubmissionLocks,
+  drafts: SessionDrafts,
+  sessionId: string,
+  submittedText: string,
+  sent: boolean,
+): SessionDrafts {
+  locks.current.delete(sessionId);
+  const current = draftForSession(drafts, sessionId);
+  if (!sent) return drafts;
+  return current.trim() === submittedText ? setSessionDraft(drafts, sessionId, "") : drafts;
 }
 
 export function composerSendDecision(
