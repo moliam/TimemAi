@@ -1,16 +1,16 @@
 use super::{
     active_elapsed_secs, apply_config_value, boxed_config_table_at_width, cli_help_text,
-    config_field_value, consume_turn_cancel_request, display_width, epoch_millis,
-    load_or_create_shell_session, merge_queued_input, next_paste_recovery_choice,
-    normalize_newlines, paste_marker_ranges, paste_marker_segments,
-    paste_recovery_return_edit_clear_lines, paste_recovery_summary_from_markers, pasted_line_count,
-    prev_paste_recovery_choice, push_thinking_supplement_bytes, queued_input_drain_from_bytes,
-    queued_text_to_supplements, random_spinner_tick, raw_multiline_paste_display,
-    raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
-    read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
-    reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
-    render_config_menu, render_expand_output_choices, render_expand_output_prompt,
-    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
+    config_field_value, consume_turn_cancel_request, display_width, load_or_create_shell_session,
+    merge_queued_input, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
+    paste_marker_segments, paste_recovery_return_edit_clear_lines,
+    paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
+    push_thinking_supplement_bytes, queued_input_drain_from_bytes, queued_text_to_supplements,
+    random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
+    read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
+    reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
+    render_approval_choices, render_config_apply_report, render_config_menu,
+    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
+    render_paste_recovery_choices, render_paste_recovery_prompt,
     render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
     render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
     render_stale_context_prompt, render_startup_banner, render_startup_status_block,
@@ -29,6 +29,14 @@ use super::{
     TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
     STATIC_PROMPT, TURN_CANCEL_REQUESTED,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn epoch_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
 use agent_core::{
     session_store::{SessionStore, StoredSession, StoredSessionState},
     stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
