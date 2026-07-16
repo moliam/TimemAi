@@ -88,6 +88,35 @@ export function finishSessionDraftSubmission(
   return current.trim() === submittedText ? setSessionDraft(drafts, sessionId, "") : drafts;
 }
 
+export function pruneSessionDrafts(drafts: SessionDrafts, liveSessionIds: Iterable<string>): SessionDrafts {
+  const live = new Set(liveSessionIds);
+  let changed = false;
+  const next: SessionDrafts = {};
+  for (const [sessionId, draft] of Object.entries(drafts)) {
+    if (live.has(sessionId)) {
+      next[sessionId] = draft;
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? next : drafts;
+}
+
+export function pruneSessionSubmissionLocks(
+  locks: SessionDraftSubmissionLocks,
+  liveSessionIds: Iterable<string>,
+): boolean {
+  const live = new Set(liveSessionIds);
+  let changed = false;
+  for (const sessionId of Array.from(locks.current)) {
+    if (!live.has(sessionId)) {
+      locks.current.delete(sessionId);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export function composerSendDecision(
   session: Pick<Session, "session_id" | "state"> | undefined,
   text: string,
