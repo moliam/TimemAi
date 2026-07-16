@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -988,10 +988,6 @@ function MemSwitchDialog({ current, pending, onClose, onSwitch }: {
     if (event.key === "Enter" && !pending && !invalid) onSwitch(cleaned);
     if (event.key === "Escape") onClose();
   }}/></label><p className="mem-hint">Use a space name, not a filesystem path. Examples: <code>.test_mem</code>, <code>project_a</code>.</p><div className="decision-actions"><button className="secondary" disabled={pending} onClick={onClose}>Cancel</button><button className="primary" disabled={pending || invalid || cleaned === current} onClick={() => onSwitch(cleaned)}>{pending ? "Switching…" : "Switch mem"}</button></div></section></div>;
-}
-
-function decisionKey(decision: Decision) {
-  return `${decision.event.session_id}:${decision.event.topic.name}:${String(decision.event.payload.request_id ?? "")}`;
 }
 
 function InlineDecision({ decision, pending, locked, position, total, onReply }: { decision: Decision; pending: boolean; locked: boolean; position: number; total: number; onReply: (decision: "accept" | "decline") => void }) {

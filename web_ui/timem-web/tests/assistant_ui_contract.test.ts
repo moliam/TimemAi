@@ -337,6 +337,14 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('if (sendCommand({ type: "session_create"');
   });
 
+  it("uses the shared worker-aware decision key for inline request pending state", () => {
+    expect(source).toContain("decisionKey, draftForSession");
+    expect(source).toContain("pendingDecisionKeys.has(decisionKey(decision))");
+    expect(source).not.toContain("function decisionKey(decision: Decision)");
+    expect(viewModelSource).toContain("decision.event.context_id ?? \"\"");
+    expect(viewModelSource).toContain("decision.event.worker_id ?? \"\"");
+  });
+
   it("backs off and reconnects the WebSocket instead of only changing the label", () => {
     expect(source).toContain("const connect = () =>");
     expect(source).toContain("Math.min(10_000, 500 * 2 ** Math.min(retryAttempt, 5))");
