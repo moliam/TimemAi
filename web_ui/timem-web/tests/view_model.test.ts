@@ -206,6 +206,23 @@ describe("web topic view model", () => {
     expect(composerSendDecision(current, "do not race stop", true)).toEqual({ kind: "skip", reason: "cancelling" });
   });
 
+  it("keeps draft text and releases the pending guard when cancellation blocks a reserved send", () => {
+    let drafts = { session_1: "human clicked send while stop is pending" };
+    const locks = { current: new Set<string>() };
+    const reserved = reserveSessionDraftSubmission(locks, "session_1", drafts);
+    expect(reserved).toEqual({ sessionId: "session_1", text: "human clicked send while stop is pending" });
+
+    const decision = composerSendDecision({ ...session("session_1"), state: "working" }, reserved!.text, true);
+    expect(decision).toEqual({ kind: "skip", reason: "cancelling" });
+
+    drafts = finishSessionDraftSubmission(locks, drafts, reserved!.sessionId, reserved!.text, false);
+    expect(draftForSession(drafts, "session_1")).toBe("human clicked send while stop is pending");
+    expect(Array.from(locks.current)).toEqual([]);
+
+    const retryAfterCancelSettles = reserveSessionDraftSubmission(locks, "session_1", drafts);
+    expect(retryAfterCancelSettles).toEqual({ sessionId: "session_1", text: "human clicked send while stop is pending" });
+  });
+
   it("sends a new task after a cancelled active turn is marked finished", () => {
     const active = upsertTurn(session("session_1"), turn("turn_cancelled"));
     const working = updateSessionWorkerState(active, active.primary_worker_id, "working");
