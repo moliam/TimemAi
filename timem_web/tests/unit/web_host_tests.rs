@@ -2104,6 +2104,40 @@ fn active_turn_supplement_consumes_pending_attachments_into_the_same_turn() {
 }
 
 #[test]
+fn failed_active_turn_supplement_does_not_drop_pending_attachments() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "SUPPLEMENT_ATTACHMENT_ROLLBACK");
+    let turn = start_web_turn(&state, &session_id, "inspect initial state").unwrap();
+    let attachment = WebAttachment {
+        id: "upload_race".to_string(),
+        name: "race-context.md".to_string(),
+        path: "/tmp/timem-web/race-context.md".to_string(),
+        bytes: 128,
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.attachments.push(attachment.clone());
+        session
+            .turns
+            .retain(|candidate| candidate.turn_id != turn.turn_id);
+    }
+
+    assert_eq!(
+        append_turn_supplement_with_pending_attachments(
+            &state,
+            &session_id,
+            "supplement during stale active turn".to_string(),
+        )
+        .unwrap_err(),
+        "active_turn_not_found"
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions[&session_id].attachments, vec![attachment]);
+}
+
+#[test]
 fn stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "STALE_SUPPLEMENT_ATTACHMENT");
