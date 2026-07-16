@@ -78,6 +78,7 @@ required_patterns=(
   "performance_guard_topic_generation_for_many_actions_is_bounded"
   "performance_guard_many_observation_events_render_bounded"
   "session_turn_preserves_cache_plan_with_xml_response_protocol"
+  "restored_web_turns_follow_history_time_not_turn_id_lexical_order"
 )
 
 for pattern in "${required_patterns[@]}"; do
