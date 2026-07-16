@@ -38,7 +38,10 @@ fn epoch_millis() -> u128 {
         .as_millis()
 }
 use agent_core::{
-    session_store::{SessionStore, StoredSession, StoredSessionState},
+    session_store::{
+        ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole, SessionStore, StoredSession,
+        StoredSessionState,
+    },
     stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
     OutputExpansionRequest, ResponseProtocolKind, RoundLimitDecisionRequest,
     RuntimeConfigApplyError, StaleContextDecisionRequest, WorkInstructionLoadMode,
@@ -53,6 +56,7 @@ use reedline::{
     EditCommand, EditMode, Highlighter, KeyCode, KeyModifiers, Prompt, ReedlineEvent,
     ReedlineRawEvent,
 };
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
@@ -2042,5 +2046,113 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     assert!(
         take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending).is_none()
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_can_resume_web_style_session_history() {
+    let root = std::env::temp_dir().join(format!("timem_shell_cross_host_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    let session_id = "web_session_handoff";
+    let config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+    };
+    store
+        .upsert_session(&StoredSession {
+            session_id: session_id.to_string(),
+            display_name: "Session0".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 4,
+            current_dir: workspace.display().to_string(),
+            profile: shell_session_profile(&config),
+            env: shell_session_env_values(
+                &config,
+                BashApprovalMode::Approve,
+                WorkInstructionLoadMode::Silent,
+            ),
+            state: StoredSessionState::Ready,
+            last_turn_id: Some("turn_web_1".to_string()),
+            raw_chat_history_path: store
+                .history_path_for_session(session_id)
+                .display()
+                .to_string(),
+        })
+        .unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "turn_web_1".to_string(),
+                created_at_ms: 2,
+                content: "web user question".to_string(),
+            },
+        )
+        .unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id: "turn_web_1".to_string(),
+                created_at_ms: 3,
+                kind: ChatHistoryEventKind::ActionResult,
+                content: "Action result: run_bash\nok".to_string(),
+                extra: BTreeMap::from([(
+                    "payload".to_string(),
+                    serde_json::json!({"action": "run_bash", "status": "completed"}),
+                )]),
+            },
+        )
+        .unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::Assistant,
+                turn_id: "turn_web_1".to_string(),
+                created_at_ms: 4,
+                content: "web final answer".to_string(),
+            },
+        )
+        .unwrap();
+
+    let loaded = load_or_create_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &workspace,
+    );
+    assert_eq!(loaded.session_id, session_id);
+    assert_eq!(loaded.display_name, "Session0");
+
+    let history = store.read_history_page(session_id, None, 200).unwrap();
+    assert_eq!(history.records.len(), 3);
+    assert_eq!(history.records[0].turn_id(), "turn_web_1");
+    assert!(serde_json::to_string(&history.records[1])
+        .unwrap()
+        .contains("\"kind\":\"action_result\""));
+
+    let mut pending = true;
+    let notice = take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending)
+        .expect("shell should inject a cross-host resume notice");
+    assert!(notice.contains("Refer to chat history when necessary:"));
+    assert!(notice.contains("record types:"));
+    assert!(notice.contains("\"type\":\"message\""));
+    assert!(notice.contains("\"type\":\"event\""));
+    assert!(notice.contains("Current cwd:"));
+    assert!(notice.contains("raw_chat_history.jsonl"));
+
     fs::remove_dir_all(root).unwrap();
 }
