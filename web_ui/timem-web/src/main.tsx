@@ -1,13 +1,13 @@
 import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
-import { ArrowDown, Check, CheckCheck, ChevronRight, CircleStop, Copy, Cpu, FolderOpen, Gauge, LoaderCircle, Menu, Palette, Paperclip, PanelRight, Pencil, Plus, Send, Settings2, Sparkles, Terminal, Wrench, X } from "lucide-react";
+import { ArrowDown, BookOpen, Check, CheckCheck, ChevronRight, CircleStop, Copy, Cpu, FolderOpen, FolderTree, Gauge, LoaderCircle, Menu, Palette, Paperclip, PanelRight, Pencil, Plus, Search, Send, Settings2, Sparkles, Terminal, Wrench, X } from "lucide-react";
 import { Children, Dispatch, isValidElement, MutableRefObject, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
+import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -42,6 +42,13 @@ function TimemApp() {
   const [connected, setConnected] = useState(false);
   // The activity feed is a diagnostic view. Keep the normal chat workspace focused.
   const [showActivity, setShowActivity] = useState(false);
+  const [sidePanelTab, setSidePanelTab] = useState<"tools" | "activity">("tools");
+  const [toolSearchQuery, setToolSearchQuery] = useState("");
+  const [toolSearchResults, setToolSearchResults] = useState<Record<string, ToolSummary[]>>({});
+  const [selectedTool, setSelectedTool] = useState<ToolDetail | null>(null);
+  const [toolCountPulseSessionId, setToolCountPulseSessionId] = useState("");
+  const [pendingToolgenSessionIds, setPendingToolgenSessionIds] = useState<Set<string>>(() => new Set());
+  const [toolgenDialog, setToolgenDialog] = useState<{ sessionId: string; turnId: string } | null>(null);
   const [showMobileSessions, setShowMobileSessions] = useState(false);
   const [showRuntime, setShowRuntime] = useState(false);
   const [showAppearance, setShowAppearance] = useState(false);
@@ -52,6 +59,10 @@ function TimemApp() {
   const [renameDraft, setRenameDraft] = useState("");
   const [server, setServer] = useState<Snapshot["server"] | null>(null);
   const socket = useRef<WebSocket | null>(null);
+  const activeSessionIdRef = useRef("");
+  const toolSearchQueryRef = useRef("");
+  const selectedToolRef = useRef<ToolDetail | null>(null);
+  const toolCountBySessionRef = useRef<Map<string, number>>(new Map());
   const cancellingSessionIds = useRef<Set<string>>(new Set());
   const [cancellingSessionIdSet, setCancellingSessionIdSet] = useState<Set<string>>(() => new Set());
   const [creatingSession, setCreatingSession] = useState(false);
@@ -118,6 +129,7 @@ function TimemApp() {
     setPendingRenameSessionIds(new Set());
     setPendingRuntimeKeys(new Set());
     setPendingHistorySessionIds(new Set());
+    setPendingToolgenSessionIds(new Set());
     setPendingMemSwitch(false);
   }, []);
 
@@ -164,6 +176,7 @@ function TimemApp() {
   }, [addPendingKey, pendingMemSwitch, removePendingKey, renameDraft, sendCommand]);
 
   const applySnapshot = useCallback((snapshot: Snapshot) => {
+    toolCountBySessionRef.current = new Map(snapshot.sessions.map((session) => [session.session_id, session.tools.length]));
     setServer(snapshot.server);
     setSessions(snapshot.sessions.map(boundSessionHistory));
     setActiveSessionId((current) => resolveActiveSessionId(current, snapshot.sessions));
@@ -180,6 +193,7 @@ function TimemApp() {
       creatingSessionRef.current = false;
       setCreatingSession(false);
       setSessions((current) => upsertSession(current, event.session));
+      toolCountBySessionRef.current.set(event.session.session_id, event.session.tools.length);
       setActiveSessionId(event.session.session_id);
       return;
     }
@@ -238,6 +252,30 @@ function TimemApp() {
         : session));
       return;
     }
+    if (event.type === "tool_repo_updated") {
+      const previousCount = toolCountBySessionRef.current.get(event.session_id) ?? 0;
+      toolCountBySessionRef.current.set(event.session_id, event.tools.length);
+      if (event.tools.length > previousCount) {
+        setToolCountPulseSessionId(event.session_id);
+        window.setTimeout(() => setToolCountPulseSessionId((value) => value === event.session_id ? "" : value), 2400);
+      }
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? { ...session, tools: event.tools }
+        : session));
+      setToolSearchResults((current) => ({ ...current, [event.session_id]: event.tools }));
+      const selected = selectedToolRef.current;
+      if (selected && !event.tools.some((tool) => tool.tool_id === selected.summary.tool_id)) setSelectedTool(null);
+      return;
+    }
+    if (event.type === "tool_repo_search_result") {
+      if (event.session_id !== activeSessionIdRef.current || event.query !== toolSearchQueryRef.current) return;
+      setToolSearchResults((current) => ({ ...current, [event.session_id]: event.tools }));
+      return;
+    }
+    if (event.type === "tool_repo_detail") {
+      if (event.session_id === activeSessionIdRef.current) setSelectedTool(event.detail);
+      return;
+    }
     if (event.type === "worker_activity") {
       const kind = String(event.event.kind ?? "worker_event");
       if (kind !== "model_request" && kind !== "model_response") {
@@ -260,6 +298,11 @@ function TimemApp() {
       return;
     }
     if (event.type === "turn_finished") {
+      setPendingToolgenSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(event.session_id);
+        return next;
+      });
       cancellingSessionIds.current.delete(event.session_id);
       setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
@@ -270,7 +313,7 @@ function TimemApp() {
     if (event.type !== "core_topic") return;
     const topic = event.event;
     const activity = activityFromTopic(topic);
-    if (activity) setActivities((current) => [activity, ...current].slice(0, MAX_ACTIVITY_ITEMS));
+    if (activity) setActivities((current) => [activity, ...current.filter((item) => !(activity.kind === "toolgen" && item.kind === "toolgen" && item.sessionId === activity.sessionId))].slice(0, MAX_ACTIVITY_ITEMS));
     setSessions((current) => current.map((session) => applyCoreTopicToSession(
       appendTurnEvent(session, event.turn_id, { event_id: event.turn_event_id ?? crypto.randomUUID(), source: "core_topic", payload: topic as unknown as Record<string, unknown>, created_at_ms: Date.now() }),
       topic,
@@ -289,11 +332,36 @@ function TimemApp() {
         const ordinal = typeof item.ordinal === "number" ? item.ordinal : 0;
         setSessions((current) => current.some((session) => session.session_id === sessionId)
           ? current
-          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
+          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, tools: [], contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
         setActiveSessionId((current) => current || sessionId);
       }
     }
-  }, [applySnapshot]);
+  }, [applySnapshot, clearAllPendingCommands, removePendingKey]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    toolSearchQueryRef.current = toolSearchQuery;
+  }, [toolSearchQuery]);
+
+  useEffect(() => {
+    selectedToolRef.current = selectedTool;
+  }, [selectedTool]);
+
+  useEffect(() => {
+    setSelectedTool(null);
+    setToolSearchQuery("");
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!showActivity || sidePanelTab !== "tools" || !activeSession) return;
+    const timer = window.setTimeout(() => {
+      sendCommand({ type: "tool_repo_search", session_id: activeSession.session_id, query: toolSearchQuery, limit: 200 });
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [activeSession?.session_id, showActivity, sidePanelTab, toolSearchQuery, sendCommand]);
 
   useEffect(() => {
     const token = queryToken();
@@ -418,7 +486,7 @@ function TimemApp() {
     <div className="app-shell">
       {showMobileSessions && <button className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => setShowMobileSessions(false)}/>}
       <aside className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}>
-        <div className="brand"><Sparkles size={18}/><span>Timem</span><small>local</small><button className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => setShowMobileSessions(false)}><X size={17}/></button></div>
+        <div className="brand"><Sparkles size={18}/><span>Timem</span><button className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => setShowMobileSessions(false)}><X size={17}/></button></div>
         <button className="new-session" disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); setShowMobileSessions(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
           {sessions.map((session) => <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""}`}>
@@ -457,7 +525,7 @@ function TimemApp() {
             <button title="Sessions" aria-label="Sessions" className="icon-button mobile-session-button" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
             <button title="Appearance" aria-label="Appearance" className={`icon-button ${showAppearance ? "selected" : ""}`} onClick={() => setShowAppearance((visible) => !visible)}><Palette size={17}/></button>
             <button title="Runtime information" className="icon-button" onClick={() => setShowRuntime((visible) => !visible)}><Settings2 size={17}/></button>
-            <button title="Activity panel" className={`icon-button ${showActivity ? "selected" : ""}`} onClick={() => setShowActivity((visible) => !visible)}><PanelRight size={17}/></button>
+            <button title="Session tools and activity" className={`icon-button ${showActivity ? "selected" : ""}`} onClick={() => setShowActivity((visible) => !visible)}><PanelRight size={17}/></button>
           </div>
         </header>
         {showAppearance && <AppearancePanel appearance={appearance} onChange={setAppearance} onClose={() => setShowAppearance(false)}/>}
@@ -481,6 +549,13 @@ function TimemApp() {
           loadingHistory={activeSession ? pendingHistorySessionIds.has(activeSession.session_id) : false}
           onLoadMoreHistory={loadMoreHistory}
           onSend={sendText}
+          toolCount={activeSession?.tools.length ?? 0}
+          toolCountPulse={toolCountPulseSessionId === activeSession?.session_id}
+          onOpenToolRepo={() => { setSidePanelTab("tools"); setShowActivity(true); }}
+          onRequestToolGen={(turnId) => {
+            if (!activeSession || activeSession.state === "working" || pendingMemSwitch || pendingToolgenSessionIds.has(activeSession.session_id)) return;
+            setToolgenDialog({ sessionId: activeSession.session_id, turnId });
+          }}
           onCancel={cancelActiveTurn}
           onUpload={uploadFile}
           onRemoveAttachment={(attachmentId) => {
@@ -504,10 +579,20 @@ function TimemApp() {
           }}
         />
       </main>
-      {showActivity && <aside className="activity-panel">
-        <header><button className="icon-button" title="Close activity panel" aria-label="Close activity panel" onClick={() => setShowActivity(false)}><X size={16}/></button></header>
-        <div className="activity-list">{sessionActivities.map((activity) => <div className={`activity ${activity.tone}`} key={activity.id}><span className="activity-mark">{activity.tone === "thinking" ? "✦" : activity.tone === "action" ? "↳" : activity.tone === "warning" ? "!" : activity.tone === "error" ? "×" : "i"}</span><div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="activity-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)} />}</div></div>)}</div>
-      </aside>}
+      {showActivity && <SessionSidePanel
+        tab={sidePanelTab}
+        onTabChange={setSidePanelTab}
+        onClose={() => setShowActivity(false)}
+        session={activeSession}
+        activities={sessionActivities}
+        searchQuery={toolSearchQuery}
+        onSearchQueryChange={setToolSearchQuery}
+        tools={activeSession ? (toolSearchResults[activeSession.session_id] ?? activeSession.tools) : []}
+        selectedTool={selectedTool}
+        onSelectTool={(toolId) => activeSession && sendCommand({ type: "tool_repo_detail", session_id: activeSession.session_id, tool_id: toolId })}
+        onRenameTool={(toolId, newName) => activeSession && sendCommand({ type: "tool_repo_rename", session_id: activeSession.session_id, tool_id: toolId, new_name: newName })}
+        onOpenTerminal={(toolId) => activeSession && sendCommand({ type: "tool_repo_open_terminal", session_id: activeSession.session_id, tool_id: toolId })}
+      />}
       {showNewSession && <NewSessionDialog workspaces={server?.workspace_dirs ?? []} runtimeDefaults={server?.session_env_defaults ?? {}} creating={creatingSession} onClose={() => { if (!creatingSessionRef.current) setShowNewSession(false); }} onCreate={(displayName, workspaceDir, env) => {
         if (pendingMemSwitch) return;
         if (creatingSessionRef.current) return;
@@ -529,16 +614,81 @@ function TimemApp() {
         } else {
           setPendingMemSwitch(false);
         }
-      }}/>}
+      }}
+      />}
+      {toolgenDialog && <ToolGenDialog
+        key={`${toolgenDialog.sessionId}:${toolgenDialog.turnId}`}
+        pending={pendingToolgenSessionIds.has(toolgenDialog.sessionId)}
+        onClose={() => { if (!pendingToolgenSessionIds.has(toolgenDialog.sessionId)) setToolgenDialog(null); }}
+        onSubmit={(text) => {
+          const request = toolgenDialog;
+          setPendingToolgenSessionIds((current) => new Set(current).add(request.sessionId));
+          if (sendCommand(manualToolGenCommand(request.sessionId, request.turnId, text))) {
+            setToolgenDialog(null);
+          } else {
+            setPendingToolgenSessionIds((current) => { const next = new Set(current); next.delete(request.sessionId); return next; });
+          }
+        }}
+      />}
     </div>
   </AssistantRuntimeProvider>;
+}
+
+function SessionSidePanel({ tab, onTabChange, onClose, session, activities, searchQuery, onSearchQueryChange, tools, selectedTool, onSelectTool, onRenameTool, onOpenTerminal }: {
+  tab: "tools" | "activity";
+  onTabChange: (tab: "tools" | "activity") => void;
+  onClose: () => void;
+  session: Session | undefined;
+  activities: Activity[];
+  searchQuery: string;
+  onSearchQueryChange: (query: string) => void;
+  tools: ToolSummary[];
+  selectedTool: ToolDetail | null;
+  onSelectTool: (toolId: string) => void;
+  onRenameTool: (toolId: string, newName: string) => boolean;
+  onOpenTerminal: (toolId: string) => boolean;
+}) {
+  const [sort, setSort] = useState<"time" | "type" | "language">("time");
+  const [renameToolId, setRenameToolId] = useState("");
+  const [renameValue, setRenameValue] = useState("");
+  const [contextMenu, setContextMenu] = useState<{ toolId: string; x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!contextMenu) return;
+    const dismiss = () => setContextMenu(null);
+    window.addEventListener("pointerdown", dismiss);
+    return () => window.removeEventListener("pointerdown", dismiss);
+  }, [contextMenu]);
+  const sortedTools = useMemo(() => [...tools].sort((left, right) => {
+    if (sort === "type") return left.tool_type.localeCompare(right.tool_type) || left.name.localeCompare(right.name);
+    if (sort === "language") return left.language.localeCompare(right.language) || left.name.localeCompare(right.name);
+    return right.updated_at_ms - left.updated_at_ms || left.name.localeCompare(right.name);
+  }), [sort, tools]);
+  const finishToolRename = (tool: ToolSummary) => {
+    const name = renameValue.trim();
+    if (name && name !== tool.name) onRenameTool(tool.tool_id, name);
+    setRenameToolId("");
+    setRenameValue("");
+  };
+  return <aside className="activity-panel session-side-panel">
+    <header className="side-panel-header"><div className="side-panel-tabs" role="tablist"><button role="tab" aria-selected={tab === "tools"} className={tab === "tools" ? "active" : ""} onClick={() => onTabChange("tools")}><FolderTree size={15}/>ToolRepo{session && <small>{session.tools.length}</small>}</button><button role="tab" aria-selected={tab === "activity"} className={tab === "activity" ? "active" : ""} onClick={() => onTabChange("activity")}>Activity</button></div><button className="icon-button" title="Close side panel" aria-label="Close side panel" onClick={onClose}><X size={16}/></button></header>
+    {tab === "activity" ? <div className="activity-list">{activities.map((activity) => <div className={`activity ${activity.tone}`} key={activity.id}><span className="activity-mark">{activity.tone === "thinking" ? "✦" : activity.tone === "action" ? "↳" : activity.tone === "warning" ? "!" : activity.tone === "error" ? "×" : "i"}</span><div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="activity-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}</div></div>)}</div> : <div className="toolrepo-panel">
+      <div className="toolrepo-controls"><label><Search size={14}/><input value={searchQuery} onChange={(event) => onSearchQueryChange(event.target.value)} placeholder="Search names and code" aria-label="Search ToolRepo"/></label><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)} aria-label="Sort ToolRepo"><option value="time">Recent</option><option value="type">Type</option><option value="language">Language</option></select></div>
+      {!sortedTools.length ? <div className="toolrepo-empty"><Wrench size={20}/><strong>No reusable tools yet</strong><span>Use ToolGen on a completed task to preserve a reusable script here.</span></div> : <div className="toolrepo-browser"><div className="toolrepo-list" role="tree">{sortedTools.map((tool) => <div className={`toolrepo-item ${selectedTool?.summary.tool_id === tool.tool_id ? "selected" : ""}`} role="treeitem" aria-selected={selectedTool?.summary.tool_id === tool.tool_id} key={tool.tool_id} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ toolId: tool.tool_id, x: event.clientX, y: event.clientY }); }}>
+        <button className="toolrepo-item-main" onClick={() => onSelectTool(tool.tool_id)}><ChevronRight size={13}/><span><strong>{tool.name}</strong><small>{tool.language} · {tool.tool_type}</small></span></button>
+        {renameToolId === tool.tool_id ? <input className="toolrepo-rename" autoFocus value={renameValue} aria-label={`Rename ${tool.name}`} onChange={(event) => setRenameValue(event.target.value)} onBlur={() => finishToolRename(tool)} onKeyDown={(event) => { if (event.key === "Enter") finishToolRename(tool); if (event.key === "Escape") { setRenameToolId(""); setRenameValue(""); } }}/> : <button className="toolrepo-edit" title={`Rename ${tool.name}`} aria-label={`Rename ${tool.name}`} onClick={() => { setRenameToolId(tool.tool_id); setRenameValue(tool.name); }}><Pencil size={12}/></button>}
+      </div>)}</div>
+      {selectedTool && <section className="toolrepo-detail"><header><div><strong>{selectedTool.summary.name}</strong><code>{selectedTool.summary.synopsis}</code></div><button title="Open directory in terminal" aria-label="Open directory in terminal" onClick={() => onOpenTerminal(selectedTool.summary.tool_id)}><Terminal size={14}/></button></header><div className="toolrepo-files" aria-label="Tool files">{selectedTool.files.map((file) => <div key={file.path} style={{ paddingLeft: `${8 + Math.max(0, file.path.split("/").length - 1) * 12}px` }}><span>{file.path}</span><small>{formatBytes(file.bytes)}</small></div>)}</div><div className="toolrepo-readme"><BookOpen size={14}/><div><MarkdownContent text={selectedTool.readme}/></div></div></section>}
+      </div>}
+    </div>}
+    {contextMenu && <div className="toolrepo-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()}><button onClick={() => { onOpenTerminal(contextMenu.toolId); setContextMenu(null); }}><Terminal size={14}/>在命令行中打开目录</button></div>}
+  </aside>;
 }
 
 const MAX_RENDERED_TURN_EVENTS = 200;
 const INITIAL_RENDERED_TURNS = 24;
 const TURN_HISTORY_PAGE_SIZE = 24;
 
-function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply }: {
+function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, loadingHistory, toolCount, toolCountPulse, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onOpenToolRepo, onRequestToolGen }: {
   activeSession: Session | undefined;
   sessionIds: string[];
   sessionInteractionLocked: boolean;
@@ -548,12 +698,16 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
   pendingAttachmentRemoveIds: Set<string>;
   pendingDecisionKeys: Set<string>;
   loadingHistory: boolean;
+  toolCount: number;
+  toolCountPulse: boolean;
   onLoadMoreHistory: (session: Session) => void;
   onSend: (text: string) => Promise<boolean>;
   onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void;
+  onOpenToolRepo: () => void;
+  onRequestToolGen: (turnId: string) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
@@ -649,7 +803,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
       }}
     >
       {(activeSession?.turns.length ?? 0) === 0 &&
-        <div className="welcome"><Sparkles size={24}/><h2>Ready when you are.</h2><p>Ask Timem to investigate, write, or work with your local environment.</p></div>
+        <div className="welcome"><Sparkles size={24}/><h2>Ready when you are.</h2><p>Ask Timem to investigate, write, or work with you.</p></div>
       }
       {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button className="load-history" disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory ? "Loading earlier history…" : hiddenTurnCount > 0 ? `Load ${Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks` : "Load earlier history"}</button>}
       {visibleTurns.map((turn) => <TurnInteraction
@@ -659,6 +813,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
         sessionInteractionLocked={sessionInteractionLocked}
         pendingDecisionKeys={pendingDecisionKeys}
         onDecisionReply={onDecisionReply}
+        onRequestToolGen={onRequestToolGen}
       />)}
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button className="scroll-to-bottom" title="Scroll to latest" aria-label="Scroll to latest"><ArrowDown size={16}/></button></ThreadPrimitive.ScrollToBottom>
@@ -681,14 +836,14 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
               }
             }}
           />
-          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" disabled={sessionInteractionLocked} onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" disabled={sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className="send-button" type="submit" title="Send message" aria-label="Send message" disabled={!activeSession || !draft.trim() || submittingDraft || sessionInteractionLocked}><Send size={17}/></button>{activeSession?.state === "working" && <button className="stop-button" type="button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void onCancel()}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
+          <div className="composer-actions"><span>Enter to send · Shift+Enter for newline</span><div className="composer-buttons"><button className="attach-button" type="button" title="Attach a file" disabled={sessionInteractionLocked} onClick={() => fileInput.current?.click()}><Paperclip size={17}/></button><input ref={fileInput} className="file-input" type="file" disabled={sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`toolrepo-toggle ${toolCountPulse ? "count-pulse" : ""}`} type="button" title={`Open ToolRepo · ${toolCount} tools`} aria-label={`Open ToolRepo with ${toolCount} tools`} disabled={!activeSession || sessionInteractionLocked} onClick={onOpenToolRepo}><Wrench size={17}/><span>{toolCount}</span></button><button className="send-button" type="submit" title="Send message" aria-label="Send message" disabled={!activeSession || !draft.trim() || submittingDraft || sessionInteractionLocked}><Send size={17}/></button>{activeSession?.state === "working" && <button className="stop-button" type="button" title={isCancelling ? "Cancellation requested" : "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void onCancel()}><CircleStop size={17}/> {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
   </ThreadPrimitive.Root>;
 }
 
-function TurnInteraction({ turn, decisions, sessionInteractionLocked, pendingDecisionKeys, onDecisionReply }: { turn: WebTurn; decisions: Decision[]; sessionInteractionLocked: boolean; pendingDecisionKeys: Set<string>; onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void }) {
+function TurnInteraction({ turn, decisions, sessionInteractionLocked, pendingDecisionKeys, onDecisionReply, onRequestToolGen }: { turn: WebTurn; decisions: Decision[]; sessionInteractionLocked: boolean; pendingDecisionKeys: Set<string>; onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void; onRequestToolGen: (turnId: string) => void }) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
   const previousUpdateCount = useRef(turn.events.length + decisions.length);
@@ -697,6 +852,9 @@ function TurnInteraction({ turn, decisions, sessionInteractionLocked, pendingDec
   const visibleEvents = lifecycleEvents.slice(-MAX_RENDERED_TURN_EVENTS);
   const omitted = lifecycleEvents.length - visibleEvents.length;
   const hasVisibleProcess = visibleEvents.some((event) => activityFromTurnEvent(event, turn.turn_id) !== null) || decisions.length > 0 || turn.state === "working";
+  const isToolGenTurn = turn.turn_id.startsWith("web_toolgen_turn_")
+    || turn.user_entries.some((entry) => entry.kind === "toolgen_instruction")
+    || turn.events.some((event) => event.source === "core_topic" && (event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen");
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -721,16 +879,16 @@ function TurnInteraction({ turn, decisions, sessionInteractionLocked, pendingDec
   };
 
   return <article className="turn-interaction" data-turn-id={turn.turn_id}>
-    <section className="turn-user-frame">
+    {!!turn.user_entries.length && <section className="turn-user-frame">
       <div className="turn-user-content">{turn.user_entries.map((entry, index) => <div className={`turn-user-entry ${entry.kind}`} key={`${entry.created_at_ms}-${index}`}>
         {entry.kind === "supplement" && <span>[补充]</span>}
         {entry.kind === "approval" && <span>[审批]</span>}
         <MarkdownContent text={entry.text}/>
         {!!entry.attachments?.length && <div className="turn-entry-attachments">{entry.attachments.map((attachment) => <span key={attachment.id} title={attachment.path}><Paperclip size={13}/><i aria-hidden="true">:</i><b>{attachment.name}</b><small>{formatBytes(attachment.bytes)}</small></span>)}</div>}
       </div>)}</div>
-    </section>
+    </section>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state}`}>
-      {turn.state === "working" && <div className="turn-assistant-heading"><span className="working-chip"><span className="pulse"/> working</span></div>}
+      {turn.state === "working" && <div className="turn-assistant-heading"><span className={`working-chip${isToolGenTurn ? " toolgen-working" : ""}`}>{isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>}{isToolGenTurn ? "Generating tools…" : "working"}</span></div>}
       <div className="turn-work-scroll" ref={workScrollRef} onScroll={(event) => {
         const remaining = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight;
         followLatest.current = remaining < 36;
@@ -740,11 +898,11 @@ function TurnInteraction({ turn, decisions, sessionInteractionLocked, pendingDec
         {visibleEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={turn.turn_id}/>)}
         {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
         {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
-        {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className="working-indicator"><span className="pulse"/> Waiting for the first runtime update…</div>}
+        {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`}><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>}
       </div>
       {pendingUpdates > 0 && <button className="turn-new-updates" onClick={scrollWorkToLatest}><ArrowDown size={13}/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
     </section>}
-    {turn.final_answer && <section className="turn-final-delivery"><div className="message-content"><MarkdownContent text={turn.final_answer}/></div>{turn.completion && <CompletionCard completion={turn.completion}/>}</section>}
+    {turn.final_answer && <section className="turn-final-delivery"><div className="message-content"><MarkdownContent text={turn.final_answer}/></div>{turn.completion && <CompletionCard completion={turn.completion} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}/>}</section>}
     {!turn.final_answer && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
   </article>;
 }
@@ -773,11 +931,21 @@ function TurnEventView({ event, sessionId }: { event: WebTurnEvent; sessionId: s
   const activity = activityFromTurnEvent(event, sessionId);
   if (!activity) return null;
   if (activity.kind === "context_compact") return <ContextCompactNotice activity={activity}/>;
+  if (activity.kind === "toolgen") return <ToolGenNotice activity={activity}/>;
   if (activity.tone === "action") return <ToolActivity activity={activity}/>;
   return <div className={`turn-work-item ${activity.tone}`}>
     <span className="activity-mark">{activity.tone === "thinking" ? "💡" : activity.tone === "warning" ? "!" : activity.tone === "error" ? "×" : "i"}</span>
     <div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}</div>
   </div>;
+}
+
+function ToolGenNotice({ activity }: { activity: Activity }) {
+  const hasDetail = !!activity.detail?.trim();
+  if (!hasDetail) return <blockquote className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}><span>{activity.title}</span></blockquote>;
+  return <details className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}>
+    <summary><ChevronRight size={13}/><span>{activity.title}</span></summary>
+    <div><MarkdownContent text={activity.detail ?? ""}/></div>
+  </details>;
 }
 
 function ToolActivity({ activity }: { activity: Activity }) {
@@ -882,7 +1050,7 @@ function fencedCode(language: string, code: string) {
   return `${fence}${language}\n${code}\n${fence}`;
 }
 
-function CompletionCard({ completion }: { completion: NonNullable<ChatMessage["completion"]> }) {
+function CompletionCard({ completion, onToolGen }: { completion: NonNullable<ChatMessage["completion"]>; onToolGen?: () => void }) {
   const stats = completion.stats ?? {};
   const cancelled = completion.stop_reason?.toLowerCase() === "cancelledbyuser";
   const facts = [
@@ -901,6 +1069,7 @@ function CompletionCard({ completion }: { completion: NonNullable<ChatMessage["c
     {facts.map(([label, value]) => <span key={label}><b>{label}</b> {value}</span>)}
     {!cancelled && isNotableStopReason(completion.stop_reason) && <span className="completion-status"><b>Status</b> {completion.stop_reason}</span>}
     {completion.repair_issue && <span className="completion-status warning"><b>Last repair</b> {completion.repair_issue}</span>}
+    {onToolGen && !cancelled && <button className="completion-toolgen" type="button" title="Preserve reusable work from this task" onClick={onToolGen}><Wrench size={12}/>ToolGen</button>}
   </div>;
 }
 
@@ -973,6 +1142,11 @@ function NewSessionDialog({ workspaces, runtimeDefaults, creating, onClose, onCr
   const updateEnv = (key: string, value: string) => setEnv((current) => ({ ...current, [key]: value }));
   const cleanedEnv = () => Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value));
   return <div className="modal-backdrop" role="presentation"><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session"><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2><div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)}/></label><label>Workspace<select value={workspaceDir} disabled={creating} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.map((workspace) => <option value={workspace} key={workspace}>{workspace}</option>)}</select></label><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span>{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option><option value="markdown">markdown</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>}</label>)}</div></details></div><div className="decision-actions"><button className="secondary" disabled={creating} onClick={onClose}>Cancel</button><button className="primary" disabled={creating} onClick={() => onCreate(displayName.trim(), workspaceDir, cleanedEnv())}><Plus size={16}/> {creating ? "Creating…" : "Create session"}</button></div></section></div>;
+}
+
+function ToolGenDialog({ pending, onClose, onSubmit }: { pending: boolean; onClose: () => void; onSubmit: (text: string) => void }) {
+  const [instruction, setInstruction] = useState("");
+  return <div className="modal-backdrop" role="presentation"><section className="decision-modal toolgen-dialog" role="dialog" aria-modal="true" aria-label="Generate reusable tool"><span className="eyebrow">TOOLGEN</span><h2>Preserve this work</h2><p>Timem will turn reusable modules from the completed task into one or more standalone script tools. Add optional guidance below.</p><label>Additional guidance<textarea autoFocus value={instruction} disabled={pending} placeholder="Optional: preferred interface, language, scope, or reusable module…" onChange={(event) => setInstruction(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && !pending) onClose(); }}/></label><div className="decision-actions"><button className="secondary" disabled={pending} onClick={onClose}>Cancel</button><button className="primary" disabled={pending} onClick={() => onSubmit(instruction.trim())}><Wrench size={15}/>{pending ? "Starting…" : "Generate tool"}</button></div></section></div>;
 }
 
 function MemSwitchDialog({ current, pending, onClose, onSwitch }: {

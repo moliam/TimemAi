@@ -78,6 +78,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         Err(_) => {
             return ParsedEnvelope {
                 final_answer: String::new(),
+                toolgen_retrospect: String::new(),
                 continue_work: true,
                 thought: String::new(),
                 thought_keep_in_context: false,
@@ -94,6 +95,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     if !value.is_object() {
         return ParsedEnvelope {
             final_answer: String::new(),
+            toolgen_retrospect: String::new(),
             continue_work: true,
             thought: String::new(),
             thought_keep_in_context: false,
@@ -116,6 +118,11 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     }
     let final_answer = value
         .get("final_answer")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let toolgen_retrospect = value
+        .get("toolgen_retrospect")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
@@ -203,6 +210,12 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         repair_issue = Some("final_answer_required_when_status_finished".to_string());
     }
     if repair_issue.is_none()
+        && !toolgen_retrospect.trim().is_empty()
+        && (continue_work || final_answer.trim().is_empty())
+    {
+        repair_issue = Some("toolgen_retrospect_requires_final_answer".to_string());
+    }
+    if repair_issue.is_none()
         && continue_work
         && !matches!(
             status_normalized.as_deref(),
@@ -230,6 +243,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     }
     ParsedEnvelope {
         final_answer,
+        toolgen_retrospect,
         continue_work,
         thought,
         thought_keep_in_context,
@@ -335,6 +349,7 @@ fn is_allowed_response_top_level_key(key: &str) -> bool {
         key,
         "status"
             | "final_answer"
+            | "toolgen_retrospect"
             | "working_still_action"
             | "next_actions"
             | "free_talk"

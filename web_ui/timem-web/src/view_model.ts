@@ -149,6 +149,20 @@ export function composerSendDecision(
   };
 }
 
+export function manualToolGenCommand(
+  sessionId: string,
+  sourceTurnId: string,
+  optionalGuidance: string,
+): ClientCommand {
+  return {
+    type: "turn_submit",
+    session_id: sessionId,
+    input_kind: "toolgen",
+    source_turn_id: sourceTurnId,
+    text: optionalGuidance.trim(),
+  };
+}
+
 export function sessionRenameDecision(
   sessionId: string | undefined,
   draftName: string,
@@ -176,10 +190,29 @@ function actionLifecycleKey(event: WebTurnEvent) {
   return `${action}:${JSON.stringify(topicEvent.payload.input ?? null)}`;
 }
 
+function toolgenLifecycle(event: WebTurnEvent) {
+  if (event.source !== "core_topic") return undefined;
+  const topicEvent = event.payload as unknown as CoreTopicEvent;
+  if (topicEvent.topic?.name !== "core.toolgen") return undefined;
+  const phase = typeof topicEvent.payload.phase === "string" ? topicEvent.payload.phase : "";
+  return phase ? { key: `toolgen:${topicEvent.context_id ?? "unknown"}`, phase } : undefined;
+}
+
 export function coalesceActionLifecycle(events: WebTurnEvent[]) {
   const visible: WebTurnEvent[] = [];
   const pendingStarts = new Map<string, number[]>();
+  const pendingToolGen = new Set<string>();
   for (const event of events) {
+    const toolgen = toolgenLifecycle(event);
+    if (toolgen) {
+      if (toolgen.phase === "started") {
+        pendingToolGen.add(toolgen.key);
+      } else {
+        visible.push(event);
+        pendingToolGen.delete(toolgen.key);
+      }
+      continue;
+    }
     const key = actionLifecycleKey(event);
     if (!key) {
       visible.push(event);
@@ -342,6 +375,7 @@ function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
   const payload = event.payload.payload;
   if (!topic || typeof topic !== "object" || (topic as Record<string, unknown>).name !== "core.model.response") return undefined;
   if (!payload || typeof payload !== "object") return undefined;
+  if ((payload as Record<string, unknown>).runtime_phase === "toolgen") return undefined;
   const workerId = event.payload.worker_id;
   if (typeof workerId === "string" && workerId !== session.primary_worker_id) return undefined;
   const finalAnswer = (payload as Record<string, unknown>).final_answer;
@@ -388,9 +422,10 @@ export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").Usag
     if (event.source !== "worker_activity" || event.payload.kind !== "model_response") continue;
     const usage = event.payload.usage;
     if (!usage || typeof usage !== "object") continue;
-    latest = usage as import("./protocol").UsageStats;
+    const current = usage as import("./protocol").UsageStats;
+    latest = current;
     for (const field of USAGE_FIELDS) {
-      const value = latest[field];
+      const value = current[field];
       if (typeof value === "number" && Number.isFinite(value)) total[field] = (total[field] ?? 0) + value;
     }
   }
@@ -451,6 +486,7 @@ export function applyCoreTopicToSession(
     : session.contexts;
   const currentDir = reportedDir && targetContextId === session.active_context_id ? reportedDir : session.current_dir;
   if (event.topic.name === "core.model.response") {
+    if (event.payload.runtime_phase === "toolgen") return session;
     const finalAnswer = typeof event.payload.final_answer === "string" ? event.payload.final_answer.trim() : "";
     const messageId = typeof event.payload.ui_message_id === "string" ? event.payload.ui_message_id : undefined;
     const isPrimary = !event.worker_id || event.worker_id === session.primary_worker_id;
@@ -536,6 +572,28 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         detail: `${before ?? "?"} tokens → ${after ?? "?"} tokens`,
         before_tokens: before,
         after_tokens: after,
+        createdAt: Date.now(),
+      };
+    }
+    case "core.toolgen": {
+      const phase = label(payload.phase);
+      const tool = payload.tool && typeof payload.tool === "object" ? payload.tool as Record<string, unknown> : undefined;
+      const toolName = tool ? label(tool.name) : "";
+      const retrospect = label(payload.retrospect);
+      const error = label(payload.error);
+      const title = phase === "published"
+        ? `ToolGen: 已沉淀 ${toolName || "可复用工具"}`
+        : phase === "started"
+          ? "ToolGen: 正在评估…"
+          : "ToolGen: 生成失败";
+      return {
+        id: crypto.randomUUID(),
+        sessionId: event.session_id,
+        tone: phase === "published" || phase === "started" ? "notice" : "warning",
+        kind: "toolgen",
+        toolgen_phase: phase,
+        title,
+        detail: error || retrospect,
         createdAt: Date.now(),
       };
     }

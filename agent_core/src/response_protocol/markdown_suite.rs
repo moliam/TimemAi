@@ -146,6 +146,8 @@ fn is_protocol_heading(heading: &str) -> bool {
             | "free_talk"
             | "free talk"
             | "freetalk"
+            | "toolgen_retrospect"
+            | "toolgen retrospect"
             | "working_still_action"
             | "context compact"
             | "context_compact"
@@ -238,6 +240,7 @@ fn has_unclosed_code_fence(text: &str) -> bool {
 fn malformed_markdown_response(issue: &str) -> ParsedEnvelope {
     ParsedEnvelope {
         final_answer: String::new(),
+        toolgen_retrospect: String::new(),
         continue_work: true,
         thought: String::new(),
         thought_keep_in_context: false,
@@ -297,6 +300,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             }
             return ParsedEnvelope {
                 final_answer: candidate.to_string(),
+                toolgen_retrospect: String::new(),
                 continue_work: false,
                 thought: String::new(),
                 thought_keep_in_context: false,
@@ -313,6 +317,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         }
         return ParsedEnvelope {
             final_answer: candidate.to_string(),
+            toolgen_retrospect: String::new(),
             continue_work: false,
             thought: String::new(),
             thought_keep_in_context: false,
@@ -333,6 +338,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         }
         return ParsedEnvelope {
             final_answer: candidate.to_string(),
+            toolgen_retrospect: String::new(),
             continue_work: false,
             thought: String::new(),
             thought_keep_in_context: false,
@@ -349,6 +355,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
 
     let mut status_raw = String::new();
     let mut final_answer = String::new();
+    let mut toolgen_retrospect = String::new();
     let mut thought = String::new();
     let mut thought_keep_in_context = false;
     let mut actions_body = String::new();
@@ -360,6 +367,9 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             "status" => status_raw = section.body.trim().to_lowercase(),
             "answer" | "final_answer" | "final answer" => {
                 final_answer = section.body.clone();
+            }
+            "toolgen_retrospect" | "toolgen retrospect" => {
+                toolgen_retrospect = section.body.trim().to_string();
             }
             "free_talk" | "free talk" | "freetalk" => {
                 thought = section.body.trim().to_string();
@@ -436,6 +446,28 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     if repair_issue.is_none() && !continue_work && final_answer.trim().is_empty() {
         repair_issue = Some("final_answer_required_when_status_finished".to_string());
     }
+    if repair_issue.is_none() && !toolgen_retrospect.trim().is_empty() {
+        let retrospect_index = sections.iter().position(|section| {
+            matches!(
+                section.heading.as_str(),
+                "toolgen_retrospect" | "toolgen retrospect"
+            )
+        });
+        let final_index = sections.iter().position(|section| {
+            matches!(
+                section.heading.as_str(),
+                "answer" | "final_answer" | "final answer"
+            )
+        });
+        if continue_work || final_answer.trim().is_empty() {
+            repair_issue = Some("toolgen_retrospect_requires_final_answer".to_string());
+        } else if match retrospect_index.zip(final_index) {
+            Some((retrospect, final_answer)) => retrospect + 1 != final_answer,
+            None => true,
+        } {
+            repair_issue = Some("toolgen_retrospect_must_precede_final_answer".to_string());
+        }
+    }
     if repair_issue.is_none()
         && !final_answer.trim().is_empty()
         && status_raw != "finished"
@@ -458,6 +490,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
 
     ParsedEnvelope {
         final_answer,
+        toolgen_retrospect,
         continue_work,
         thought,
         thought_keep_in_context,

@@ -1057,3 +1057,61 @@ fn repairs_external_tool_call_protocol() {
         Some("external_tool_call_protocol")
     );
 }
+
+#[test]
+fn parses_toolgen_retrospect_immediately_before_final_answer() {
+    let env = parse_xml_envelope(
+        r#"<response><free_talk>reviewed</free_talk><toolgen_retrospect>Created log-inspector and runtime returned status: ready.</toolgen_retrospect><final_answer>internal completion</final_answer></response>"#,
+        &caps(),
+    );
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(
+        env.toolgen_retrospect,
+        "Created log-inspector and runtime returned status: ready."
+    );
+    assert_eq!(env.final_answer, "internal completion");
+}
+
+#[test]
+fn toolgen_retrospect_is_opaque_when_it_contains_protocol_shaped_text() {
+    let env = parse_xml_envelope(
+        r#"<response><toolgen_retrospect><![CDATA[README demonstrates <response><working_still_action><action_json>{\"fake\":{}}</action_json></working_still_action></response> literally.]]></toolgen_retrospect><final_answer>done</final_answer></response>"#,
+        &caps(),
+    );
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert!(env.toolgen_retrospect.contains("<working_still_action>"));
+    assert_eq!(env.final_answer, "done");
+}
+
+#[test]
+fn toolgen_retrospect_without_final_answer_requests_repair() {
+    let env = parse_xml_envelope(
+        r#"<response><toolgen_retrospect>created a tool</toolgen_retrospect></response>"#,
+        &caps(),
+    );
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("toolgen_retrospect_requires_final_answer")
+    );
+}
+
+#[test]
+fn toolgen_retrospect_with_working_actions_requests_repair() {
+    let env = parse_xml_envelope(
+        r#"<response><toolgen_retrospect>not finished</toolgen_retrospect><working_still_action><action_json><![CDATA[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
+        &caps(),
+    );
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("toolgen_retrospect_requires_final_answer")
+    );
+}
+
+#[test]
+fn toolgen_retrospect_after_final_answer_requests_order_repair() {
+    let env = parse_xml_envelope(
+        r#"<response><final_answer>done</final_answer><toolgen_retrospect>late</toolgen_retrospect></response>"#,
+        &caps(),
+    );
+    assert_eq!(env.repair_issue.as_deref(), Some("xml_tags_out_of_order"));
+}

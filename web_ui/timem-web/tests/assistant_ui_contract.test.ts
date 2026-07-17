@@ -8,6 +8,12 @@ const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 
 describe("assistant-ui thread integration", () => {
+  it("keeps the brand concise and describes collaboration without a local-only qualifier", () => {
+    expect(source).toContain("Ask Timem to investigate, write, or work with you.");
+    expect(source).not.toContain("work with your local environment");
+    expect(source).not.toContain("<small>local</small>");
+  });
+
   it("uses assistant-ui thread primitives for the primary conversation surface", () => {
     expect(source).toContain("ThreadPrimitive.Root");
     expect(source).toContain("ThreadPrimitive.Viewport");
@@ -50,6 +56,49 @@ describe("assistant-ui thread integration", () => {
 
   it("defaults the diagnostic activity panel to hidden", () => {
     expect(source).toContain("const [showActivity, setShowActivity] = useState(false);");
+  });
+
+  it("opens ToolRepo from the composer and keeps the tool count inside the control", () => {
+    expect(source).toContain('const [sidePanelTab, setSidePanelTab] = useState<"tools" | "activity">("tools")');
+    expect(source).toContain('title={`Open ToolRepo · ${toolCount} tools`}');
+    expect(source).toContain('aria-label={`Open ToolRepo with ${toolCount} tools`}');
+    expect(source).toContain('onClick={onOpenToolRepo}');
+    expect(source).not.toContain('type: "toolgen_set"');
+    expect(source).not.toContain('aria-pressed={toolgenEnabled}');
+    expect(source).toContain('event.type === "tool_repo_updated"');
+    expect(source).toContain('event.session_id !== activeSessionIdRef.current');
+    expect(source).toContain('event.query !== toolSearchQueryRef.current');
+    expect(styles).toContain(".toolrepo-toggle");
+    expect(styles).toContain("@keyframes tool-count-pulse");
+  });
+
+  it("starts ToolGen manually from an exact completed turn with optional guidance", () => {
+    expect(source).toContain('manualToolGenCommand(request.sessionId, request.turnId, text)');
+    expect(source).toContain('function ToolGenDialog');
+    expect(source).toContain('Additional guidance');
+    expect(source).toContain('onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}');
+    expect(source).toContain('className="completion-toolgen"');
+    expect(source).toContain('isToolGenTurn ? "Generating tools…" : "working"');
+    expect(source).toContain('isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"');
+    expect(styles).toContain(".working-chip.toolgen-working");
+  });
+
+  it("renders ToolRepo browsing, search, rename and terminal-open controls", () => {
+    expect(source).toContain('placeholder="Search names and code"');
+    expect(source).toContain('aria-label="Sort ToolRepo"');
+    expect(source).toContain('type: "tool_repo_detail"');
+    expect(source).toContain('type: "tool_repo_rename"');
+    expect(source).toContain('type: "tool_repo_open_terminal"');
+    expect(source).toContain("在命令行中打开目录");
+    expect(source).toContain("selectedTool.files.map");
+    expect(source).toContain("<MarkdownContent text={selectedTool.readme}");
+  });
+
+  it("keeps ToolGen retrospective attached to its final delivery", () => {
+    expect(source).toContain("function ToolGenNotice");
+    expect(source).toContain('<details className={`toolgen-notice');
+    expect(styles).toContain(".toolgen-notice[open] summary svg");
+    expect(source).not.toContain("turn.completion?.toolgen_retrospect");
   });
 
   it("does not expose internal model transport bookkeeping or duplicate activity labels", () => {
