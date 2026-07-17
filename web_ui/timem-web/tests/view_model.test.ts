@@ -547,6 +547,26 @@ describe("web topic view model", () => {
     expect(sessionContextUsage(session("session_2"))).toBeUndefined();
   });
 
+  it("does not treat restored history telemetry as current context usage", () => {
+    const restored = session("session_restored");
+    const historicalTurn = turn("old", "restored");
+    historicalTurn.events = [
+      { event_id: "history_usage", source: "worker_activity", created_at_ms: 2, payload: { kind: "model_response", usage: { prompt_tokens: 26_000, completion_tokens: 500 } } },
+    ];
+    historicalTurn.completion = { latest_usage: { prompt_tokens: 26_000 } };
+    restored.turns = [historicalTurn];
+
+    expect(sessionContextUsage(restored)).toBeUndefined();
+
+    const liveTurn = turn("new", "working");
+    liveTurn.events = [
+      { event_id: "new_usage", source: "worker_activity", created_at_ms: 3, payload: { kind: "model_response", usage: { prompt_tokens: 4_200, completion_tokens: 20 } } },
+    ];
+    restored.turns.push(liveTurn);
+
+    expect(sessionContextUsage(restored)?.prompt_tokens).toBe(4_200);
+  });
+
   it("renders response repair as a visible warning", () => {
     const activity = activityFromTopic(topic("core.model.repair", { attempt: 2, max_attempts: 5, issue: "missing_response_root" }));
     expect(activity).toMatchObject({ tone: "warning", title: "Response format repair (2/5)", detail: "missing_response_root" });

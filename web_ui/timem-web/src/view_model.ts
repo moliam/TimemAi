@@ -420,6 +420,7 @@ export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").Usag
 export function sessionContextUsage(session: Session): import("./protocol").UsageStats | undefined {
   for (let index = session.turns.length - 1; index >= 0; index -= 1) {
     const turn = session.turns[index];
+    if (turn.state === "restored") continue;
     const live = turnLiveUsage(turn);
     if (live) return live.latest;
     const latest = turn.completion?.latest_usage;

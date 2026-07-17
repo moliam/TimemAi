@@ -754,8 +754,8 @@ function ContextUsageBar({ session }: { session: Session | undefined }) {
   const limit = session?.max_llm_input_tokens || undefined;
   const ratio = usage && limit ? Math.min(100, Math.ceil((usage.prompt_tokens ?? 0) * 100 / limit)) : 0;
   return <section className="context-usage-bar" aria-label="Context usage">
-    <span>Context</span><strong>{formatTokens(usage?.prompt_tokens) ?? "—"}{limit ? ` / ${formatTokens(limit)}` : ""}</strong>
-    <div className="context-usage-meter" aria-hidden="true"><span style={{ width: `${ratio}%` }}/></div><small>{usage && limit ? `${ratio}%` : "waiting for usage"}</small>
+    <span>Context</span><strong>{formatTokens(usage?.prompt_tokens ?? 0) ?? "0"}{limit ? ` / ${formatTokens(limit)}` : ""}</strong>
+    <div className="context-usage-meter" aria-hidden="true"><span style={{ width: `${ratio}%` }}/></div><small>{limit ? `${ratio}%` : "0%"}</small>
   </section>;
 }
 
