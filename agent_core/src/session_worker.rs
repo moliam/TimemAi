@@ -2,7 +2,8 @@ use crate::{
     core_initialized_topic_event_with_worker, run_session_turn_with_model_client, AgentCore,
     CoreGlobalWorkerStatus, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent,
     HostDecision, HostDecisionRequest, ModelClient, ProviderConfig, ProviderModelClient,
-    RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnUi, UsageStats,
+    ResponseProtocolKind, RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail,
+    TurnUi, UsageStats,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -10,6 +11,28 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+const TOOLGEN_CONTEXT_INSTRUCTIONS: &str =
+    include_str!("../../resources/toolgen/toolgen_context.md");
+const TOOLGEN_XML_COMPLETION: &str =
+    include_str!("../../resources/protocol/xml/toolgen_retrospect.md");
+const TOOLGEN_JSON_COMPLETION: &str =
+    include_str!("../../resources/protocol/json/toolgen_retrospect.md");
+const TOOLGEN_MARKDOWN_COMPLETION: &str =
+    include_str!("../../resources/protocol/markdown/toolgen_retrospect.md");
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolGenRequest {
+    pub user_instruction: Option<String>,
+}
+
+impl ToolGenRequest {
+    pub fn new(user_instruction: Option<String>) -> Self {
+        Self {
+            user_instruction: user_instruction.filter(|value| !value.trim().is_empty()),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CoreSessionWorkerConfig {
@@ -141,6 +164,7 @@ pub enum CoreSessionWorkerEvent {
     ModelResponse {
         round: u32,
         usage: UsageStats,
+        runtime_phase: Option<String>,
     },
     ModelResponseDiscarded {
         round: u32,
@@ -165,6 +189,9 @@ enum CoreSessionWorkerCommand {
     RunTurn {
         input: String,
         additional_context: Option<String>,
+    },
+    RunToolGen {
+        request: ToolGenRequest,
     },
     Rename {
         display_name: String,
@@ -196,6 +223,16 @@ impl CoreSessionWorkerHandle {
                 input: input.into(),
                 additional_context,
             })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn run_toolgen(&self, request: ToolGenRequest) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        self.command_tx
+            .send(CoreSessionWorkerCommand::RunToolGen { request })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -583,6 +620,7 @@ impl CoreSessionWorker {
             let workspace = worker_config.workspace.clone();
             core.set_response_protocol(config.response_protocol);
             core.set_assistant_speaker_name(&identity.display_name);
+            core.set_tool_repo_session_id(&identity.session_id);
             let init_event = core_initialized_topic_event_with_worker(
                 &identity.session_id,
                 core.profile(),
@@ -608,43 +646,96 @@ impl CoreSessionWorker {
                 reply_rx,
                 runtime: runtime.clone(),
                 current_turn_active: None,
+                phase: None,
+                accept_supplements: true,
             };
 
             while let Ok(command) = command_rx.recv() {
                 match command {
                     CoreSessionWorkerCommand::RunTurn { .. }
+                    | CoreSessionWorkerCommand::RunToolGen { .. }
                     | CoreSessionWorkerCommand::Rename { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
                         break;
                     }
                     CoreSessionWorkerCommand::RunTurn {
-                        input,
-                        additional_context,
+                        mut input,
+                        mut additional_context,
                     } => {
                         let context_id = identity.context_id.clone();
                         let outcome = {
                             let working = runtime.begin_worker_turn();
                             ui.current_turn_active = Some(working.active_handle());
-                            let outcome = run_session_turn_with_model_client(
-                                &mut core,
-                                &mut config,
-                                TurnInput {
-                                    input: &input,
-                                    session: &context_id,
-                                    audit_file: &workspace.audit_file,
-                                    runtime: &workspace.runtime,
-                                    run_bash_target: &workspace.run_bash_target,
-                                    additional_context: additional_context.as_deref(),
-                                },
-                                &mut ui,
-                                Some(&mut profiler),
-                                &mut model_client,
-                            );
+                            let outcome = loop {
+                                let main_outcome = run_session_turn_with_model_client(
+                                    &mut core,
+                                    &mut config,
+                                    TurnInput {
+                                        input: &input,
+                                        session: &context_id,
+                                        audit_file: &workspace.audit_file,
+                                        runtime: &workspace.runtime,
+                                        run_bash_target: &workspace.run_bash_target,
+                                        additional_context: additional_context.as_deref(),
+                                    },
+                                    &mut ui,
+                                    Some(&mut profiler),
+                                    &mut model_client,
+                                );
+                                let supplements = ui.take_supplements_for_main_context();
+                                if supplements.is_empty() {
+                                    break main_outcome;
+                                }
+                                input = supplements.join("\n\n");
+                                additional_context = Some(
+                                    "These user messages arrived while the previous response was being finalized. Address them before finalizing again."
+                                        .to_string(),
+                                );
+                            };
                             ui.current_turn_active = None;
                             drop(working);
                             outcome
                         };
+                        let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
+                    }
+                    CoreSessionWorkerCommand::RunToolGen { request } => {
+                        let working = runtime.begin_worker_turn();
+                        ui.current_turn_active = Some(working.active_handle());
+                        let toolgen_runner = ToolGenRunner {
+                            core: &mut core,
+                            config: &mut config,
+                            workspace: &workspace,
+                            identity: &identity,
+                            ui: &mut ui,
+                            profiler: &mut profiler,
+                            model_client: &mut model_client,
+                        };
+                        let mut outcome = match toolgen_runner.run(&request) {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                ui.emit_toolgen_failure(
+                                    &error,
+                                    core.tool_repo()
+                                        .list()
+                                        .map(|items| items.len())
+                                        .unwrap_or(0),
+                                );
+                                let mut outcome = TurnOutcome::final_response(
+                                    "",
+                                    UsageStats::zero(),
+                                    None,
+                                    None,
+                                    Duration::ZERO,
+                                );
+                                outcome.toolgen_retrospect =
+                                    format!("ToolGen could not publish a verified tool: {error}");
+                                outcome
+                            }
+                        };
+                        outcome.toolgen_retrospect = outcome.toolgen_retrospect.trim().to_string();
+                        ui.current_turn_active = None;
+                        drop(working);
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                     }
                     CoreSessionWorkerCommand::Rename { display_name } => {
@@ -717,6 +808,147 @@ struct WorkerTurnUi {
     reply_rx: Receiver<TopicReply>,
     runtime: CoreSessionWorkerRuntime,
     current_turn_active: Option<Arc<AtomicBool>>,
+    phase: Option<String>,
+    accept_supplements: bool,
+}
+
+fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static str {
+    match protocol {
+        ResponseProtocolKind::Xml => TOOLGEN_XML_COMPLETION,
+        ResponseProtocolKind::Json => TOOLGEN_JSON_COMPLETION,
+        ResponseProtocolKind::Markdown => TOOLGEN_MARKDOWN_COMPLETION,
+    }
+}
+
+struct ToolGenRunner<'a, M: ModelClient> {
+    core: &'a mut AgentCore,
+    config: &'a mut ProviderConfig,
+    workspace: &'a CoreSessionWorkerWorkspace,
+    identity: &'a CoreSessionWorkerIdentity,
+    ui: &'a mut WorkerTurnUi,
+    profiler: &'a mut RuntimeProfiler,
+    model_client: &'a mut M,
+}
+
+impl<M: ModelClient> ToolGenRunner<'_, M> {
+    fn run(self, request: &ToolGenRequest) -> Result<TurnOutcome, String> {
+        let Self {
+            core,
+            config,
+            workspace,
+            identity,
+            ui,
+            profiler,
+            model_client,
+        } = self;
+        let repo = core.tool_repo();
+        let before = repo.list()?;
+        let draft = repo.create_draft()?;
+        if let Err(error) = core.enable_toolgen_capability() {
+            let _ = repo.discard_draft(&draft);
+            return Err(error);
+        }
+        let system_instruction = format!(
+        "{TOOLGEN_CONTEXT_INSTRUCTIONS}\n\n{}\n\nWrite the new tool files only in this temporary staging directory:\n{}\n\nExisting verified tools for this Session are available here:\n{}\n\nCurrent working directory:\n{}",
+        toolgen_completion_instruction(config.response_protocol),
+        draft.display(),
+        repo.root().display(),
+        core.current_prompt_cwd().display(),
+    );
+        core.submit_prompt_component(
+            crate::PromptComponentRole::system(),
+            "runtime_note",
+            system_instruction,
+            "toolgen_request",
+        );
+        ui.begin_toolgen_run(before.len());
+        let mut input = request.user_instruction.clone().unwrap_or_default();
+        let mut outcome = loop {
+            let current = run_session_turn_with_model_client(
+                core,
+                config,
+                TurnInput {
+                    input: &input,
+                    session: &identity.context_id,
+                    audit_file: &workspace.audit_file,
+                    runtime: &workspace.runtime,
+                    run_bash_target: &workspace.run_bash_target,
+                    additional_context: None,
+                },
+                ui,
+                Some(profiler),
+                model_client,
+            );
+            let supplements = ui.take_supplements_for_main_context();
+            if supplements.is_empty() {
+                break current;
+            }
+            input = supplements.join("\n\n");
+        };
+        core.disable_toolgen_capability();
+        let after = match repo.list() {
+            Ok(after) => after,
+            Err(error) => {
+                let _ = repo.discard_draft(&draft);
+                ui.finish_toolgen_run(
+                    before.len(),
+                    None,
+                    &outcome.toolgen_retrospect,
+                    Some(&error),
+                );
+                return Err(error);
+            }
+        };
+        let published = after.iter().find(|tool| {
+            !before
+                .iter()
+                .any(|old| old.tool_id == tool.tool_id && old.updated_at_ms == tool.updated_at_ms)
+        });
+        if published.is_none() {
+            let _ = repo.discard_draft(&draft);
+            if outcome.toolgen_retrospect.trim().is_empty() {
+                outcome.toolgen_retrospect = toolgen_failure_detail(&outcome)
+                    .map(|detail| format!("ToolGen did not publish a verified tool: {detail}"))
+                    .unwrap_or_else(|| "ToolGen did not publish a verified tool.".to_string());
+            }
+        }
+        let completion_error = if published.is_none() {
+            Some(
+                toolgen_failure_detail(&outcome)
+                    .unwrap_or_else(|| "toolgen_no_verified_tool".to_string()),
+            )
+        } else {
+            None
+        };
+        ui.finish_toolgen_run(
+            after.len(),
+            published,
+            &outcome.toolgen_retrospect,
+            completion_error.as_deref(),
+        );
+        Ok(outcome)
+    }
+}
+
+fn toolgen_failure_detail(outcome: &TurnOutcome) -> Option<String> {
+    let summary = outcome.stop_summary.as_ref()?;
+    Some(match &summary.detail {
+        TurnStopDetail::ModelError { error } => error.clone(),
+        TurnStopDetail::RoundLimit { max_rounds } => {
+            format!("toolgen_round_limit_reached:max_rounds={max_rounds}")
+        }
+        TurnStopDetail::OutputLimit { current_tokens } => {
+            format!("toolgen_output_limit_reached:current_tokens={current_tokens}")
+        }
+        TurnStopDetail::ProtocolRepairFailure {
+            first_issue,
+            final_issue,
+            truncated,
+        } => format!(
+            "toolgen_protocol_repair_failed:first_issue={first_issue},final_issue={final_issue},truncated={truncated}"
+        ),
+        TurnStopDetail::None => format!("toolgen_run_stopped:{:?}", summary.stop_reason),
+    })
 }
 
 impl TurnUi for WorkerTurnUi {
@@ -729,6 +961,9 @@ impl TurnUi for WorkerTurnUi {
     }
 
     fn drain_user_supplements(&mut self) -> Vec<String> {
+        if !self.accept_supplements {
+            return Vec::new();
+        }
         self.supplement_queue
             .lock()
             .map(|mut queue| std::mem::take(&mut *queue))
@@ -745,6 +980,7 @@ impl TurnUi for WorkerTurnUi {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelResponse {
             round,
             usage: usage.clone(),
+            runtime_phase: self.phase.clone(),
         });
     }
 
@@ -764,6 +1000,10 @@ impl TurnUi for WorkerTurnUi {
             .into_iter()
             .map(|mut event| {
                 event.session_id = self.session_id.clone();
+                if let Some(phase) = self.phase.as_deref() {
+                    event.topic.attributes["runtime_phase"] = serde_json::json!(phase);
+                    event.payload["runtime_phase"] = serde_json::json!(phase);
+                }
                 event.with_worker_scope(&self.context_id, &self.worker_id)
             })
             .collect();
@@ -787,10 +1027,16 @@ impl TurnUi for WorkerTurnUi {
 
     fn request_host_decision_topic(
         &mut self,
-        session: &str,
+        _session: &str,
         request: HostDecisionRequest,
     ) -> HostDecision {
-        let event = request.topic_event(session);
+        let mut event = request
+            .topic_event(&self.session_id)
+            .with_worker_scope(&self.context_id, &self.worker_id);
+        if let Some(phase) = self.phase.as_deref() {
+            event.topic.attributes["runtime_phase"] = serde_json::json!(phase);
+            event.payload["runtime_phase"] = serde_json::json!(phase);
+        }
         let _ = self
             .event_tx
             .send(CoreSessionWorkerEvent::Topics(vec![event.clone()]));
@@ -821,6 +1067,67 @@ impl TurnUi for WorkerTurnUi {
                 return decision;
             }
         }
+    }
+}
+
+impl WorkerTurnUi {
+    fn take_supplements_for_main_context(&mut self) -> Vec<String> {
+        self.supplement_queue
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default()
+    }
+
+    fn begin_toolgen_run(&mut self, tool_count: usize) {
+        self.phase = Some("toolgen".to_string());
+        let event =
+            crate::toolgen_topic_event(&self.session_id, "started", tool_count, None, None, None)
+                .with_worker_scope(&self.context_id, &self.worker_id);
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::Topics(vec![event]));
+    }
+
+    fn finish_toolgen_run(
+        &mut self,
+        tool_count: usize,
+        tool: Option<&crate::ToolSummary>,
+        retrospect: &str,
+        error: Option<&str>,
+    ) {
+        let phase = if error.is_some() || tool.is_none() {
+            "failed"
+        } else {
+            "published"
+        };
+        let event = crate::toolgen_topic_event(
+            &self.session_id,
+            phase,
+            tool_count,
+            tool,
+            (!retrospect.trim().is_empty()).then_some(retrospect.trim()),
+            error,
+        )
+        .with_worker_scope(&self.context_id, &self.worker_id);
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::Topics(vec![event]));
+        self.phase = None;
+    }
+
+    fn emit_toolgen_failure(&mut self, error: &str, tool_count: usize) {
+        let event = crate::toolgen_topic_event(
+            &self.session_id,
+            "failed",
+            tool_count,
+            None,
+            None,
+            Some(error),
+        )
+        .with_worker_scope(&self.context_id, &self.worker_id);
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::Topics(vec![event]));
     }
 }
 

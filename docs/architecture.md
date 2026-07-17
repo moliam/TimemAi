@@ -1311,6 +1311,33 @@ environment/config and are redacted from audit logs. The CLI adapter may choose
 a default local key-file path, but key-file parsing and conversion into provider
 configuration are core provider-config responsibilities.
 
+## Session ToolGen
+
+ToolGen is a manual, source-turn-bound per-Session preservation workflow. It
+does not run concurrently with another Session task and does not create a
+second user chat worker. A host may request it only for an exact completed turn
+while the Session is idle. The owning worker continues in its existing Context
+with a hard maximum of 10 model calls. The runtime appends one marked ToolGen
+SYSTEM component and optional USER guidance, temporarily enables the publishing
+capability, and restores the normal capability surface and round budget when the
+run ends. Existing task history is not copied into a second prompt block.
+
+The ToolGen run must create a reusable tool or update an existing one. A
+manual request that ends without publishing a verified tool is reported as a
+failure, not as a successful no-op. Candidates are written to a Session-scoped
+draft directory and must contain a short `README.md`, `.timem-tool.json`, and
+the declared entrypoint/support files. Runtime validates paths, size, symlinks, manifest
+shape, and a bounded self-test before atomically publishing a candidate. A
+failed or exhausted retrospective reports a structured `core.toolgen` outcome
+but never replaces a successful primary answer.
+
+Published tools live under the Session memory root and remain available until
+the user removes that memory data. Future prompts receive only the ToolRepo path and are
+instructed to inspect semantically named folders and their short README files
+as needed; runtime does not invent a second tool invocation protocol for them.
+Hosts may expose listing, code search, detail, rename, and terminal-open
+operations, but repository validation and publication remain core-owned.
+
 ## Runtime Data
 
 By default, data is scoped to the directory where `timem-shell` starts:

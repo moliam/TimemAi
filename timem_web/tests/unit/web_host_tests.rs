@@ -1158,6 +1158,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         state: "ready".to_string(),
         current_dir: "/work".to_string(),
         max_llm_input_tokens: 10_000,
+        tools: Vec::new(),
         runtime_profile: test_runtime_profile(),
         contexts: vec![WebContext {
             context_id: context_id.clone(),
@@ -1721,6 +1722,8 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
         ClientCommand::TurnSubmit {
             session_id: session_id.to_string(),
             text: "continue".to_string(),
+            input_kind: None,
+            source_turn_id: None,
         },
     )
     .unwrap();
@@ -1814,7 +1817,6 @@ fn mismatched_core_topic_is_not_forwarded_or_written_to_another_agent() {
             "must not leak".to_string(),
         )]),
     );
-
     let sessions = state.sessions.lock().unwrap();
     assert!(sessions["session_a"].messages.is_empty());
     assert!(sessions["session_b"].messages.is_empty());
@@ -1909,7 +1911,6 @@ fn turn_completion_stats_are_attached_to_the_matching_final_answer() {
             ),
         },
     );
-
     let sessions = state.sessions.lock().unwrap();
     let message = sessions["session_a"].messages.last().unwrap();
     assert_eq!(message.text, "final answer");
@@ -1968,10 +1969,24 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         "session_a",
         CoreSessionWorkerEvent::ModelResponse {
             round: 2,
+            runtime_phase: None,
             usage: UsageStats {
                 prompt_tokens: 8_200,
                 completion_tokens: 123,
                 cached_tokens: 6_400,
+                ..UsageStats::zero()
+            },
+        },
+    );
+    handle_worker_event(
+        &state,
+        "session_a",
+        CoreSessionWorkerEvent::ModelResponse {
+            round: 3,
+            runtime_phase: Some("toolgen".to_string()),
+            usage: UsageStats {
+                prompt_tokens: 3_100,
+                completion_tokens: 80,
                 ..UsageStats::zero()
             },
         },
@@ -1983,9 +1998,10 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         .iter()
         .find(|candidate| candidate.turn_id == turn.turn_id)
         .unwrap();
-    assert_eq!(active.events.len(), 1);
+    assert_eq!(active.events.len(), 2);
     assert_eq!(active.events[0].payload["kind"], "model_response");
     assert_eq!(active.events[0].payload["usage"]["prompt_tokens"], 8_200);
+    assert_eq!(active.events[1].payload["runtime_phase"], "toolgen");
     assert!(sessions["session_b"].turns.is_empty());
     drop(sessions);
 
@@ -2080,6 +2096,8 @@ fn active_turn_supplement_consumes_pending_attachments_into_the_same_turn() {
         ClientCommand::TurnSubmit {
             session_id: session_id.clone(),
             text: "also use this attached context".to_string(),
+            input_kind: None,
+            source_turn_id: None,
         },
     )
     .unwrap()
@@ -2302,6 +2320,8 @@ fn rapid_submit_during_an_active_turn_is_treated_as_a_supplement() {
         ClientCommand::TurnSubmit {
             session_id: session_id.clone(),
             text: "stop if this is still running".to_string(),
+            input_kind: None,
+            source_turn_id: None,
         },
     )
     .unwrap()
@@ -2333,6 +2353,8 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
             ClientCommand::TurnSubmit {
                 session_id: session_id.clone(),
                 text: text.to_string(),
+                input_kind: None,
+                source_turn_id: None,
             },
         )
         .unwrap()
@@ -2582,6 +2604,100 @@ impl ModelClient for TaggedFinalModel {
     }
 }
 
+struct ToolGenPromptCaptureModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ModelClient for ToolGenPromptCaptureModel {
+    fn call_model(
+        &mut self,
+        _config: &ProviderConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        Ok(LlmResponse {
+            content: "<response><toolgen_retrospect>No reusable tool was published.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></response>".to_string(),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+struct ToolGenPublishModel {
+    calls: u8,
+}
+
+impl ModelClient for ToolGenPublishModel {
+    fn call_model(
+        &mut self,
+        _config: &ProviderConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        let content = if self.calls == 1 {
+            "<response><free_talk>Checking the reusable workflow.</free_talk><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"printf toolgen-host-check\",\"timeout_ms\":5000}}]]]></action_json></working_still_action></response>".to_string()
+        } else if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
+            "<response><toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer></response>".to_string()
+        } else {
+            let marker = "Write the new tool files only in this temporary staging directory:\n";
+            let draft = prompt
+                .split_once(marker)
+                .and_then(|(_, rest)| rest.lines().next())
+                .expect("ToolGen prompt must provide a draft path");
+            std::fs::write(
+                std::path::Path::new(draft).join("README.md"),
+                "# host-tool\n\nPurpose: verify the Web host ToolGen event chain.\nSynopsis: `host-tool --self-test`\nInput: optional self-test flag. Output: ready.\nExample: `./tool.sh --self-test`\n",
+            )
+            .unwrap();
+            std::fs::write(
+                std::path::Path::new(draft).join("tool.sh"),
+                "#!/bin/bash\nset -euo pipefail\n[[ ${1:-} == --self-test ]] && { echo ready; exit 0; }\necho ready\n",
+            )
+            .unwrap();
+            std::fs::write(
+                std::path::Path::new(draft).join(".timem-tool.json"),
+                serde_json::json!({
+                    "name": "host-tool",
+                    "type": "test-automation",
+                    "language": "bash",
+                    "entrypoint": "tool.sh",
+                    "synopsis": "host-tool [--self-test]",
+                    "self_test": {"args": ["--self-test"], "timeout_ms": 2000}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            format!(
+                "<response><free_talk>Publishing the verified draft.</free_talk><working_still_action><action_json><![CDATA[[{{\"toolgen\":{{\"op\":\"publish\",\"draft_path\":{}}}}}]]]></action_json></working_still_action></response>",
+                serde_json::to_string(draft).unwrap()
+            )
+        };
+        Ok(LlmResponse {
+            content,
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 100 + u32::from(self.calls),
+                completion_tokens: 20,
+                total_tokens: 120 + u32::from(self.calls),
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
 struct ChangeCwdModel {
     new_path: String,
     round: u8,
@@ -2673,6 +2789,382 @@ fn register_real_worker(state: &AppState, name: &'static str) -> String {
         .unwrap()
         .insert(session_id.clone(), session);
     session_id
+}
+
+fn register_toolgen_capture_worker(state: &AppState, prompts: Arc<Mutex<Vec<String>>>) -> String {
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("toolgen_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir = std::env::temp_dir().join(format!("timem_web_toolgen_{}", now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("ToolGen test".to_string()),
+            None,
+            ToolGenPromptCaptureModel { prompts },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, "ToolGen test".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id;
+    session.active_context_id = session.contexts[0].context_id.clone();
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
+}
+
+fn register_toolgen_publish_worker(state: &AppState) -> String {
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("toolgen_publish_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir = std::env::temp_dir().join(format!("timem_web_toolgen_publish_{}", now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let memory_dir = current_mem_state(state).unwrap().layout.memory_dir();
+    let mut core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        },
+        &memory_dir,
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("ToolGen publish test".to_string()),
+            None,
+            ToolGenPublishModel { calls: 0 },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, "ToolGen publish test".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id;
+    session.active_context_id = session.contexts[0].context_id.clone();
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
+}
+
+fn add_completed_toolgen_source_turn(state: &AppState, session_id: &str) -> String {
+    let source = start_web_turn(state, session_id, "extract reusable timing data").unwrap();
+    let mut sessions = state.sessions.lock().unwrap();
+    let session = sessions.get_mut(session_id).unwrap();
+    let turn = session
+        .turns
+        .iter_mut()
+        .find(|turn| turn.turn_id == source.turn_id)
+        .unwrap();
+    turn.state = "completed".to_string();
+    turn.final_answer = Some("source final answer must remain visible".to_string());
+    turn.completion = Some(json!({"stop_reason": "finished"}));
+    session.state = "ready".to_string();
+    session.active_turn_id = None;
+    source.turn_id
+}
+
+fn drive_worker_until_session_ready(
+    state: &AppState,
+    session_id: &str,
+    prompts: &Arc<Mutex<Vec<String>>>,
+) {
+    let started = Instant::now();
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+            handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
+        }
+        if !prompts.lock().unwrap().is_empty()
+            && state.sessions.lock().unwrap()[session_id].state == "ready"
+        {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "ToolGen worker did not finish"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_toolgen_capture_worker(&state, Arc::clone(&prompts));
+    let source_turn_id = add_completed_toolgen_source_turn(&state, &session_id);
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: String::new(),
+            input_kind: Some("toolgen".to_string()),
+            source_turn_id: Some(source_turn_id.clone()),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("manual ToolGen must create a Web turn");
+    };
+    assert_eq!(turn.state, "working");
+    assert!(turn.turn_id.starts_with("web_toolgen_turn_"));
+    assert!(turn.user_entries.is_empty());
+    drive_worker_until_session_ready(&state, &session_id, &prompts);
+
+    let prompt = prompts.lock().unwrap().last().unwrap().clone();
+    assert!(prompt.contains("[TOOL_GEN_TASK] Please preserve the reusable work module"));
+    assert!(!prompt.contains("Referenced completed turn id:"));
+    assert!(!prompt.contains("Completed task:"));
+    assert!(!prompt.contains("Completed task result:"));
+    assert!(!prompt.contains("Observed action evidence:"));
+    assert!(prompt.contains("## ToolGen test"));
+    assert!(!prompt.contains("ToolGen test_TOOLGEN"));
+    let marker = "[TOOL_GEN_TASK] Please preserve the reusable work module";
+    let delta_start = prompt[..prompt.find(marker).unwrap()]
+        .rfind("[BEGIN DELTA]")
+        .unwrap();
+    let delta_end = prompt[delta_start..].find("[END DELTA]").unwrap() + delta_start;
+    let toolgen_delta = &prompt[delta_start..delta_end];
+    assert!(toolgen_delta.contains("## SYSTEM"));
+    assert!(!toolgen_delta.contains("## USER"));
+
+    let sessions = state.sessions.lock().unwrap();
+    let source = sessions[&session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == source_turn_id)
+        .unwrap();
+    assert_eq!(
+        source.final_answer.as_deref(),
+        Some("source final answer must remain visible")
+    );
+}
+
+#[test]
+fn manual_toolgen_adds_optional_guidance_as_user_component() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_toolgen_capture_worker(&state, Arc::clone(&prompts));
+    let source_turn_id = add_completed_toolgen_source_turn(&state, &session_id);
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "Prefer a Python CLI with JSON output.".to_string(),
+            input_kind: Some("toolgen".to_string()),
+            source_turn_id: Some(source_turn_id),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("manual ToolGen must create a Web turn");
+    };
+    assert_eq!(turn.user_entries.len(), 1);
+    assert_eq!(turn.user_entries[0].kind, "toolgen_instruction");
+    drive_worker_until_session_ready(&state, &session_id, &prompts);
+
+    let prompt = prompts.lock().unwrap().last().unwrap().clone();
+    let guidance_at = prompt
+        .find("Prefer a Python CLI with JSON output.")
+        .expect("optional ToolGen guidance must reach the model");
+    let delta_start = prompt[..guidance_at].rfind("[BEGIN DELTA]").unwrap();
+    let delta_end = prompt[guidance_at..].find("[END DELTA]").unwrap() + guidance_at;
+    let toolgen_delta = &prompt[delta_start..delta_end];
+    assert!(toolgen_delta.contains("## USER"));
+    let system_at = toolgen_delta.find("## SYSTEM").unwrap();
+    let user_at = toolgen_delta.find("## USER").unwrap();
+    assert!(
+        system_at < user_at,
+        "the fixed ToolGen SYSTEM instruction must precede optional USER guidance"
+    );
+}
+
+#[test]
+fn manual_toolgen_publishes_tool_and_retains_the_complete_web_event_chain() {
+    let state = routing_test_state();
+    let session_id = register_toolgen_publish_worker(&state);
+    let source_turn_id = add_completed_toolgen_source_turn(&state, &session_id);
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "Keep the generated CLI deterministic.".to_string(),
+            input_kind: Some("toolgen".to_string()),
+            source_turn_id: Some(source_turn_id.clone()),
+        },
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
+            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+        }
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        let finished = session.state == "ready" && session.tools.len() == 1;
+        drop(sessions);
+        if finished {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "ToolGen publish workflow did not finish: {}",
+            serde_json::to_string(&state.sessions.lock().unwrap()[&session_id]).unwrap()
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    let source = session
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == source_turn_id)
+        .unwrap();
+    assert_eq!(
+        source.final_answer.as_deref(),
+        Some("source final answer must remain visible")
+    );
+    let toolgen_turn = session.turns.last().unwrap();
+    assert_eq!(toolgen_turn.state, "finished");
+    assert!(toolgen_turn.final_answer.is_none());
+    assert_eq!(session.tools[0].name, "host-tool");
+    assert_eq!(
+        toolgen_turn.completion.as_ref().unwrap()["stats"]["llm_calls"],
+        3
+    );
+
+    let serialized_events = serde_json::to_string(&toolgen_turn.events).unwrap();
+    assert!(serialized_events.contains("Checking the reusable workflow"));
+    assert!(serialized_events.contains("Publishing the verified draft"));
+    assert!(serialized_events.contains("run_bash"));
+    assert!(serialized_events.contains("toolgen"));
+    assert!(serialized_events.contains("published"));
+    assert!(serialized_events.contains("model_response"));
+    assert!(serialized_events.contains("runtime_phase"));
+    assert!(!serialized_events.contains("model_error"));
+}
+
+#[test]
+fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_toolgen_capture_worker(&state, Arc::clone(&prompts));
+
+    let missing = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: String::new(),
+            input_kind: Some("toolgen".to_string()),
+            source_turn_id: Some("missing_turn".to_string()),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(missing, "toolgen_source_turn_not_found");
+
+    let unfinished = start_web_turn(&state, &session_id, "unfinished task").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    let incomplete = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: String::new(),
+            input_kind: Some("toolgen".to_string()),
+            source_turn_id: Some(unfinished.turn_id),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(incomplete, "toolgen_source_turn_not_completed");
+
+    let source_turn_id = add_completed_toolgen_source_turn(&state, &session_id);
+    let request = || ClientCommand::TurnSubmit {
+        session_id: session_id.clone(),
+        text: String::new(),
+        input_kind: Some("toolgen".to_string()),
+        source_turn_id: Some(source_turn_id.clone()),
+    };
+    assert!(handle_command(&state, TEST_PORT, request())
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        handle_command(&state, TEST_PORT, request()).unwrap_err(),
+        "turn_already_active"
+    );
+    drive_worker_until_session_ready(&state, &session_id, &prompts);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -2978,4 +3470,110 @@ async fn ask_mode_decline_continues_the_turn_without_loading_work_instructions()
     let context = session_context(&state, &session_id, &[]).unwrap().unwrap();
     assert!(context.contains("host: local_web"));
     assert!(!context.contains("MUST_NOT_REACH_MODEL"));
+}
+
+fn publish_web_test_tool(repo: &SessionToolRepo, name: &str, searchable: &str) -> ToolSummary {
+    let draft = repo.create_draft().unwrap();
+    std::fs::write(
+        draft.join("README.md"),
+        format!("# {name}\n\n`{name} <file>`\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        draft.join("tool.sh"),
+        format!("#!/bin/bash\nprintf '%s\\n' {searchable}\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        draft.join(".timem-tool.json"),
+        serde_json::json!({
+            "name": name,
+            "type": "debug",
+            "language": "bash",
+            "entrypoint": "tool.sh",
+            "synopsis": format!("{name} <file>"),
+            "self_test": {"args": ["--self-test"], "timeout_ms": 2000}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    repo.publish(&draft).unwrap().summary
+}
+
+#[test]
+fn toolrepo_commands_are_session_scoped() {
+    let state = routing_test_state();
+    let repo_a = session_tool_repo(&state, "session_a").unwrap();
+    let tool = publish_web_test_tool(&repo_a, "trace-window-finder", "exclusive-search-marker");
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ToolRepoSearch {
+            session_id: "session_a".into(),
+            query: "exclusive-search-marker".into(),
+            limit: Some(10),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(event, WireEvent::ToolRepoSearchResult { session_id, ref tools, .. } if session_id == "session_a" && tools[0].tool_id == tool.tool_id)
+    );
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ToolRepoSearch {
+            session_id: "session_b".into(),
+            query: "exclusive-search-marker".into(),
+            limit: Some(10),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(event, WireEvent::ToolRepoSearchResult { ref tools, .. } if tools.is_empty()));
+}
+
+#[test]
+fn toolrepo_detail_rename_and_future_prompt_hint_share_the_published_state() {
+    let state = routing_test_state();
+    let repo = session_tool_repo(&state, "session_a").unwrap();
+    let tool = publish_web_test_tool(&repo, "json-log-filter", "needle-in-code");
+
+    let detail = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ToolRepoDetail {
+            session_id: "session_a".into(),
+            tool_id: tool.tool_id.clone(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(detail, WireEvent::ToolRepoDetail { ref detail, .. } if detail.readme.contains("json-log-filter") && detail.files.iter().any(|file| file.path == "tool.sh"))
+    );
+
+    let renamed = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ToolRepoRename {
+            session_id: "session_a".into(),
+            tool_id: tool.tool_id,
+            new_name: "structured-log-filter".into(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        matches!(renamed, WireEvent::ToolRepoUpdated { ref tools, .. } if tools[0].name == "structured-log-filter")
+    );
+    let context = session_context(&state, "session_a", &[]).unwrap().unwrap();
+    assert!(context.contains(repo.root().to_string_lossy().as_ref()));
+    assert!(context.contains("semantic names"));
+    assert!(context.contains("inspect its short README"));
+    assert!(!session_context(&state, "session_b", &[])
+        .unwrap()
+        .unwrap()
+        .contains("Previously accumulated reusable scripts"));
 }

@@ -1922,6 +1922,7 @@ fn status_finished_uses_final_answer_as_host_final_answer() {
 fn final_turn_wire_shape_uses_semantic_final_answer_field() {
     let step = CoreStep::Final(TurnFinal {
         final_answer: "这是最终结论。".to_string(),
+        toolgen_retrospect: String::new(),
         stats: UsageStats::zero(),
         profile_label: "aliyun:qwen-plus".to_string(),
         repair_issue: None,

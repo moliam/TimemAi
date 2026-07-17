@@ -42,6 +42,8 @@ button { cursor: pointer; }
 .turn-assistant-heading { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 13px; border-bottom: 1px solid #25343e; }
 .turn-assistant-heading .message-label { margin: 0; color: #b9cbd3; }
 .working-chip { display: inline-flex; align-items: center; gap: 7px; color: #d6b46f; font-size: 11px; font-weight: 700; }
+.working-chip.toolgen-working, .working-indicator.toolgen-working { color: #73aee8; }
+.working-chip.toolgen-working svg { animation: toolgen-turn 1.8s ease-in-out infinite; }
 .turn-work-scroll { max-height: min(480px, 55vh); min-height: 52px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 7px 12px 10px; }
 .turn-work-item { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 9px 2px; color: #c4d2dc; font-size: 12px; line-height: 1.5; animation: work-row-enter .2s ease-out both; }
 .turn-work-item + .turn-work-item { border-top: 1px solid #1d2932; }
@@ -449,6 +451,7 @@ button { cursor: pointer; }
 .turn-assistant-heading .message-label { color: #b4b4b4; font-size: 11px; }
 .working-chip { gap: 5px; border: 0; padding: 0; background: transparent; color: #8d8d8d; font-size: 10px; }
 .working-chip .pulse { width: 5px; height: 5px; background: #aaa; }
+@keyframes toolgen-turn { 0%, 100% { transform: rotate(-8deg); opacity: .7; } 50% { transform: rotate(16deg); opacity: 1; } }
 .turn-work-scroll { max-height: min(420px, 50vh); padding: 0; scrollbar-gutter: auto; }
 .turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 2px; color: #aaa; font-size: 12px; }
 .turn-work-item + .turn-work-item { border: 0; }
@@ -568,3 +571,83 @@ button { cursor: pointer; }
   .tool-activity summary { grid-template-columns: 16px max-content max-content minmax(0, 1fr) 14px; }
   .completion-card { line-height: 1.8; }
 }
+
+/* ToolGen is session-scoped; the side panel is a quiet repository browser, not another chat surface. */
+.toolrepo-toggle { height: 32px; min-width: 43px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; border: 1px solid #484848; border-radius: 16px; background: transparent; color: #aaa; }
+.toolrepo-toggle:hover { color: #ddd; border-color: #666; }
+.toolrepo-toggle > span { min-width: 13px; color: #d8d8d8; font-size: 10px; font-weight: 700; line-height: 1; text-align: center; }
+.toolrepo-toggle.count-pulse > span { animation: tool-count-pulse .7s ease-in-out 3; }
+.completion-toolgen { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 0 3px; border: 0; background: transparent; color: #6f8fa8; font: inherit; font-weight: 650; }
+.completion-toolgen:hover { color: #8ebce0; }
+.toolgen-dialog p { margin: 0 0 15px; color: #9eabb4; font-size: 13px; line-height: 1.55; }
+.toolgen-dialog label { display: grid; gap: 7px; color: #c5d0d6; font-size: 12px; font-weight: 650; }
+.toolgen-dialog textarea { min-height: 112px; resize: vertical; border: 1px solid #344650; border-radius: 6px; padding: 10px 11px; background: #0d151b; color: #e3ebef; font: 13px/1.5 inherit; outline: 0; }
+.toolgen-dialog textarea:focus { border-color: #4d8fd7; box-shadow: 0 0 0 3px #4d8fd722; }
+@keyframes tool-count-pulse { 50% { transform: scale(1.35); box-shadow: 0 0 0 5px #3485dc2e; } }
+.toolgen-notice { margin: 5px 0; padding: 4px 0 4px 12px; border: 0; border-left: 2px solid #526477; color: #9eabb7; font-size: 12px; }
+.toolgen-notice summary { display: flex; align-items: center; gap: 4px; width: fit-content; cursor: pointer; list-style: none; font-weight: 650; }
+.toolgen-notice summary::-webkit-details-marker { display: none; }
+.toolgen-notice summary svg { flex: 0 0 auto; transition: transform .16s ease; }
+.toolgen-notice[open] summary svg { transform: rotate(90deg); }
+.toolgen-notice > div { margin: 5px 0 0 17px; color: #8996a2; }
+.toolgen-notice .markdown-body > :first-child { margin-top: 0; }
+.toolgen-notice .markdown-body > :last-child { margin-bottom: 0; }
+.toolgen-notice.failed { border-left-color: #a97956; }
+.side-panel-header { align-items: center; padding: 10px 10px 8px !important; }
+.side-panel-tabs { min-width: 0; display: flex; align-items: center; gap: 3px; }
+.side-panel-tabs button { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 6px; padding: 6px 9px; background: transparent; color: #888; font-size: 11px; font-weight: 650; }
+.side-panel-tabs button:hover { color: #ccc; background: #292929; }
+.side-panel-tabs button.active { color: #a9d1ff; background: #24364a; }
+.side-panel-tabs small { min-width: 16px; padding: 1px 4px; border-radius: 8px; background: #3b526c; color: #d9ebff; font-size: 9px; }
+.toolrepo-panel { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.toolrepo-controls { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 6px; padding: 10px; border-bottom: 1px solid #2b2b2b; }
+.toolrepo-controls label { min-width: 0; display: flex; align-items: center; gap: 6px; border: 1px solid #3a3a3a; border-radius: 7px; padding: 0 8px; color: #777; background: #202020; }
+.toolrepo-controls input, .toolrepo-controls select, .toolrepo-rename { min-width: 0; width: 100%; border: 0; outline: 0; background: transparent; color: #ddd; font-size: 11px; }
+.toolrepo-controls input { height: 32px; }
+.toolrepo-controls select { border: 1px solid #3a3a3a; border-radius: 7px; padding: 0 6px; background: #202020; }
+.toolrepo-empty { margin: auto; max-width: 250px; display: grid; justify-items: center; gap: 8px; padding: 28px; color: #777; text-align: center; font-size: 11px; line-height: 1.5; }
+.toolrepo-empty strong { color: #aaa; font-size: 12px; }
+.toolrepo-browser { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: auto; }
+.toolrepo-list { flex: none; display: grid; padding: 6px; }
+.toolrepo-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 26px; align-items: center; border-radius: 6px; }
+.toolrepo-item:hover { background: #252525; }
+.toolrepo-item.selected { background: #27394c; }
+.toolrepo-item-main { min-width: 0; display: flex; align-items: center; gap: 4px; border: 0; padding: 8px 5px; background: transparent; color: #bbb; text-align: left; }
+.toolrepo-item-main > span { min-width: 0; display: grid; gap: 2px; }
+.toolrepo-item-main strong, .toolrepo-item-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolrepo-item-main strong { font-size: 11px; font-weight: 650; }
+.toolrepo-item-main small { color: #777; font-size: 9px; }
+.toolrepo-edit { width: 25px; height: 25px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777; opacity: 0; }
+.toolrepo-item:hover .toolrepo-edit, .toolrepo-edit:focus-visible { opacity: 1; }
+.toolrepo-edit:hover { color: #ccc; background: #343434; }
+.toolrepo-rename { margin: 4px; border: 1px solid #4c87c6; border-radius: 5px; padding: 5px 6px; background: #202b37; }
+.toolrepo-detail { flex: 1; min-height: 210px; display: flex; flex-direction: column; border-top: 1px solid #333; }
+.toolrepo-detail > header { flex: none; align-items: flex-start; gap: 8px; padding: 11px !important; }
+.toolrepo-detail > header > div { min-width: 0; display: grid; gap: 5px; }
+.toolrepo-detail > header strong { overflow: hidden; color: #ddd; font-size: 12px; text-overflow: ellipsis; }
+.toolrepo-detail > header code { color: #858585; font: 9px/1.4 "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+.toolrepo-detail > header button { flex: none; width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #888; }
+.toolrepo-detail > header button:hover { background: #292929; color: #ddd; }
+.toolrepo-files { flex: none; display: grid; max-height: 130px; overflow: auto; padding: 6px 4px; border-bottom: 1px solid #2b2b2b; }
+.toolrepo-files > div { min-width: 0; display: flex; justify-content: space-between; gap: 8px; padding-block: 3px; color: #aaa; font: 10px/1.35 "SFMono-Regular", Consolas, monospace; }
+.toolrepo-files span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolrepo-files small { flex: none; color: #666; }
+.toolrepo-readme { min-height: 0; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 5px; overflow: auto; padding: 12px; color: #aaa; font-size: 11px; }
+.toolrepo-readme > svg { color: #6f8cac; }
+.toolrepo-readme .markdown-body > :first-child { margin-top: 0; }
+.toolrepo-context-menu { position: fixed; z-index: 40; padding: 4px; border: 1px solid #444; border-radius: 7px; background: #252525; box-shadow: 0 12px 32px #0009; }
+.toolrepo-context-menu button { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 5px; padding: 8px 10px; background: transparent; color: #ddd; font-size: 11px; }
+.toolrepo-context-menu button:hover { background: #373737; }
+:root[data-theme="light"] .toolrepo-toggle { border-color: #ccc; color: #666; }
+:root[data-theme="light"] .toolrepo-toggle > span { color: #444; }
+:root[data-theme="light"] .completion-toolgen { color: #437ba8; }
+:root[data-theme="light"] .toolgen-dialog p { color: #61717a; }
+:root[data-theme="light"] .toolgen-dialog label { color: #34434a; }
+:root[data-theme="light"] .toolgen-dialog textarea { border-color: #bccbd1; background: #f8fbfc; color: #1c2b31; }
+:root[data-theme="light"] .side-panel-tabs button.active, :root[data-theme="light"] .toolrepo-item.selected { background: #e2effd; color: #1f68ad; }
+:root[data-theme="light"] .toolrepo-controls label, :root[data-theme="light"] .toolrepo-controls select { border-color: #ddd; background: #f5f5f5; color: #555; }
+:root[data-theme="light"] .toolrepo-controls input, :root[data-theme="light"] .toolrepo-controls select, :root[data-theme="light"] .toolrepo-rename { color: #222; }
+:root[data-theme="light"] .toolrepo-item:hover { background: #eee; }
+:root[data-theme="light"] .toolrepo-context-menu { border-color: #ddd; background: #fff; }
+:root[data-theme="light"] .toolrepo-context-menu button { color: #222; }
+@media (prefers-reduced-motion: reduce) { .toolrepo-toggle.count-pulse > span { animation: none; } }

@@ -8,6 +8,14 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ### Added
 
+- Added manual per-Session ToolGen preservation. A ToolGen button on each
+  completed task can open an optional-guidance dialog, then run a bounded
+  temporary Context against that exact source turn to create or update one or
+  more runtime-validated reusable scripts. The original final answer remains
+  unchanged on success or failure. The composer opens a default ToolRepo side
+  panel and shows its count inside the control; ToolRepo supports code search,
+  sorting, file tree, README, rename and terminal-open operations.
+
 - Added a local authenticated `timem-web` host with an assistant-ui conversation
   surface, multiple isolated sessions, file attachments, runtime settings,
   GFM Markdown rendering, syntax-highlighted copyable code blocks, completion

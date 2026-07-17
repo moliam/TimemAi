@@ -324,6 +324,7 @@ impl ActionGroupOrder {
 
 pub struct ParsedEnvelope {
     pub final_answer: String,
+    pub toolgen_retrospect: String,
     pub continue_work: bool,
     pub thought: String,
     pub thought_keep_in_context: bool,

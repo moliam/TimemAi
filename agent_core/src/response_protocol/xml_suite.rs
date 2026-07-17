@@ -79,6 +79,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     let mut repair_issue = response.flow_issue.clone();
     let has_status = response.has_status;
     let final_answer = response.final_answer.clone();
+    let toolgen_retrospect = response.toolgen_retrospect.clone();
     let thought = response.free_talk.clone();
     let thought_keep_in_context = !thought.trim().is_empty();
 
@@ -114,6 +115,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     }
     ParsedEnvelope {
         final_answer,
+        toolgen_retrospect,
         continue_work,
         thought,
         thought_keep_in_context,
@@ -174,6 +176,7 @@ fn strip_surrounding_xml_fence(text: &str) -> Option<&str> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ResponseFields {
     free_talk: String,
+    toolgen_retrospect: String,
     final_answer: String,
     action_json_blocks: Vec<String>,
     context_compacts: Vec<ContextCompactFields>,
@@ -238,6 +241,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
         "freetalk",
         "working_still_action",
         "context_compact",
+        "toolgen_retrospect",
         "final_answer",
         "status",
     ];
@@ -265,6 +269,8 @@ fn scan_response_body(body: &str) -> ResponseFields {
             }
             has_free_talk = true;
             1
+        } else if tag == "toolgen_retrospect" {
+            2
         } else {
             state_branch_count += 1;
             if tag == "working_still_action" {
@@ -273,7 +279,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
             if tag == "final_answer" {
                 has_final_answer = true;
             }
-            2
+            3
         };
         if fields.flow_issue.is_none() && tag_order < last_order {
             fields.flow_issue = Some("xml_tags_out_of_order".to_string());
@@ -288,7 +294,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
             continue;
         }
 
-        let close_start = if tag == "final_answer" {
+        let close_start = if matches!(tag, "final_answer" | "toolgen_retrospect") {
             find_last_close_tag(body, open_end + 1, tag)
         } else if tag == "working_still_action" || tag == "context_compact" {
             find_close_tag_outside_cdata(body, open_end + 1, tag)
@@ -308,6 +314,9 @@ fn scan_response_body(body: &str) -> ResponseFields {
             }
             "final_answer" => {
                 fields.final_answer = decode_xml_text(&unwrap_cdata_text(inner));
+            }
+            "toolgen_retrospect" => {
+                fields.toolgen_retrospect = decode_xml_text(&unwrap_cdata_text(inner));
             }
             "status" => {
                 fields.has_status = true;
@@ -336,6 +345,12 @@ fn scan_response_body(body: &str) -> ResponseFields {
     }
     if fields.flow_issue.is_none() && state_branch_count > 1 {
         fields.flow_issue = Some("state_branch_must_choose_one".to_string());
+    }
+    if fields.flow_issue.is_none()
+        && !fields.toolgen_retrospect.trim().is_empty()
+        && !has_final_answer
+    {
+        fields.flow_issue = Some("toolgen_retrospect_requires_final_answer".to_string());
     }
     fields
 }
@@ -460,6 +475,7 @@ fn close_tag_len(tag: &str) -> usize {
 fn malformed_xml_response(issue: &str) -> ParsedEnvelope {
     ParsedEnvelope {
         final_answer: String::new(),
+        toolgen_retrospect: String::new(),
         continue_work: true,
         thought: String::new(),
         thought_keep_in_context: false,
