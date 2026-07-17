@@ -180,6 +180,13 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".live-turn-usage");
   });
 
+  it("shows restored sessions as zero context until a fresh provider usage arrives", () => {
+    expect(viewModelSource).toContain('if (turn.state === "restored") continue;');
+    expect(source).toContain("formatTokens(usage?.prompt_tokens ?? 0)");
+    expect(source).toContain('limit ? `${ratio}%` : "0%"');
+    expect(source).not.toContain("waiting for usage");
+  });
+
   it("supports agent rename and a distinct animated working state", () => {
     expect(viewModelSource).toContain('type: "session_rename"');
     expect(viewModelSource).toContain("sessionRenameDecision");
