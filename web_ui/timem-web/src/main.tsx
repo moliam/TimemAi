@@ -79,12 +79,33 @@ function TimemApp() {
   const pendingRuntimeKeysRef = useRef<Set<string>>(new Set());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const runtimeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const runtimePanelRef = useRef<HTMLElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   const activeMessages = activeSession?.messages ?? [];
 
   useEffect(() => {
     applyAppearance(appearance);
   }, [appearance]);
+
+  useEffect(() => {
+    if (!showRuntime) return;
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (runtimeButtonRef.current?.contains(target) || runtimePanelRef.current?.contains(target)) return;
+      setShowRuntime(false);
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowRuntime(false);
+    };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [showRuntime]);
 
   useEffect(() => {
     if (new URLSearchParams(window.location.search).has("token")) {
@@ -524,13 +545,13 @@ function TimemApp() {
           <div className="header-actions">
             <button title="Sessions" aria-label="Sessions" className="icon-button mobile-session-button" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
             <button title="Appearance" aria-label="Appearance" className={`icon-button ${showAppearance ? "selected" : ""}`} onClick={() => setShowAppearance((visible) => !visible)}><Palette size={17}/></button>
-            <button title="Runtime information" className="icon-button" onClick={() => setShowRuntime((visible) => !visible)}><Settings2 size={17}/></button>
+            <button ref={runtimeButtonRef} title="Runtime information" className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} onClick={() => setShowRuntime((visible) => !visible)}><Settings2 size={17}/></button>
             <button title="Session tools and activity" className={`icon-button ${showActivity ? "selected" : ""}`} onClick={() => setShowActivity((visible) => !visible)}><PanelRight size={17}/></button>
           </div>
         </header>
         {showAppearance && <AppearancePanel appearance={appearance} onChange={setAppearance} onClose={() => setShowAppearance(false)}/>}
         {visibleError && <div className="host-error-banner" role="alert"><span><strong>{visibleError.title}</strong>{visibleError.detail && ` · ${visibleError.detail}`}</span><button className="icon-button" title="Dismiss error" onClick={() => setActivities((current) => current.filter((activity) => activity.id !== visibleError.id))}><X size={15}/></button></div>}
-        {showRuntime && <RuntimePanel server={server} pendingKeys={pendingRuntimeKeys} onUpdate={(key, value) => {
+        {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} pendingKeys={pendingRuntimeKeys} onUpdate={(key, value) => {
           if (!addPendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, key)) return;
           if (!sendCommand({ type: "runtime_update", key, value })) {
             removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, key);
@@ -1105,10 +1126,10 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function RuntimePanel({ server, pendingKeys, onUpdate }: { server: Snapshot["server"] | null; pendingKeys: Set<string>; onUpdate: (key: string, value: string) => void }) {
+function RuntimePanel({ panelRef, server, pendingKeys, onUpdate }: { panelRef: MutableRefObject<HTMLElement | null>; server: Snapshot["server"] | null; pendingKeys: Set<string>; onUpdate: (key: string, value: string) => void }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  if (!server) return <section className="runtime-card"><Cpu size={16}/><span>Loading runtime settings…</span></section>;
-  return <section className="runtime-card runtime-settings"><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/> localhost:{server.port}</span></div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
+  if (!server) return <section ref={panelRef} className="runtime-card"><Cpu size={16}/><span>Loading runtime settings…</span></section>;
+  return <section ref={panelRef} className="runtime-card runtime-settings"><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/> localhost:{server.port}</span></div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
     const value = drafts[option.key] ?? option.value;
     const pending = pendingKeys.has(option.key);
     return <label key={option.key}><span>{option.key}</span><div><input value={value} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))}/><button className="secondary compact" disabled={pending || value === option.value} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
@@ -1127,6 +1148,9 @@ const SESSION_RUNTIME_FIELDS = [
   ["TIMEM_MAX_LLM_OUTPUT", "Max output tokens", "text"],
   ["TIMEM_BASH_APPROVAL", "Bash approval", "bash_approval"],
   ["TIMEM_WORK_INSTRUCTIONS", "AGENTS/CLAUDE loading", "work_instructions"],
+  ["TIMEM_ENABLE_THINKING", "Enable thinking", "boolean"],
+  ["TIMEM_REASONING_EFFORT", "Reasoning effort", "text"],
+  ["TIMEM_STREAM", "Stream response", "boolean"],
 ] as const;
 
 function NewSessionDialog({ workspaces, runtimeDefaults, creating, onClose, onCreate }: {
@@ -1141,7 +1165,7 @@ function NewSessionDialog({ workspaces, runtimeDefaults, creating, onClose, onCr
   const [env, setEnv] = useState<Record<string, string>>({});
   const updateEnv = (key: string, value: string) => setEnv((current) => ({ ...current, [key]: value }));
   const cleanedEnv = () => Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value));
-  return <div className="modal-backdrop" role="presentation"><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session"><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2><div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)}/></label><label>Workspace<select value={workspaceDir} disabled={creating} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.map((workspace) => <option value={workspace} key={workspace}>{workspace}</option>)}</select></label><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span>{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option><option value="markdown">markdown</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>}</label>)}</div></details></div><div className="decision-actions"><button className="secondary" disabled={creating} onClick={onClose}>Cancel</button><button className="primary" disabled={creating} onClick={() => onCreate(displayName.trim(), workspaceDir, cleanedEnv())}><Plus size={16}/> {creating ? "Creating…" : "Create session"}</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session"><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2><div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)}/></label><label>Workspace<select value={workspaceDir} disabled={creating} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.map((workspace) => <option value={workspace} key={workspace}>{workspace}</option>)}</select></label><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span>{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option><option value="markdown">markdown</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : kind === "boolean" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "false"}</option><option value="true">true</option><option value="false">false</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>}</label>)}</div></details></div><div className="decision-actions"><button className="secondary" disabled={creating} onClick={onClose}>Cancel</button><button className="primary" disabled={creating} onClick={() => onCreate(displayName.trim(), workspaceDir, cleanedEnv())}><Plus size={16}/> {creating ? "Creating…" : "Create session"}</button></div></section></div>;
 }
 
 function ToolGenDialog({ pending, onClose, onSubmit }: { pending: boolean; onClose: () => void; onSubmit: (text: string) => void }) {

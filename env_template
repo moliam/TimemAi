@@ -44,6 +44,12 @@
 # Maximum response tokens.
 # export TIMEM_MAX_LLM_OUTPUT=10K
 
+# Optional OpenAI-compatible reasoning/streaming extensions. Enable only when
+# the selected gateway/model documents these fields.
+# export TIMEM_ENABLE_THINKING=true
+# export TIMEM_REASONING_EFFORT=max
+# export TIMEM_STREAM=true
+
 # Maximum LLM input context window. Accepts plain numbers or K suffix, such as 100K.
 # export TIMEM_MAX_LLM_INPUT=100K
 

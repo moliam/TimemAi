@@ -227,3 +227,40 @@ fn token_limits_default_and_can_come_from_env() {
     assert_eq!(configured.max_llm_input_tokens, 128_000);
     assert_eq!(configured.max_llm_output_tokens, 8_000);
 }
+
+#[test]
+fn openai_compatible_thinking_options_are_loaded_from_env() {
+    let config = provider_config_from_sources(
+        &ProviderConfigSource::default(),
+        &env(&[
+            ("TIMEM_API_KEY", "k"),
+            ("TIMEM_ENABLE_THINKING", "true"),
+            ("TIMEM_REASONING_EFFORT", "max"),
+            ("TIMEM_STREAM", "true"),
+        ]),
+    )
+    .unwrap();
+
+    assert_eq!(config.openai_compatible.enable_thinking, Some(true));
+    assert_eq!(
+        config.openai_compatible.reasoning_effort.as_deref(),
+        Some("max")
+    );
+    assert!(config.openai_compatible.stream);
+}
+
+#[test]
+fn openai_compatible_thinking_options_reject_invalid_env_values() {
+    for (key, value) in [
+        ("TIMEM_ENABLE_THINKING", "sometimes"),
+        ("TIMEM_STREAM", "maybe"),
+        ("TIMEM_REASONING_EFFORT", "max; rm"),
+    ] {
+        let error = provider_config_from_sources(
+            &ProviderConfigSource::default(),
+            &env(&[("TIMEM_API_KEY", "k"), (key, value)]),
+        )
+        .unwrap_err();
+        assert!(error.contains(key), "unexpected error for {key}: {error}");
+    }
+}

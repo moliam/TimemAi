@@ -264,12 +264,24 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('TIMEM_GATEWAY_PROVIDER');
     expect(source).toContain('TIMEM_MODEL');
     expect(source).toContain('TIMEM_API_KEY');
+    expect(source).toContain('TIMEM_ENABLE_THINKING');
+    expect(source).toContain('TIMEM_REASONING_EFFORT');
+    expect(source).toContain('TIMEM_STREAM');
+    expect(source).toContain('kind === "boolean"');
     expect(source).toContain('type={kind}');
     expect(source).toContain('env }))');
     expect(source).toContain('session.runtime_profile.provider');
     expect(source).toContain('session.runtime_profile.model');
     expect(styles).toContain('.session-runtime-grid');
     expect(styles).toContain('.session-profile');
+  });
+
+  it("dismisses the runtime configuration card on outside click or Escape", () => {
+    expect(source).toContain('document.addEventListener("pointerdown", dismissOnOutsidePointer)');
+    expect(source).toContain('runtimeButtonRef.current?.contains(target)');
+    expect(source).toContain('runtimePanelRef.current?.contains(target)');
+    expect(source).toContain('if (event.key === "Escape") setShowRuntime(false)');
+    expect(source).toContain('aria-expanded={showRuntime}');
   });
 
   it("renders context compaction outside chat messages with a reduced-motion fallback", () => {

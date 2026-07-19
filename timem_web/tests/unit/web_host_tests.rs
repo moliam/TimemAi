@@ -393,6 +393,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
                 max_llm_input_tokens: 10_000,
                 api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
                 response_protocol: ResponseProtocolKind::default(),
+                openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
             },
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
@@ -537,6 +538,9 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
             "markdown".to_string(),
         ),
         ("TIMEM_MAX_LLM_INPUT".to_string(), "64K".to_string()),
+        ("TIMEM_ENABLE_THINKING".to_string(), "true".to_string()),
+        ("TIMEM_REASONING_EFFORT".to_string(), "max".to_string()),
+        ("TIMEM_STREAM".to_string(), "true".to_string()),
     ]);
     let first = create_session(
         &state,
@@ -566,6 +570,33 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
         "markdown"
     );
     assert_eq!(sessions[&second].max_llm_input_tokens, 64_000);
+    assert_eq!(
+        sessions[&second]
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .enable_thinking,
+        Some(true)
+    );
+    assert_eq!(
+        sessions[&second]
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("max")
+    );
+    assert!(
+        sessions[&second]
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .stream
+    );
     drop(sessions);
 
     let defaults = state.template.settings.lock().unwrap();
@@ -652,6 +683,20 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let turn = start_web_turn(&state, &session_id, "remember this after restart").unwrap();
     assert_eq!(turn.user_entries[0].text, "remember this after restart");
 
+    // Simulate a session persisted by the previous Web host, where `env`
+    // contained the fully resolved profile and carried no override provenance.
+    let store = current_session_store(&state).unwrap();
+    let mut legacy = store.load_session(&session_id).unwrap().unwrap();
+    legacy.env_overrides = None;
+    legacy
+        .env
+        .insert("TIMEM_MODEL".to_string(), "stale-model".to_string());
+    store.upsert_session(&legacy).unwrap();
+
+    // A default-inheriting session must follow the environment/configuration
+    // used by the newly started host instead of pinning its old resolved model.
+    template.settings.lock().unwrap().config.model = "model-from-new-env".to_string();
+
     let mut restarted = routing_test_state();
     restarted.sessions.lock().unwrap().clear();
     restarted.template = Arc::new(template);
@@ -675,6 +720,7 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     );
     assert!(restored_session.active_turn_id.is_none());
     assert!(restored_session.resume_notice_pending);
+    assert_eq!(restored_session.runtime_profile.model, "model-from-new-env");
     drop(sessions);
 
     let context = session_context(&restarted, &session_id, &[])
@@ -687,6 +733,159 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
         .unwrap()
         .unwrap_or_default();
     assert!(!context_after_first_use.contains("This session was restored"));
+}
+
+#[test]
+fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_long_turn"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restore_long_turn_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Milestone work".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let store = current_session_store(&state).unwrap();
+    let turn_id = "turn_vla_milestone";
+    store
+        .append_history_record(
+            &session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: turn_id.to_string(),
+                created_at_ms: 1,
+                kind: Some("task".to_string()),
+                content: "generate the VLA parking milestones".to_string(),
+            },
+        )
+        .unwrap();
+    for index in 0..203 {
+        store
+            .append_history_record(
+                &session_id,
+                &ChatHistoryRecord::Event {
+                    role: ChatHistoryRole::System,
+                    turn_id: turn_id.to_string(),
+                    created_at_ms: index + 2,
+                    kind: ChatHistoryEventKind::Action,
+                    content: format!("action {index}"),
+                    extra: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+    }
+    store
+        .append_history_record(
+            &session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: turn_id.to_string(),
+                created_at_ms: 205,
+                kind: Some("supplement".to_string()),
+                content: "还有一个 tar_log，下面是 clp 压缩的日志".to_string(),
+            },
+        )
+        .unwrap();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 1);
+
+    let sessions = restarted.sessions.lock().unwrap();
+    let restored = &sessions[&session_id];
+    assert_eq!(restored.turns.len(), 1);
+    assert_eq!(
+        restored.turns[0]
+            .user_entries
+            .iter()
+            .map(|entry| (entry.kind.as_str(), entry.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("task", "generate the VLA parking milestones"),
+            ("supplement", "还有一个 tar_log，下面是 clp 压缩的日志"),
+        ]
+    );
+}
+
+#[test]
+fn restored_session_keeps_only_explicit_non_secret_runtime_overrides() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_overrides"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restore_overrides_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let overrides = BTreeMap::from([
+        ("TIMEM_MODEL".to_string(), "session-model".to_string()),
+        ("TIMEM_STREAM".to_string(), "true".to_string()),
+        (
+            "TIMEM_API_KEY".to_string(),
+            "session-only-secret".to_string(),
+        ),
+    ]);
+    let session_id = create_session(
+        &state,
+        Some("Custom profile".to_string()),
+        Some(root.display().to_string()),
+        overrides,
+    )
+    .unwrap();
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    let persisted_overrides = stored.env_overrides.as_ref().unwrap();
+    assert_eq!(
+        persisted_overrides.get("TIMEM_MODEL").map(String::as_str),
+        Some("session-model")
+    );
+    assert!(!persisted_overrides.contains_key("TIMEM_API_KEY"));
+    assert_eq!(
+        persisted_overrides.get("TIMEM_STREAM").map(String::as_str),
+        Some("true")
+    );
+    assert!(stored.env.is_empty());
+
+    template.settings.lock().unwrap().config.model = "model-from-new-env".to_string();
+    template.settings.lock().unwrap().config.api_key = "new-process-secret".to_string();
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 1);
+
+    let sessions = restarted.sessions.lock().unwrap();
+    let restored = sessions.get(&session_id).unwrap();
+    assert_eq!(restored.runtime_profile.model, "session-model");
+    assert_eq!(
+        restored.runtime.settings.config.api_key,
+        "new-process-secret"
+    );
+    assert!(restored.runtime.settings.config.openai_compatible.stream);
 }
 
 #[test]
@@ -1066,6 +1265,14 @@ fn session_runtime_env_rejects_unknown_empty_and_invalid_values() {
             .unwrap(),
         "invalid_session_response_protocol"
     );
+    assert!(state
+        .template
+        .session_settings(&BTreeMap::from([(
+            "TIMEM_STREAM".to_string(),
+            "sometimes".to_string(),
+        )]))
+        .unwrap_err()
+        .contains("invalid_TIMEM_STREAM"));
 }
 
 #[test]
@@ -1107,6 +1314,7 @@ fn routing_test_state() -> AppState {
         max_llm_input_tokens: 10_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let template = WorkerTemplate {
         settings: Arc::new(Mutex::new(RuntimeSettings {
@@ -1190,6 +1398,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         runtime: WebSessionRuntime {
             settings,
             env: BTreeMap::new(),
+            env_overrides: BTreeMap::new(),
         },
     }
 }
@@ -1214,6 +1423,7 @@ fn test_runtime_settings() -> RuntimeSettings {
             max_llm_input_tokens: 10_000,
             api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
             response_protocol: ResponseProtocolKind::Xml,
+            openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Off,

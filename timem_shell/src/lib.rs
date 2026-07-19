@@ -697,6 +697,9 @@ pub fn provider_config_from_env(
             timeout_secs: options.timeout_secs,
             max_llm_output_tokens: options.max_llm_output_tokens,
             max_llm_input_tokens: options.max_llm_input_tokens,
+            enable_thinking: None,
+            reasoning_effort: None,
+            stream: None,
             local_api_key: LocalLLMKeyFile::load(&local_llm_key_file_path())
                 .ok()
                 .map(|file| file.api_key),
