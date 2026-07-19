@@ -1,6 +1,6 @@
 use crate::{
     default_api_protocol_for_provider, default_base_url_for_provider, default_model_for_provider,
-    parse_api_protocol, parse_token_count, ApiProtocol, ProviderConfig,
+    parse_api_protocol, parse_token_count, ApiProtocol, OpenAiCompatibleOptions, ProviderConfig,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -18,6 +18,9 @@ pub struct ProviderConfigSource {
     pub max_llm_output_tokens: Option<u32>,
     pub max_llm_input_tokens: Option<u32>,
     pub local_api_key: Option<String>,
+    pub enable_thinking: Option<bool>,
+    pub reasoning_effort: Option<String>,
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +93,7 @@ impl LocalLLMKeyFile {
             max_llm_input_tokens: 100_000,
             api_protocol: ApiProtocol::OpenAiCompatible,
             response_protocol: crate::ResponseProtocolKind::default(),
+            openai_compatible: OpenAiCompatibleOptions::default(),
         }
     }
 }
@@ -160,6 +164,26 @@ pub fn provider_config_from_sources(
                 .and_then(|value| parse_token_count(value))
         })
         .unwrap_or(100_000);
+    let enable_thinking = match source.enable_thinking {
+        Some(value) => Some(value),
+        None => env
+            .get("TIMEM_ENABLE_THINKING")
+            .map(|value| parse_bool_env("TIMEM_ENABLE_THINKING", value))
+            .transpose()?,
+    };
+    let reasoning_effort = source
+        .reasoning_effort
+        .clone()
+        .or_else(|| env.get("TIMEM_REASONING_EFFORT").cloned())
+        .map(|value| validate_reasoning_effort(&value))
+        .transpose()?;
+    let stream = match source.stream {
+        Some(value) => value,
+        None => match env.get("TIMEM_STREAM") {
+            Some(value) => parse_bool_env("TIMEM_STREAM", value)?,
+            None => false,
+        },
+    };
     Ok(ProviderConfig {
         provider,
         model,
@@ -170,7 +194,53 @@ pub fn provider_config_from_sources(
         max_llm_input_tokens,
         api_protocol,
         response_protocol: crate::ResponseProtocolKind::default(),
+        openai_compatible: OpenAiCompatibleOptions {
+            enable_thinking,
+            reasoning_effort,
+            stream,
+        },
     })
+}
+
+fn parse_bool_env(key: &str, value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!("invalid_{key}: expected true or false")),
+    }
+}
+
+fn validate_reasoning_effort(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 32
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("invalid_TIMEM_REASONING_EFFORT".to_string());
+    }
+    Ok(value.to_string())
+}
+
+pub fn apply_openai_compatible_env_value(
+    options: &mut OpenAiCompatibleOptions,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    match key {
+        "TIMEM_ENABLE_THINKING" => {
+            options.enable_thinking = Some(parse_bool_env(key, value)?);
+        }
+        "TIMEM_REASONING_EFFORT" => {
+            options.reasoning_effort = Some(validate_reasoning_effort(value)?);
+        }
+        "TIMEM_STREAM" => {
+            options.stream = parse_bool_env(key, value)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn vendor_api_key(provider: &str, env: &HashMap<String, String>) -> Option<String> {

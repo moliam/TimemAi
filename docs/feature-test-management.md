@@ -96,6 +96,16 @@ adding or changing browser-visible behavior.
 
 ## Feature Coverage Matrix
 
+Provider adapter coverage includes optional OpenAI-compatible thinking/SSE
+extensions through `openai_compatible_request_supports_official_thinking_stream_options`,
+`openai_compatible_sse_collects_content_and_usage_without_exposing_reasoning`,
+`malformed_openai_compatible_sse_is_a_provider_error_not_model_content`, and
+`openai_compatible_thinking_options_are_loaded_from_env`. Host coverage verifies
+the same Session options survive Shell/Web configuration and restore without
+persisting API keys. Release certification additionally uses a real GLM request
+and checks the audit contains the configured request fields and normalized
+content/usage but no `reasoning_content`.
+
 | ID | Feature | User value | Primary tests | Boundary / complexity covered | Status / supplement needed |
 |---|---|---|---|---|---|
 | F01 | Provider configuration and startup banner | User can choose provider, protocol, model, URL, API key, token limits, data dir, and see effective values. | `parse_cli_args_reads_provider_model_and_limits`, `provider_config_from_env`, `config_menu_renders_effective_values_and_can_apply_updates`, `config_provider_update_keeps_dependent_defaults_consistent`, `config_provider_update_resets_custom_settings_when_returning_to_known_provider`, banner wrapping tests, `run_config_provider_switch_smoke`, real TTY `/config` smoke. | CLI option over env precedence, provider defaults, custom gateway, long base URL wrapping, runtime config updates, provider switch resets dependent default protocol/base URL, custom provider cannot silently inherit a known provider default URL, provider switching through real TTY menu, missing/non-ASCII API keys. | Covered. Keep adding config fields to help, banner, `/config`, and tests together. |

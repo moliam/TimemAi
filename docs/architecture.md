@@ -1311,6 +1311,15 @@ environment/config and are redacted from audit logs. The CLI adapter may choose
 a default local key-file path, but key-file parsing and conversion into provider
 configuration are core provider-config responsibilities.
 
+OpenAI-compatible Session profiles may additionally set
+`TIMEM_ENABLE_THINKING`, `TIMEM_REASONING_EFFORT`, and `TIMEM_STREAM`. Core owns
+validation and request-body injection. When streaming is enabled, provider
+transport collects SSE `delta.content` and the final usage event into the same
+`LlmResponse` contract used by non-streaming providers. It counts but does not
+retain or expose `delta.reasoning_content`, preserving the boundary that private
+provider reasoning is not user-facing model output. Shell and Web only collect
+or persist these Session options; they do not parse SSE.
+
 ## Session ToolGen
 
 ToolGen is a manual, source-turn-bound per-Session preservation workflow. It

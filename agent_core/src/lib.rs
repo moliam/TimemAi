@@ -126,12 +126,13 @@ pub use provider::{
     parse_provider_response, plan_structured_output, prepare_provider_http_request,
     prepare_provider_request, prompt_cache_plan_audit, provider_http_error_message,
     provider_prompt_blocks, provider_request_audit_event, provider_response_audit_event,
-    ApiProtocol, PreparedProviderHttpRequest, PreparedProviderRequest, ProviderCacheControl,
-    ProviderConfig, ProviderHttpResponseInterpretation, ProviderPromptBlock, ProviderPromptRole,
-    StructuredOutputHint,
+    ApiProtocol, OpenAiCompatibleOptions, PreparedProviderHttpRequest, PreparedProviderRequest,
+    ProviderCacheControl, ProviderConfig, ProviderHttpResponseInterpretation, ProviderPromptBlock,
+    ProviderPromptRole, StructuredOutputHint,
 };
 pub use provider_config::{
-    provider_config_from_sources, validate_provider_api_key, LocalLLMKeyFile, ProviderConfigSource,
+    apply_openai_compatible_env_value, provider_config_from_sources, validate_provider_api_key,
+    LocalLLMKeyFile, ProviderConfigSource,
 };
 pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
 pub use redaction::{redact_value, REDACTED};

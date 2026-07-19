@@ -189,6 +189,12 @@ OpenAI Responses, `TIMEM_GATEWAY_PROVIDER=anthropic` uses Anthropic protocol,
 and other providers use OpenAI-compatible chat completions. For a custom
 gateway, set both `TIMEM_API_PROTOCOL` and `TIMEM_BASE_URL` explicitly.
 
+OpenAI-compatible gateways may expose optional reasoning and SSE extensions.
+Timem accepts `TIMEM_ENABLE_THINKING=true`, `TIMEM_REASONING_EFFORT=<value>`,
+and `TIMEM_STREAM=true`. Streaming responses are assembled into the normal
+provider result; private `reasoning_content` is not exposed as assistant output.
+Use these settings only when the selected gateway documents them.
+
 `TIMEM_RESPONSE_PROTOCOL` chooses how the model must format its response for
 the local runtime parser. Supported values are `markdown`, `json`, and `xml`;
 the default is `xml`.

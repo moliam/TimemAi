@@ -172,6 +172,7 @@ struct WebWorker {
 struct WebSessionRuntime {
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
+    env_overrides: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1020,6 +1021,7 @@ fn create_session(
     let runtime = WebSessionRuntime {
         settings,
         env: session_env,
+        env_overrides,
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
@@ -1096,11 +1098,16 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
     if !current_dir.is_dir() {
         return Err("stored_session_workspace_not_found".to_string());
     }
-    let settings = state.template.session_settings(&stored.env)?;
-    let session_env = state.template.session_env(&settings, &stored.env);
+    // Legacy records stored the complete resolved runtime in `env`, which made
+    // restored sessions silently pin stale launch configuration. Only the new
+    // provenance-aware field represents explicit per-session overrides.
+    let env_overrides = stored.env_overrides.clone().unwrap_or_default();
+    let settings = state.template.session_settings(&env_overrides)?;
+    let session_env = state.template.session_env(&settings, &env_overrides);
     let runtime = WebSessionRuntime {
         settings,
         env: session_env,
+        env_overrides,
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
@@ -1330,7 +1337,18 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
                 .name()
                 .to_string(),
         },
-        env: session_env_values(&session.runtime.settings),
+        // Keep the legacy field empty. Resolved settings belong to the launch
+        // environment and must not become persistent per-session overrides.
+        env: BTreeMap::new(),
+        env_overrides: Some(
+            session
+                .runtime
+                .env_overrides
+                .iter()
+                .filter(|(key, _)| key.as_str() != "TIMEM_API_KEY")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
         state: if session.state == "error" {
             StoredSessionState::Error
         } else if session.active_turn_id.is_some() || session.state == "working" {
@@ -3231,6 +3249,19 @@ impl WorkerTemplate {
             validate_provider_api_key(value).map_err(|_| "invalid_session_api_key".to_string())?;
             settings.config.api_key = value.clone();
         }
+        for key in [
+            "TIMEM_ENABLE_THINKING",
+            "TIMEM_REASONING_EFFORT",
+            "TIMEM_STREAM",
+        ] {
+            if let Some(value) = env_overrides.get(key) {
+                agent_core::apply_openai_compatible_env_value(
+                    &mut settings.config.openai_compatible,
+                    key,
+                    value,
+                )?;
+            }
+        }
         Ok(settings)
     }
 
@@ -3269,6 +3300,16 @@ impl WorkerTemplate {
         env.insert(
             "TIMEM_MAX_LLM_OUTPUT".to_string(),
             settings.config.max_llm_output_tokens.to_string(),
+        );
+        if let Some(value) = settings.config.openai_compatible.enable_thinking {
+            env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
+        }
+        if let Some(value) = &settings.config.openai_compatible.reasoning_effort {
+            env.insert("TIMEM_REASONING_EFFORT".to_string(), value.clone());
+        }
+        env.insert(
+            "TIMEM_STREAM".to_string(),
+            settings.config.openai_compatible.stream.to_string(),
         );
         env
     }
@@ -3309,6 +3350,9 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_MAX_LLM_OUTPUT",
     "TIMEM_BASH_APPROVAL",
     "TIMEM_WORK_INSTRUCTIONS",
+    "TIMEM_ENABLE_THINKING",
+    "TIMEM_REASONING_EFFORT",
+    "TIMEM_STREAM",
 ];
 
 fn apply_session_runtime_field(
@@ -3349,7 +3393,7 @@ impl WebSessionRuntimeProfile {
 }
 
 fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut env = BTreeMap::from([
         (
             "TIMEM_GATEWAY_PROVIDER".to_string(),
             settings.config.provider.clone(),
@@ -3387,7 +3431,18 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             agent_core::work_instruction_mode_label(settings.work_instruction_mode).to_string(),
         ),
-    ])
+    ]);
+    if let Some(value) = settings.config.openai_compatible.enable_thinking {
+        env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
+    }
+    if let Some(value) = &settings.config.openai_compatible.reasoning_effort {
+        env.insert("TIMEM_REASONING_EFFORT".to_string(), value.clone());
+    }
+    env.insert(
+        "TIMEM_STREAM".to_string(),
+        settings.config.openai_compatible.stream.to_string(),
+    );
+    env
 }
 
 #[derive(Debug)]
@@ -3530,6 +3585,9 @@ impl WebLaunchOptions {
             timeout_secs: self.timeout_secs,
             max_llm_output_tokens: self.max_llm_output_tokens,
             max_llm_input_tokens: self.max_llm_input_tokens,
+            enable_thinking: None,
+            reasoning_effort: None,
+            stream: None,
             local_api_key: agent_core::LocalLLMKeyFile::load(
                 &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../key"),
             )

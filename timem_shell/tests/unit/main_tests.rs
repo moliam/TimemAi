@@ -467,6 +467,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -554,6 +555,7 @@ fn config_provider_update_keeps_dependent_defaults_consistent() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -626,6 +628,7 @@ fn config_provider_update_resets_custom_settings_when_returning_to_known_provide
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -695,6 +698,7 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let banner = render_startup_banner(
         ".xxx_mem",
@@ -840,6 +844,7 @@ fn startup_banner_highlights_values_outside_provider_defaults() {
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let default_banner = render_startup_banner(
         ".test_mem",
@@ -862,6 +867,7 @@ fn startup_banner_highlights_values_outside_provider_defaults() {
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let override_banner = render_startup_banner(
         ".test_mem",
@@ -897,6 +903,7 @@ fn startup_banner_does_not_highlight_custom_provider_model_or_base_url() {
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let banner = render_startup_banner(
         ".test_mem",
@@ -1104,6 +1111,38 @@ fn sourced_env_file_reaches_child_process_without_set_a() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "custom|anthropic");
+}
+
+#[test]
+fn shell_provider_and_session_env_keep_openai_thinking_stream_options() {
+    let env = HashMap::from([
+        ("TIMEM_API_KEY".to_string(), "test-key".to_string()),
+        ("TIMEM_ENABLE_THINKING".to_string(), "true".to_string()),
+        ("TIMEM_REASONING_EFFORT".to_string(), "max".to_string()),
+        ("TIMEM_STREAM".to_string(), "true".to_string()),
+    ]);
+    let config = provider_config_from_env(&CliOptions::default(), &env).unwrap();
+    assert_eq!(config.openai_compatible.enable_thinking, Some(true));
+    assert_eq!(
+        config.openai_compatible.reasoning_effort.as_deref(),
+        Some("max")
+    );
+    assert!(config.openai_compatible.stream);
+
+    let stored = shell_session_env_values(
+        &config,
+        BashApprovalMode::Ask,
+        WorkInstructionLoadMode::Silent,
+    );
+    assert_eq!(
+        stored.get("TIMEM_ENABLE_THINKING").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        stored.get("TIMEM_REASONING_EFFORT").map(String::as_str),
+        Some("max")
+    );
+    assert_eq!(stored.get("TIMEM_STREAM").map(String::as_str), Some("true"));
 }
 
 #[test]
@@ -2003,6 +2042,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let stored = StoredSession {
         session_id: "web_session_1".to_string(),
@@ -2016,6 +2056,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
             BashApprovalMode::Approve,
             WorkInstructionLoadMode::Silent,
         ),
+        env_overrides: None,
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: store
@@ -2066,6 +2107,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     store
         .upsert_session(&StoredSession {
@@ -2080,6 +2122,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
                 BashApprovalMode::Approve,
                 WorkInstructionLoadMode::Silent,
             ),
+            env_overrides: None,
             state: StoredSessionState::Ready,
             last_turn_id: None,
             raw_chat_history_path: store
@@ -2163,6 +2206,7 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
             ),
             ("TIMEM_TIMEOUT".to_string(), "77".to_string()),
         ]),
+        env_overrides: None,
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: root
@@ -2213,6 +2257,7 @@ fn shell_can_resume_web_style_session_history() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     store
         .upsert_session(&StoredSession {
@@ -2227,6 +2272,7 @@ fn shell_can_resume_web_style_session_history() {
                 BashApprovalMode::Approve,
                 WorkInstructionLoadMode::Silent,
             ),
+            env_overrides: None,
             state: StoredSessionState::Ready,
             last_turn_id: Some("turn_web_1".to_string()),
             raw_chat_history_path: store

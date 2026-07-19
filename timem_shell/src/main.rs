@@ -560,6 +560,7 @@ fn load_or_create_shell_session(
         current_dir: current_dir.display().to_string(),
         profile: shell_session_profile(config),
         env: shell_session_env_values(config, bash_approval_mode, work_instruction_mode),
+        env_overrides: None,
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: session_store
@@ -607,7 +608,7 @@ fn shell_session_env_values(
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut env = BTreeMap::from([
         (
             "TIMEM_GATEWAY_PROVIDER".to_string(),
             config.provider.clone(),
@@ -639,7 +640,18 @@ fn shell_session_env_values(
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             agent_core::work_instruction_mode_label(work_instruction_mode).to_string(),
         ),
-    ])
+    ]);
+    if let Some(value) = config.openai_compatible.enable_thinking {
+        env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
+    }
+    if let Some(value) = &config.openai_compatible.reasoning_effort {
+        env.insert("TIMEM_REASONING_EFFORT".to_string(), value.clone());
+    }
+    env.insert(
+        "TIMEM_STREAM".to_string(),
+        config.openai_compatible.stream.to_string(),
+    );
+    env
 }
 
 fn take_shell_resume_notice(
