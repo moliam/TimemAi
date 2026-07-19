@@ -579,7 +579,7 @@ fn parse_action_blocks(
 
     let mut action_groups = Vec::new();
     for (block_idx, block) in action_blocks.iter().enumerate() {
-        match serde_json::from_str::<Value>(block.trim()) {
+        match parse_action_json_value(block) {
             Ok(value) => {
                 if !value.is_array() {
                     if value.as_object().is_some_and(|object| {
@@ -623,6 +623,52 @@ fn parse_action_blocks(
         .flat_map(|group| group.actions.clone())
         .collect::<Vec<_>>();
     (next_actions, action_groups)
+}
+
+fn parse_action_json_value(block: &str) -> serde_json::Result<Value> {
+    let trimmed = trim_json_boundary_whitespace(block.trim());
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => Ok(value),
+        Err(original_error) => {
+            // Models sometimes emit `]]>` after a top-level JSON array. In that
+            // spelling the first `]` closes CDATA instead of the JSON array.
+            // Recover only this single, unambiguous omission and only when the
+            // repaired value is still the required top-level array.
+            if trimmed.starts_with('[') && !trimmed.ends_with(']') {
+                let repaired = format!("{trimmed}]");
+                if let Ok(value) = serde_json::from_str::<Value>(&repaired) {
+                    if value.is_array() {
+                        return Ok(value);
+                    }
+                }
+            }
+            if let Some(repaired) = trimmed.strip_suffix(']') {
+                if let Ok(value) = serde_json::from_str::<Value>(repaired) {
+                    if value.is_array() {
+                        return Ok(value);
+                    }
+                }
+            }
+            Err(original_error)
+        }
+    }
+}
+
+fn trim_json_boundary_whitespace(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim();
+        let next = trimmed
+            .strip_prefix("\\n")
+            .or_else(|| trimmed.strip_prefix("\\r"))
+            .or_else(|| trimmed.strip_prefix("\\t"))
+            .or_else(|| trimmed.strip_suffix("\\n"))
+            .or_else(|| trimmed.strip_suffix("\\r"))
+            .or_else(|| trimmed.strip_suffix("\\t"));
+        match next {
+            Some(value) => text = value,
+            None => return trimmed,
+        }
+    }
 }
 
 fn parse_context_compacts_from_fields(
