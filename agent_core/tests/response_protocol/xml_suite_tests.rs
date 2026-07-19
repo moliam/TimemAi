@@ -790,6 +790,87 @@ fn parses_actions_from_cdata_json() {
 }
 
 #[test]
+fn recovers_glm_action_array_when_cdata_close_consumes_the_final_bracket() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <free_talk>Searching milestone markers with simple patterns.</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[[
+      {"run_bash":{"cmd":"grep -n -i -E 'app.start|InitNode|init.succ' app.log | head -120","timeout_ms":10000}},
+      {"run_bash":{"cmd":"grep -n -i -E 'postprocess|startup finished' app.log | head -80","timeout_ms":10000}}
+    ]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 2);
+    assert_eq!(env.next_actions[0].action, "run_bash");
+    assert_eq!(env.next_actions[0].input_i64("timeout_ms"), Some(10000));
+}
+
+#[test]
+fn recovers_glm_action_array_with_escaped_shell_patterns() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <working_still_action>
+    <action_json><![CDATA[[
+      {"run_bash":{"cmd":"grep -n -i 'app start\\|startup\\|InitNode' app.log | head -100","timeout_ms":10000}},
+      {"run_bash":{"cmd":"grep -n -i '\\.so\\|loaded\\|library' app.log | head -80","timeout_ms":10000}}
+    ]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 2);
+    assert!(env.next_actions[0]
+        .input_str("cmd")
+        .contains("app start\\|"));
+    assert!(env.next_actions[1].input_str("cmd").contains("\\.so"));
+}
+
+#[test]
+fn recovers_glm_action_array_with_one_parallel_example_bracket_too_many() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <working_still_action>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"grep -n 'init node succ' app.log | head -40","timeout_ms":10000}},{"run_bash":{"cmd":"sed -n '96570,96660p' app.log","timeout_ms":10000}}]]]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 2);
+    assert_eq!(
+        env.next_actions[1].input_str("cmd"),
+        "sed -n '96570,96660p' app.log"
+    );
+}
+
+#[test]
+fn recovers_glm_action_array_with_literal_newline_at_cdata_boundary() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <working_still_action>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"python3 tool.py --self-test","timeout_ms":8000}}\n    ]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(
+        env.next_actions[0].input_str("cmd"),
+        "python3 tool.py --self-test"
+    );
+}
+
+#[test]
 fn rejects_old_group_object_from_action_json() {
     let env = parse_xml_envelope(
         r#"<response>
