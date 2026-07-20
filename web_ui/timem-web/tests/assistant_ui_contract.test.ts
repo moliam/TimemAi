@@ -310,7 +310,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label="Create session" aria-describedby={describedBy}');
     expect(source).toContain('<p id={descriptionId}>Choose a workspace and optional runtime overrides for this session.</p>');
     expect(source).toContain('{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}');
-    expect(source).toContain('onKeyDown={(event) => { if (event.key === "Escape") closeIfIdle(); }}');
+    expect(source).toContain('onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}');
     expect(source).toContain('onClose={() => { if (!creatingSessionRef.current) closeNewSessionDialog(); }}');
     expect(source).toContain('onClose={() => { if (!pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))) setToolgenDialog(null); }}');
     expect(source).toContain('onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }}');
@@ -982,7 +982,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('closeAppearancePanel(false);');
     expect(source).toContain('if (event.key === "Escape") closeAppearancePanel()');
     expect(source).toContain('const descriptionId = "appearance-panel-description";');
-    expect(source).toContain('id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} tabIndex={-1}');
+    expect(source).toContain('id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}');
     expect(source).toContain('<p id={descriptionId}>Adjust theme, font, and message text size for this browser.</p>');
     expect(source).toContain('setShowRuntime(false); setShowActivity(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true);');
     expect(styles).toContain(".appearance-panel header p");
