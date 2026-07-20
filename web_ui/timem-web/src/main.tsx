@@ -1096,7 +1096,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
         <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitDraft(); }}>
           <textarea
             value={draft}
-            placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? "Switching mem…" : activeSession.state === "working" ? "继续输入…" : "Ask Timem anything about this workspace…"}
+            placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? "Switching mem…" : activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."}
             aria-label="Message Timem"
             disabled={!activeSession || sessionInteractionLocked}
             onChange={(event) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, event.target.value))}

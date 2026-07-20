@@ -845,6 +845,8 @@ describe("assistant-ui thread integration", () => {
 
   it("keeps working-turn input visually close to normal input while naming supplement behavior", () => {
     expect(source).toContain('placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? "Switching mem…" : activeSession.state === "working" ? "继续输入…"');
+    expect(source).toContain('"Ask Timem to investigate, write, or work with you."');
+    expect(source).not.toContain("Ask Timem anything about this workspace");
     expect(source).toContain('activeSession?.state === "working" ? "Send supplement" : "Send message"');
     expect(source).toContain('title={effectiveSendLabel} aria-label={effectiveSendLabel}');
     expect(source).not.toContain('>Supplement</span>');
