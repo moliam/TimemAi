@@ -716,7 +716,7 @@ button:disabled { cursor: not-allowed; }
 .toolrepo-empty.searching svg { color: #7ebce8; animation: search-pending-pulse .9s ease-in-out infinite; }
 .toolrepo-browser { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .toolrepo-list { min-height: 0; flex: 1 1 auto; display: grid; align-content: start; overflow: auto; padding: 6px; }
-.toolrepo-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 26px; align-items: center; border-radius: 6px; }
+.toolrepo-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 26px 26px; align-items: center; border-radius: 6px; }
 .toolrepo-item:hover { background: #252525; }
 .toolrepo-item.selected { background: #27394c; }
 .toolrepo-item.loading-detail { background: #202b34; }
@@ -732,10 +732,10 @@ button:disabled { cursor: not-allowed; }
 .toolrepo-item.selected .toolrepo-toggle-state { background: #183555; color: #b7dcff; }
 .toolrepo-item.loading-detail .toolrepo-item-main small { color: #8fb9d5; }
 .toolrepo-item.renaming-tool .toolrepo-item-main small { color: #9ac7a8; }
-.toolrepo-edit { width: 25px; height: 25px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777; opacity: 0; }
-.toolrepo-item:hover .toolrepo-edit, .toolrepo-edit:focus-visible { opacity: 1; }
-.toolrepo-edit:hover { color: #ccc; background: #343434; }
-.toolrepo-edit:disabled { opacity: .55; color: #69806f; }
+.toolrepo-open, .toolrepo-edit { width: 25px; height: 25px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777; opacity: 0; }
+.toolrepo-item:hover .toolrepo-open, .toolrepo-item:hover .toolrepo-edit, .toolrepo-open:focus-visible, .toolrepo-edit:focus-visible { opacity: 1; }
+.toolrepo-open:hover, .toolrepo-edit:hover { color: #ccc; background: #343434; }
+.toolrepo-open:disabled, .toolrepo-edit:disabled { opacity: .55; color: #69806f; }
 .toolrepo-rename { margin: 4px; border: 1px solid #4c87c6; border-radius: 5px; padding: 5px 6px; background: #202b37; }
 .toolrepo-detail { flex: none; min-height: 0; max-height: 260px; display: flex; flex-direction: column; border-top: 1px solid #333; }
 .toolrepo-detail > header { flex: none; align-items: flex-start; gap: 8px; padding: 11px !important; }
