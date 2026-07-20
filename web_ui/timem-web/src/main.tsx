@@ -963,7 +963,7 @@ function ActivityListItem({ activity }: { activity: Activity }) {
   const summaryLabel = `${open ? "收起" : "展开"} Activity 详情${activity.title ? `：${activity.title}` : ""}`;
   return <details className={`activity ${activity.tone}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary title={open ? "收起详情" : "展开详情"} aria-label={summaryLabel}><span className="activity-mark">{mark}</span><div>{activity.title && <strong>{activity.title}</strong>}<span className="activity-expand-label">{open ? "收起" : "展开"}</span></div></summary>
-    <div className="activity-body"><button type="button" className="activity-collapse top" onClick={collapse}>收起详情</button>{activity.detail && <div className="activity-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}<button type="button" className="activity-collapse" onClick={collapse}>收起详情</button></div>
+    <div className="activity-body"><button type="button" className="activity-collapse top" title="Collapse activity details" aria-label="Collapse activity details" onClick={collapse}>收起详情</button>{activity.detail && <div className="activity-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}<button type="button" className="activity-collapse" title="Collapse activity details" aria-label="Collapse activity details" onClick={collapse}>收起详情</button></div>
   </details>;
 }
 
@@ -1285,7 +1285,7 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
   const summaryLabel = `${open ? "收起" : "展开"} ToolGen 详情${activity.title ? `：${activity.title}` : ""}`;
   return <details className={`toolgen-notice ${activity.toolgen_phase ?? ""}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary title={open ? "收起 ToolGen 详情" : "展开 ToolGen 详情"} aria-label={summaryLabel}><ChevronRight size={13}/><span>{activity.title}</span></summary>
-    <div><button type="button" className="toolgen-collapse top" onClick={collapse}>收起详情</button><MarkdownContent text={activity.detail ?? ""}/><button type="button" className="toolgen-collapse" onClick={collapse}>收起详情</button></div>
+    <div><button type="button" className="toolgen-collapse top" title="Collapse ToolGen details" aria-label="Collapse ToolGen details" onClick={collapse}>收起详情</button><MarkdownContent text={activity.detail ?? ""}/><button type="button" className="toolgen-collapse" title="Collapse ToolGen details" aria-label="Collapse ToolGen details" onClick={collapse}>收起详情</button></div>
   </details>;
 }
 
@@ -1313,10 +1313,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
       <ChevronRight className="tool-activity-chevron" size={14}/>
     </summary>
     <div className="tool-activity-body">
-      <button type="button" className="tool-activity-collapse top" onClick={collapse}>收起详情</button>
+      <button type="button" className="tool-activity-collapse top" title={`Collapse ${toolName} details`} aria-label={`Collapse ${toolName} details`} onClick={collapse}>收起详情</button>
       {activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}
       {activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}
-      <button type="button" className="tool-activity-collapse" onClick={collapse}>收起详情</button>
+      <button type="button" className="tool-activity-collapse" title={`Collapse ${toolName} details`} aria-label={`Collapse ${toolName} details`} onClick={collapse}>收起详情</button>
     </div>
   </details>;
 }
