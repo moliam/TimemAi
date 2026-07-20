@@ -117,7 +117,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('sendCommand({ type: "history_page"');
     expect(source).toContain("limit: STORED_HISTORY_PAGE_SIZE");
     expect(source).toContain('const historyButtonLabel = sessionInteractionLocked');
-    expect(source).toContain('"Earlier history is locked while switching mem"');
+    expect(source).toContain('`${sessionInteractionLockReason} · earlier history is locked`');
     expect(source).toContain("Loading earlier history…");
     expect(source).toContain("Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks");
     expect(source).toContain('className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" aria-busy={loadingHistory || undefined}');
@@ -343,7 +343,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className={`primary ${creating ? "sending" : ""}`}');
     expect(source).toContain("const createDecision = sessionCreateDecision(displayName, workspaceDir, env, creating, memSwitching);");
     expect(source).toContain('closeNewSessionDialog();');
-    expect(source).toContain('memSwitching={pendingMemSwitch}');
+    expect(source).toContain('memSwitching={runtimeLocked}');
     expect(source).toContain("const submit = () => { if (createDecision.kind === \"send\") onCreate(createDecision.command); };");
     expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing)');
     expect(source).toContain('{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}');
@@ -750,8 +750,8 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("locks old-session interactions while a mem switch snapshot is pending", () => {
-    expect(source).toContain("sessionInteractionLocked={pendingMemSwitch}");
-    expect(source).toContain("disabled={pendingMemSwitch}");
+    expect(source).toContain("sessionInteractionLocked={runtimeLocked}");
+    expect(source).toContain("disabled={runtimeLocked}");
     expect(source).toContain("if (pendingMemSwitch) return;");
     expect(source).toContain('reason === "mem_switching"');
     expect(source).toContain("disabled={!activeSession || sessionInteractionLocked}");
@@ -760,14 +760,16 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
     expect(source).toContain("const disabled = pending || locked;");
     expect(source).toContain("disabled={disabled}");
-    expect(source).toContain('const newSessionLabel = pendingMemSwitch ? "New session is locked while switching mem" : "New session";');
-    expect(source).toContain('ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch}');
-    expect(source).toContain('title={pendingMemSwitch ? "Mem switch is in progress" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`}');
-    expect(source).toContain('aria-label={pendingMemSwitch ? `Workers locked while switching mem for ${session.display_name}`');
-    expect(source).toContain('aria-expanded={expandedSessionIds.has(session.session_id)} disabled={pendingMemSwitch}');
-    expect(source).toContain('aria-label={pendingMemSwitch ? `${session.display_name} locked while switching mem` : renamingSession ? `${session.display_name} rename is being saved` : undefined}');
-    expect(source).toContain('disabled={pendingMemSwitch} onClick={() => { setActiveSessionId(session.session_id);');
-    expect(source).toContain('disabled={pendingMemSwitch || renamingSession} onClick={() => beginRename(session)}');
+    expect(source).toContain('const runtimeReady = connected && snapshotReady;');
+    expect(source).toContain('const runtimeLocked = pendingMemSwitch || !runtimeReady;');
+    expect(source).toContain('const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";');
+    expect(source).toContain('ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked}');
+    expect(source).toContain('title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`}');
+    expect(source).toContain('aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}`');
+    expect(source).toContain('aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked}');
+    expect(source).toContain('aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined}');
+    expect(source).toContain('disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id);');
+    expect(source).toContain('disabled={runtimeLocked || renamingSession} onClick={() => beginRename(session)}');
     expect(source).toContain("sessionRenameDecision(");
     expect(styles).toContain(".session:disabled, .session-expand:disabled");
     expect(styles).toContain(".session:disabled:hover, .session-expand:disabled:hover");
@@ -782,6 +784,10 @@ describe("assistant-ui thread integration", () => {
     expect(helloBranch).toContain("clearAllPendingCommands();");
     expect(helloBranch).toContain("setDecisions([]);");
     expect(helloBranch).toContain("applySnapshot(event.snapshot);");
+    expect(helloBranch).toContain("setSnapshotReady(true);");
+    expect(source).toContain('if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return false;');
+    expect(source).toContain('ws.onopen = () => { retryAttempt = 0; setConnected(true); setSnapshotReady(false); };');
+    expect(source).toContain('setConnected(false);\n        setSnapshotReady(false);');
   });
 
   it("moves active selection to a live session when a reconnect or mem snapshot swaps sessions", () => {
@@ -838,7 +844,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('renamingSession ? "renaming-session" : ""');
     expect(source).toContain("aria-busy={renamingSession || undefined}");
     expect(source).toContain("Saving name...");
-    expect(source).toContain("disabled={pendingMemSwitch || renamingSession}");
+    expect(source).toContain("disabled={runtimeLocked || renamingSession}");
     expect(styles).toContain("@keyframes session-working-glow");
     expect(styles).toContain(".session-row.renaming-session");
     expect(styles).toContain(".session-pending");
@@ -872,8 +878,10 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("announces runtime connection state and explains mem switch availability", () => {
-    expect(source).toContain('const connectionLabel = connected ? "Runtime connected" : "Reconnecting to runtime…";');
-    expect(source).toContain('const memSwitchTitle = !connected ? "Reconnect before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";');
+    expect(source).toContain('const connectionLabel = !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";');
+    expect(source).toContain('const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";');
+    expect(source).toContain('setSnapshotReady(false)');
+    expect(source).toContain('setSnapshotReady(true)');
     expect(source).toContain("const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);");
     expect(source).toContain("const closeMemSwitchDialog = useCallback((restoreFocus = true) => {");
     expect(source).toContain("if (restoreFocus) memSwitchButtonRef.current?.focus({ preventScroll: true });");
@@ -1061,7 +1069,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={attachment.name}');
     expect(source).toContain("pendingAttachmentRemoveIds.has");
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
-    expect(source).toContain("const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `Cannot remove ${attachment.name} while session is switching mem` : `Remove ${attachment.name}`;");
+    expect(source).toContain("const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `${sessionInteractionLockReason} · cannot remove ${attachment.name}` : `Remove ${attachment.name}`;");
     expect(source).toContain("title={removeLabel} aria-label={removeLabel}");
     expect(source).toContain("aria-busy={removing || undefined}");
     expect(styles).toContain(".attachment-summary");
@@ -1078,7 +1086,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("removePendingKey(pendingUploadSessionIdsRef, setPendingUploadSessionIds, activeSession.session_id);");
     expect(source).toContain("uploadingAttachment={!!activeSession && pendingUploadSessionIds.has(activeSession.session_id)}");
     expect(source).toContain("uploadingAttachmentFile={activeSession ? pendingUploadFiles[activeSession.session_id] : undefined}");
-    expect(source).toContain('const lockedControlHint = sessionInteractionLocked ? "Mem switch is in progress" : "";');
+    expect(source).toContain('const lockedControlHint = sessionInteractionLocked ? sessionInteractionLockReason : "";');
     expect(source).toContain('const uploadingAttachmentText = uploadingAttachmentFile ? `Uploading ${uploadingAttachmentFile.name}` : "Uploading file…";');
     expect(source).toContain('const attachTitle = missingSessionHint || lockedControlHint || (uploadingAttachment ? uploadingAttachmentText : "Attach a file");');
     expect(source).toContain('const attachLabel = missingSessionHint || lockedControlHint || (uploadingAttachment ? uploadingAttachmentText : "Attach a file");');
@@ -1111,7 +1119,7 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("keeps working-turn input visually close to normal input while naming supplement behavior", () => {
-    expect(source).toContain('placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? "Switching mem…" : activeSession.state === "working" ? "继续输入…"');
+    expect(source).toContain('placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? sessionInteractionLockReason : activeSession.state === "working" ? "继续输入…"');
     expect(source).toContain('"Ask Timem to investigate, write, or work with you."');
     expect(source).not.toContain("Ask Timem anything about this workspace");
     expect(source).toContain('activeSession?.state === "working" ? "Send supplement" : "Send message"');

@@ -71,6 +71,7 @@ function TimemApp() {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [connected, setConnected] = useState(false);
+  const [snapshotReady, setSnapshotReady] = useState(false);
   // The activity feed is a diagnostic view. Keep the normal chat workspace focused.
   const [showActivity, setShowActivity] = useState(false);
   const [sidePanelTab, setSidePanelTab] = useState<"tools" | "activity">("tools");
@@ -247,10 +248,10 @@ function TimemApp() {
   }, []);
 
   const sendCommand = useCallback((command: ClientCommand) => {
-    if (socket.current?.readyState !== WebSocket.OPEN) return false;
+    if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return false;
     socket.current.send(JSON.stringify(command));
     return true;
-  }, []);
+  }, [snapshotReady]);
 
   const addPendingKey = useCallback((ref: MutableRefObject<Set<string>>, setState: Dispatch<SetStateAction<Set<string>>>, key: string) => {
     if (ref.current.has(key)) return false;
@@ -350,6 +351,7 @@ function TimemApp() {
       clearAllPendingCommands();
       setDecisions([]);
       applySnapshot(event.snapshot);
+      setSnapshotReady(true);
       return;
     }
     if (event.type === "session_created") {
@@ -556,10 +558,11 @@ function TimemApp() {
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${scheme}://${window.location.host}/ws?token=${encodeURIComponent(token)}`);
       socket.current = ws;
-      ws.onopen = () => { retryAttempt = 0; setConnected(true); };
+      ws.onopen = () => { retryAttempt = 0; setConnected(true); setSnapshotReady(false); };
       ws.onclose = () => {
         if (socket.current === ws) socket.current = null;
         setConnected(false);
+        setSnapshotReady(false);
         if (!stopped) {
           const delay = Math.min(10_000, 500 * 2 ** Math.min(retryAttempt, 5));
           retryAttempt += 1;
@@ -691,9 +694,11 @@ function TimemApp() {
   const hiddenErrorCount = Math.max(0, visibleErrorCount - 1);
   const errorDetailsLabel = visibleErrorCount === 1 ? "Show this error in Activity" : `Show ${visibleErrorCount} errors in Activity`;
   const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";
-  const connectionLabel = connected ? "Runtime connected" : "Reconnecting to runtime…";
-  const memSwitchTitle = !connected ? "Reconnect before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";
-  const newSessionLabel = pendingMemSwitch ? "New session is locked while switching mem" : "New session";
+  const runtimeReady = connected && snapshotReady;
+  const runtimeLocked = pendingMemSwitch || !runtimeReady;
+  const connectionLabel = !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";
+  const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";
+  const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
   const headerModelLabel = activeSession?.runtime_profile ? `${activeSession.runtime_profile.provider}:${activeSession.runtime_profile.model}` : "";
   const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";
   const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";
@@ -704,12 +709,12 @@ function TimemApp() {
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
         <div className="brand"><Sparkles size={18}/><span>Timem</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
-        <button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button>
+        <button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
           {sessions.map((session) => {
             const renamingSession = pendingRenameSessionIds.has(session.session_id);
             return <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""}`} aria-busy={renamingSession || undefined}>
-            <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={pendingMemSwitch ? "Mem switch is in progress" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={pendingMemSwitch ? `Workers locked while switching mem for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={pendingMemSwitch} onClick={() => setExpandedSessionIds((current) => {
+            <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked} onClick={() => setExpandedSessionIds((current) => {
               const next = new Set(current);
               if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id);
               return next;
@@ -719,23 +724,23 @@ function TimemApp() {
               autoFocus
               value={renameDraft}
               aria-label={`Rename ${session.display_name}`}
-              disabled={pendingMemSwitch}
+              disabled={runtimeLocked}
               onChange={(event) => setRenameDraft(event.target.value)}
               onBlur={() => finishRename(session.session_id)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); }
                 if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }
               }}
-            /> : <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={pendingMemSwitch ? "Mem switch is in progress" : session.current_dir} aria-label={pendingMemSwitch ? `${session.display_name} locked while switching mem` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={pendingMemSwitch} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
+            /> : <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.current_dir} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
               {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name}>{session.display_name}</span><span className="session-cwd" title={session.current_dir}>{tailPath(session.current_dir)}</span>{renamingSession ? <span className="session-pending">Saving name...</span> : session.runtime_profile && <span className="session-profile" title={`${session.runtime_profile.provider}:${session.runtime_profile.model}`}>{session.runtime_profile.provider}:{session.runtime_profile.model}</span>}</span><span className="sr-only">Session state: {session.state}</span>
             </button>}
-            {renamingSessionId !== session.session_id && <button type="button" className="session-rename" title={`Rename ${session.display_name}`} aria-label={`Rename ${session.display_name}`} disabled={pendingMemSwitch || renamingSession} onClick={() => beginRename(session)}><Pencil size={13}/></button>}
+            {renamingSessionId !== session.session_id && <button type="button" className="session-rename" title={`Rename ${session.display_name}`} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked || renamingSession} onClick={() => beginRename(session)}><Pencil size={13}/></button>}
           </div>{expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}</div>;
           })}
         </nav>
         <div className="sidebar-footer">
           <div className="connection-row" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span className="connection-label">{connectionLabel}</span></div>
-          <div className="mem-row" title={server?.mem?.memory_dir ?? ""}><span>mem</span><code>{server?.mem?.space ?? "…"}</code><button type="button" ref={memSwitchButtonRef} className="mem-switch-button" title={memSwitchTitle} aria-label={memSwitchTitle} disabled={!connected || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}>{pendingMemSwitch ? "Switching…" : "Switch"}</button></div>
+          <div className="mem-row" title={server?.mem?.memory_dir ?? ""}><span>mem</span><code>{server?.mem?.space ?? "…"}</code><button type="button" ref={memSwitchButtonRef} className="mem-switch-button" title={memSwitchTitle} aria-label={memSwitchTitle} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}>{pendingMemSwitch ? "Switching…" : "Switch"}</button></div>
         </div>
       </aside>
       <main className="chat-shell">
@@ -768,7 +773,8 @@ function TimemApp() {
         <TimemThread
           activeSession={activeSession}
           sessionIds={sessions.map((session) => session.session_id)}
-          sessionInteractionLocked={pendingMemSwitch}
+          sessionInteractionLocked={runtimeLocked}
+          sessionInteractionLockReason={pendingMemSwitch ? "Mem switch is in progress" : "Waiting for runtime snapshot…"}
           decisions={sessionDecisions}
           fileInput={fileInput}
           isCancelling={!!activeSession && cancellingSessionIdSet.has(activeSession.session_id)}
@@ -785,13 +791,13 @@ function TimemApp() {
           toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}
           onOpenToolRepo={() => { setShowAppearance(false); setShowRuntime(false); setSidePanelTab("tools"); setShowActivity(true); }}
           onRequestToolGen={(turnId) => {
-            if (!activeSession || activeSession.state === "working" || pendingMemSwitch || hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)) return;
+            if (!activeSession || activeSession.state === "working" || runtimeLocked || hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)) return;
             setToolgenDialog({ sessionId: activeSession.session_id, turnId });
           }}
           onCancel={cancelActiveTurn}
           onUpload={uploadFile}
           onRemoveAttachment={(attachmentId) => {
-            if (!activeSession || pendingMemSwitch) return;
+            if (!activeSession || runtimeLocked) return;
             const key = `${activeSession.session_id}:${attachmentId}`;
             if (!addPendingKey(pendingAttachmentRemoveIdsRef, setPendingAttachmentRemoveIds, key)) return;
             if (!sendCommand({ type: "attachment_remove", session_id: activeSession.session_id, attachment_id: attachmentId })) {
@@ -801,7 +807,7 @@ function TimemApp() {
             }
           }}
           onDecisionReply={(decision, decisionValue) => {
-            if (pendingMemSwitch) return;
+            if (runtimeLocked) return;
             const key = decisionKey(decision);
             if (!addPendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key)) return;
             const event = decision.event;
@@ -865,8 +871,8 @@ function TimemApp() {
           return false;
         }}
       />}
-      {showNewSession && <NewSessionDialog workspaces={server?.workspace_dirs ?? []} runtimeDefaults={server?.session_env_defaults ?? {}} creating={creatingSession} memSwitching={pendingMemSwitch} onClose={() => { if (!creatingSessionRef.current) closeNewSessionDialog(); }} onCreate={(command) => {
-        if (pendingMemSwitch) return;
+      {showNewSession && <NewSessionDialog workspaces={server?.workspace_dirs ?? []} runtimeDefaults={server?.session_env_defaults ?? {}} creating={creatingSession} memSwitching={runtimeLocked} onClose={() => { if (!creatingSessionRef.current) closeNewSessionDialog(); }} onCreate={(command) => {
+        if (runtimeLocked) return;
         if (creatingSessionRef.current) return;
         creatingSessionRef.current = true;
         setCreatingSession(true);
@@ -1066,10 +1072,11 @@ const MAX_RENDERED_TURN_EVENTS = 200;
 const INITIAL_RENDERED_TURNS = 24;
 const TURN_HISTORY_PAGE_SIZE = 24;
 
-function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, toolCount, toolCountPulse, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onOpenToolRepo, onRequestToolGen }: {
+function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, toolCount, toolCountPulse, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onOpenToolRepo, onRequestToolGen }: {
   activeSession: Session | undefined;
   sessionIds: string[];
   sessionInteractionLocked: boolean;
+  sessionInteractionLockReason: string;
   decisions: Decision[];
   fileInput: React.RefObject<HTMLInputElement | null>;
   isCancelling: boolean;
@@ -1103,7 +1110,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
   const draft = draftForSession(draftsBySession, activeSessionId);
   const submittingDraft = !!activeSessionId && submittingDraftSessionIds.has(activeSessionId);
   const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Send supplement" : "Send message";
-  const lockedControlHint = sessionInteractionLocked ? "Mem switch is in progress" : "";
+  const lockedControlHint = sessionInteractionLocked ? sessionInteractionLockReason : "";
   const missingSessionHint = activeSession ? "" : "Create a session before using Timem";
   const uploadingAttachmentText = uploadingAttachmentFile ? `Uploading ${uploadingAttachmentFile.name}` : "Uploading file…";
   const composerHint = missingSessionHint || lockedControlHint || (uploadingAttachment ? `${uploadingAttachmentText} · send is paused until it finishes` : activeSession?.state === "working" ? "Enter to add supplement · Shift+Enter for newline" : "Enter to send · Shift+Enter for newline");
@@ -1122,7 +1129,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
   const canLoadStoredHistory = !!activeSession?.history_has_more && !!activeSession.history_before_cursor;
   const visibleTurns = hiddenTurnCount > 0 ? turns.slice(-visibleTurnCount) : turns;
   const historyButtonLabel = sessionInteractionLocked
-    ? "Earlier history is locked while switching mem"
+    ? `${sessionInteractionLockReason} · earlier history is locked`
     : loadingHistory
       ? "Loading earlier history…"
       : hiddenTurnCount > 0
@@ -1230,14 +1237,14 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
         <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
         {!!activeSession && (!!activeSession.attachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{activeSession.attachments.map((attachment) => {
           const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);
-          const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `Cannot remove ${attachment.name} while session is switching mem` : `Remove ${attachment.name}`;
+          const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `${sessionInteractionLockReason} · cannot remove ${attachment.name}` : `Remove ${attachment.name}`;
           return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removeLabel} aria-label={removeLabel} aria-busy={removing || undefined} disabled={removing || sessionInteractionLocked} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
         })}</div>}
         {activeSession && <div className="composer-cwd" title={activeSession.current_dir} aria-label={`Current working directory: ${activeSession.current_dir}`}><FolderOpen size={13} aria-hidden="true"/><span>{tailPath(activeSession.current_dir, 64)}</span></div>}
         <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitDraft(); }}>
           <textarea
             value={draft}
-            placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? "Switching mem…" : activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."}
+            placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? sessionInteractionLockReason : activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."}
             aria-label="Message Timem"
             aria-describedby={composerHintId}
             title={composerHint}
