@@ -909,6 +909,7 @@ function SessionSidePanel({ tab, onTabChange, onClose, session, activities, sear
   const [contextMenu, setContextMenu] = useState<{ toolId: string; x: number; y: number } | null>(null);
   const toolsTabRef = useRef<HTMLButtonElement>(null);
   const activityTabRef = useRef<HTMLButtonElement>(null);
+  const contextMenuActionRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const tabButton = tab === "tools" ? toolsTabRef.current : activityTabRef.current;
     tabButton?.focus({ preventScroll: true });
@@ -923,6 +924,7 @@ function SessionSidePanel({ tab, onTabChange, onClose, session, activities, sear
   }, [searchQuery, sort, selectedTool?.summary.tool_id, tools.length]);
   useEffect(() => {
     if (!contextMenu) return;
+    contextMenuActionRef.current?.focus({ preventScroll: true });
     const dismiss = () => setContextMenu(null);
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setContextMenu(null);
@@ -999,7 +1001,7 @@ function SessionSidePanel({ tab, onTabChange, onClose, session, activities, sear
       {pendingTool ? <section className="toolrepo-detail loading" aria-busy="true" aria-label={pendingToolDetailLabel}><header><div><strong title={pendingTool.name}>{pendingTool.name}</strong><code>Reading tool directory…</code></div><div className="toolrepo-detail-actions"><button type="button" className="toolrepo-detail-collapse" title={`Stop viewing ${pendingTool.name} details`} aria-label={`Stop viewing ${pendingTool.name} details`} onClick={onCollapseTool}>收起详情</button></div></header><div className="toolrepo-detail-loading" role="status" aria-live="polite" aria-label={pendingToolDetailLabel}><span className="toolrepo-search-pending" aria-hidden="true"/>Reading directory tree...</div></section> : selectedTool && <section className="toolrepo-detail"><header><div><strong title={selectedTool.summary.name}>{selectedTool.summary.name}</strong><code title={selectedTool.summary.synopsis}>{selectedTool.summary.synopsis}</code></div><div className="toolrepo-detail-actions"><button type="button" title="Open directory in terminal" aria-label="Open directory in terminal" onClick={() => onOpenTerminal(selectedTool.summary.tool_id)}><Terminal size={14}/></button><button type="button" className="toolrepo-detail-collapse" title="Collapse tool detail" aria-label="Collapse tool detail" onClick={onCollapseTool}>收起详情</button></div></header><div className="toolrepo-files" aria-label="Tool directory tree">{selectedTool.files.map((file) => <div key={file.path} title={`${file.path} · ${formatBytes(file.bytes)}`} style={{ paddingLeft: `${8 + Math.max(0, file.path.split("/").length - 1) * 12}px` }}><span>{file.path}</span><small>{formatBytes(file.bytes)}</small></div>)}</div></section>}
       </div>}
     </div>}
-    {contextMenu && <div className="toolrepo-context-menu" role="menu" aria-label="Tool actions" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()}><button type="button" role="menuitem" onClick={() => { onOpenTerminal(contextMenu.toolId); setContextMenu(null); }}><Terminal size={14}/>在命令行中打开目录</button></div>}
+    {contextMenu && <div className="toolrepo-context-menu" role="menu" aria-label="Tool actions" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onKeyDownCapture={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setContextMenu(null); } }}><button ref={contextMenuActionRef} type="button" role="menuitem" onClick={() => { onOpenTerminal(contextMenu.toolId); setContextMenu(null); }}><Terminal size={14}/>在命令行中打开目录</button></div>}
   </aside>;
 }
 
