@@ -466,11 +466,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("function toolInvocationPreview");
     expect(source).toContain("activity.detail?.split");
     expect(source).toContain("const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();");
-    expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`}>');
+    expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
     expect(source).toContain("const toolName = toolDisplayName(activity.tool_name || activity.title);");
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;');
     expect(source).toContain("const summaryContent = <>");
     expect(source).toContain('open={open} onToggle={(event) => setOpen(event.currentTarget.open)}');
+    expect(source).toContain('aria-busy={running || undefined} open={open}');
     expect(source).toContain('aria-label={summaryLabel}');
     expect(source).toContain('className="tool-activity-collapse top" onClick={collapse}>收起详情</button>');
     expect(source).toContain('className="tool-activity-collapse" onClick={collapse}>收起详情</button>');
