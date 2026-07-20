@@ -12,6 +12,7 @@ import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
 const MAX_ACTIVITY_ITEMS = 300;
+const STORED_HISTORY_PAGE_SIZE = 200;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
 
@@ -576,7 +577,7 @@ function TimemApp() {
     if (pendingMemSwitch) return;
     if (!session.history_has_more || !session.history_before_cursor) return;
     if (!addPendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, session.session_id)) return;
-    if (!sendCommand({ type: "history_page", session_id: session.session_id, before_cursor: session.history_before_cursor, limit: 200 })) {
+    if (!sendCommand({ type: "history_page", session_id: session.session_id, before_cursor: session.history_before_cursor, limit: STORED_HISTORY_PAGE_SIZE })) {
       removePendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, session.session_id);
       const activity: Activity = { id: crypto.randomUUID(), sessionId: session.session_id, tone: "error", title: "Load history failed", detail: "Reconnect to Timem Web before loading earlier history.", createdAt: Date.now() };
       pushActivity(activity);
@@ -1043,7 +1044,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
       ? "Loading earlier history…"
       : hiddenTurnCount > 0
         ? `Load ${Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks`
-        : "Load earlier history";
+        : `Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks`;
   const latestTurn = turns.at(-1);
   const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
   const liveSessionKey = sessionIds.join("\u0000");

@@ -109,13 +109,16 @@ describe("assistant-ui thread integration", () => {
   it("progressively mounts long task history and preserves the reading position", () => {
     expect(source).toContain("INITIAL_RENDERED_TURNS = 24");
     expect(source).toContain("TURN_HISTORY_PAGE_SIZE = 24");
+    expect(source).toContain("STORED_HISTORY_PAGE_SIZE = 200");
     expect(source).toContain("previousScrollMetrics.current");
     expect(source).toContain("preservePrependScrollTop(previous, viewport.scrollHeight)");
     expect(source).toContain("canLoadStoredHistory");
     expect(source).toContain('sendCommand({ type: "history_page"');
+    expect(source).toContain("limit: STORED_HISTORY_PAGE_SIZE");
     expect(source).toContain('const historyButtonLabel = sessionInteractionLocked');
     expect(source).toContain('"Earlier history is locked while switching mem"');
     expect(source).toContain("Loading earlier history…");
+    expect(source).toContain("Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks");
     expect(source).toContain('className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" aria-busy={loadingHistory || undefined}');
     expect(source).toContain('{loadingHistory && <LoaderCircle size={13} aria-hidden="true"/>}');
     expect(source).toContain("<span>{historyButtonLabel}</span>");
