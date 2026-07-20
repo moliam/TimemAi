@@ -1098,6 +1098,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
     }
   };
   const submitDraft = async () => {
+    if (uploadingAttachment || sessionInteractionLocked) return;
     const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
     if (reserved === null) return;
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));

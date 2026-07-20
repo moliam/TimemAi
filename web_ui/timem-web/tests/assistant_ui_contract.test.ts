@@ -90,6 +90,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('`${uploadingAttachmentText} · send is paused until it finishes`');
     expect(source).toContain('const effectiveSendLabel = missingSessionHint || lockedControlHint || (submittingDraft ? "Sending…" : uploadingAttachment ? "Wait for file upload" : sendLabel);');
     expect(source).toContain('const composerHintId = `composer-hint-${activeSessionId || "empty"}`;');
+    expect(source).toContain("if (uploadingAttachment || sessionInteractionLocked) return;");
     expect(source).toContain('placeholder={!activeSession ? "Create a session to start…"');
     expect(source).toContain('aria-describedby={composerHintId}');
     expect(source).toContain('title={composerHint}');
