@@ -92,6 +92,7 @@ function TimemApp() {
   const appearancePanelRef = useRef<HTMLElement | null>(null);
   const runtimeButtonRef = useRef<HTMLButtonElement | null>(null);
   const runtimePanelRef = useRef<HTMLElement | null>(null);
+  const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   const activeMessages = activeSession?.messages ?? EMPTY_CHAT_MESSAGES;
   const pushActivity = useCallback((activity: Activity) => {
@@ -148,6 +149,7 @@ function TimemApp() {
 
   useEffect(() => {
     if (!showMobileSessions) return;
+    mobileSidebarRef.current?.focus({ preventScroll: true });
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setShowMobileSessions(false);
     };
@@ -637,7 +639,7 @@ function TimemApp() {
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="app-shell">
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => setShowMobileSessions(false)}/>}
-      <aside id="session-navigation" className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}>
+      <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
         <div className="brand"><Sparkles size={18}/><span>Timem</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => setShowMobileSessions(false)}><X size={17}/></button></div>
         <button type="button" className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); setShowMobileSessions(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
