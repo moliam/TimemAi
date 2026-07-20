@@ -618,6 +618,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
     expect(source).toContain("const disabled = pending || locked;");
     expect(source).toContain("disabled={disabled}");
+    expect(source).toContain('const newSessionLabel = pendingMemSwitch ? "New session is locked while switching mem" : "New session";');
+    expect(source).toContain('className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch}');
     expect(source).toContain('title={pendingMemSwitch ? "Mem switch is in progress" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`}');
     expect(source).toContain('aria-label={pendingMemSwitch ? `Workers locked while switching mem for ${session.display_name}`');
     expect(source).toContain('aria-expanded={expandedSessionIds.has(session.session_id)} disabled={pendingMemSwitch}');
