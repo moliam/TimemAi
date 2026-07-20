@@ -602,6 +602,7 @@ function TimemApp() {
   });
 
   const sessionActivities = activities.filter((activity) => activity.sessionId === activeSession?.session_id);
+  const sessionActivityCount = sessionActivities.length;
   const sessionDecisions = decisions.filter((decision) => decision.event.session_id === activeSession?.session_id);
   const visibleErrors = activities.filter((activity) => activity.tone === "error" && (activity.sessionId === activeSession?.session_id || activity.sessionId === "system"));
   const visibleError = visibleErrors[0];
@@ -654,7 +655,7 @@ function TimemApp() {
             <button type="button" title="Sessions" aria-label="Sessions" className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
             <button type="button" title="Appearance" aria-label="Appearance" className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible); }}><Palette size={17}/></button>
             <button type="button" ref={runtimeButtonRef} title="Runtime information" aria-label="Runtime information" className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible); }}><Settings2 size={17}/></button>
-            <button type="button" title="Session tools and activity" aria-label="Session tools and activity" className={`icon-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible); }}><PanelRight size={17}/></button>
+            <button type="button" title={`Session tools and activity${sessionActivityCount ? ` · ${sessionActivityCount} updates` : ""}`} aria-label={`Session tools and activity${sessionActivityCount ? `, ${sessionActivityCount} updates` : ""}`} className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible); }}><PanelRight size={17}/>{sessionActivityCount > 0 && <span className="activity-count-badge">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}</button>
           </div>
         </header>
         {showAppearance && <AppearancePanel appearance={appearance} onChange={setAppearance} onClose={() => setShowAppearance(false)}/>}

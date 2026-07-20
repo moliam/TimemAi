@@ -139,9 +139,13 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("lets the session tools side panel collapse from the header, Escape key, and narrow-screen backdrop", () => {
-    expect(source).toContain('aria-label="Session tools and activity"');
+    expect(source).toContain('const sessionActivityCount = sessionActivities.length;');
+    expect(source).toContain('aria-label={`Session tools and activity${sessionActivityCount ? `, ${sessionActivityCount} updates` : ""}`}');
     expect(source).toContain('aria-expanded={showActivity}');
     expect(source).toContain('aria-expanded={showActivity} aria-controls="session-side-panel"');
+    expect(source).toContain('title={`Session tools and activity${sessionActivityCount ? ` · ${sessionActivityCount} updates` : ""}`}');
+    expect(source).toContain('className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`}');
+    expect(source).toContain('{sessionActivityCount > 0 && <span className="activity-count-badge">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}');
     expect(source).toContain('setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible);');
     expect(source).toContain("const switchSidePanelTabFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>)");
     expect(source).toContain('if (event.key === "ArrowLeft" || event.key === "Home")');
@@ -172,6 +176,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".activity-panel { position: fixed; z-index: 4;");
     expect(styles).toContain(".side-panel-header-actions");
     expect(styles).toContain(".side-panel-clear");
+    expect(styles).toContain(".side-panel-button { position: relative; }");
+    expect(styles).toContain(".activity-count-badge");
+    expect(styles).toContain(':root[data-theme="light"] .activity-count-badge');
   });
 
   it("keeps narrow-screen panels as overlays so the chat and composer stay usable", () => {
