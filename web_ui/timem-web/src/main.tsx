@@ -15,6 +15,34 @@ const MAX_ACTIVITY_ITEMS = 300;
 const STORED_HISTORY_PAGE_SIZE = 200;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
+const FOCUSABLE_DIALOG_SELECTOR = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function useDialogFocusTrap() {
+  useEffect(() => {
+    const containFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const activeElement = document.activeElement;
+      const dialog = activeElement instanceof HTMLElement
+        ? activeElement.closest<HTMLElement>('[role="dialog"][aria-modal="true"]')
+        : null;
+      if (!dialog || !dialog.contains(document.activeElement)) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_DIALOG_SELECTOR)).filter((element) => element.getClientRects().length > 0);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
+        return;
+      }
+      const currentIndex = focusable.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = event.shiftKey
+        ? currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1
+        : currentIndex === focusable.length - 1 ? 0 : currentIndex + 1;
+      event.preventDefault();
+      focusable[nextIndex].focus({ preventScroll: true });
+    };
+    document.addEventListener("keydown", containFocus, true);
+    return () => document.removeEventListener("keydown", containFocus, true);
+  }, []);
+}
 
 function initialAccessToken() {
   const query = new URLSearchParams(window.location.search).get("token") ?? "";
@@ -36,6 +64,7 @@ function makeMessage(role: ChatMessage["role"], text: string, id?: string): Chat
 }
 
 function TimemApp() {
+  useDialogFocusTrap();
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");

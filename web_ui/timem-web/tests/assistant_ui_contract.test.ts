@@ -300,6 +300,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const closeIfIdle = () => { if (!creating) onClose(); };');
     expect(source).toContain('const closeIfIdle = () => { if (!pending) onClose(); };');
     expect(source).toContain("const newSessionButtonRef = useRef<HTMLButtonElement | null>(null);");
+    expect(source).toContain("const FOCUSABLE_DIALOG_SELECTOR =");
+    expect(source).toContain("function useDialogFocusTrap()");
+    expect(source).toContain("activeElement.closest<HTMLElement>");
+    expect(source).toContain('document.addEventListener("keydown", containFocus, true);');
+    expect(source).toContain("useDialogFocusTrap();");
     expect(source).toContain("const closeNewSessionDialog = useCallback((restoreFocus = true) => {");
     expect(source).toContain('window.getComputedStyle(newSessionButton).visibility !== "hidden"');
     expect(source).toContain('newSessionButton.focus({ preventScroll: true });');
