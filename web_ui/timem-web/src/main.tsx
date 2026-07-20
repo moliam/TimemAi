@@ -926,7 +926,7 @@ function SessionSidePanel({ tab, onTabChange, onClose, session, activities, sear
 
 function ActivityListItem({ activity }: { activity: Activity }) {
   const [open, setOpen] = useState(false);
-  const mark = activity.tone === "thinking" ? "✦" : activity.tone === "action" ? "↳" : activity.tone === "warning" ? "!" : activity.tone === "error" ? "×" : "i";
+  const mark = activity.tone === "thinking" ? "✦" : activity.tone === "action" ? "↳" : activity.tone === "warning" ? "⚠️" : activity.tone === "error" ? "×" : "i";
   const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
   if (!hasExpandableDetail) return <div className={`activity ${activity.tone}`}><span className="activity-mark">{mark}</span><div>{activity.title && <strong>{activity.title}</strong>}</div></div>;
   const collapse = () => setOpen(false);
@@ -1224,7 +1224,7 @@ function TurnEventView({ event, sessionId }: { event: WebTurnEvent; sessionId: s
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity}/>;
   if (activity.tone === "action") return <ToolActivity activity={activity}/>;
   return <div className={`turn-work-item ${activity.tone}`}>
-    <span className="activity-mark">{activity.tone === "thinking" ? "💡" : activity.tone === "warning" ? "!" : activity.tone === "error" ? "×" : "i"}</span>
+    <span className="activity-mark">{activity.tone === "thinking" ? "💡" : activity.tone === "warning" ? "⚠️" : activity.tone === "error" ? "×" : "i"}</span>
     <div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}</div>
   </div>;
 }
