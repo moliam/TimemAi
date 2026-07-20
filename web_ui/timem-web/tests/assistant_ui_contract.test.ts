@@ -682,7 +682,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="session-name" title={session.display_name}');
     expect(source).toContain('className="session-cwd" title={session.current_dir}>{tailPath(session.current_dir)}');
     expect(source).toContain('className="session-profile" title={`${session.runtime_profile.provider}:${session.runtime_profile.model}`}');
-    expect(source).toContain('{session.state === "working" && <span className="session-state">busy</span>}');
+    expect(source).toContain('className="session-working-icon" size={15} aria-label="Session working"');
+    expect(source).not.toContain('className="session-state">busy</span>');
+    expect(styles).not.toContain(".session-state");
     expect(source).toContain('className="composer-cwd" title={activeSession.current_dir}');
     expect(viewModelSource).toContain("context_state");
     expect(styles).toContain(".session-cwd");
