@@ -495,6 +495,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain("Working view");
     expect(source).not.toContain("renderToolInvocation");
     expect(viewModelSource).not.toContain('title: "Work instructions"');
+    expect(source).toContain('activity.tone === "warning" ? "⚠️"');
+    expect(source).not.toContain('activity.tone === "warning" ? "!"');
   });
 
   it("uses the Markdown highlighter for final answers and Bash activity commands", () => {
