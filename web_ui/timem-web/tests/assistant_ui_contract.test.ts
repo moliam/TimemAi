@@ -240,6 +240,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('pendingToolgenRequestsRef.current = removeToolgenRequestsForSession(pendingToolgenRequestsRef.current, event.session_id);');
     expect(source).toContain('pendingToolgenRequestsRef.current.clear();');
     expect(source).toContain('function ToolGenDialog');
+    expect(source).toContain('const descriptionId = "toolgen-dialog-description";');
+    expect(source).toContain('const statusId = "toolgen-dialog-status";');
+    expect(source).toContain('const describedBy = pending ? `${descriptionId} ${statusId}` : descriptionId;');
+    expect(source).toContain('aria-describedby={describedBy}');
     expect(source).toContain("Extract reusable tool");
     expect(source).toContain("preserve reusable work from the completed task");
     expect(source).toContain("Optional: preferred interface, language, scope, or reusable workflow…");
@@ -284,7 +288,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="modal-titlebar"');
     expect(source).toContain('aria-label="Close create session" disabled={creating} onClick={closeIfIdle}');
     expect(source).toContain('aria-label="Close ToolGen dialog" disabled={pending} onClick={closeIfIdle}');
-    expect(source).toContain('className="toolgen-dialog-status" role="status" aria-live="polite"');
+    expect(source).toContain('<p id={descriptionId}>Timem will preserve reusable work');
+    expect(source).toContain('id={statusId} className="toolgen-dialog-status" role="status" aria-live="polite"');
     expect(source).toContain("Starting ToolGen and opening a generating-tools task…");
     expect(source).toContain('aria-label="Close mem switch" disabled={pending} onClick={closeIfIdle}');
     expect(source).toContain('className={`primary ${creating ? "sending" : ""}`}');
