@@ -296,6 +296,20 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".completion-toolgen.sending svg");
   });
 
+  it("labels completed normal and ToolGen work frames distinctly with a visible title treatment", () => {
+    expect(source).toContain('isToolGenTurn ? "ToolGen" : "Thought/Action"');
+    expect(source).toContain("completed-work-title");
+    expect(source).toContain("toolgen-completed-title");
+    expect(styles).toContain(".working-chip.completed-work-title");
+    expect(styles).toContain("border-radius: 999px");
+    expect(styles).toContain(":root[data-theme=\"light\"] .working-chip.completed-work-title");
+  });
+
+  it("identifies restored ToolGen work by topic rather than event source", () => {
+    expect(source).toContain('(event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen"');
+    expect(source).not.toContain('event.source === "core_topic" && (event.payload.topic');
+  });
+
   it("lets modal backdrops dismiss dialogs without closing while editing inside them", () => {
     expect(source).toContain('className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}');
     expect(source).toContain('className="modal-backdrop" role="presentation" aria-label="Dismiss ToolGen dialog" onClick={closeIfIdle}');
@@ -618,6 +632,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".toolgen-collapse");
     expect(styles).toContain(".toolgen-collapse.top");
     expect(styles).toContain(':root[data-theme="light"] .toolgen-notice');
+    expect(styles).toContain(".toolgen-notice.published");
+    expect(styles).toContain(".toolgen-notice.published summary::before");
+    expect(styles).toContain(':root[data-theme="light"] .toolgen-notice.published');
     expect(styles).toContain(':root[data-theme="light"] .toolgen-collapse');
     expect(source).not.toContain("turn.completion?.toolgen_retrospect");
   });
@@ -812,6 +829,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={contextUsageLabel} aria-label={contextUsageLabel}');
     expect(source).toContain('role="status" aria-live="polite"');
     expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
+    expect(source).toContain("const persistentToolGenEvents = visibleEvents.filter");
+    expect(source).toContain('activity.toolgen_phase === "published"');
+    expect(source).toContain("const scrollEvents = visibleEvents.filter");
+    expect(source).toContain('className="turn-persistent-toolgen" aria-label="ToolGen result"');
+    expect(source).toContain("scrollEvents.map((event)");
+    expect(styles).toContain(".turn-persistent-toolgen");
     expect(source).toContain('title="Scroll to latest work update"');
     expect(source).toContain('aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`}');
     expect(source).toContain('scroll.scrollTo({ top: scroll.scrollHeight, behavior: prefersReducedMotion() ? "auto" : "smooth" });');
