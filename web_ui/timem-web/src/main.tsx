@@ -614,7 +614,7 @@ function TimemApp() {
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="app-shell">
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => setShowMobileSessions(false)}/>}
-      <aside className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}>
+      <aside id="session-navigation" className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}>
         <div className="brand"><Sparkles size={18}/><span>Timem</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => setShowMobileSessions(false)}><X size={17}/></button></div>
         <button type="button" className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); setShowMobileSessions(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
@@ -651,7 +651,7 @@ function TimemApp() {
         <header className="chat-header">
           <span className="header-model" title={headerModelLabel}>{headerModelLabel}</span>
           <div className="header-actions">
-            <button type="button" title="Sessions" aria-label="Sessions" className="icon-button mobile-session-button" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
+            <button type="button" title="Sessions" aria-label="Sessions" className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
             <button type="button" title="Appearance" aria-label="Appearance" className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible); }}><Palette size={17}/></button>
             <button type="button" ref={runtimeButtonRef} title="Runtime information" aria-label="Runtime information" className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible); }}><Settings2 size={17}/></button>
             <button type="button" title="Session tools and activity" aria-label="Session tools and activity" className={`icon-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible); }}><PanelRight size={17}/></button>
