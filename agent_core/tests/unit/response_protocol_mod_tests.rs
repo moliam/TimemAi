@@ -51,6 +51,48 @@ fn assert_protocols_equivalent(json_raw: &str, markdown_raw: &str, xml_raw: &str
 }
 
 #[test]
+fn toolgen_retrospect_has_equivalent_final_response_semantics_in_all_protocols() {
+    let json = parse_json(
+        r#"{"status":"ALL_FINISHED","toolgen_retrospect":"Created semantic-tool after runtime returned ready.","final_answer":"review done"}"#,
+    );
+    let markdown = parse_markdown(
+        "## Status\nfinished\n\n## ToolGen_Retrospect\nCreated semantic-tool after runtime returned ready.\n\n## Final_Answer\nreview done",
+    );
+    let xml = parse_xml(
+        "<response><toolgen_retrospect>Created semantic-tool after runtime returned ready.</toolgen_retrospect><final_answer>review done</final_answer></response>",
+    );
+    for envelope in [&json, &markdown, &xml] {
+        assert!(envelope.repair_issue.is_none());
+        assert!(!envelope.continue_work);
+        assert_eq!(envelope.final_answer, "review done");
+        assert_eq!(
+            envelope.toolgen_retrospect,
+            "Created semantic-tool after runtime returned ready."
+        );
+    }
+}
+
+#[test]
+fn toolgen_retrospect_is_rejected_from_working_responses_in_all_protocols() {
+    let json = parse_json(
+        r#"{"toolgen_retrospect":"premature","working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+    );
+    let markdown = parse_markdown(
+        "## ToolGen_Retrospect\npremature\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```",
+    );
+    let xml = parse_xml(
+        "<response><toolgen_retrospect>premature</toolgen_retrospect><working_still_action><action_json><![CDATA[{\"run_bash\":{\"cmd\":\"pwd\"}}]]></action_json></working_still_action></response>",
+    );
+    for (protocol, envelope) in [("json", &json), ("markdown", &markdown), ("xml", &xml)] {
+        assert_eq!(
+            envelope.repair_issue.as_deref(),
+            Some("toolgen_retrospect_requires_final_answer"),
+            "{protocol}: {envelope:?}"
+        );
+    }
+}
+
+#[test]
 fn json_markdown_xml_protocols_parse_same_final_answer() {
     assert_protocols_equivalent(
         r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,

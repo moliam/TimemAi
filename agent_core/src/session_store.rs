@@ -19,6 +19,8 @@ pub struct StoredSession {
     pub profile: StoredSessionProfile,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_overrides: Option<BTreeMap<String, String>>,
     pub state: StoredSessionState,
     pub last_turn_id: Option<String>,
     pub raw_chat_history_path: String,
@@ -270,7 +272,8 @@ pub fn read_history_page_from_path(
         })
         .transpose()?;
     let file = fs::File::open(path).map_err(|_| "chat_history_open_failed")?;
-    let mut page = VecDeque::<(usize, ChatHistoryRecord)>::new();
+    let mut page = VecDeque::<(usize, String, Vec<ChatHistoryRecord>)>::new();
+    let mut page_len = 0usize;
     let mut logical_index = 0usize;
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|_| "chat_history_read_failed")?;
@@ -282,20 +285,37 @@ pub fn read_history_page_from_path(
         };
         let within_window = requested_end.is_none_or(|end| logical_index < end);
         if within_window {
-            page.push_back((logical_index, record));
-            while page.len() > limit {
-                page.pop_front();
+            let turn_id = record.turn_id().to_string();
+            let extends_active_turn = page
+                .back()
+                .is_some_and(|(_, active_turn_id, _)| *active_turn_id == turn_id);
+            if extends_active_turn {
+                page.back_mut().unwrap().2.push(record);
+            } else {
+                page.push_back((logical_index, turn_id, vec![record]));
+            }
+            page_len = page_len.saturating_add(1);
+            // A restored page must never begin in the middle of a turn. Keep
+            // the newest complete turns near the requested record budget; a
+            // single very large turn is intentionally allowed to exceed it.
+            while page_len > limit && page.len() > 1 {
+                if let Some((_, _, removed)) = page.pop_front() {
+                    page_len = page_len.saturating_sub(removed.len());
+                }
             }
         }
         logical_index = logical_index.saturating_add(1);
     }
     let end = requested_end.unwrap_or(logical_index).min(logical_index);
-    while page.front().is_some_and(|(index, _)| *index >= end) {
+    while page.front().is_some_and(|(index, _, _)| *index >= end) {
         page.pop_front();
     }
-    let start = page.front().map(|(index, _)| *index).unwrap_or(end);
+    let start = page.front().map(|(index, _, _)| *index).unwrap_or(end);
     Ok(ChatHistoryPage {
-        records: page.into_iter().map(|(_, record)| record).collect(),
+        records: page
+            .into_iter()
+            .flat_map(|(_, _, records)| records)
+            .collect(),
         before_cursor: (start > 0).then(|| start.to_string()),
         has_more: start > 0,
     })
@@ -363,6 +383,7 @@ pub fn new_stored_session(
         current_dir: current_dir.as_ref().display().to_string(),
         profile,
         env: BTreeMap::new(),
+        env_overrides: Some(BTreeMap::new()),
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: history_path.as_ref().display().to_string(),

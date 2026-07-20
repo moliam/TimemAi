@@ -16,6 +16,12 @@ It may contain:
 - Per-session browser upload storage and attachment metadata. Uploaded bytes
   remain host-local; the host only contributes their paths as session context.
 - Host-only settings and UI command validation.
+- Session-scoped ToolGen commands and ToolRepo projections. The Web host may
+  start ToolGen manually for an exact completed turn, attach optional user
+  guidance, list/search/detail/rename tools, and request opening a validated
+  tool directory in a terminal. It must route these operations by Session and
+  forward `core.toolgen` lifecycle data without moving repository validation or
+  retrospective model logic out of `agent_core`.
 
 A Web Session is the configuration ownership boundary and contains explicit
 `contexts[]` and `workers[]` registries. All workers in the Session inherit its

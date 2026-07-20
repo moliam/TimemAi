@@ -75,6 +75,14 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   iOS, and future hosts share one JSONL history contract. The first resume
   layer stores session metadata and raw chat/event records, not live
   Worker/Context execution state.
+- Session ToolRepo persistence and ToolGen retrospective execution. Core owns
+  Session-scoped draft/published paths, manifest/tree validation, bounded
+  self-tests, atomic publication/update, repository search/detail/rename data,
+  source-turn-bound manual requests, same-Context sequential execution, normal
+  turn lifecycle, temporary capability activation, and structured
+  `core.toolgen` lifecycle topics.
+  ToolGen failure must not replace a successful source-turn result. Hosts own
+  the manual trigger and repository presentation, not candidate validation.
 - Local tool execution abstractions that return structured action evidence.
 - Registered command-tool foreground/background execution semantics. Core owns
   background job ids, persisted status/output files, polling, cancellation,

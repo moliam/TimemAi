@@ -54,6 +54,9 @@ pub mod status_view;
 pub mod tool_jobs;
 #[path = "../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;
+pub mod tool_repo;
+#[path = "../../resources/capabilities/tools/toolgen.rs"]
+pub mod toolgen;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
@@ -87,7 +90,7 @@ pub use data_layout::{
 pub use host::{
     context_compact_topic_event, core_initialized_topic_event,
     core_initialized_topic_event_with_worker, normalize_user_supplements, resolve_topic_reply,
-    session_worker_default_display_name, topic_event_status_hint,
+    session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
     work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
     CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
     CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
@@ -99,7 +102,7 @@ pub use host::{
     TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, CORE_TOPIC_ACTION,
     CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
     CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
-    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_STALE_CONTEXT_REQUEST,
+    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
     CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
@@ -123,12 +126,13 @@ pub use provider::{
     parse_provider_response, plan_structured_output, prepare_provider_http_request,
     prepare_provider_request, prompt_cache_plan_audit, provider_http_error_message,
     provider_prompt_blocks, provider_request_audit_event, provider_response_audit_event,
-    ApiProtocol, PreparedProviderHttpRequest, PreparedProviderRequest, ProviderCacheControl,
-    ProviderConfig, ProviderHttpResponseInterpretation, ProviderPromptBlock, ProviderPromptRole,
-    StructuredOutputHint,
+    ApiProtocol, OpenAiCompatibleOptions, PreparedProviderHttpRequest, PreparedProviderRequest,
+    ProviderCacheControl, ProviderConfig, ProviderHttpResponseInterpretation, ProviderPromptBlock,
+    ProviderPromptRole, StructuredOutputHint,
 };
 pub use provider_config::{
-    provider_config_from_sources, validate_provider_api_key, LocalLLMKeyFile, ProviderConfigSource,
+    apply_openai_compatible_env_value, provider_config_from_sources, validate_provider_api_key,
+    LocalLLMKeyFile, ProviderConfigSource,
 };
 pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
 pub use redaction::{redact_value, REDACTED};
@@ -150,7 +154,7 @@ pub use session_runtime::{
 pub use session_worker::{
     CoreSessionWorker, CoreSessionWorkerConfig, CoreSessionWorkerEvent, CoreSessionWorkerHandle,
     CoreSessionWorkerLifecycleState, CoreSessionWorkerManager, CoreSessionWorkerRuntime,
-    CoreSessionWorkerStatus,
+    CoreSessionWorkerStatus, ToolGenRequest,
 };
 use shell_exec::FileShellJobStore;
 pub use shell_exec::ShellJobRecord;
@@ -165,6 +169,10 @@ pub use status_view::{
     RuntimeStatusSnapshot,
 };
 use tool_jobs::FileToolJobStore;
+pub use tool_repo::{
+    SessionToolRepo, ToolDetail, ToolFileEntry, ToolManifest, ToolPublishResult, ToolSelfTest,
+    ToolSummary,
+};
 pub use work_instructions::{
     combine_additional_contexts, discover_work_instruction_files, load_work_instruction_context,
     parse_work_instruction_mode, work_instruction_load_report, work_instruction_load_request,
@@ -259,6 +267,7 @@ pub enum AssistantReplayMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnFinal {
     pub final_answer: String,
+    pub toolgen_retrospect: String,
     pub stats: UsageStats,
     pub profile_label: String,
     pub repair_issue: Option<String>,
@@ -435,12 +444,19 @@ pub(crate) enum PendingApprovedAction {
         turn_id: String,
         cwd: PathBuf,
     },
+    ToolgenPublish {
+        repo: SessionToolRepo,
+        draft_path: PathBuf,
+    },
 }
 
 impl PendingApprovedAction {
     fn command(&self) -> &str {
         match self {
             PendingApprovedAction::RunBash { command, .. } => command,
+            PendingApprovedAction::ToolgenPublish { draft_path, .. } => {
+                draft_path.to_str().unwrap_or("<invalid-path>")
+            }
         }
     }
 
@@ -465,6 +481,12 @@ impl PendingApprovedAction {
                 "session_id": session_id,
                 "turn_id": turn_id,
                 "cwd": cwd,
+                "approval_id": approval_id,
+                "risk": risk,
+                "reason": reason,
+            }),
+            PendingApprovedAction::ToolgenPublish { draft_path, .. } => json!({
+                "draft_path": draft_path,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -796,6 +818,7 @@ fn default_self_tool_process() -> SelfToolProcess {
 
 #[derive(Debug)]
 pub struct AgentCore {
+    memory_dir: PathBuf,
     static_prompt: String,
     rendered_static_prompt: String,
     profile: CoreProfile,
@@ -832,6 +855,7 @@ pub struct AgentCore {
     assistant_replay_mode: AssistantReplayMode,
     current_prompt_cwd: PathBuf,
     cwd_note_pending: bool,
+    tool_repo_session_id: String,
 }
 impl AgentCore {
     pub fn new(
@@ -847,7 +871,7 @@ impl AgentCore {
             default_self_tool_process(),
         );
         let static_prompt = static_prompt.into();
-        let capabilities = CapabilityRegistry::builtin();
+        let capabilities = CapabilityRegistry::builtin().without_tool("toolgen");
         let response_protocol = ResponseProtocolKind::default();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -858,6 +882,7 @@ impl AgentCore {
             &assistant_speaker_name,
         );
         Self {
+            memory_dir: memory_dir.to_path_buf(),
             static_prompt,
             rendered_static_prompt,
             profile,
@@ -894,7 +919,46 @@ impl AgentCore {
             assistant_replay_mode: AssistantReplayMode::RawOutput,
             current_prompt_cwd,
             cwd_note_pending: true,
+            tool_repo_session_id: "default".to_string(),
         }
+    }
+
+    pub fn set_tool_repo_session_id(&mut self, session_id: impl Into<String>) {
+        let session_id = session_id.into();
+        if !session_id.trim().is_empty() {
+            self.tool_repo_session_id = session_id;
+        }
+    }
+
+    pub fn tool_repo(&self) -> SessionToolRepo {
+        SessionToolRepo::new(&self.memory_dir, &self.tool_repo_session_id)
+    }
+
+    pub fn fork_ephemeral_context(&self, cwd: impl AsRef<Path>) -> Self {
+        let mut fork = Self::new(
+            self.static_prompt.clone(),
+            self.profile.clone(),
+            &self.memory_dir,
+        );
+        fork.capabilities = self.capabilities.clone();
+        fork.response_protocol = self.response_protocol;
+        fork.max_llm_input_tokens = self.max_llm_input_tokens;
+        fork.configured_round_budget = self.configured_round_budget;
+        fork.round_budget = self.configured_round_budget;
+        fork.bash_approval_mode = self.bash_approval_mode;
+        fork.assistant_speaker_name = self.assistant_speaker_name.clone();
+        fork.assistant_replay_mode = self.assistant_replay_mode;
+        fork.current_prompt_cwd = cwd.as_ref().to_path_buf();
+        fork.tool_repo_session_id = self.tool_repo_session_id.clone();
+        fork.refresh_rendered_static_prompt();
+        fork
+    }
+
+    pub fn set_round_budget(&mut self, rounds: u32) {
+        let rounds = rounds.max(1);
+        self.configured_round_budget = rounds;
+        self.round_budget = rounds;
+        self.current_round = 0;
     }
 
     pub fn set_assistant_speaker_name(&mut self, name: impl AsRef<str>) {
@@ -1157,7 +1221,16 @@ impl AgentCore {
         );
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
-        self.capabilities = capabilities;
+        self.capabilities = capabilities.without_tool("toolgen");
+        self.refresh_rendered_static_prompt();
+    }
+    pub(crate) fn enable_toolgen_capability(&mut self) -> Result<(), String> {
+        self.capabilities.enable_toolgen()?;
+        self.refresh_rendered_static_prompt();
+        Ok(())
+    }
+    pub(crate) fn disable_toolgen_capability(&mut self) {
+        self.capabilities.disable_toolgen();
         self.refresh_rendered_static_prompt();
     }
     pub fn set_response_protocol(&mut self, protocol: ResponseProtocolKind) {
@@ -1345,10 +1418,11 @@ impl AgentCore {
             .iter()
             .map(|component| estimate_prompt_tokens(&component.content))
             .sum::<u32>();
-        let should_memory_precheck = supporting_context
-            .map(should_run_memory_precheck)
-            .unwrap_or(false);
         let text = user_input.trim().to_string();
+        let should_memory_precheck = !text.is_empty()
+            && supporting_context
+                .map(should_run_memory_precheck)
+                .unwrap_or(false);
         let filtered_supporting_context = supporting_context
             .map(|ctx| self.filter_repeated_work_instructions(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
@@ -1369,12 +1443,14 @@ impl AgentCore {
         {
             system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
         }
-        self.submit_prompt_component(
-            PromptComponentRole::user(),
-            "user_question",
-            text,
-            "user_input",
-        );
+        if !text.is_empty() {
+            self.submit_prompt_component(
+                PromptComponentRole::user(),
+                "user_question",
+                text,
+                "user_input",
+            );
+        }
         for system_text in system_texts {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -1494,6 +1570,7 @@ impl AgentCore {
                 self.defer_next_turn_slices(slices);
                 return CoreStep::Final(TurnFinal {
                     final_answer: final_text,
+                    toolgen_retrospect: String::new(),
                     stats: self.current_stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: Some("invalid_json_plain_text_fallback".to_string()),
@@ -1505,6 +1582,7 @@ impl AgentCore {
             if final_text.is_empty() {
                 return CoreStep::Final(TurnFinal {
                     final_answer: String::new(),
+                    toolgen_retrospect: String::new(),
                     stats: self.current_stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: Some(issue.clone()),
@@ -1526,6 +1604,7 @@ impl AgentCore {
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
+                toolgen_retrospect: parsed.toolgen_retrospect.clone(),
                 stats: self.current_stats.clone(),
                 profile_label: self.profile.label(),
                 repair_issue: Some(issue),
@@ -1649,6 +1728,7 @@ impl AgentCore {
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
+                toolgen_retrospect: parsed.toolgen_retrospect.clone(),
                 stats: self.current_stats.clone(),
                 profile_label: self.profile.label(),
                 repair_issue: if self.repair_attempted
@@ -1751,6 +1831,7 @@ impl AgentCore {
         self.defer_next_turn_slices(slices);
         CoreStep::Final(TurnFinal {
             final_answer: final_text,
+            toolgen_retrospect: parsed.toolgen_retrospect,
             stats: self.current_stats.clone(),
             profile_label: self.profile.label(),
             repair_issue: None,
@@ -1836,6 +1917,7 @@ impl AgentCore {
         step
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_model_repair_audit_if_needed(
         &self,
         audit_file: &Path,
@@ -2014,6 +2096,9 @@ impl AgentCore {
                     &self.shell_jobs,
                     runtime,
                 ),
+                PendingApprovedAction::ToolgenPublish { repo, draft_path } => {
+                    toolgen::execute_approved_publish(repo, draft_path, &pending.request)
+                }
             }
         } else {
             format!(
@@ -2051,6 +2136,7 @@ impl AgentCore {
         )
     }
 
+    #[allow(clippy::result_large_err)]
     fn finish_parallel_group_after_approvals(
         &mut self,
         actions: Vec<ParsedAction>,
@@ -2279,6 +2365,7 @@ impl AgentCore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_output_expansion_with_audit(
         &self,
         config: &mut ProviderConfig,
@@ -2939,6 +3026,7 @@ impl AgentCore {
         rows
     }
 
+    #[allow(clippy::result_large_err)]
     fn execute_action_groups(
         &mut self,
         groups: Vec<ParsedActionGroup>,
@@ -3017,6 +3105,9 @@ impl AgentCore {
                         &shell_jobs,
                         &mut runtime,
                     )
+                }
+                PendingApprovedAction::ToolgenPublish { repo, draft_path } => {
+                    toolgen::execute_approved_publish(repo, draft_path, &pending_for_thread.request)
                 }
             };
             (idx, action, pending_for_thread, result)
@@ -3173,6 +3264,7 @@ impl AgentCore {
         pending
     }
 
+    #[allow(clippy::result_large_err)]
     fn execute_parallel_action_group(
         &mut self,
         actions: Vec<ParsedAction>,

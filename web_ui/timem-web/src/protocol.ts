@@ -26,6 +26,25 @@ export type TurnCompletion = {
   elapsed_ms?: number;
   repair_issue?: string | null;
   stop_reason?: string | null;
+  toolgen_retrospect?: string | null;
+};
+
+export type ToolSummary = {
+  tool_id: string;
+  name: string;
+  tool_type: string;
+  language: string;
+  synopsis: string;
+  entrypoint: string;
+  path: string;
+  updated_at_ms: number;
+  status: "ready" | string;
+};
+
+export type ToolDetail = {
+  summary: ToolSummary;
+  readme: string;
+  files: Array<{ path: string; bytes: number }>;
 };
 
 export type Session = {
@@ -35,6 +54,7 @@ export type Session = {
   state: "ready" | "working" | "error" | "stopped" | string;
   current_dir: string;
   max_llm_input_tokens: number;
+  tools: ToolSummary[];
   runtime_profile?: {
     provider: string;
     model: string;
@@ -112,7 +132,8 @@ export type Activity = {
   code_language?: string;
   tool_name?: string;
   tool_status?: string;
-  kind?: "context_compact";
+  kind?: "context_compact" | "toolgen";
+  toolgen_phase?: string;
   before_tokens?: number;
   after_tokens?: number;
   createdAt: number;
@@ -155,17 +176,24 @@ export type WireEvent =
   | { type: "host_config_updated"; key: string; value: string; session_env_defaults: Record<string, string> }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
-  | { type: "history_page"; session_id: string; records: ChatHistoryRecord[]; before_cursor?: string | null; has_more: boolean };
+  | { type: "history_page"; session_id: string; records: ChatHistoryRecord[]; before_cursor?: string | null; has_more: boolean }
+  | { type: "tool_repo_updated"; session_id: string; tools: ToolSummary[] }
+  | { type: "tool_repo_search_result"; session_id: string; query: string; tools: ToolSummary[] }
+  | { type: "tool_repo_detail"; session_id: string; detail: ToolDetail };
 
 export type ClientCommand =
   | { type: "session_create"; display_name?: string; workspace_dir?: string; env?: Record<string, string> }
   | { type: "session_rename"; session_id: string; display_name: string }
   | { type: "session_stop"; session_id: string }
-  | { type: "turn_submit"; session_id: string; text: string }
+  | { type: "turn_submit"; session_id: string; text: string; input_kind?: "toolgen"; source_turn_id?: string }
   | { type: "turn_supplement"; session_id: string; text: string }
   | { type: "turn_cancel"; session_id: string }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
   | { type: "history_page"; session_id: string; before_cursor?: string | null; limit?: number }
+  | { type: "tool_repo_search"; session_id: string; query: string; limit?: number }
+  | { type: "tool_repo_detail"; session_id: string; tool_id: string }
+  | { type: "tool_repo_rename"; session_id: string; tool_id: string; new_name: string }
+  | { type: "tool_repo_open_terminal"; session_id: string; tool_id: string }
   | { type: "runtime_update"; key: string; value: string }
   | { type: "mem_switch"; space: string }
   | {

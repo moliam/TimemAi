@@ -28,6 +28,7 @@ pub struct TurnInput<'a> {
 #[derive(Debug, Clone)]
 pub struct TurnOutcome {
     pub text: String,
+    pub toolgen_retrospect: String,
     pub stats: UsageStats,
     pub latest_usage: Option<UsageStats>,
     pub elapsed: Duration,
@@ -47,6 +48,7 @@ impl TurnOutcome {
     ) -> Self {
         Self {
             text: text.into(),
+            toolgen_retrospect: String::new(),
             stats,
             latest_usage,
             elapsed,
@@ -60,6 +62,7 @@ impl TurnOutcome {
     pub fn stopped(text: impl Into<String>, stopped: StoppedTurn, elapsed: Duration) -> Self {
         Self {
             text: text.into(),
+            toolgen_retrospect: String::new(),
             stats: stopped.stats,
             latest_usage: stopped.latest_usage,
             elapsed,
@@ -72,6 +75,11 @@ impl TurnOutcome {
 
     pub fn with_running_jobs(mut self, running_jobs: Vec<crate::RunningShellJob>) -> Self {
         self.running_jobs = running_jobs;
+        self
+    }
+
+    pub fn with_toolgen_retrospect(mut self, retrospect: impl Into<String>) -> Self {
+        self.toolgen_retrospect = retrospect.into();
         self
     }
 }
@@ -347,6 +355,7 @@ pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
+pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
@@ -848,6 +857,34 @@ pub fn context_compact_topic_event(
             "discarded_delta_ids": discarded_delta_ids,
             "offloaded_delta_ids": offloaded_delta_ids,
             "scratch_id": scratch_id,
+        }),
+    )
+}
+
+pub fn toolgen_topic_event(
+    session_id: impl Into<String>,
+    phase: &str,
+    tool_count: usize,
+    tool: Option<&crate::ToolSummary>,
+    retrospect: Option<&str>,
+    error: Option<&str>,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_TOOLGEN,
+            json!({
+                "name": CORE_TOPIC_TOOLGEN,
+                "phase": phase,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "phase": phase,
+            "tool_count": tool_count,
+            "tool": tool,
+            "retrospect": retrospect,
+            "error": error,
         }),
     )
 }

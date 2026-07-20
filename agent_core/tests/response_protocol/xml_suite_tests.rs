@@ -291,7 +291,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             Case {
                 name: "invalid action json",
                 raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\",}}]]]></action_json></working_still_action></response>",
-                issue: "actions[0].invalid_json",
+                issue: "actions[0].invalid_json:trailing comma at line 1 column 27",
                 guidance: "not valid JSON",
             },
             Case {
@@ -736,7 +736,13 @@ fn string_field_protection_does_not_hide_malformed_action_json() {
         &caps(),
     );
 
-    assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
+    assert!(
+        env.repair_issue
+            .as_deref()
+            .is_some_and(|issue| issue.starts_with("actions[0].invalid_json:trailing comma")),
+        "{:?}",
+        env.repair_issue
+    );
     assert!(env.next_actions.is_empty());
     assert!(env.action_groups.is_empty());
 }
@@ -753,7 +759,13 @@ fn adjacent_top_level_action_arrays_request_repair_instead_of_execution() {
         &caps(),
     );
 
-    assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
+    assert!(
+        env.repair_issue
+            .as_deref()
+            .is_some_and(|issue| issue.starts_with("actions[0].invalid_json:trailing characters")),
+        "{:?}",
+        env.repair_issue
+    );
     assert!(env.next_actions.is_empty());
     assert!(env.action_groups.is_empty());
 }
@@ -787,6 +799,87 @@ fn parses_actions_from_cdata_json() {
     assert_eq!(env.next_actions.len(), 1);
     assert_eq!(env.next_actions[0].action, "run_bash");
     assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+}
+
+#[test]
+fn recovers_glm_action_array_when_cdata_close_consumes_the_final_bracket() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <free_talk>Searching milestone markers with simple patterns.</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[[
+      {"run_bash":{"cmd":"grep -n -i -E 'app.start|InitNode|init.succ' app.log | head -120","timeout_ms":10000}},
+      {"run_bash":{"cmd":"grep -n -i -E 'postprocess|startup finished' app.log | head -80","timeout_ms":10000}}
+    ]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 2);
+    assert_eq!(env.next_actions[0].action, "run_bash");
+    assert_eq!(env.next_actions[0].input_i64("timeout_ms"), Some(10000));
+}
+
+#[test]
+fn recovers_glm_action_array_with_escaped_shell_patterns() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <working_still_action>
+    <action_json><![CDATA[[
+      {"run_bash":{"cmd":"grep -n -i 'app start\\|startup\\|InitNode' app.log | head -100","timeout_ms":10000}},
+      {"run_bash":{"cmd":"grep -n -i '\\.so\\|loaded\\|library' app.log | head -80","timeout_ms":10000}}
+    ]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 2);
+    assert!(env.next_actions[0]
+        .input_str("cmd")
+        .contains("app start\\|"));
+    assert!(env.next_actions[1].input_str("cmd").contains("\\.so"));
+}
+
+#[test]
+fn recovers_glm_action_array_with_one_parallel_example_bracket_too_many() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <working_still_action>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"grep -n 'init node succ' app.log | head -40","timeout_ms":10000}},{"run_bash":{"cmd":"sed -n '96570,96660p' app.log","timeout_ms":10000}}]]]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 2);
+    assert_eq!(
+        env.next_actions[1].input_str("cmd"),
+        "sed -n '96570,96660p' app.log"
+    );
+}
+
+#[test]
+fn recovers_glm_action_array_with_literal_newline_at_cdata_boundary() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <working_still_action>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"python3 tool.py --self-test","timeout_ms":8000}}\n    ]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(
+        env.next_actions[0].input_str("cmd"),
+        "python3 tool.py --self-test"
+    );
 }
 
 #[test]
@@ -1056,4 +1149,82 @@ fn repairs_external_tool_call_protocol() {
         env.repair_issue.as_deref(),
         Some("external_tool_call_protocol")
     );
+}
+
+#[test]
+fn malformed_action_json_reports_json_parser_reason() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <free_talk>writing files</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"bash tool.sh "$out"","timeout_ms":5000}}]]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    let issue = env
+        .repair_issue
+        .as_deref()
+        .expect("malformed action json should request repair");
+    assert!(issue.starts_with("actions[0].invalid_json:"), "{issue}");
+    assert!(issue.contains("line"), "{issue}");
+}
+
+#[test]
+fn parses_toolgen_retrospect_immediately_before_final_answer() {
+    let env = parse_xml_envelope(
+        r#"<response><free_talk>reviewed</free_talk><toolgen_retrospect>Created log-inspector and runtime returned status: ready.</toolgen_retrospect><final_answer>internal completion</final_answer></response>"#,
+        &caps(),
+    );
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(
+        env.toolgen_retrospect,
+        "Created log-inspector and runtime returned status: ready."
+    );
+    assert_eq!(env.final_answer, "internal completion");
+}
+
+#[test]
+fn toolgen_retrospect_is_opaque_when_it_contains_protocol_shaped_text() {
+    let env = parse_xml_envelope(
+        r#"<response><toolgen_retrospect><![CDATA[README demonstrates <response><working_still_action><action_json>{\"fake\":{}}</action_json></working_still_action></response> literally.]]></toolgen_retrospect><final_answer>done</final_answer></response>"#,
+        &caps(),
+    );
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert!(env.toolgen_retrospect.contains("<working_still_action>"));
+    assert_eq!(env.final_answer, "done");
+}
+
+#[test]
+fn toolgen_retrospect_without_final_answer_requests_repair() {
+    let env = parse_xml_envelope(
+        r#"<response><toolgen_retrospect>created a tool</toolgen_retrospect></response>"#,
+        &caps(),
+    );
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("toolgen_retrospect_requires_final_answer")
+    );
+}
+
+#[test]
+fn toolgen_retrospect_with_working_actions_requests_repair() {
+    let env = parse_xml_envelope(
+        r#"<response><toolgen_retrospect>not finished</toolgen_retrospect><working_still_action><action_json><![CDATA[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
+        &caps(),
+    );
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("toolgen_retrospect_requires_final_answer")
+    );
+}
+
+#[test]
+fn toolgen_retrospect_after_final_answer_requests_order_repair() {
+    let env = parse_xml_envelope(
+        r#"<response><final_answer>done</final_answer><toolgen_retrospect>late</toolgen_retrospect></response>"#,
+        &caps(),
+    );
+    assert_eq!(env.repair_issue.as_deref(), Some("xml_tags_out_of_order"));
 }
