@@ -366,6 +366,28 @@ fn embedded_frontend_assets_receive_browser_safe_content_types() {
 }
 
 #[test]
+fn embedded_frontend_toolrepo_browser_does_not_render_readme_body() {
+    let index = std::str::from_utf8(embedded_web_asset("/index.html").unwrap()).unwrap();
+    let js_path = index
+        .split('"')
+        .find(|part| part.starts_with("/assets/index-") && part.ends_with(".js"))
+        .expect("embedded frontend index js asset");
+    let css_path = index
+        .split('"')
+        .find(|part| part.starts_with("/assets/index-") && part.ends_with(".css"))
+        .expect("embedded frontend index css asset");
+    let js = std::str::from_utf8(embedded_web_asset(js_path).unwrap()).unwrap();
+    let css = std::str::from_utf8(embedded_web_asset(css_path).unwrap()).unwrap();
+
+    assert!(js.contains("Tool directory tree"));
+    assert!(js.contains("Collapse tool detail"));
+    assert!(!js.contains("toolrepo-readme"));
+    assert!(!js.contains(".readme})"));
+    assert!(css.contains(".toolrepo-item.selected .toolrepo-item-main>svg"));
+    assert!(!css.contains(".toolrepo-readme"));
+}
+
+#[test]
 fn browser_responses_disable_referrer_leaks_and_remote_active_content() {
     let mut response = Response::new(axum::body::Body::empty());
     apply_browser_security_headers(&mut response);
@@ -2607,6 +2629,81 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
 }
 
 #[test]
+fn rapid_stop_and_send_clicks_during_active_turn_do_not_break_the_session() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "STOP_AND_SEND_RACE");
+    let first = start_web_turn(&state, &session_id, "copy a large artifact").unwrap();
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "first correction before stopping".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+        },
+    )
+    .unwrap()
+    .expect("active submit should update the active turn");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("expected turn update")
+    };
+    assert_eq!(turn.turn_id, first.turn_id);
+
+    for _ in 0..3 {
+        assert!(handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::TurnCancel {
+                session_id: session_id.clone(),
+            },
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "late correction from another rapid send click".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+        },
+    )
+    .unwrap()
+    .expect("late active submit should still update the active turn");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("expected turn update")
+    };
+    assert_eq!(turn.turn_id, first.turn_id);
+
+    let sessions = state.sessions.lock().unwrap();
+    let retained = sessions[&session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == first.turn_id)
+        .unwrap();
+    assert_eq!(
+        retained
+            .user_entries
+            .iter()
+            .map(|entry| (entry.kind.as_str(), entry.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("task", "copy a large artifact"),
+            ("supplement", "first correction before stopping"),
+            (
+                "supplement",
+                "late correction from another rapid send click"
+            ),
+        ]
+    );
+}
+
+#[test]
 fn stale_supplement_after_cancel_completion_starts_a_new_turn() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "STALE_SUPPLEMENT");
@@ -3181,14 +3278,14 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     drive_worker_until_session_ready(&state, &session_id, &prompts);
 
     let prompt = prompts.lock().unwrap().last().unwrap().clone();
-    assert!(prompt.contains("[TOOL_GEN_TASK] Please preserve the reusable work module"));
+    assert!(prompt.contains("[TOOL_GEN_TASK] Please extract the reusable function"));
     assert!(!prompt.contains("Referenced completed turn id:"));
     assert!(!prompt.contains("Completed task:"));
     assert!(!prompt.contains("Completed task result:"));
     assert!(!prompt.contains("Observed action evidence:"));
     assert!(prompt.contains("## ToolGen test"));
     assert!(!prompt.contains("ToolGen test_TOOLGEN"));
-    let marker = "[TOOL_GEN_TASK] Please preserve the reusable work module";
+    let marker = "[TOOL_GEN_TASK] Please extract the reusable function";
     let delta_start = prompt[..prompt.find(marker).unwrap()]
         .rfind("[BEGIN DELTA]")
         .unwrap();
@@ -3781,7 +3878,7 @@ fn toolrepo_detail_rename_and_future_prompt_hint_share_the_published_state() {
     let context = session_context(&state, "session_a", &[]).unwrap().unwrap();
     assert!(context.contains(repo.root().to_string_lossy().as_ref()));
     assert!(context.contains("semantic names"));
-    assert!(context.contains("inspect its short README"));
+    assert!(context.contains("run the script's --help"));
     assert!(!session_context(&state, "session_b", &[])
         .unwrap()
         .unwrap()
