@@ -720,7 +720,7 @@ describe("assistant-ui thread integration", () => {
     expect(viewModelSource).toContain('{ type: "turn_supplement"');
     expect(sendText).toContain("composerSendDecision(");
     expect(source).toContain('value={draft}');
-    expect(source).toContain('onSubmit={(event) => { event.preventDefault(); void submitDraft(); }}');
+    expect(source).toContain('onSubmit={(event) => { event.preventDefault(); submitDraft(); }}');
     expect(source).toContain('type="submit" title={effectiveSendLabel}');
     expect(source).not.toContain("ComposerPrimitive.Send");
   });
@@ -730,7 +730,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const [draftsBySession, setDraftsBySession]");
     expect(source).toContain("const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());");
     expect(source).toContain("reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession)");
-    expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, current, reserved.sessionId, reserved.text, sent)");
+    expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent)");
+    expect(source).toContain("const sent = onSend(reserved.text);");
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
     expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
     expect(source).toContain("pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)");
@@ -1137,6 +1138,15 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain('>Supplement</span>');
   });
 
+  it("releases a stuck send affordance from the authoritative turn completion", () => {
+    expect(source).toContain('setCompletedTurnKey(`${event.session_id}:${event.turn_id ?? ""}`);');
+    expect(source).toContain('if (event.turn.state !== "working") setCompletedTurnKey(`${event.session_id}:${event.turn.turn_id}`);');
+    expect(source).toContain('completedTurnKey.startsWith(`${activeSessionId}:`)');
+    expect(source).toContain('releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)');
+    expect(source).toContain('submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());');
+    expect(source).toContain('latestActiveTurn.created_at_ms < startedAt');
+  });
+
   it("shows long current directories by their tail while preserving the full path tooltip", () => {
     expect(source).toContain('<span className="session-cwd" title={session.current_dir}>{tailPath(session.current_dir)}</span>');
     expect(source).toContain('className="composer-cwd" title={activeSession.current_dir} aria-label={`Current working directory: ${activeSession.current_dir}`}');
@@ -1157,7 +1167,7 @@ describe("assistant-ui thread integration", () => {
     expect(sendText).toContain("if (!sendCommand(decision.command))");
     expect(sendText).not.toContain("setSessions((current)");
     expect(sendText).toContain("return false;");
-    expect(source).toContain("setDraftsBySession((current) => finishSessionDraftSubmission(submittingDraftSessionIdsRef, current, reserved.sessionId, reserved.text, sent));");
+    expect(source).toContain("const nextDrafts = finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent);");
     expect(source).not.toContain("setDraft(\"\");");
   });
 

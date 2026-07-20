@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionCreateDecision, sessionRenameDecision, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionCreateDecision, sessionRenameDecision, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -109,6 +109,7 @@ function TimemApp() {
   const [pendingUploadSessionIds, setPendingUploadSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingUploadFiles, setPendingUploadFiles] = useState<Record<string, { name: string; bytes: number }>>({});
   const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
+  const [completedTurnKey, setCompletedTurnKey] = useState("");
   const creatingSessionRef = useRef(false);
   const pendingAttachmentRemoveIdsRef = useRef<Set<string>>(new Set());
   const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
@@ -374,6 +375,7 @@ function TimemApp() {
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...upsertTurn(session, event.turn), attachments: session.attachments.filter((attachment) => !consumedAttachmentIds.has(attachment.id)) }
         : session));
+      if (event.turn.state !== "working") setCompletedTurnKey(`${event.session_id}:${event.turn.turn_id}`);
       return;
     }
     if (event.type === "host_error") {
@@ -482,6 +484,7 @@ function TimemApp() {
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? finishTurn(attachTurnCompletion(session, event.outcome.message_id, event.outcome.completion ?? {}), event.turn_id, event.outcome.completion ?? {})
         : session));
+      setCompletedTurnKey(`${event.session_id}:${event.turn_id ?? ""}`);
       return;
     }
     if (event.type !== "core_topic") return;
@@ -585,7 +588,7 @@ function TimemApp() {
     };
   }, [receive]);
 
-  const sendText = useCallback(async (text: string): Promise<boolean> => {
+  const sendText = useCallback((text: string): boolean => {
     const decision = composerSendDecision(
       activeSession,
       text,
@@ -774,6 +777,7 @@ function TimemApp() {
         <ContextUsageBar session={activeSession}/>
         <TimemThread
           activeSession={activeSession}
+          completedTurnKey={completedTurnKey}
           sessionIds={sessions.map((session) => session.session_id)}
           sessionInteractionLocked={runtimeLocked}
           sessionInteractionLockReason={pendingMemSwitch ? "Mem switch is in progress" : "Waiting for runtime snapshot…"}
@@ -1076,8 +1080,9 @@ const MAX_RENDERED_TURN_EVENTS = 200;
 const INITIAL_RENDERED_TURNS = 24;
 const TURN_HISTORY_PAGE_SIZE = 24;
 
-function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, toolCount, toolCountPulse, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onOpenToolRepo, onRequestToolGen }: {
+function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, toolCount, toolCountPulse, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onOpenToolRepo, onRequestToolGen }: {
   activeSession: Session | undefined;
+  completedTurnKey: string;
   sessionIds: string[];
   sessionInteractionLocked: boolean;
   sessionInteractionLockReason: string;
@@ -1094,7 +1099,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, sess
   pendingToolGenTurnIds: Set<string>;
   toolGenSessionBusy: boolean;
   onLoadMoreHistory: (session: Session) => void;
-  onSend: (text: string) => Promise<boolean>;
+  onSend: (text: string) => boolean;
   onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
@@ -1108,6 +1113,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, sess
   const [visibleTurnCount, setVisibleTurnCount] = useState(INITIAL_RENDERED_TURNS);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
   const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());
+  const submittingDraftStartedAtRef = useRef<Map<string, number>>(new Map());
   const [submittingDraftSessionIds, setSubmittingDraftSessionIds] = useState<Set<string>>(() => new Set());
   const turns = activeSession?.turns ?? [];
   const activeSessionId = activeSession?.session_id;
@@ -1154,6 +1160,25 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, sess
     }
   }, [liveSessionKey]);
 
+  useEffect(() => {
+    if (!completedTurnKey || !activeSessionId || !completedTurnKey.startsWith(`${activeSessionId}:`)) return;
+    if (releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)) {
+      submittingDraftStartedAtRef.current.delete(activeSessionId);
+      setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+    }
+  }, [activeSessionId, completedTurnKey]);
+
+  const latestActiveTurn = activeSession?.turns.at(-1);
+  useEffect(() => {
+    if (!activeSessionId || !latestActiveTurn || latestActiveTurn.state === "working") return;
+    const startedAt = submittingDraftStartedAtRef.current.get(activeSessionId);
+    if (startedAt === undefined || latestActiveTurn.created_at_ms < startedAt) return;
+    if (releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)) {
+      submittingDraftStartedAtRef.current.delete(activeSessionId);
+      setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+    }
+  }, [activeSessionId, latestActiveTurn?.created_at_ms, latestActiveTurn?.state]);
+
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     const previous = previousScrollMetrics.current;
@@ -1191,18 +1216,20 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, sess
       onLoadMoreHistory(activeSession);
     }
   };
-  const submitDraft = async () => {
+  const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
     const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
     if (reserved === null) return;
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
-    let sent = false;
-    try {
-      sent = await onSend(reserved.text);
-    } finally {
-      setDraftsBySession((current) => finishSessionDraftSubmission(submittingDraftSessionIdsRef, current, reserved.sessionId, reserved.text, sent));
-      setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
-    }
+    submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());
+    const sent = onSend(reserved.text);
+    // Release the synchronous deduplication lock before publishing the React state
+    // snapshot. Calling the mutating helper inside a deferred state updater would
+    // leave the next lock snapshot stale and keep the composer stuck on Sending.
+    const nextDrafts = finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent);
+    setDraftsBySession(nextDrafts);
+    if (!submittingDraftSessionIdsRef.current.has(reserved.sessionId)) submittingDraftStartedAtRef.current.delete(reserved.sessionId);
+    setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
   };
 
   return <ThreadPrimitive.Root className="aui-thread">
@@ -1245,7 +1272,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, sess
           return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removeLabel} aria-label={removeLabel} aria-busy={removing || undefined} disabled={removing || sessionInteractionLocked} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
         })}</div>}
         {activeSession && <div className="composer-cwd" title={activeSession.current_dir} aria-label={`Current working directory: ${activeSession.current_dir}`}><FolderOpen size={13} aria-hidden="true"/><span>{tailPath(activeSession.current_dir, 64)}</span></div>}
-        <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitDraft(); }}>
+        <form className="composer" onSubmit={(event) => { event.preventDefault(); submitDraft(); }}>
           <textarea
             value={draft}
             placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? sessionInteractionLockReason : activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."}
@@ -1257,7 +1284,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, sess
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
-                void submitDraft();
+                submitDraft();
               }
             }}
           />

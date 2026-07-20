@@ -96,6 +96,10 @@ export function finishSessionDraftSubmission(
   return current.trim() === submittedText ? setSessionDraft(drafts, sessionId, "") : drafts;
 }
 
+export function releaseSessionDraftSubmission(locks: SessionDraftSubmissionLocks, sessionId: string): boolean {
+  return locks.current.delete(sessionId);
+}
+
 export function pruneSessionDrafts(drafts: SessionDrafts, liveSessionIds: Iterable<string>): SessionDrafts {
   const live = new Set(liveSessionIds);
   let changed = false;
