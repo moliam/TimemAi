@@ -521,7 +521,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="turn-final-delivery"');
     expect(source).toContain("<FinalAnswerDelivery text={turn.final_answer}");
     expect(source).toContain('className="turn-final-toolbar"');
-    expect(source).toContain('className={`final-copy ${copyState === "failed" ? "copy-failed" : ""}`}');
+    expect(source).toContain('const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";');
+    expect(source).toContain('className={`final-copy ${copyClass}`}');
     expect(source).toContain('aria-label={copyLabel}');
     expect(source).toContain('title={copyLabel}');
     expect(source).toContain('<span aria-live="polite">{copyLabel}</span></button></div>');
@@ -532,8 +533,10 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".completion-card");
     expect(styles).toContain(".turn-final-toolbar");
     expect(styles).toContain(".final-copy");
+    expect(styles).toContain(".final-copy.copy-success, .code-block figcaption button.copy-success");
     expect(styles).toContain(".final-copy.copy-failed, .code-block figcaption button.copy-failed");
     expect(styles).toContain(':root[data-theme="light"] .final-copy');
+    expect(styles).toContain(':root[data-theme="light"] .final-copy.copy-success');
     expect(styles).toContain(':root[data-theme="light"] .final-copy.copy-failed');
     expect(styles).not.toContain("::root");
     expect(styles).toContain(".completion-card { gap: 0 7px;");
@@ -801,7 +804,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('pre: CodeBlock');
     expect(source).toContain('className="table-scroll" tabIndex={0} aria-label="Scrollable table"');
     expect(source).toContain('navigator.clipboard.writeText(code)');
-    expect(source).toContain('className={copyState === "failed" ? "copy-failed" : ""}');
+    expect(source).toContain('className={copyClass}');
     expect(source).toContain('aria-label={copyLabel}');
     expect(styles).toContain('.markdown-body blockquote');
     expect(styles).toContain(".table-scroll");
