@@ -814,7 +814,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('import remarkGfm from "remark-gfm"');
     expect(source).toContain('remarkPlugins={[remarkGfm]}');
     expect(source).toContain('pre: CodeBlock');
-    expect(source).toContain('className="table-scroll" tabIndex={0} aria-label="Scrollable table"');
+    expect(source).toContain('className="table-scroll" role="region" tabIndex={0} aria-label="Scrollable table. Use horizontal scroll to inspect all columns."');
     expect(source).toContain('navigator.clipboard.writeText(code)');
     expect(source).toContain('className={copyClass}');
     expect(source).toContain('aria-label={copyLabel}');

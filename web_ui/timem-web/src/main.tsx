@@ -1321,7 +1321,7 @@ function MarkdownContent({ text }: { text: string }) {
     components={{
       a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer"/>,
       pre: CodeBlock,
-      table: ({ node: _node, ...props }) => <div className="table-scroll" tabIndex={0} aria-label="Scrollable table"><table {...props}/></div>,
+      table: ({ node: _node, ...props }) => <div className="table-scroll" role="region" tabIndex={0} aria-label="Scrollable table. Use horizontal scroll to inspect all columns."><table {...props}/></div>,
     }}
   >{text}</ReactMarkdown></div>;
 }
