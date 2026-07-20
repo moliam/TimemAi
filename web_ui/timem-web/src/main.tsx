@@ -1097,7 +1097,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
       {(activeSession?.turns.length ?? 0) === 0 &&
         <div className="welcome"><Sparkles size={24}/><h2>{welcomeTitle}</h2><p>{welcomeText}</p></div>
       }
-      {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button type="button" className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory && <LoaderCircle size={13}/>}<span>{historyButtonLabel}</span></button>}
+      {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button type="button" className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" aria-busy={loadingHistory || undefined} disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory && <LoaderCircle size={13} aria-hidden="true"/>}<span>{historyButtonLabel}</span></button>}
       {visibleTurns.map((turn) => <TurnInteraction
         key={turn.turn_id}
         sessionId={activeSession?.session_id ?? ""}

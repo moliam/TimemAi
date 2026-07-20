@@ -114,8 +114,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const historyButtonLabel = sessionInteractionLocked');
     expect(source).toContain('"Earlier history is locked while switching mem"');
     expect(source).toContain("Loading earlier history…");
-    expect(source).toContain('className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite"');
-    expect(source).toContain('{loadingHistory && <LoaderCircle size={13}/>}');
+    expect(source).toContain('className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" aria-busy={loadingHistory || undefined}');
+    expect(source).toContain('{loadingHistory && <LoaderCircle size={13} aria-hidden="true"/>}');
     expect(source).toContain("<span>{historyButtonLabel}</span>");
     expect(styles).toContain(".load-history");
     expect(styles).toContain(".load-history.loading svg");
@@ -662,6 +662,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('setPendingToolSearchKey("");');
     expect(source).toContain('setPendingToolDetailKey("");');
     expect(source).toContain("setSelectedTool(null);");
+  });
+
+  it("exposes earlier-history loading as a busy button state", () => {
+    expect(source).toContain('className={`load-history ${loadingHistory ? "loading" : ""}`}');
+    expect(source).toContain('aria-label={historyButtonLabel} aria-live="polite" aria-busy={loadingHistory || undefined}');
+    expect(source).toContain('disabled={loadingHistory || sessionInteractionLocked}');
+    expect(source).toContain('loadingHistory && <LoaderCircle size={13} aria-hidden="true"/>');
   });
 
   it("locks old-session interactions while a mem switch snapshot is pending", () => {
