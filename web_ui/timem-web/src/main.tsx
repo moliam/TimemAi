@@ -869,6 +869,10 @@ function SessionSidePanel({ tab, onTabChange, onClose, session, activities, sear
   const toolsTabRef = useRef<HTMLButtonElement>(null);
   const activityTabRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
+    const tabButton = tab === "tools" ? toolsTabRef.current : activityTabRef.current;
+    tabButton?.focus({ preventScroll: true });
+  }, [tab]);
+  useEffect(() => {
     setRenameToolId("");
     setRenameValue("");
     setContextMenu(null);

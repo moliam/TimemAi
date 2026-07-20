@@ -154,6 +154,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}');
     expect(source).toContain('setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible);');
     expect(source).toContain("const switchSidePanelTabFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>)");
+    expect(source).toContain('const tabButton = tab === "tools" ? toolsTabRef.current : activityTabRef.current;');
+    expect(source).toContain('tabButton?.focus({ preventScroll: true });');
     expect(source).toContain('if (event.key === "ArrowLeft" || event.key === "Home")');
     expect(source).toContain("toolsTabRef.current?.focus();");
     expect(source).toContain('} else if (event.key === "ArrowRight" || event.key === "End")');
