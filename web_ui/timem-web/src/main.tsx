@@ -1119,6 +1119,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
             placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? "Switching mem…" : activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."}
             aria-label="Message Timem"
             aria-describedby={composerHintId}
+            title={composerHint}
             disabled={!activeSession || sessionInteractionLocked}
             onChange={(event) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, event.target.value))}
             onKeyDown={(event) => {

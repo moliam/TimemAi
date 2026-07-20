@@ -90,6 +90,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const composerHintId = `composer-hint-${activeSessionId || "empty"}`;');
     expect(source).toContain('placeholder={!activeSession ? "Create a session to start…"');
     expect(source).toContain('aria-describedby={composerHintId}');
+    expect(source).toContain('title={composerHint}');
     expect(source).toContain('<div className="composer-actions"><span id={composerHintId}>{composerHint}</span>');
     expect(source).toContain('title={effectiveSendLabel}');
     expect(source).toContain('aria-label={effectiveSendLabel}');
