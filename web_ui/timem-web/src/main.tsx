@@ -155,6 +155,7 @@ function TimemApp() {
 
   useEffect(() => {
     if (!showAppearance) return;
+    appearancePanelRef.current?.focus({ preventScroll: true });
     const dismissOnOutsidePointer = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
@@ -1428,7 +1429,7 @@ function AppearancePanel({ panelRef, appearance, onChange, onClose }: { panelRef
   const descriptionId = "appearance-panel-description";
   return <>
     <div className="appearance-dismiss" aria-hidden="true" onClick={onClose}/>
-    <section id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}>
+    <section id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}>
       <header><div><span className="eyebrow">APPEARANCE</span><h2>Reading preferences</h2><p id={descriptionId}>Adjust theme, font, and message text size for this browser.</p></div><button type="button" className="icon-button" aria-label="Close appearance settings" onClick={onClose}><X size={16}/></button></header>
       <fieldset><legend>Theme</legend><div className="segmented-control">{(["dark", "light"] as const).map((theme) => <button type="button" title={`Use ${theme} theme`} className={appearance.theme === theme ? "active" : ""} aria-pressed={appearance.theme === theme} key={theme} onClick={() => update("theme", theme)}>{theme === "dark" ? "Dark" : "Light"}</button>)}</div></fieldset>
       <fieldset><legend>Font</legend><div className="appearance-options">{(["system", "serif", "mono"] as const).map((font) => <button type="button" title={`Use ${font} font for chat reading`} className={`${font}-sample ${appearance.font === font ? "active" : ""}`} aria-pressed={appearance.font === font} key={font} onClick={() => update("font", font)}>{font === "system" ? "System" : font === "serif" ? "Serif" : "Mono"}<small>Aa</small></button>)}</div></fieldset>
