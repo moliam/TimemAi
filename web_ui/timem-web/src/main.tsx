@@ -1201,7 +1201,7 @@ function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked,
     }
     window.setTimeout(() => setCopyState("idle"), 1400);
   };
-  const copyLabel = copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy";
+  const copyLabel = copyState === "copied" ? "Answer copied" : copyState === "failed" ? "Copy answer failed" : "Copy answer";
   const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";
   return <section className="turn-final-delivery">
     <div className="turn-final-toolbar"><button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}<span aria-live="polite">{copyLabel}</span></button></div>
@@ -1345,7 +1345,7 @@ function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {
     }
     window.setTimeout(() => setCopyState("idle"), 1400);
   };
-  const copyLabel = copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy";
+  const copyLabel = copyState === "copied" ? "Code copied" : copyState === "failed" ? "Copy code failed" : "Copy code";
   const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";
   return <figure className="code-block">
     <figcaption><span title={language}>{language}</span><button type="button" className={copyClass} onClick={() => void copy()} title={copyLabel} aria-label={copyLabel}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}<span aria-live="polite">{copyLabel}</span></button></figcaption>

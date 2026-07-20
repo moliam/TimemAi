@@ -548,7 +548,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={copyLabel}');
     expect(source).toContain('<span aria-live="polite">{copyLabel}</span></button></div>');
     expect(source).toContain('<figcaption><span title={language}>{language}</span>');
-    expect(source).toContain('copyState === "failed" ? "Copy failed"');
+    expect(source).toContain('copyState === "copied" ? "Answer copied" : copyState === "failed" ? "Copy answer failed" : "Copy answer"');
     expect(source).toContain("navigator.clipboard.writeText(text)");
     expect(source).toContain("<CompletionCard completion={completion}");
     expect(styles).toContain(".completion-card");
@@ -851,6 +851,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('navigator.clipboard.writeText(code)');
     expect(source).toContain('className={copyClass}');
     expect(source).toContain('aria-label={copyLabel}');
+    expect(source).toContain('copyState === "copied" ? "Code copied" : copyState === "failed" ? "Copy code failed" : "Copy code"');
     expect(styles).toContain('.markdown-body blockquote');
     expect(styles).toContain(".table-scroll");
     expect(styles).toContain('.code-block figcaption');
