@@ -1207,7 +1207,7 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
   const scrollWorkToLatest = () => {
     const scroll = workScrollRef.current;
     if (!scroll) return;
-    scroll.scrollTo({ top: scroll.scrollHeight, behavior: "smooth" });
+    scroll.scrollTo({ top: scroll.scrollHeight, behavior: prefersReducedMotion() ? "auto" : "smooth" });
     followLatest.current = true;
     setPendingUpdates(0);
   };
@@ -1234,7 +1234,7 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
         {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
         {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>}
       </div>}
-      {showWorkStream && pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13}/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
+      {showWorkStream && pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13} aria-hidden="true"/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
     </section>}
     {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}/>}
     {!turn.final_answer && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
@@ -1424,6 +1424,10 @@ function useTimedClipboardCopy(text: string, labels: { idle: string; copied: str
   const copyLabel = copyState === "copied" ? labels.copied : copyState === "failed" ? labels.failed : labels.idle;
   const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";
   return { copyState, copy, copyLabel, copyClass };
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 }
 
 async function copyTextToClipboard(text: string) {

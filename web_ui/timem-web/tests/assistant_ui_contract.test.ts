@@ -763,6 +763,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
     expect(source).toContain('title="Scroll to latest work update"');
     expect(source).toContain('aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`}');
+    expect(source).toContain('scroll.scrollTo({ top: scroll.scrollHeight, behavior: prefersReducedMotion() ? "auto" : "smooth" });');
+    expect(source).toContain('function prefersReducedMotion()');
+    expect(source).toContain('window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false');
+    expect(source).toContain('<ArrowDown size={13} aria-hidden="true"/>');
     expect(styles).toContain(".turn-new-updates:focus-visible, .scroll-to-bottom:focus-visible");
     expect(source).toContain("!turn.final_answer && turn.completion");
     expect(viewModelSource).toContain("turnLiveUsage");
