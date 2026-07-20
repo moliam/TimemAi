@@ -382,6 +382,7 @@ impl ActionRuntime for TurnActionRuntime<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn call_model_with_system_retries(
     model_client: &mut dyn ModelClient,
     config: &ProviderConfig,
@@ -502,6 +503,7 @@ pub fn cancelled_turn_result() -> (
     )
 }
 
+#[allow(clippy::type_complexity)]
 fn cancelled_turn_parts() -> (
     String,
     Option<StoppedTurn>,
@@ -510,6 +512,7 @@ fn cancelled_turn_parts() -> (
     turn_stop_parts(TurnStopSummary::cancelled_by_user())
 }
 
+#[allow(clippy::type_complexity)]
 fn turn_stop_parts(
     stop: TurnStopSummary,
 ) -> (

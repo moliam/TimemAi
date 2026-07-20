@@ -691,6 +691,7 @@ fn append_shell_history_message(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_shell_turn_result(
     session_store: &SessionStore,
     stored_session: &mut StoredSession,

@@ -155,6 +155,7 @@ impl Drop for WorkingWorkerGuard {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum CoreSessionWorkerEvent {
     Topics(Vec<CoreTopicEvent>),
@@ -388,6 +389,7 @@ impl CoreSessionWorkerManager {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_worker_in_session(
         &mut self,
         core: AgentCore,
@@ -439,6 +441,7 @@ impl CoreSessionWorkerManager {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_worker_in_session_with_model_client<M>(
         &mut self,
         core: AgentCore,

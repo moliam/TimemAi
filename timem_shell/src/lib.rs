@@ -235,6 +235,7 @@ pub fn compact_status_text(text: &str, max_chars: usize) -> String {
     compact_runtime_status_text(text, max_chars)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_final_response_at(
     text: &str,
     stats: &UsageStats,
