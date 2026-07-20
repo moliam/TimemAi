@@ -87,6 +87,8 @@ function TimemApp() {
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const appearanceButtonRef = useRef<HTMLButtonElement | null>(null);
+  const appearancePanelRef = useRef<HTMLElement | null>(null);
   const runtimeButtonRef = useRef<HTMLButtonElement | null>(null);
   const runtimePanelRef = useRef<HTMLElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
@@ -153,11 +155,21 @@ function TimemApp() {
 
   useEffect(() => {
     if (!showAppearance) return;
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (appearanceButtonRef.current?.contains(target) || appearancePanelRef.current?.contains(target)) return;
+      setShowAppearance(false);
+    };
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setShowAppearance(false);
     };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
     document.addEventListener("keydown", dismissOnEscape);
-    return () => document.removeEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
   }, [showAppearance]);
 
   useEffect(() => {
@@ -656,12 +668,12 @@ function TimemApp() {
           <span className="header-model" title={headerModelLabel}>{headerModelLabel}</span>
           <div className="header-actions">
             <button type="button" title="Sessions" aria-label="Sessions" className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
-            <button type="button" title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible); }}><Palette size={17}/></button>
+            <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible); }}><Palette size={17}/></button>
             <button type="button" ref={runtimeButtonRef} title={runtimeLabel} aria-label={runtimeLabel} className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible); }}><Settings2 size={17}/></button>
             <button type="button" title={sidePanelLabel} aria-label={sidePanelLabel} className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible); }}><PanelRight size={17}/>{sessionActivityCount > 0 && <span className="activity-count-badge">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}</button>
           </div>
         </header>
-        {showAppearance && <AppearancePanel appearance={appearance} onChange={setAppearance} onClose={() => setShowAppearance(false)}/>}
+        {showAppearance && <AppearancePanel panelRef={appearancePanelRef} appearance={appearance} onChange={setAppearance} onClose={() => setShowAppearance(false)}/>}
         {visibleError && <div className="host-error-banner" role="alert">
           <span className="host-error-text" title={visibleErrorText}><strong>{visibleError.title}</strong>{visibleError.detail && <span className="host-error-detail"> · {visibleError.detail}</span>}{hiddenErrorCount > 0 && <em>{hiddenErrorCount} more hidden error{hiddenErrorCount === 1 ? "" : "s"}</em>}</span>
           <div className="host-error-actions">
@@ -1382,12 +1394,12 @@ function textFromNode(node: React.ReactNode): string {
   return "";
 }
 
-function AppearancePanel({ appearance, onChange, onClose }: { appearance: Appearance; onChange: (appearance: Appearance) => void; onClose: () => void }) {
+function AppearancePanel({ panelRef, appearance, onChange, onClose }: { panelRef: MutableRefObject<HTMLElement | null>; appearance: Appearance; onChange: (appearance: Appearance) => void; onClose: () => void }) {
   const update = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onChange({ ...appearance, [key]: value });
   const descriptionId = "appearance-panel-description";
   return <>
     <div className="appearance-dismiss" aria-hidden="true" onClick={onClose}/>
-    <section id="appearance-panel" className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}>
+    <section id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}>
       <header><div><span className="eyebrow">APPEARANCE</span><h2>Reading preferences</h2><p id={descriptionId}>Adjust theme, font, and message text size for this browser.</p></div><button type="button" className="icon-button" aria-label="Close appearance settings" onClick={onClose}><X size={16}/></button></header>
       <fieldset><legend>Theme</legend><div className="segmented-control">{(["dark", "light"] as const).map((theme) => <button type="button" title={`Use ${theme} theme`} className={appearance.theme === theme ? "active" : ""} aria-pressed={appearance.theme === theme} key={theme} onClick={() => update("theme", theme)}>{theme === "dark" ? "Dark" : "Light"}</button>)}</div></fieldset>
       <fieldset><legend>Font</legend><div className="appearance-options">{(["system", "serif", "mono"] as const).map((font) => <button type="button" title={`Use ${font} font for chat reading`} className={`${font}-sample ${appearance.font === font ? "active" : ""}`} aria-pressed={appearance.font === font} key={font} onClick={() => update("font", font)}>{font === "system" ? "System" : font === "serif" ? "Serif" : "Mono"}<small>Aa</small></button>)}</div></fieldset>

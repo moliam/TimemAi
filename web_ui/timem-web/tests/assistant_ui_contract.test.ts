@@ -870,9 +870,12 @@ describe("assistant-ui thread integration", () => {
     expect(appearanceSource).toContain('root.dataset.font = appearance.font');
     expect(appearanceSource).toContain('root.dataset.textSize = appearance.textSize');
     expect(source).toContain('const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";');
+    expect(source).toContain("const appearanceButtonRef = useRef<HTMLButtonElement | null>(null);");
+    expect(source).toContain("const appearancePanelRef = useRef<HTMLElement | null>(null);");
     expect(source).toContain('title={appearanceLabel} aria-label={appearanceLabel}');
+    expect(source).toContain('ref={appearanceButtonRef}');
     expect(source).toContain('aria-expanded={showAppearance} aria-controls="appearance-panel"');
-    expect(source).toContain('<AppearancePanel appearance={appearance}');
+    expect(source).toContain('<AppearancePanel panelRef={appearancePanelRef} appearance={appearance}');
     expect(source).toContain("aria-pressed={appearance.theme === theme}");
     expect(source).toContain("aria-pressed={appearance.font === font}");
     expect(source).toContain("aria-pressed={appearance.textSize === size}");
@@ -880,9 +883,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={`Use ${font} font for chat reading`}');
     expect(source).toContain('title={`Use ${size === "medium" ? "default" : size} text size`}');
     expect(source).toContain('if (!showAppearance) return;');
+    expect(source).toContain('appearanceButtonRef.current?.contains(target)');
+    expect(source).toContain('appearancePanelRef.current?.contains(target)');
     expect(source).toContain('if (event.key === "Escape") setShowAppearance(false)');
     expect(source).toContain('const descriptionId = "appearance-panel-description";');
-    expect(source).toContain('id="appearance-panel" className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId}');
+    expect(source).toContain('id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId}');
     expect(source).toContain('<p id={descriptionId}>Adjust theme, font, and message text size for this browser.</p>');
     expect(source).toContain('setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible);');
     expect(styles).toContain(".appearance-panel header p");
