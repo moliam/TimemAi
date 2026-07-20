@@ -710,9 +710,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={pendingMemSwitch ? "Mem switch is in progress" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`}');
     expect(source).toContain('aria-label={pendingMemSwitch ? `Workers locked while switching mem for ${session.display_name}`');
     expect(source).toContain('aria-expanded={expandedSessionIds.has(session.session_id)} disabled={pendingMemSwitch}');
-    expect(source).toContain('aria-label={pendingMemSwitch ? `${session.display_name} locked while switching mem` : undefined}');
+    expect(source).toContain('aria-label={pendingMemSwitch ? `${session.display_name} locked while switching mem` : renamingSession ? `${session.display_name} rename is being saved` : undefined}');
     expect(source).toContain('disabled={pendingMemSwitch} onClick={() => { setActiveSessionId(session.session_id);');
-    expect(source).toContain('disabled={pendingMemSwitch} onClick={() => beginRename(session)}');
+    expect(source).toContain('disabled={pendingMemSwitch || renamingSession} onClick={() => beginRename(session)}');
     expect(source).toContain("sessionRenameDecision(");
     expect(styles).toContain(".session:disabled, .session-expand:disabled");
     expect(styles).toContain(".session:disabled:hover, .session-expand:disabled:hover");
@@ -775,7 +775,15 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("session-rename-input");
     expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); }');
     expect(source).toContain('if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }');
+    expect(source).toContain("const renamingSession = pendingRenameSessionIds.has(session.session_id);");
+    expect(source).toContain('renamingSession ? "renaming-session" : ""');
+    expect(source).toContain("aria-busy={renamingSession || undefined}");
+    expect(source).toContain("Saving name...");
+    expect(source).toContain("disabled={pendingMemSwitch || renamingSession}");
     expect(styles).toContain("@keyframes session-working-glow");
+    expect(styles).toContain(".session-row.renaming-session");
+    expect(styles).toContain(".session-pending");
+    expect(styles).toContain(':root[data-theme="light"] .session-row.renaming-session');
     expect(styles).toContain(".sr-only { position: absolute; width: 1px; height: 1px;");
   });
 

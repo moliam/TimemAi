@@ -244,6 +244,7 @@ button:disabled { cursor: not-allowed; }
 .session-row:hover { background: #19232d; }
 .session-row.active { background: #22323d; box-shadow: inset 2px 0 #62c8b3; }
 .session-row.working { animation: session-working-glow 2.2s ease-in-out infinite; }
+.session-row.renaming-session { background: #1c2a33; }
 .session-row .session { flex: 1; width: 100%; padding-right: 34px; }
 .session-row.active .session { color: #f3fbff; }
 .session-working-icon { flex: none; color: #e7b86c; animation: spin 1.5s linear infinite; }
@@ -252,6 +253,7 @@ button:disabled { cursor: not-allowed; }
 .session-rename:hover { color: #dff6ef; background: #28404a; }
 .session-rename-input { min-width: 0; width: calc(100% - 12px); margin: 6px; padding: 5px 7px; border: 1px solid #4d9288; border-radius: 4px; outline: 0; background: #0e191f; color: #eef8f6; }
 .session-profile { overflow: hidden; text-overflow: ellipsis; color: #6f919c; font-size: 10px; white-space: nowrap; }
+.session-pending { overflow: hidden; text-overflow: ellipsis; color: #8fb9d5; font-size: 10px; white-space: nowrap; }
 .session-modal { max-height: min(760px, calc(100vh - 40px)); display: flex; flex-direction: column; }
 .session-modal-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
 .session-runtime-overrides { margin-top: 15px; border-top: 1px solid #2b3c46; padding-top: 12px; }
@@ -303,9 +305,11 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .session:hover,
 :root[data-theme="light"] .session-row:hover { background: #e1e9ec; color: #172229; }
 :root[data-theme="light"] .session-row.active { background: #d8e6e7; box-shadow: inset 2px 0 #278c7e; }
+:root[data-theme="light"] .session-row.renaming-session { background: #dbe8ed; }
 :root[data-theme="light"] .session-row.active .session { color: #172229; }
 :root[data-theme="light"] .session-rename:hover { color: #145f56; background: #cbdde0; }
 :root[data-theme="light"] .session-rename-input { border-color: #4d9288; background: #fff; color: #172229; }
+:root[data-theme="light"] .session-pending { color: #2f7582; }
 :root[data-theme="light"] .session-profile { color: #71868f; }
 :root[data-theme="light"] .session-runtime-overrides { border-color: #d4dfe3; }
 :root[data-theme="light"] .session-runtime-overrides summary { color: #405963; }
