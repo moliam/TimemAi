@@ -462,6 +462,16 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(':root[data-theme="light"] .activity-collapse');
   });
 
+  it("provides a keyboard reachable ToolRepo terminal action on each tool row", () => {
+    expect(source).toContain('className="toolrepo-open"');
+    expect(source).toContain('title={`Open ${tool.name} directory in terminal`}');
+    expect(source).toContain('aria-label={`Open ${tool.name} directory in terminal`}');
+    expect(source).toContain("onClick={() => onOpenTerminal(tool.tool_id)}");
+    expect(styles).toContain("grid-template-columns: minmax(0, 1fr) 26px 26px;");
+    expect(styles).toContain(".toolrepo-open, .toolrepo-edit");
+    expect(styles).toContain(".toolrepo-open:focus-visible");
+  });
+
   it("shows readable tool names and invocation previews in the working pane", () => {
     expect(source).toContain("function toolInvocationPreview");
     expect(source).toContain("activity.detail?.split");
