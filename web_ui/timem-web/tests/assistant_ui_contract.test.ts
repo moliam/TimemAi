@@ -496,8 +496,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"} Activity 详情${activity.title ? `：${activity.title}` : ""}`;');
     expect(source).toContain('aria-label={summaryLabel}');
     expect(source).toContain('className="activity-expand-label">{open ? "收起" : "展开"}</span>');
-    expect(source).toContain('className="activity-collapse top" onClick={collapse}>收起详情</button>');
-    expect(source).toContain('className="activity-collapse" onClick={collapse}>收起详情</button>');
+    expect(source).toContain('className="activity-collapse top" title="Collapse activity details" aria-label="Collapse activity details" onClick={collapse}>收起详情</button>');
+    expect(source).toContain('className="activity-collapse" title="Collapse activity details" aria-label="Collapse activity details" onClick={collapse}>收起详情</button>');
     expect(styles).toContain(".activity:is(details) { display: block; }");
     expect(styles).toContain(".activity summary { display: grid;");
     expect(styles).toContain(".activity-collapse");
@@ -525,8 +525,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('open={open} onToggle={(event) => setOpen(event.currentTarget.open)}');
     expect(source).toContain('aria-busy={running || undefined} open={open}');
     expect(source).toContain('aria-label={summaryLabel}');
-    expect(source).toContain('className="tool-activity-collapse top" onClick={collapse}>收起详情</button>');
-    expect(source).toContain('className="tool-activity-collapse" onClick={collapse}>收起详情</button>');
+    expect(source).toContain('className="tool-activity-collapse top" title={`Collapse ${toolName} details`} aria-label={`Collapse ${toolName} details`} onClick={collapse}>收起详情</button>');
+    expect(source).toContain('className="tool-activity-collapse" title={`Collapse ${toolName} details`} aria-label={`Collapse ${toolName} details`} onClick={collapse}>收起详情</button>');
     expect(styles).toContain(".tool-activity-collapse");
     expect(styles).toContain(".tool-activity summary:focus-visible { background: #1f1f1f; box-shadow: inset 2px 0 0 #4d8fd7; }");
     expect(styles).toContain(':root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }');
@@ -551,8 +551,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"} ToolGen 详情${activity.title ? `：${activity.title}` : ""}`;');
     expect(source).toContain('aria-label={summaryLabel}');
     expect(source).toContain('className="toolgen-collapse"');
-    expect(source).toContain('className="toolgen-collapse top" onClick={collapse}>收起详情</button>');
-    expect(source).toContain('className="toolgen-collapse" onClick={collapse}>收起详情</button>');
+    expect(source).toContain('className="toolgen-collapse top" title="Collapse ToolGen details" aria-label="Collapse ToolGen details" onClick={collapse}>收起详情</button>');
+    expect(source).toContain('className="toolgen-collapse" title="Collapse ToolGen details" aria-label="Collapse ToolGen details" onClick={collapse}>收起详情</button>');
     expect(styles).toContain(".toolgen-notice[open] summary svg");
     expect(styles).toContain('content: "收起"');
     expect(styles).toContain(".toolgen-collapse");
