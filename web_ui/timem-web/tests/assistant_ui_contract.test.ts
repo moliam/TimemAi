@@ -355,7 +355,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label="Clear ToolRepo search"');
     expect(source).toContain('onClick={() => onSearchQueryChange("")}');
     expect(source).toContain('if (event.key === "Escape" && searchQuery)');
-    expect(source).toContain("event.stopPropagation(); onSearchQueryChange(\"\");");
+    expect(source).toContain("event.preventDefault(); event.stopPropagation(); onSearchQueryChange(\"\");");
     expect(source).toContain('const sortLabel = sort === "time" ? "recent update" : sort;');
     expect(source).toContain('const sortControlLabel = `Sort ToolRepo by ${sortLabel}`;');
     expect(source).toContain('title={sortControlLabel} aria-label={sortControlLabel}');
