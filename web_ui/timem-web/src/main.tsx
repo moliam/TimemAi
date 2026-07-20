@@ -609,13 +609,14 @@ function TimemApp() {
   const hiddenErrorCount = Math.max(0, visibleErrors.length - 1);
   const connectionLabel = connected ? "Runtime connected" : "Reconnecting to runtime…";
   const memSwitchTitle = !connected ? "Reconnect before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";
+  const newSessionLabel = pendingMemSwitch ? "New session is locked while switching mem" : "New session";
   const headerModelLabel = activeSession?.runtime_profile ? `${activeSession.runtime_profile.provider}:${activeSession.runtime_profile.model}` : "";
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="app-shell">
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => setShowMobileSessions(false)}/>}
       <aside className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}>
         <div className="brand"><Sparkles size={18}/><span>Timem</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => setShowMobileSessions(false)}><X size={17}/></button></div>
-        <button type="button" className="new-session" disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); setShowMobileSessions(false); }}><Plus size={16}/> New session</button>
+        <button type="button" className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); setShowMobileSessions(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
           {sessions.map((session) => <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""}`}>
             <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={pendingMemSwitch ? "Mem switch is in progress" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={pendingMemSwitch ? `Workers locked while switching mem for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={pendingMemSwitch} onClick={() => setExpandedSessionIds((current) => {
