@@ -868,12 +868,16 @@ describe("assistant-ui thread integration", () => {
 
   it("lets users remove pending attachments without losing access to long file names", () => {
     expect(source).toContain('type: "attachment_remove"');
+    expect(source).toContain("const attachedFileCount = activeSession?.attachments.length ?? 0;");
+    expect(source).toContain('const attachmentSummary = attachedFileCount === 1 ? "1 file attached" : `${attachedFileCount} files attached`;');
+    expect(source).toContain('className="attachment-summary" title={attachmentSummary}');
     expect(source).toContain('className="pending-attachment-name"');
     expect(source).toContain('title={attachment.name}');
     expect(source).toContain("pendingAttachmentRemoveIds.has");
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
     expect(source).toContain('aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`}');
     expect(source).toContain("aria-busy={removing || undefined}");
+    expect(styles).toContain(".attachment-summary");
     expect(styles).toContain(".pending-attachment-name");
     expect(styles).toContain("text-overflow: ellipsis");
   });
@@ -898,7 +902,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label={attachLabel}');
     expect(source).toContain("disabled={!activeSession || uploadingAttachment || sessionInteractionLocked}");
     expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
-    expect(source).toContain('aria-live="polite">{uploadingAttachment && <div className="pending-attachment uploading" role="status"');
+    expect(source).toContain('aria-live="polite">{attachedFileCount > 0 && <div className="attachment-summary"');
+    expect(source).toContain('uploadingAttachment && <div className="pending-attachment uploading" role="status"');
     expect(source).toContain('aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText}');
     expect(source).toContain("title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}");
     expect(source).toContain('className="upload-dot" aria-hidden="true"');
