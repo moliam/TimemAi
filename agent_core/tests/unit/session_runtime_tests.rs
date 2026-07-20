@@ -40,6 +40,7 @@ fn test_config() -> ProviderConfig {
         max_llm_input_tokens: 100_000,
         max_llm_output_tokens: 10_000,
         response_protocol: crate::ResponseProtocolKind::Markdown,
+        openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
 
@@ -936,7 +937,13 @@ fn session_turn_xml_malformed_action_json_still_repairs() {
         .filter_map(CoreTopicEvent::as_model_repair)
         .collect::<Vec<_>>();
     assert_eq!(repair_topics.len(), 1);
-    assert_eq!(repair_topics[0].issue, "actions[0].invalid_json");
+    assert!(
+        repair_topics[0]
+            .issue
+            .starts_with("actions[0].invalid_json:trailing comma"),
+        "{}",
+        repair_topics[0].issue
+    );
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
     let _ = std::fs::remove_dir_all(dir);

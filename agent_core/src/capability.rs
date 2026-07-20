@@ -9,6 +9,7 @@ const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/m
 const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
 const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
+const TOOLGEN_MANIFEST: &str = include_str!("../../resources/capabilities/tools/toolgen.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityBinding {
@@ -191,11 +192,31 @@ impl CapabilityRegistry {
                 CAPMGR_MANIFEST,
                 RUN_BASH_MANIFEST,
                 SELF_TOOL_MANIFEST,
+                TOOLGEN_MANIFEST,
             ],
             &[],
             profile,
         )
         .expect("builtin capability manifests must be valid")
+    }
+
+    pub fn without_tool(mut self, tool_id: &str) -> Self {
+        self.tools.remove(tool_id);
+        self
+    }
+
+    pub(crate) fn enable_toolgen(&mut self) -> Result<(), String> {
+        let manifest = parse_tool_manifest(TOOLGEN_MANIFEST)?;
+        validate_manifest(&manifest)?;
+        if !self.host_profile.supports_tool(&manifest) {
+            return Err("toolgen_requires_local_command_execution".to_string());
+        }
+        self.tools.insert(manifest.id.clone(), manifest);
+        Ok(())
+    }
+
+    pub(crate) fn disable_toolgen(&mut self) {
+        self.tools.remove("toolgen");
     }
 
     pub fn builtin_with_overlay_dir(dir: impl AsRef<Path>) -> Result<Self, String> {

@@ -283,7 +283,12 @@ pub fn run_session_turn_with_model_client(
                 break (
                     turn.final_answer,
                     None,
-                    Some((turn.stats, latest_usage, turn.repair_issue)),
+                    Some((
+                        turn.stats,
+                        latest_usage,
+                        turn.repair_issue,
+                        turn.toolgen_retrospect,
+                    )),
                 );
             }
         }
@@ -292,8 +297,9 @@ pub fn run_session_turn_with_model_client(
     let elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
     let mut outcome = match (stopped, final_parts) {
         (Some(stopped), None) => TurnOutcome::stopped(text, stopped, elapsed),
-        (None, Some((stats, latest_usage, repair_issue))) => {
+        (None, Some((stats, latest_usage, repair_issue, toolgen_retrospect))) => {
             TurnOutcome::final_response(text, stats, latest_usage, repair_issue, elapsed)
+                .with_toolgen_retrospect(toolgen_retrospect)
         }
         _ => unreachable!("session turn loop must produce exactly one outcome kind"),
     };
@@ -376,6 +382,7 @@ impl ActionRuntime for TurnActionRuntime<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn call_model_with_system_retries(
     model_client: &mut dyn ModelClient,
     config: &ProviderConfig,
@@ -496,20 +503,22 @@ pub fn cancelled_turn_result() -> (
     )
 }
 
+#[allow(clippy::type_complexity)]
 fn cancelled_turn_parts() -> (
     String,
     Option<StoppedTurn>,
-    Option<(UsageStats, Option<UsageStats>, Option<String>)>,
+    Option<(UsageStats, Option<UsageStats>, Option<String>, String)>,
 ) {
     turn_stop_parts(TurnStopSummary::cancelled_by_user())
 }
 
+#[allow(clippy::type_complexity)]
 fn turn_stop_parts(
     stop: TurnStopSummary,
 ) -> (
     String,
     Option<StoppedTurn>,
-    Option<(UsageStats, Option<UsageStats>, Option<String>)>,
+    Option<(UsageStats, Option<UsageStats>, Option<String>, String)>,
 ) {
     (String::new(), Some(stop.into_stopped_turn()), None)
 }

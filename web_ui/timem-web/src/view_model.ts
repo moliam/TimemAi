@@ -31,6 +31,10 @@ export type SessionRenameDecision =
   | { kind: "skip"; reason: "no_session" | "empty_name" | "already_pending" | "mem_switching" }
   | { kind: "send"; command: Extract<ClientCommand, { type: "session_rename" }>; displayName: string };
 
+export type SessionCreateDecision =
+  | { kind: "skip"; reason: "empty_workspace" | "creating" | "mem_switching" }
+  | { kind: "send"; command: Extract<ClientCommand, { type: "session_create" }>; displayName: string; workspaceDir: string; env: Record<string, string> };
+
 export type DraftSubmissionLock = { current: boolean };
 export type SessionDraftSubmissionLocks = { current: Set<string> };
 export type SessionDrafts = Record<string, string>;
@@ -92,6 +96,10 @@ export function finishSessionDraftSubmission(
   return current.trim() === submittedText ? setSessionDraft(drafts, sessionId, "") : drafts;
 }
 
+export function releaseSessionDraftSubmission(locks: SessionDraftSubmissionLocks, sessionId: string): boolean {
+  return locks.current.delete(sessionId);
+}
+
 export function pruneSessionDrafts(drafts: SessionDrafts, liveSessionIds: Iterable<string>): SessionDrafts {
   const live = new Set(liveSessionIds);
   let changed = false;
@@ -149,6 +157,20 @@ export function composerSendDecision(
   };
 }
 
+export function manualToolGenCommand(
+  sessionId: string,
+  sourceTurnId: string,
+  optionalGuidance: string,
+): ClientCommand {
+  return {
+    type: "turn_submit",
+    session_id: sessionId,
+    input_kind: "toolgen",
+    source_turn_id: sourceTurnId,
+    text: optionalGuidance.trim(),
+  };
+}
+
 export function sessionRenameDecision(
   sessionId: string | undefined,
   draftName: string,
@@ -167,28 +189,85 @@ export function sessionRenameDecision(
   };
 }
 
+export function sessionCreateDecision(
+  displayNameDraft: string,
+  workspaceDirDraft: string,
+  envDraft: Record<string, string>,
+  creating: boolean,
+  isMemSwitching = false,
+): SessionCreateDecision {
+  if (isMemSwitching) return { kind: "skip", reason: "mem_switching" };
+  if (creating) return { kind: "skip", reason: "creating" };
+  const workspaceDir = workspaceDirDraft.trim();
+  if (!workspaceDir) return { kind: "skip", reason: "empty_workspace" };
+  const displayName = displayNameDraft.trim();
+  const env = Object.fromEntries(Object.entries(envDraft)
+    .map(([key, value]) => [key, value.trim()])
+    .filter(([, value]) => value));
+  return {
+    kind: "send",
+    displayName,
+    workspaceDir,
+    env,
+    command: {
+      type: "session_create",
+      ...(displayName ? { display_name: displayName } : {}),
+      workspace_dir: workspaceDir,
+      env,
+    },
+  };
+}
+
 function actionLifecycleKey(event: WebTurnEvent) {
   if (event.source !== "core_topic") return undefined;
   const topicEvent = event.payload as unknown as CoreTopicEvent;
   if (topicEvent.topic?.name !== "core.action") return undefined;
   const action = typeof topicEvent.payload.action === "string" ? topicEvent.payload.action : "";
   if (!action) return undefined;
-  return `${action}:${stableValueKey(topicEvent.payload.input ?? null)}`;
+  const actionId = typeof topicEvent.payload.action_id === "string"
+    ? topicEvent.payload.action_id
+    : typeof topicEvent.topic.attributes?.action_id === "string"
+      ? topicEvent.topic.attributes.action_id
+      : "";
+  if (actionId) return `id:${actionId}`;
+  return `${action}:${JSON.stringify(stableJsonValue(topicEvent.payload.input ?? null))}`;
 }
 
-function stableValueKey(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableValueKey).join(",")}]`;
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
   if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableValueKey(record[key])}`).join(",")}}`;
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, stableJsonValue(nested)]),
+    );
   }
-  return JSON.stringify(value);
+  return value;
+}
+
+function toolgenLifecycle(event: WebTurnEvent) {
+  if (event.source !== "core_topic") return undefined;
+  const topicEvent = event.payload as unknown as CoreTopicEvent;
+  if (topicEvent.topic?.name !== "core.toolgen") return undefined;
+  const phase = typeof topicEvent.payload.phase === "string" ? topicEvent.payload.phase : "";
+  return phase ? { key: `toolgen:${topicEvent.context_id ?? "unknown"}`, phase } : undefined;
 }
 
 export function coalesceActionLifecycle(events: WebTurnEvent[]) {
   const visible: WebTurnEvent[] = [];
   const pendingStarts = new Map<string, number[]>();
+  const pendingToolGen = new Set<string>();
   for (const event of events) {
+    const toolgen = toolgenLifecycle(event);
+    if (toolgen) {
+      if (toolgen.phase === "started") {
+        pendingToolGen.add(toolgen.key);
+      } else {
+        visible.push(event);
+        pendingToolGen.delete(toolgen.key);
+      }
+      continue;
+    }
     const key = actionLifecycleKey(event);
     if (!key) {
       visible.push(event);
@@ -346,6 +425,17 @@ export function appendTurnEvent(session: Session, turnId: string | null | undefi
   };
 }
 
+function turnEventSessionId(event: WebTurnEvent) {
+  const direct = event.payload.session_id;
+  if (typeof direct === "string") return direct;
+  const nested = event.payload.payload;
+  if (nested && typeof nested === "object") {
+    const sessionId = (nested as Record<string, unknown>).session_id;
+    if (typeof sessionId === "string") return sessionId;
+  }
+  return undefined;
+}
+
 function turnEventBelongsToSession(session: Session, event: WebTurnEvent): boolean {
   if (event.source !== "core_topic") return true;
   const topicEvent = event.payload as unknown as CoreTopicEvent;
@@ -362,6 +452,7 @@ function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
   const payload = event.payload.payload;
   if (!topic || typeof topic !== "object" || (topic as Record<string, unknown>).name !== "core.model.response") return undefined;
   if (!payload || typeof payload !== "object") return undefined;
+  if ((payload as Record<string, unknown>).runtime_phase === "toolgen") return undefined;
   const workerId = event.payload.worker_id;
   if (typeof workerId === "string" && workerId !== session.primary_worker_id) return undefined;
   const finalAnswer = (payload as Record<string, unknown>).final_answer;
@@ -408,9 +499,10 @@ export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").Usag
     if (event.source !== "worker_activity" || event.payload.kind !== "model_response") continue;
     const usage = event.payload.usage;
     if (!usage || typeof usage !== "object") continue;
-    latest = usage as import("./protocol").UsageStats;
+    const current = usage as import("./protocol").UsageStats;
+    latest = current;
     for (const field of USAGE_FIELDS) {
-      const value = latest[field];
+      const value = current[field];
       if (typeof value === "number" && Number.isFinite(value)) total[field] = (total[field] ?? 0) + value;
     }
   }
@@ -483,6 +575,7 @@ export function applyCoreTopicToSession(
   const currentDir = reportedDir && targetContextId === session.active_context_id ? reportedDir : session.current_dir;
   let workers = session.workers;
   if (event.topic.name === "core.model.response") {
+    if (event.payload.runtime_phase === "toolgen") return session;
     const finalAnswer = typeof event.payload.final_answer === "string" ? event.payload.final_answer.trim() : "";
     const messageId = typeof event.payload.ui_message_id === "string" ? event.payload.ui_message_id : undefined;
     const isPrimary = !event.worker_id || event.worker_id === session.primary_worker_id;
@@ -564,13 +657,16 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
   switch (event.topic.name) {
     case "core.model.response": {
       const freeTalk = label(payload.free_talk);
-      return freeTalk ? { id: crypto.randomUUID(), sessionId: event.session_id, tone: "thinking", title: "", detail: freeTalk, createdAt: Date.now() } : null;
+      const progress = label(payload.progress);
+      const detail = [freeTalk, progress].filter((text) => text.trim()).join("\n\n");
+      return detail ? { id: crypto.randomUUID(), sessionId: event.session_id, tone: "thinking", title: "", detail, createdAt: Date.now() } : null;
     }
     case "core.model.repair":
-      return { id: crypto.randomUUID(), sessionId: event.session_id, tone: "warning", title: `Response format repair (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
+      return { id: crypto.randomUUID(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";
+      const statusText = displayToolStatus(status);
       const input = payload.input && typeof payload.input === "object" ? payload.input as Record<string, unknown> : undefined;
       const command = action === "run_bash" && input
         ? [input.cmd, input.loop_cmd].find((value): value is string => typeof value === "string")
@@ -580,7 +676,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         id: crypto.randomUUID(),
         sessionId: event.session_id,
         tone: "action",
-        title: `${action} · ${status}`,
+        title: `${toolDisplayName(action)} · ${statusText}`,
         tool_name: action,
         tool_status: status,
         detail,
@@ -604,11 +700,47 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         createdAt: Date.now(),
       };
     }
+    case "core.toolgen": {
+      const phase = label(payload.phase);
+      const tool = payload.tool && typeof payload.tool === "object" ? payload.tool as Record<string, unknown> : undefined;
+      const toolName = tool ? label(tool.name) : "";
+      const retrospect = label(payload.retrospect);
+      const error = label(payload.error);
+      const title = phase === "published"
+        ? `ToolGen: 已生成并验证 ${toolName || "可复用工具"}`
+        : phase === "started"
+          ? "ToolGen: 正在评估…"
+          : "ToolGen: 生成失败";
+      return {
+        id: crypto.randomUUID(),
+        sessionId: event.session_id,
+        tone: phase === "published" || phase === "started" ? "notice" : "warning",
+        kind: "toolgen",
+        toolgen_phase: phase,
+        title,
+        detail: error || retrospect,
+        createdAt: Date.now(),
+      };
+    }
     case "core.work_instruction_load":
       return null;
     default:
       return null;
   }
+}
+
+export function toolDisplayName(name: string) {
+  if (name === "run_bash") return "Bash";
+  if (name === "memmgr") return "MemMgr";
+  if (name === "capmgr") return "CapMgr";
+  if (name === "self_tool") return "Self tool";
+  return name;
+}
+
+function displayToolStatus(status: string) {
+  if (status === "background_running") return "background running";
+  if (status === "timeout") return "timed out";
+  return status.replaceAll("_", " ");
 }
 
 function formatToolArguments(input: Record<string, unknown> | undefined) {

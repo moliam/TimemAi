@@ -496,6 +496,7 @@ fn output_expansion_resolution_is_core_owned() {
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
 
     let resolution = core.resolve_output_expansion_with_audit(
@@ -537,6 +538,7 @@ fn output_expansion_decline_returns_core_stop_summary() {
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let usage = UsageStats {
         prompt_tokens: 80,
@@ -582,6 +584,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut bash = BashApprovalMode::Ask;
     let mut work = agent_core::WorkInstructionLoadMode::Silent;
@@ -657,6 +660,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         max_llm_input_tokens: 3_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
 
     core.configure_runtime_from_host(&config, BashApprovalMode::Approve);
@@ -1922,6 +1926,7 @@ fn status_finished_uses_final_answer_as_host_final_answer() {
 fn final_turn_wire_shape_uses_semantic_final_answer_field() {
     let step = CoreStep::Final(TurnFinal {
         final_answer: "这是最终结论。".to_string(),
+        toolgen_retrospect: String::new(),
         stats: UsageStats::zero(),
         profile_label: "aliyun:qwen-plus".to_string(),
         repair_issue: None,

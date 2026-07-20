@@ -840,6 +840,7 @@ pub(crate) fn execute_run_bash_action(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_run_bash(
     command: &str,
     cwd: &Path,
@@ -953,6 +954,7 @@ pub(crate) fn execute_run_bash(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_approved_bash(
     command: &str,
     cwd: &Path,

@@ -149,6 +149,7 @@ fn empty_audit_doc() -> Value {
     json!({"version": 1, "events": []})
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn host_start_audit_event(
     host: &str,
     session: &str,
@@ -205,6 +206,7 @@ pub fn max_llm_output_increased_audit_event(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn model_repair_request_audit_event(
     session: &str,
     turn_id: &str,
@@ -228,6 +230,7 @@ pub fn model_repair_request_audit_event(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn model_repair_output_event(
     session: &str,
     turn_id: &str,
@@ -357,6 +360,7 @@ pub fn stale_context_choice_audit_event(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn turn_final_audit_event(
     session: &str,
     turn_id: &str,

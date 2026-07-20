@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionCreateDecision, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -16,6 +16,7 @@ const session = (sessionId: string): Session => ({
   state: "ready",
   current_dir: "/work",
   max_llm_input_tokens: 100_000,
+  tools: [],
   contexts: [{ context_id: `context_${sessionId}`, current_dir: "/work", worker_ids: [`worker_${sessionId}`] }],
   workers: [{ worker_id: `worker_${sessionId}`, context_id: `context_${sessionId}`, display_name: sessionId, ordinal: 0, state: "ready", parent_worker_id: null }],
   active_context_id: `context_${sessionId}`,
@@ -50,19 +51,42 @@ const actionEvent = (
   lifecycle: "start" | "finish",
   status: string,
   input: Record<string, unknown> = { cmd: "git status" },
+  actionId?: string,
 ): WebTurnEvent => ({
   event_id: id,
   source: "core_topic",
   created_at_ms: Number(id.replace(/\D/g, "")) || 1,
   payload: {
     session_id: "session_1",
-    topic: { name: "core.action", attributes: { event: lifecycle } },
+    topic: { name: "core.action", attributes: { event: lifecycle, ...(actionId ? { action_id: actionId } : {}) } },
     state: { name: "running" },
-    payload: { action: "run_bash", input, event: lifecycle, status },
+    payload: { action: "run_bash", input, event: lifecycle, status, ...(actionId ? { action_id: actionId } : {}) },
   },
 });
 
 describe("web topic view model", () => {
+  it("renders ToolGen lifecycle as one compact system activity", () => {
+    const started = activityFromTopic(topic("core.toolgen", { phase: "started", tool_count: 2 }));
+    expect(started).toMatchObject({ tone: "notice", kind: "toolgen", title: "ToolGen: 正在评估…" });
+    const published = activityFromTopic(topic("core.toolgen", { phase: "published", tool_count: 3, tool: { name: "trace-summarizer" }, retrospect: "Created and validated." }, "ready"));
+    expect(published).toMatchObject({ tone: "notice", kind: "toolgen", title: "ToolGen: 已生成并验证 trace-summarizer", detail: "Created and validated." });
+    const failed = activityFromTopic(topic("core.toolgen", { phase: "failed", error: "self-test failed" }, "ready"));
+    expect(failed).toMatchObject({ tone: "warning", kind: "toolgen", title: "ToolGen: 生成失败", detail: "self-test failed" });
+    expect(activityFromTopic(topic("core.model.response", { runtime_phase: "toolgen", free_talk: "Building a reusable parser.", final_answer: "internal completion" }))).toMatchObject({
+      tone: "thinking",
+      detail: "Building a reusable parser.",
+    });
+    expect(activityFromTopic(topic("core.action", { runtime_phase: "toolgen", action: "run_bash", status: "running", input: { cmd: "bash tool.sh --self-test" } }))).toMatchObject({
+      tone: "action",
+      code: "bash tool.sh --self-test",
+      code_language: "bash",
+    });
+    expect(activityFromTopic(topic("core.model.repair", { runtime_phase: "toolgen", attempt: 1, max_attempts: 5, issue: "invalid_xml" }))).toMatchObject({
+      tone: "warning",
+      title: "⚠️ 模型回复偏离协议，重试 (1/5)",
+    });
+  });
+
   it("submits a new user turn when the active session is ready", () => {
     const current = session("session_1");
     expect(composerSendDecision(current, "  start task  ", false)).toEqual({
@@ -114,6 +138,13 @@ describe("web topic view model", () => {
     const submitted = reserveDraftSubmission(lock, "retry me");
     expect(finishDraftSubmission(lock, "retry me", submitted, false)).toBe("retry me");
     expect(lock.current).toBe(false);
+  });
+
+  it("releases a session send guard when the authoritative turn-finished event arrives", () => {
+    const locks = { current: new Set(["session_1", "session_2"]) };
+    expect(releaseSessionDraftSubmission(locks, "session_1")).toBe(true);
+    expect(locks.current).toEqual(new Set(["session_2"]));
+    expect(releaseSessionDraftSubmission(locks, "session_1")).toBe(false);
   });
 
   it("keeps drafts and pending send guards isolated by session", () => {
@@ -259,6 +290,35 @@ describe("web topic view model", () => {
     });
   });
 
+  it("builds a session create command from cleaned form input", () => {
+    expect(sessionCreateDecision("  Research  ", "  /work/project  ", {
+      TIMEM_MODEL: " qwen-plus ",
+      TIMEM_API_KEY: "   ",
+      TIMEM_STREAM: " true ",
+    }, false)).toEqual({
+      kind: "send",
+      displayName: "Research",
+      workspaceDir: "/work/project",
+      env: { TIMEM_MODEL: "qwen-plus", TIMEM_STREAM: "true" },
+      command: {
+        type: "session_create",
+        display_name: "Research",
+        workspace_dir: "/work/project",
+        env: { TIMEM_MODEL: "qwen-plus", TIMEM_STREAM: "true" },
+      },
+    });
+    expect(sessionCreateDecision("   ", "/work/project", {}, false)).toMatchObject({
+      kind: "send",
+      command: { type: "session_create", workspace_dir: "/work/project", env: {} },
+    });
+  });
+
+  it("blocks session creation while creating, mem switching, or missing a workspace", () => {
+    expect(sessionCreateDecision("name", "   ", {}, false)).toEqual({ kind: "skip", reason: "empty_workspace" });
+    expect(sessionCreateDecision("name", "/work", {}, true)).toEqual({ kind: "skip", reason: "creating" });
+    expect(sessionCreateDecision("name", "/work", {}, false, true)).toEqual({ kind: "skip", reason: "mem_switching" });
+  });
+
   it("skips empty text and missing sessions before touching the socket", () => {
     expect(composerSendDecision(session("session_1"), "   \n\t", false)).toEqual({ kind: "skip", reason: "empty_text" });
     expect(composerSendDecision(undefined, "hello", false)).toEqual({ kind: "skip", reason: "no_session" });
@@ -288,6 +348,14 @@ describe("web topic view model", () => {
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
   });
 
+  it("does not append a topic event to another session even if turn ids collide", () => {
+    const target = { ...session("session_1"), turns: [turn("turn_shared")] };
+    const other = { ...session("session_2"), turns: [turn("turn_shared")] };
+    const event = actionEvent("event_1", "start", "running");
+    expect(appendTurnEvent(target, "turn_shared", event).turns[0].events).toHaveLength(1);
+    expect(appendTurnEvent(other, "turn_shared", event).turns[0].events).toHaveLength(0);
+  });
+
   it("pairs duplicate concurrent actions in order without collapsing either invocation", () => {
     const events = coalesceActionLifecycle([
       actionEvent("event_1", "start", "running"),
@@ -299,10 +367,22 @@ describe("web topic view model", () => {
     expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["completed", "timeout"]);
   });
 
+  it("uses structured action ids to keep out-of-order parallel action completion aligned", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_1", "start", "running", { cmd: "same command" }, "action_a"),
+      actionEvent("event_2", "start", "running", { cmd: "same command" }, "action_b"),
+      actionEvent("event_3", "finish", "timeout", { cmd: "same command" }, "action_b"),
+      actionEvent("event_4", "finish", "completed", { cmd: "same command" }, "action_a"),
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).action_id)).toEqual(["action_a", "action_b"]);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["completed", "timeout"]);
+  });
+
   it("pairs action lifecycle events even when input object key order changes", () => {
     const events = coalesceActionLifecycle([
-      actionEvent("event_1", "start", "running", { cmd: "printf ok", timeout_ms: 5000 }),
-      actionEvent("event_2", "finish", "completed", { timeout_ms: 5000, cmd: "printf ok" }),
+      actionEvent("event_1", "start", "running", { timeout_ms: 5000, cmd: "git status" }),
+      actionEvent("event_2", "finish", "completed", { cmd: "git status", timeout_ms: 5000 }),
     ]);
     expect(events).toHaveLength(1);
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
@@ -311,20 +391,12 @@ describe("web topic view model", () => {
   it("pairs action lifecycle events when nested input object key order changes", () => {
     const events = coalesceActionLifecycle([
       actionEvent("event_1", "start", "running", {
-        args: {
-          cmd: "printf ok",
-          env: { BETA: "2", ALPHA: "1" },
-          files: [{ path: "b.txt", mode: "read" }, { mode: "write", path: "a.txt" }],
-        },
-        timeout_ms: 5000,
+        cmd: "python3 analyze.py",
+        options: { output: "summary.json", filters: { warning: true, error: true } },
       }),
       actionEvent("event_2", "finish", "completed", {
-        timeout_ms: 5000,
-        args: {
-          files: [{ mode: "read", path: "b.txt" }, { path: "a.txt", mode: "write" }],
-          env: { ALPHA: "1", BETA: "2" },
-          cmd: "printf ok",
-        },
+        options: { filters: { error: true, warning: true }, output: "summary.json" },
+        cmd: "python3 analyze.py",
       }),
     ]);
     expect(events).toHaveLength(1);
@@ -340,6 +412,28 @@ describe("web topic view model", () => {
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("background_running");
   });
 
+  it("replaces the ToolGen start row with one terminal failure row", () => {
+    const toolgenEvent = (id: string, phase: string): WebTurnEvent => ({
+      event_id: id,
+      source: "core_topic",
+      created_at_ms: 1,
+      payload: {
+        session_id: "session_1",
+        context_id: "context_1",
+        topic: { name: "core.toolgen" },
+        state: { name: "running" },
+        payload: { phase, error: phase === "failed" ? "toolgen_no_verified_tool" : null },
+      },
+    });
+    const events = coalesceActionLifecycle([
+      toolgenEvent("toolgen_started", "started"),
+      toolgenEvent("toolgen_failed", "failed"),
+    ]);
+    expect(events).toHaveLength(1);
+    expect((events[0].payload.payload as Record<string, unknown>).phase).toBe("failed");
+    expect(coalesceActionLifecycle([toolgenEvent("toolgen_started", "started")])).toHaveLength(0);
+  });
+
   it("reconstructs turns from stored chat history records", () => {
     const records: ChatHistoryRecord[] = [
       { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, content: "old task" },
@@ -351,6 +445,15 @@ describe("web topic view model", () => {
     expect(turns[0].user_entries[0].text).toBe("old task");
     expect(turns[0].events[0].source).toBe("core_topic");
     expect(turns[0].final_answer).toBe("old answer");
+  });
+
+  it("preserves the ToolGen topic marker when restoring historical work events", () => {
+    const turns = turnsFromHistoryRecords([
+      { type: "event", role: "system", turn_id: "toolgen_turn_1", created_at_ms: 1, kind: "toolgen", content: "published", payload: { topic: { name: "core.toolgen" }, payload: { phase: "published" } } },
+      { type: "message", role: "assistant", turn_id: "toolgen_turn_1", created_at_ms: 2, content: "tool generated" },
+    ]);
+    expect(turns[0].events[0].source).toBe("history");
+    expect((turns[0].events[0].payload.topic as { name: string }).name).toBe("core.toolgen");
   });
 
   it("restores task, supplement, and approval user entries inside one turn", () => {
@@ -369,6 +472,24 @@ describe("web topic view model", () => {
       { kind: "approval", text: "approved run_bash", attachments: [], created_at_ms: 3 },
     ]);
     expect(turns[0].final_answer).toBe("done");
+  });
+
+  it("restores the last assistant message as the turn final answer while preserving chat order", () => {
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, kind: "task", content: "analyze this" },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 2, content: "partial answer" },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 3, content: "final answer" },
+    ];
+    const turns = turnsFromHistoryRecords(records);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].final_answer).toBe("final answer");
+
+    const restored = prependHistoryRecords(session("session_1"), records);
+    expect(restored.messages.map((message) => `${message.role}:${message.text}`)).toEqual([
+      "user:analyze this",
+      "assistant:partial answer",
+      "assistant:final answer",
+    ]);
   });
 
   it("sorts restored entries and events within one turn by creation time", () => {
@@ -535,6 +656,19 @@ describe("web topic view model", () => {
     });
   });
 
+  it("shows ToolGen model usage as the latest usage in its active work frame", () => {
+    const activeTurn = turn("turn_toolgen_usage");
+    activeTurn.events = [
+      { event_id: "main", source: "worker_activity", created_at_ms: 2, payload: { kind: "model_response", usage: { prompt_tokens: 8_200, completion_tokens: 120 } } },
+      { event_id: "toolgen", source: "worker_activity", created_at_ms: 3, payload: { kind: "model_response", runtime_phase: "toolgen", usage: { prompt_tokens: 3_100, completion_tokens: 80 } } },
+    ];
+
+    expect(turnLiveUsage(activeTurn)).toEqual({
+      total: { prompt_tokens: 11_300, completion_tokens: 200 },
+      latest: { prompt_tokens: 3_100, completion_tokens: 80 },
+    });
+  });
+
   it("uses only the selected session's latest real provider usage for context", () => {
     const current = session("session_1");
     const oldTurn = turn("old", "finished");
@@ -569,7 +703,7 @@ describe("web topic view model", () => {
 
   it("renders response repair as a visible warning", () => {
     const activity = activityFromTopic(topic("core.model.repair", { attempt: 2, max_attempts: 5, issue: "missing_response_root" }));
-    expect(activity).toMatchObject({ tone: "warning", title: "Response format repair (2/5)", detail: "missing_response_root" });
+    expect(activity).toMatchObject({ tone: "warning", title: "⚠️ 模型回复偏离协议，重试 (2/5)", detail: "missing_response_root" });
   });
 
   it("renders model free talk verbatim without an invented completion label", () => {
@@ -582,6 +716,26 @@ describe("web topic view model", () => {
       title: "",
       detail: "User sent a simple greeting. No tools needed.",
     });
+  });
+
+  it("renders model progress even when free talk is omitted", () => {
+    const activity = activityFromTopic(topic("core.model.response", {
+      status: "working",
+      progress: "正在检查日志并提取关键错误。",
+    }));
+    expect(activity).toMatchObject({
+      tone: "thinking",
+      title: "",
+      detail: "正在检查日志并提取关键错误。",
+    });
+  });
+
+  it("keeps free talk before progress for one model response topic", () => {
+    const activity = activityFromTopic(topic("core.model.response", {
+      free_talk: "先判断需要哪些证据。",
+      progress: "正在读取本地文件。",
+    }));
+    expect(activity?.detail).toBe("先判断需要哪些证据。\n\n正在读取本地文件。");
   });
 
   it("does not turn work-instruction bookkeeping into user-visible activity", () => {
@@ -606,7 +760,15 @@ describe("web topic view model", () => {
 
   it("renders run_bash commands as Bash code and keeps the structured status", () => {
     const activity = activityFromTopic(topic("core.action", { action: "run_bash", status: "running", input: { cmd: "git status" } }));
-    expect(activity).toMatchObject({ tone: "action", title: "run_bash · running", detail: "", code: "git status", code_language: "bash" });
+    expect(activity).toMatchObject({ tone: "action", title: "Bash · running", tool_name: "run_bash", detail: "", code: "git status", code_language: "bash" });
+  });
+
+  it("shows human-readable action statuses while preserving structured tool status", () => {
+    const background = activityFromTopic(topic("core.action", { action: "run_bash", status: "background_running", input: { cmd: "cargo test" } }));
+    expect(background).toMatchObject({ title: "Bash · background running", tool_status: "background_running" });
+
+    const timeout = activityFromTopic(topic("core.action", { action: "run_bash", status: "timeout", input: { cmd: "sleep 30" } }));
+    expect(timeout).toMatchObject({ title: "Bash · timed out", tool_status: "timeout" });
   });
 
   it("renders builtin tool usage as a readable invocation", () => {
@@ -617,7 +779,8 @@ describe("web topic view model", () => {
     }));
     expect(activity).toMatchObject({
       tone: "action",
-      title: "memmgr · running",
+      title: "MemMgr · running",
+      tool_name: "memmgr",
       detail: 'type="durable" op="sql" sql="SELECT id, content FROM memories"',
     });
   });
@@ -881,6 +1044,33 @@ describe("web topic view model", () => {
     expect(unrelated.messages).toEqual([]);
   });
 
+  it("never lets a ToolGen child response replace the primary final answer", () => {
+    const primary = topic("core.model.response", {
+      status: "finished",
+      final_answer: "Primary answer",
+      continue_work: false,
+    });
+    const toolgen = {
+      ...topic("core.model.response", {
+        status: "finished",
+        final_answer: "Tool preservation skipped.",
+        free_talk: "Decision details",
+        runtime_phase: "toolgen",
+        continue_work: false,
+      }),
+      context_id: "context_session_1",
+      worker_id: "worker_session_1",
+    };
+    let current = upsertTurn(session("session_1"), turn("turn_1"));
+    current = appendTurnEvent(current, "turn_1", { event_id: "main", source: "core_topic", payload: primary as unknown as Record<string, unknown>, created_at_ms: 2 });
+    current = appendTurnEvent(current, "turn_1", { event_id: "toolgen", source: "core_topic", payload: toolgen as unknown as Record<string, unknown>, created_at_ms: 3 });
+    const afterTopicReducer = applyCoreTopicToSession(current, toolgen, assistantMessage);
+
+    expect(current.turns[0].final_answer).toBe("Primary answer");
+    expect(afterTopicReducer.turns[0].final_answer).toBe("Primary answer");
+    expect(afterTopicReducer.messages).toEqual([]);
+  });
+
   it("keeps one turn envelope for task, supplement, process, and final telemetry", () => {
     const active = upsertTurn(session("session_1"), turn("turn_1"));
     const response = topic("core.model.response", {
@@ -955,6 +1145,18 @@ describe("web topic view model", () => {
     const once = appendTurnEvent(active, "turn_1", event);
     const replayed = appendTurnEvent(once, "turn_1", event);
     expect(replayed.turns[0].events).toEqual([event]);
+  });
+
+  it("builds a source-turn-bound manual ToolGen command without inventing user text", () => {
+    expect(manualToolGenCommand("session_1", "turn_7", "   ")).toEqual({
+      type: "turn_submit",
+      session_id: "session_1",
+      input_kind: "toolgen",
+      source_turn_id: "turn_7",
+      text: "",
+    });
+    expect(manualToolGenCommand("session_1", "turn_7", "  Prefer Python.  ").text)
+      .toBe("Prefer Python.");
   });
 
   it("does not apply a turn event to another session or another turn", () => {

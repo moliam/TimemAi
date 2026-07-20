@@ -9,7 +9,8 @@ use agent_core::{
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
     CoreSessionWorkerEvent, CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision,
     HostDecisionRequest, ProviderConfig, ProviderConfigSource, ResponseProtocolKind,
-    RuntimeDataLayout, TopicReply, WorkInstructionLoadMode, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
+    WorkInstructionLoadMode, CORE_TOPIC_TOOLGEN, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{capability::CapabilityRegistry, self_tool::SelfToolPaths};
 use axum::{
@@ -122,6 +123,7 @@ struct WebSession {
     state: String,
     current_dir: String,
     max_llm_input_tokens: u32,
+    tools: Vec<ToolSummary>,
     runtime_profile: WebSessionRuntimeProfile,
     contexts: Vec<WebContext>,
     workers: Vec<WebWorker>,
@@ -170,6 +172,7 @@ struct WebWorker {
 struct WebSessionRuntime {
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
+    env_overrides: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -295,6 +298,19 @@ enum WireEvent {
         before_cursor: Option<String>,
         has_more: bool,
     },
+    ToolRepoUpdated {
+        session_id: String,
+        tools: Vec<ToolSummary>,
+    },
+    ToolRepoSearchResult {
+        session_id: String,
+        query: String,
+        tools: Vec<ToolSummary>,
+    },
+    ToolRepoDetail {
+        session_id: String,
+        detail: ToolDetail,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -358,7 +374,10 @@ enum ClientCommand {
     },
     TurnSubmit {
         session_id: String,
+        #[serde(default)]
         text: String,
+        input_kind: Option<String>,
+        source_turn_id: Option<String>,
     },
     TurnSupplement {
         session_id: String,
@@ -375,6 +394,24 @@ enum ClientCommand {
         session_id: String,
         before_cursor: Option<String>,
         limit: Option<usize>,
+    },
+    ToolRepoSearch {
+        session_id: String,
+        query: String,
+        limit: Option<usize>,
+    },
+    ToolRepoDetail {
+        session_id: String,
+        tool_id: String,
+    },
+    ToolRepoRename {
+        session_id: String,
+        tool_id: String,
+        new_name: String,
+    },
+    ToolRepoOpenTerminal {
+        session_id: String,
+        tool_id: String,
     },
     TopicReply {
         session_id: String,
@@ -612,6 +649,11 @@ fn current_session_store(state: &AppState) -> Result<SessionStore, String> {
     Ok(current_mem_state(state)?.session_store)
 }
 
+fn session_tool_repo(state: &AppState, session_id: &str) -> Result<SessionToolRepo, String> {
+    let mem = current_mem_state(state)?;
+    Ok(SessionToolRepo::new(mem.layout.memory_dir(), session_id))
+}
+
 async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
     let (mut sender, mut receiver) = socket.split();
     if send_event(
@@ -736,9 +778,28 @@ fn handle_command(
                 manager.request_shutdown(&worker_id)?;
             }
         }
-        ClientCommand::TurnSubmit { session_id, text } => {
-            let text = nonempty_text(text, "turn text")?;
-            let turn = submit_or_supplement_turn(state, &session_id, text)?;
+        ClientCommand::TurnSubmit {
+            session_id,
+            text,
+            input_kind,
+            source_turn_id,
+        } => {
+            let turn = if input_kind.as_deref() == Some("toolgen") {
+                submit_toolgen_turn(
+                    state,
+                    &session_id,
+                    source_turn_id
+                        .as_deref()
+                        .ok_or_else(|| "toolgen_source_turn_id_required".to_string())?,
+                    (!text.trim().is_empty()).then_some(text),
+                )?
+            } else {
+                if input_kind.is_some() || source_turn_id.is_some() {
+                    return Err("unsupported_turn_input_kind".to_string());
+                }
+                let text = nonempty_text(text, "turn text")?;
+                submit_or_supplement_turn(state, &session_id, text)?
+            };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
         }
         ClientCommand::TurnSupplement { session_id, text } => {
@@ -789,6 +850,48 @@ fn handle_command(
                 before_cursor: page.before_cursor,
                 has_more: page.has_more,
             }));
+        }
+        ClientCommand::ToolRepoSearch {
+            session_id,
+            query,
+            limit,
+        } => {
+            let tools =
+                session_tool_repo(state, &session_id)?.search(&query, limit.unwrap_or(100))?;
+            return Ok(Some(WireEvent::ToolRepoSearchResult {
+                session_id,
+                query,
+                tools,
+            }));
+        }
+        ClientCommand::ToolRepoDetail {
+            session_id,
+            tool_id,
+        } => {
+            let detail = session_tool_repo(state, &session_id)?.detail(&tool_id)?;
+            return Ok(Some(WireEvent::ToolRepoDetail { session_id, detail }));
+        }
+        ClientCommand::ToolRepoRename {
+            session_id,
+            tool_id,
+            new_name,
+        } => {
+            let repo = session_tool_repo(state, &session_id)?;
+            repo.rename(&tool_id, &new_name)?;
+            let tools = repo.list()?;
+            if let Ok(mut sessions) = state.sessions.lock() {
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.tools = tools.clone();
+                }
+            }
+            return Ok(Some(WireEvent::ToolRepoUpdated { session_id, tools }));
+        }
+        ClientCommand::ToolRepoOpenTerminal {
+            session_id,
+            tool_id,
+        } => {
+            let detail = session_tool_repo(state, &session_id)?.detail(&tool_id)?;
+            open_directory_in_terminal(Path::new(&detail.summary.path))?;
         }
         ClientCommand::TopicReply {
             session_id,
@@ -909,6 +1012,7 @@ fn create_session(
     env_overrides: BTreeMap<String, String>,
 ) -> Result<String, String> {
     let session_id = unique_web_id("session");
+    let tool_repo = session_tool_repo(state, &session_id)?;
     let current_dir = state
         .template
         .resolve_workspace(requested_workspace.as_deref())?;
@@ -917,6 +1021,7 @@ fn create_session(
     let runtime = WebSessionRuntime {
         settings,
         env: session_env,
+        env_overrides,
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
@@ -943,6 +1048,7 @@ fn create_session(
                 state: "ready".to_string(),
                 current_dir: current_dir.display().to_string(),
                 max_llm_input_tokens,
+                tools: tool_repo.list()?,
                 runtime_profile,
                 contexts: Vec::new(),
                 workers: Vec::new(),
@@ -992,14 +1098,20 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
     if !current_dir.is_dir() {
         return Err("stored_session_workspace_not_found".to_string());
     }
-    let settings = state.template.session_settings(&stored.env)?;
-    let session_env = state.template.session_env(&settings, &stored.env);
+    // Legacy records stored the complete resolved runtime in `env`, which made
+    // restored sessions silently pin stale launch configuration. Only the new
+    // provenance-aware field represents explicit per-session overrides.
+    let env_overrides = stored.env_overrides.clone().unwrap_or_default();
+    let settings = state.template.session_settings(&env_overrides)?;
+    let session_env = state.template.session_env(&settings, &env_overrides);
     let runtime = WebSessionRuntime {
         settings,
         env: session_env,
+        env_overrides,
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
+    let tool_repo = session_tool_repo(state, &stored.session_id)?;
     {
         let mut sessions = state
             .sessions
@@ -1032,6 +1144,7 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
                 .to_string(),
                 current_dir: current_dir.display().to_string(),
                 max_llm_input_tokens,
+                tools: tool_repo.list()?,
                 runtime_profile,
                 contexts: Vec::new(),
                 workers: Vec::new(),
@@ -1224,7 +1337,18 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
                 .name()
                 .to_string(),
         },
-        env: session_env_values(&session.runtime.settings),
+        // Keep the legacy field empty. Resolved settings belong to the launch
+        // environment and must not become persistent per-session overrides.
+        env: BTreeMap::new(),
+        env_overrides: Some(
+            session
+                .runtime
+                .env_overrides
+                .iter()
+                .filter(|(key, _)| key.as_str() != "TIMEM_API_KEY")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
         state: if session.state == "error" {
             StoredSessionState::Error
         } else if session.active_turn_id.is_some() || session.state == "working" {
@@ -1787,6 +1911,130 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
     Ok(turn)
 }
 
+fn submit_toolgen_turn(
+    state: &AppState,
+    session_id: &str,
+    source_turn_id: &str,
+    user_instruction: Option<String>,
+) -> Result<WebTurn, String> {
+    {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        if session.active_turn_id.is_some() {
+            return Err("turn_already_active".to_string());
+        }
+        let turn = session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == source_turn_id)
+            .cloned()
+            .ok_or_else(|| "toolgen_source_turn_not_found".to_string())?;
+        if turn.state == "working" || turn.completion.is_none() {
+            return Err("toolgen_source_turn_not_completed".to_string());
+        }
+        if turn.final_answer.as_deref().unwrap_or("").trim().is_empty() {
+            return Err("toolgen_source_final_answer_missing".to_string());
+        }
+    }
+    let user_instruction = user_instruction
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let turn = start_web_toolgen_turn(
+        state,
+        session_id,
+        source_turn_id,
+        user_instruction.as_deref(),
+    )?;
+    let request = ToolGenRequest::new(user_instruction);
+    if let Err(error) = primary_worker_handle(state, session_id)?.run_toolgen(request) {
+        rollback_web_turn(state, session_id, &turn.turn_id, Vec::new());
+        return Err(error);
+    }
+    Ok(turn)
+}
+
+fn start_web_toolgen_turn(
+    state: &AppState,
+    session_id: &str,
+    source_turn_id: &str,
+    user_instruction: Option<&str>,
+) -> Result<WebTurn, String> {
+    let created_at_ms = now_ms();
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    if session.active_turn_id.is_some() {
+        return Err("turn_already_active".to_string());
+    }
+    let user_entries = user_instruction
+        .map(|text| {
+            vec![WebTurnUserEntry {
+                kind: "toolgen_instruction".to_string(),
+                text: text.to_string(),
+                attachments: Vec::new(),
+                created_at_ms,
+            }]
+        })
+        .unwrap_or_default();
+    let turn = WebTurn {
+        turn_id: unique_web_id("web_toolgen_turn"),
+        state: "working".to_string(),
+        created_at_ms,
+        user_entries,
+        events: Vec::new(),
+        final_answer: None,
+        completion: None,
+    };
+    session.state = "working".to_string();
+    session.active_turn_id = Some(turn.turn_id.clone());
+    session.pending_completion_message_id = None;
+    session.turns.push(turn.clone());
+    if session.turns.len() > MAX_SESSION_TURNS {
+        let excess = session.turns.len() - MAX_SESSION_TURNS;
+        session.turns.drain(..excess);
+    }
+    drop(sessions);
+
+    if let Some(text) = user_instruction {
+        append_chat_history_message(
+            state,
+            session_id,
+            &turn.turn_id,
+            "user",
+            Some("toolgen_instruction"),
+            created_at_ms as i64,
+            text.to_string(),
+        );
+    }
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        "source_turn_id".to_string(),
+        Value::String(source_turn_id.to_string()),
+    );
+    current_session_store(state)?.append_history_record(
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: turn.turn_id.clone(),
+            created_at_ms: created_at_ms as i64,
+            kind: ChatHistoryEventKind::RuntimeNotice,
+            content: "ToolGen requested for a completed turn.".to_string(),
+            extra,
+        },
+    )?;
+    persist_web_session(state, session_id)?;
+    Ok(turn)
+}
+
 fn append_turn_user_entry(
     state: &AppState,
     session_id: &str,
@@ -2085,6 +2333,15 @@ fn session_context(
     } else {
         None
     };
+    let tool_repo = session_tool_repo(state, session_id)?;
+    let tool_repo_hint = if tool_repo.list()?.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Previously accumulated reusable scripts are available at: {}\nThe tool directories have semantic names. When one may help with the current task, inspect the directory and run the script's --help through run_bash as needed.",
+            tool_repo.root().display()
+        ))
+    };
     let instructions = match session.work_instruction_mode {
         WorkInstructionLoadMode::Silent => {
             work_instruction_load_report(Path::new(&current_dir)).context
@@ -2100,6 +2357,7 @@ fn session_context(
         resume_notice.as_deref(),
         instructions.as_deref(),
         uploaded_files.as_deref(),
+        tool_repo_hint.as_deref(),
     ]))
 }
 
@@ -2366,6 +2624,9 @@ fn handle_scoped_worker_event(
     match event {
         CoreSessionWorkerEvent::Topics(events) => {
             for event in events {
+                let toolgen_scoped = event.payload.get("runtime_phase").and_then(Value::as_str)
+                    == Some("toolgen")
+                    || event.topic.name == CORE_TOPIC_TOOLGEN;
                 // A worker event queue is bound to one session. Never allow an
                 // inconsistent payload to update or leak into another session's UI.
                 if event.session_id != session_id
@@ -2390,30 +2651,33 @@ fn handle_scoped_worker_event(
                     continue;
                 }
                 let mut wire_payload = event.wire_payload();
-                if let Some(cwd) = event
-                    .payload
-                    .get("context_state")
-                    .and_then(|value| value.get("cwd"))
-                    .and_then(Value::as_str)
-                {
-                    if let Ok(mut sessions) = state.sessions.lock() {
-                        if let Some(session) = sessions.get_mut(session_id) {
-                            if let Some(context) = session
-                                .contexts
-                                .iter_mut()
-                                .find(|context| context.context_id == context_id)
-                            {
-                                context.current_dir = cwd.to_string();
-                            }
-                            if session.active_context_id == context_id {
-                                session.current_dir = cwd.to_string();
+                if !toolgen_scoped {
+                    if let Some(cwd) = event
+                        .payload
+                        .get("context_state")
+                        .and_then(|value| value.get("cwd"))
+                        .and_then(Value::as_str)
+                    {
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get_mut(session_id) {
+                                if let Some(context) = session
+                                    .contexts
+                                    .iter_mut()
+                                    .find(|context| context.context_id == context_id)
+                                {
+                                    context.current_dir = cwd.to_string();
+                                }
+                                if session.active_context_id == context_id {
+                                    session.current_dir = cwd.to_string();
+                                }
                             }
                         }
+                        let _ = persist_web_session(state, session_id);
                     }
-                    let _ = persist_web_session(state, session_id);
                 }
                 if let Some(response) = event.as_model_response() {
                     if !response.final_answer.is_empty()
+                        && !toolgen_scoped
                         && is_primary_worker(state, session_id, worker_id)
                     {
                         if let Ok(message_id) =
@@ -2445,16 +2709,33 @@ fn handle_scoped_worker_event(
                             }
                         }
                     }
-                    set_worker_state(
-                        state,
-                        session_id,
-                        worker_id,
-                        if response.continue_work {
-                            "working"
-                        } else {
-                            "ready"
-                        },
-                    );
+                    if !toolgen_scoped {
+                        set_worker_state(
+                            state,
+                            session_id,
+                            worker_id,
+                            if response.continue_work {
+                                "working"
+                            } else {
+                                "ready"
+                            },
+                        );
+                    }
+                }
+                if event.topic.name == CORE_TOPIC_TOOLGEN {
+                    if let Ok(repo) = session_tool_repo(state, session_id) {
+                        if let Ok(tools) = repo.list() {
+                            if let Ok(mut sessions) = state.sessions.lock() {
+                                if let Some(session) = sessions.get_mut(session_id) {
+                                    session.tools = tools.clone();
+                                }
+                            }
+                            let _ = state.events.send(WireEvent::ToolRepoUpdated {
+                                session_id: session_id.to_string(),
+                                tools,
+                            });
+                        }
+                    }
                 }
                 if let Some(lifecycle) = event.as_lifecycle() {
                     if let Ok(mut sessions) = state.sessions.lock() {
@@ -2495,13 +2776,17 @@ fn handle_scoped_worker_event(
                 json!({ "kind": "model_request", "round": round }),
             );
         }
-        CoreSessionWorkerEvent::ModelResponse { round, usage } => {
+        CoreSessionWorkerEvent::ModelResponse {
+            round,
+            usage,
+            runtime_phase,
+        } => {
             emit_worker_activity(
                 state,
                 session_id,
                 context_id,
                 worker_id,
-                json!({ "kind": "model_response", "round": round, "usage": usage }),
+                json!({ "kind": "model_response", "round": round, "usage": usage, "runtime_phase": runtime_phase }),
             );
         }
         CoreSessionWorkerEvent::ModelResponseDiscarded { round, reason } => {
@@ -2555,6 +2840,7 @@ fn handle_scoped_worker_event(
                 "elapsed_ms": outcome.elapsed.as_millis(),
                 "repair_issue": outcome.repair_issue,
                 "stop_reason": outcome.stop_reason.map(|reason| format!("{reason:?}")),
+                "toolgen_retrospect": outcome.toolgen_retrospect,
             });
             let (message_id, turn_id) =
                 if let Ok(mut sessions) = state.sessions.lock() {
@@ -2963,6 +3249,19 @@ impl WorkerTemplate {
             validate_provider_api_key(value).map_err(|_| "invalid_session_api_key".to_string())?;
             settings.config.api_key = value.clone();
         }
+        for key in [
+            "TIMEM_ENABLE_THINKING",
+            "TIMEM_REASONING_EFFORT",
+            "TIMEM_STREAM",
+        ] {
+            if let Some(value) = env_overrides.get(key) {
+                agent_core::apply_openai_compatible_env_value(
+                    &mut settings.config.openai_compatible,
+                    key,
+                    value,
+                )?;
+            }
+        }
         Ok(settings)
     }
 
@@ -3001,6 +3300,16 @@ impl WorkerTemplate {
         env.insert(
             "TIMEM_MAX_LLM_OUTPUT".to_string(),
             settings.config.max_llm_output_tokens.to_string(),
+        );
+        if let Some(value) = settings.config.openai_compatible.enable_thinking {
+            env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
+        }
+        if let Some(value) = &settings.config.openai_compatible.reasoning_effort {
+            env.insert("TIMEM_REASONING_EFFORT".to_string(), value.clone());
+        }
+        env.insert(
+            "TIMEM_STREAM".to_string(),
+            settings.config.openai_compatible.stream.to_string(),
         );
         env
     }
@@ -3041,6 +3350,9 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_MAX_LLM_OUTPUT",
     "TIMEM_BASH_APPROVAL",
     "TIMEM_WORK_INSTRUCTIONS",
+    "TIMEM_ENABLE_THINKING",
+    "TIMEM_REASONING_EFFORT",
+    "TIMEM_STREAM",
 ];
 
 fn apply_session_runtime_field(
@@ -3081,7 +3393,7 @@ impl WebSessionRuntimeProfile {
 }
 
 fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut env = BTreeMap::from([
         (
             "TIMEM_GATEWAY_PROVIDER".to_string(),
             settings.config.provider.clone(),
@@ -3119,7 +3431,18 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             agent_core::work_instruction_mode_label(settings.work_instruction_mode).to_string(),
         ),
-    ])
+    ]);
+    if let Some(value) = settings.config.openai_compatible.enable_thinking {
+        env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
+    }
+    if let Some(value) = &settings.config.openai_compatible.reasoning_effort {
+        env.insert("TIMEM_REASONING_EFFORT".to_string(), value.clone());
+    }
+    env.insert(
+        "TIMEM_STREAM".to_string(),
+        settings.config.openai_compatible.stream.to_string(),
+    );
+    env
 }
 
 #[derive(Debug)]
@@ -3262,6 +3585,9 @@ impl WebLaunchOptions {
             timeout_secs: self.timeout_secs,
             max_llm_output_tokens: self.max_llm_output_tokens,
             max_llm_input_tokens: self.max_llm_input_tokens,
+            enable_thinking: None,
+            reasoning_effort: None,
+            stream: None,
             local_api_key: agent_core::LocalLLMKeyFile::load(
                 &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../key"),
             )
@@ -3304,6 +3630,41 @@ fn open_browser(url: &str) -> Result<(), String> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+fn open_directory_in_terminal(path: &Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err("tool_directory_not_found".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    let child = Command::new("open")
+        .args(["-a", "Terminal"])
+        .arg(path)
+        .spawn();
+    #[cfg(target_os = "linux")]
+    let child = Command::new("x-terminal-emulator")
+        .arg("--working-directory")
+        .arg(path)
+        .spawn();
+    #[cfg(target_os = "windows")]
+    let child = Command::new("cmd")
+        .args(["/C", "start", "cmd", "/K", "cd", "/D"])
+        .arg(path)
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let child: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unsupported platform",
+    ));
+    match child {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            Ok(())
+        }
+        Err(error) => Err(format!("terminal_open_failed:{error}")),
+    }
 }
 
 async fn bind_loopback(requested_port: Option<u16>) -> Result<TcpListener, String> {

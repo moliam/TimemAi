@@ -234,6 +234,74 @@ fn history_page_cursor_counts_valid_records_when_bad_lines_exist() {
 }
 
 #[test]
+fn history_pages_never_restore_a_supplement_without_its_turn_task() {
+    let root = tmp_dir("turn_aligned_paging");
+    let store = SessionStore::new(&root);
+    let session_id = "session_a";
+    let records = [
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_long".to_string(),
+            created_at_ms: 1,
+            kind: Some("task".to_string()),
+            content: "original milestone request".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_long".to_string(),
+            created_at_ms: 2,
+            kind: ChatHistoryEventKind::Action,
+            content: "first action".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_long".to_string(),
+            created_at_ms: 3,
+            kind: Some("supplement".to_string()),
+            content: "还有一个 tar_log，下面是 clp 压缩的日志".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_long".to_string(),
+            created_at_ms: 4,
+            kind: ChatHistoryEventKind::ActionResult,
+            content: "action result".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_latest".to_string(),
+            created_at_ms: 5,
+            kind: Some("task".to_string()),
+            content: "latest task".to_string(),
+        },
+    ];
+    for record in &records {
+        store.append_history_record(session_id, record).unwrap();
+    }
+
+    let latest = store.read_history_page(session_id, None, 3).unwrap();
+    assert_eq!(latest.records.len(), 1);
+    assert_eq!(latest.records[0].turn_id(), "turn_latest");
+    assert_eq!(latest.before_cursor.as_deref(), Some("4"));
+
+    let previous = store
+        .read_history_page(session_id, latest.before_cursor.as_deref(), 3)
+        .unwrap();
+    assert_eq!(previous.records.len(), 4);
+    assert!(previous
+        .records
+        .iter()
+        .any(|record| matches!(record, ChatHistoryRecord::Message { kind: Some(kind), content, .. } if kind == "task" && content == "original milestone request")));
+    assert!(previous
+        .records
+        .iter()
+        .any(|record| matches!(record, ChatHistoryRecord::Message { kind: Some(kind), content, .. } if kind == "supplement" && content.contains("tar_log"))));
+    assert!(previous.before_cursor.is_none());
+}
+
+#[test]
 fn stored_sessions_are_host_agnostic_and_sorted_by_recent_update() {
     let root = tmp_dir("stored_sessions");
     let store = SessionStore::new(&root);
