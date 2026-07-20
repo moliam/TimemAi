@@ -607,6 +607,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<span aria-live="polite">{copyLabel}</span></button></div>');
     expect(source).toContain('<figcaption><span title={language}>{language}</span>');
     expect(source).toContain("navigator.clipboard.writeText(text)");
+    expect(source).toContain("async function copyTextToClipboard(text: string)");
+    expect(source).toContain('document.createElement("textarea")');
+    expect(source).toContain('textarea.setAttribute("readonly", "true")');
+    expect(source).toContain('document.execCommand("copy")');
+    expect(source).toContain("document.body.removeChild(textarea)");
+    expect(source).toContain("window.getSelection()?.removeAllRanges()");
     expect(source).toContain("window.clearTimeout(resetTimerRef.current)");
     expect(source).toContain('setCopyState("idle");\n  }, [text]);');
     expect(source).toContain("<CompletionCard completion={completion}");
