@@ -842,6 +842,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("pendingAttachmentRemoveIds.has");
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
     expect(source).toContain('aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`}');
+    expect(source).toContain("aria-busy={removing || undefined}");
     expect(styles).toContain(".pending-attachment-name");
     expect(styles).toContain("text-overflow: ellipsis");
   });
