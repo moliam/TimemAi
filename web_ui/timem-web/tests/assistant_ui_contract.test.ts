@@ -151,7 +151,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-expanded={showActivity} aria-controls="session-side-panel"');
     expect(source).toContain('title={sidePanelLabel} aria-label={sidePanelLabel}');
     expect(source).toContain('className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`}');
-    expect(source).toContain('{sessionActivityCount > 0 && <span className="activity-count-badge">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}');
+    expect(source).toContain('{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}');
     expect(source).toContain('setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible);');
     expect(source).toContain("const switchSidePanelTabFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>)");
     expect(source).toContain('if (event.key === "ArrowLeft" || event.key === "Home")');
@@ -162,8 +162,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('ref={toolsTabRef} type="button" id="side-panel-tab-tools" role="tab" aria-label={`ToolRepo, ${session?.tools.length ?? 0} tools`} aria-controls="side-panel-tools"');
     expect(source).toContain('ref={activityTabRef} type="button" id="side-panel-tab-activity" role="tab" aria-label={`Activity, ${activities.length} updates`} aria-controls="side-panel-activity"');
     expect(source).toContain('const activityTabCount = activities.length > 99 ? "99+" : String(activities.length);');
-    expect(source).toContain('>Activity<small>{activityTabCount}</small></button>');
-    expect(source).toContain('ToolRepo{session && <> <small>{session.tools.length}</small></>}');
+    expect(source).toContain('>Activity<small aria-hidden="true">{activityTabCount}</small></button>');
+    expect(source).toContain('ToolRepo{session && <> <small aria-hidden="true">{session.tools.length}</small></>}');
     expect(source).toContain('tabIndex={tab === "tools" ? 0 : -1}');
     expect(source).toContain('tabIndex={tab === "activity" ? 0 : -1}');
     expect(source).toContain('onClearActivities={() => {');
