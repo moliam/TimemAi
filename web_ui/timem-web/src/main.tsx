@@ -1168,7 +1168,7 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
     </section>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state}`}>
       {turn.state === "working" && <div className="turn-assistant-heading"><span className={`working-chip${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>}{isToolGenTurn ? "Generating tools…" : "working"}</span></div>}
-      <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} ref={workScrollRef} onScroll={(event) => {
+      <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
         const remaining = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight;
         followLatest.current = remaining < 36;
         if (followLatest.current) setPendingUpdates(0);
