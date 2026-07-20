@@ -129,6 +129,8 @@ button:disabled { cursor: not-allowed; }
 .runtime-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .runtime-options label, .session-modal label { min-width: 0; display: grid; gap: 5px; color: #9eb0bc; font-size: 11px; font-weight: 700; }
 .runtime-options label > div { display: flex; gap: 6px; }
+.runtime-options label > div input { flex: 1 1 auto; }
+.runtime-reset { flex: none; }
 .runtime-options input, .session-modal input, .session-modal select { min-width: 0; width: 100%; border: 1px solid #38515e; border-radius: 4px; padding: 7px 8px; background: #0d171e; color: #e1edf2; outline: none; }
 .runtime-options input:focus, .session-modal input:focus, .session-modal select:focus { border-color: #64bbaa; }
 .compact { padding: 6px 8px !important; font-size: 11px; }
