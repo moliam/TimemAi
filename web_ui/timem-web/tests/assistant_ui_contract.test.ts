@@ -33,6 +33,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toMatch(/\.composer-wrap\s*\{[^}]*bottom:\s*0;/);
     expect(styles).toMatch(/\.composer-wrap\s*\{[^}]*z-index:\s*3;/);
     expect(source).toContain("ThreadPrimitive.ScrollToBottom");
+    expect(source).toContain('title="Scroll to latest message" aria-label="Scroll to latest message"');
     expect(source).toContain("scrollToBottomOnThreadSwitch");
     expect(source).toContain("followThreadLatest.current = isNearScrollBottom");
     expect(source).toContain("viewport.scrollTop = viewport.scrollHeight");
@@ -773,7 +774,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="session-working-icon" size={15} aria-label="Session working"');
     expect(source).not.toContain('className="session-state">busy</span>');
     expect(styles).not.toContain(".session-state");
-    expect(source).toContain('className="composer-cwd" title={activeSession.current_dir}');
+    expect(source).toContain('className="composer-cwd" title={activeSession.current_dir} aria-label={`Current working directory: ${activeSession.current_dir}`}');
     expect(viewModelSource).toContain("context_state");
     expect(styles).toContain(".session-cwd");
     expect(styles).toContain(".composer-cwd");
@@ -993,7 +994,8 @@ describe("assistant-ui thread integration", () => {
 
   it("shows long current directories by their tail while preserving the full path tooltip", () => {
     expect(source).toContain('<span className="session-cwd" title={session.current_dir}>{tailPath(session.current_dir)}</span>');
-    expect(source).toContain('className="composer-cwd" title={activeSession.current_dir}');
+    expect(source).toContain('className="composer-cwd" title={activeSession.current_dir} aria-label={`Current working directory: ${activeSession.current_dir}`}');
+    expect(source).toContain('<FolderOpen size={13} aria-hidden="true"/>');
     expect(source).toContain('<span>{tailPath(activeSession.current_dir, 64)}</span>');
   });
 
