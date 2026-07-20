@@ -909,6 +909,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="secondary compact runtime-reset"');
     expect(source).toContain('title={`Reset ${option.key} to current value`}');
     expect(source).toContain('aria-label={`Reset ${option.key} to current value`}');
+    expect(source).toContain("const resetDraft = () => setDrafts((current) => { const { [option.key]: _removed, ...rest } = current; return rest; });");
+    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending) { event.preventDefault(); onUpdate(option.key, value); }');
+    expect(source).toContain('if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); }');
+    expect(source).toContain("onClick={resetDraft}");
     expect(source).toContain('disabled={pending || !dirty}');
     expect(source).toContain('pendingRuntimeLabel && <p className="runtime-pending-status" role="status" aria-live="polite">{pendingRuntimeLabel}</p>');
     expect(styles).toContain(".runtime-options label > div input { flex: 1 1 auto; }");
