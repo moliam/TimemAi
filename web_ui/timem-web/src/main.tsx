@@ -1443,6 +1443,8 @@ function fencedCode(language: string, code: string) {
 function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen }: { completion: NonNullable<ChatMessage["completion"]>; toolGenPending?: boolean; toolGenBlocked?: boolean; onToolGen?: () => void }) {
   const stats = completion.stats ?? {};
   const cancelled = completion.stop_reason?.toLowerCase() === "cancelledbyuser";
+  const toolGenLabel = toolGenPending ? "Starting ToolGen" : toolGenBlocked ? "ToolGen busy" : "ToolGen";
+  const toolGenTitle = toolGenPending ? "ToolGen is starting for this task..." : toolGenBlocked ? "Another ToolGen task is already running in this session" : "Extract reusable tool from this task";
   const facts = [
     [cancelled ? "Cancelled" : "Completed", formatDuration(completion.elapsed_ms)],
     ["LLM", stats.llm_calls],
@@ -1459,7 +1461,7 @@ function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = f
     {facts.map(([label, value]) => <span key={label} title={completionFactTitle(label, completion, stats) ?? `${label}: ${value}`}><b>{label}</b> {value}</span>)}
     {!cancelled && isNotableStopReason(completion.stop_reason) && <span className="completion-status"><b>Status</b> {completion.stop_reason}</span>}
     {completion.repair_issue && <span className="completion-status warning"><b>Last repair</b> {completion.repair_issue}</span>}
-    {onToolGen && !cancelled && <button className={`completion-toolgen ${toolGenPending ? "sending" : ""}`} type="button" title={toolGenPending ? "ToolGen is starting for this task…" : toolGenBlocked ? "Another ToolGen task is already running in this session" : "Extract reusable tool from this task"} aria-label={toolGenPending ? "ToolGen is starting for this task" : toolGenBlocked ? "Another ToolGen task is already running in this session" : "Extract reusable tool from this task"} aria-busy={toolGenPending || undefined} disabled={toolGenPending || toolGenBlocked} onClick={onToolGen}>{toolGenPending ? <LoaderCircle size={12}/> : <Wrench size={12}/>}{toolGenPending ? "Starting…" : toolGenBlocked ? "ToolGen busy" : "ToolGen"}</button>}
+    {onToolGen && !cancelled && <button className={`completion-toolgen ${toolGenPending ? "sending" : ""}`} type="button" title={toolGenTitle} aria-label={toolGenTitle} aria-busy={toolGenPending || undefined} disabled={toolGenPending || toolGenBlocked} onClick={onToolGen}>{toolGenPending ? <LoaderCircle size={12}/> : <Wrench size={12}/>}<span aria-live="polite">{toolGenLabel}</span></button>}
   </div>;
 }
 

@@ -257,11 +257,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}');
     expect(source).toContain('function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen }');
     expect(source).toContain('onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}');
+    expect(source).toContain('const toolGenLabel = toolGenPending ? "Starting ToolGen" : toolGenBlocked ? "ToolGen busy" : "ToolGen";');
+    expect(source).toContain('const toolGenTitle = toolGenPending ? "ToolGen is starting for this task..." : toolGenBlocked ? "Another ToolGen task is already running in this session" : "Extract reusable tool from this task";');
     expect(source).toContain('className={`completion-toolgen ${toolGenPending ? "sending" : ""}`}');
-    expect(source).toContain('aria-label={toolGenPending ? "ToolGen is starting for this task" : toolGenBlocked ? "Another ToolGen task is already running in this session" : "Extract reusable tool from this task"}');
+    expect(source).toContain('title={toolGenTitle} aria-label={toolGenTitle}');
     expect(source).toContain('aria-busy={toolGenPending || undefined}');
     expect(source).toContain('disabled={toolGenPending || toolGenBlocked}');
-    expect(source).toContain('{toolGenPending ? "Starting…" : toolGenBlocked ? "ToolGen busy" : "ToolGen"}');
+    expect(source).toContain('<span aria-live="polite">{toolGenLabel}</span>');
     expect(source).toContain('isToolGenTurn ? "Generating tools…" : "working"');
     expect(source).toContain('isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"');
     expect(styles).toContain(".working-chip.toolgen-working");
