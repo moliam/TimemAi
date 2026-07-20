@@ -1370,10 +1370,11 @@ function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {
   const className = isValidElement<{ className?: string }>(child) ? child.props.className ?? "" : "";
   const language = className.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? "text";
   const code = textFromNode(children).replace(/\n$/, "");
+  const codeCopySubject = `${language} code`;
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(code, {
-    idle: "Copy code",
-    copied: "Code copied",
-    failed: "Copy code failed",
+    idle: `Copy ${codeCopySubject}`,
+    copied: `${codeCopySubject} copied`,
+    failed: `Copy ${codeCopySubject} failed`,
   });
   return <figure className="code-block">
     <figcaption><span title={language}>{language}</span><button type="button" className={copyClass} onClick={() => void copy()} title={copyLabel} aria-label={copyLabel}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}<span aria-live="polite">{copyLabel}</span></button></figcaption>

@@ -926,9 +926,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('remarkPlugins={[remarkGfm]}');
     expect(source).toContain('pre: CodeBlock');
     expect(source).toContain('className="table-scroll" role="region" tabIndex={0} aria-label="Scrollable table. Use horizontal scroll to inspect all columns."');
+    expect(source).toContain('const codeCopySubject = `${language} code`;');
     expect(source).toContain('const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(code, {');
-    expect(source).toContain('copied: "Code copied"');
-    expect(source).toContain('failed: "Copy code failed"');
+    expect(source).toContain('idle: `Copy ${codeCopySubject}`');
+    expect(source).toContain('copied: `${codeCopySubject} copied`');
+    expect(source).toContain('failed: `Copy ${codeCopySubject} failed`');
     expect(source).toContain('className={copyClass}');
     expect(source).toContain('aria-label={copyLabel}');
     expect(styles).toContain('.markdown-body blockquote');
