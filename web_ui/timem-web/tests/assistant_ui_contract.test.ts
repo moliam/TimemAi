@@ -897,7 +897,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={attachment.name}');
     expect(source).toContain("pendingAttachmentRemoveIds.has");
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
-    expect(source).toContain('aria-label={removing ? `Removing ${attachment.name}` : `Remove ${attachment.name}`}');
+    expect(source).toContain("const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `Cannot remove ${attachment.name} while session is switching mem` : `Remove ${attachment.name}`;");
+    expect(source).toContain("title={removeLabel} aria-label={removeLabel}");
     expect(source).toContain("aria-busy={removing || undefined}");
     expect(styles).toContain(".attachment-summary");
     expect(styles).toContain(".pending-attachment-name");
