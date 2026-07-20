@@ -130,7 +130,9 @@ describe("assistant-ui thread integration", () => {
 
   it("keeps multi-session navigation reachable on mobile", () => {
     expect(source).toContain('const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";');
-    expect(source).toContain('id="session-navigation" className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}');
+    expect(source).toContain("const mobileSidebarRef = useRef<HTMLElement | null>(null);");
+    expect(source).toContain("mobileSidebarRef.current?.focus({ preventScroll: true });");
+    expect(source).toContain('id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}');
     expect(source).toContain('title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation"');
     expect(source).toContain('<button type="button" className="mobile-sidebar-backdrop"');
     expect(source).toContain("if (!showMobileSessions) return;");
