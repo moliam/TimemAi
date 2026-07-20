@@ -663,9 +663,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("Reconnect to Timem Web before renaming this session.");
     expect(source).toContain("session-working-icon");
     expect(source).toContain('aria-label="Session working"');
+    expect(source).toContain('aria-hidden="true"');
+    expect(source).toContain('className="sr-only">Session state: {session.state}</span>');
     expect(source).not.toContain("Agent working");
     expect(source).toContain("session-rename-input");
     expect(styles).toContain("@keyframes session-working-glow");
+    expect(styles).toContain(".sr-only { position: absolute; width: 1px; height: 1px;");
   });
 
   it("expands each session into its scoped worker status list", () => {
