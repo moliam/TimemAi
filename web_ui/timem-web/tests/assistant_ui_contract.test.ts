@@ -685,6 +685,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("expandedSessionIds");
     expect(source).toContain("session-expand");
     expect(source).toContain("worker-list");
+    expect(source).toContain('aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}');
+    expect(source).toContain('className={`worker-state-dot ${worker.state}`} aria-hidden="true"');
     expect(source).toContain("worker.display_name || `ID${worker.ordinal}`");
     expect(styles).toContain(".worker-row");
     expect(styles).toContain(".worker-state-dot.working");
