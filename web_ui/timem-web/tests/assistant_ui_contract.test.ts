@@ -140,6 +140,7 @@ describe("assistant-ui thread integration", () => {
   it("lets the session tools side panel collapse from the header, Escape key, and narrow-screen backdrop", () => {
     expect(source).toContain('aria-label="Session tools and activity"');
     expect(source).toContain('aria-expanded={showActivity}');
+    expect(source).toContain('aria-expanded={showActivity} aria-controls="session-side-panel"');
     expect(source).toContain('setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible);');
     expect(source).toContain("const switchSidePanelTabFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>)");
     expect(source).toContain('if (event.key === "ArrowLeft" || event.key === "Home")');
@@ -162,7 +163,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<button type="button" className="side-panel-backdrop"');
     expect(source).toContain('aria-label="Close session tools and activity"');
     expect(source).toContain('onClick={() => setShowActivity(false)}');
-    expect(source).toContain('className="activity-panel session-side-panel" aria-label="Session tools and activity panel"');
+    expect(source).toContain('id="session-side-panel" className="activity-panel session-side-panel" aria-label="Session tools and activity panel"');
     expect(styles).toContain(".side-panel-backdrop");
     expect(styles).toContain("z-index: 3");
     expect(styles).toContain(".app-shell, .app-shell:has(.activity-panel)");
@@ -188,6 +189,9 @@ describe("assistant-ui thread integration", () => {
   it("labels the runtime settings control for assistive and contract testing", () => {
     expect(source).toContain('aria-label="Runtime information"');
     expect(source).toContain('aria-expanded={showRuntime}');
+    expect(source).toContain('aria-expanded={showRuntime} aria-controls="runtime-panel"');
+    expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card"');
+    expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings"');
     expect(source).toContain('setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible);');
   });
 
