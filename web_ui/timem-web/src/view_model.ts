@@ -641,7 +641,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const retrospect = label(payload.retrospect);
       const error = label(payload.error);
       const title = phase === "published"
-        ? `ToolGen: 已沉淀 ${toolName || "可复用工具"}`
+        ? `ToolGen: 已生成并验证 ${toolName || "可复用工具"}`
         : phase === "started"
           ? "ToolGen: 正在评估…"
           : "ToolGen: 生成失败";

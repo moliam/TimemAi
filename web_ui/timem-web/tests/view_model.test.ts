@@ -69,7 +69,7 @@ describe("web topic view model", () => {
     const started = activityFromTopic(topic("core.toolgen", { phase: "started", tool_count: 2 }));
     expect(started).toMatchObject({ tone: "notice", kind: "toolgen", title: "ToolGen: 正在评估…" });
     const published = activityFromTopic(topic("core.toolgen", { phase: "published", tool_count: 3, tool: { name: "trace-summarizer" }, retrospect: "Created and validated." }, "ready"));
-    expect(published).toMatchObject({ tone: "notice", kind: "toolgen", title: "ToolGen: 已沉淀 trace-summarizer", detail: "Created and validated." });
+    expect(published).toMatchObject({ tone: "notice", kind: "toolgen", title: "ToolGen: 已生成并验证 trace-summarizer", detail: "Created and validated." });
     const failed = activityFromTopic(topic("core.toolgen", { phase: "failed", error: "self-test failed" }, "ready"));
     expect(failed).toMatchObject({ tone: "warning", kind: "toolgen", title: "ToolGen: 生成失败", detail: "self-test failed" });
     expect(activityFromTopic(topic("core.model.response", { runtime_phase: "toolgen", free_talk: "Building a reusable parser.", final_answer: "internal completion" }))).toMatchObject({
@@ -362,6 +362,15 @@ describe("web topic view model", () => {
     expect(turns[0].user_entries[0].text).toBe("old task");
     expect(turns[0].events[0].source).toBe("core_topic");
     expect(turns[0].final_answer).toBe("old answer");
+  });
+
+  it("preserves the ToolGen topic marker when restoring historical work events", () => {
+    const turns = turnsFromHistoryRecords([
+      { type: "event", role: "system", turn_id: "toolgen_turn_1", created_at_ms: 1, kind: "toolgen", content: "published", payload: { topic: { name: "core.toolgen" }, payload: { phase: "published" } } },
+      { type: "message", role: "assistant", turn_id: "toolgen_turn_1", created_at_ms: 2, content: "tool generated" },
+    ]);
+    expect(turns[0].events[0].source).toBe("history");
+    expect((turns[0].events[0].payload.topic as { name: string }).name).toBe("core.toolgen");
   });
 
   it("restores task, supplement, and approval user entries inside one turn", () => {
