@@ -1917,6 +1917,7 @@ impl AgentCore {
         step
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_model_repair_audit_if_needed(
         &self,
         audit_file: &Path,
@@ -2135,6 +2136,7 @@ impl AgentCore {
         )
     }
 
+    #[allow(clippy::result_large_err)]
     fn finish_parallel_group_after_approvals(
         &mut self,
         actions: Vec<ParsedAction>,
@@ -2363,6 +2365,7 @@ impl AgentCore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_output_expansion_with_audit(
         &self,
         config: &mut ProviderConfig,
@@ -3023,6 +3026,7 @@ impl AgentCore {
         rows
     }
 
+    #[allow(clippy::result_large_err)]
     fn execute_action_groups(
         &mut self,
         groups: Vec<ParsedActionGroup>,
@@ -3260,6 +3264,7 @@ impl AgentCore {
         pending
     }
 
+    #[allow(clippy::result_large_err)]
     fn execute_parallel_action_group(
         &mut self,
         actions: Vec<ParsedAction>,
