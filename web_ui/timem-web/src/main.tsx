@@ -1128,6 +1128,7 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
   const followLatest = useRef(true);
   const previousUpdateCount = useRef(turn.events.length + decisions.length);
   const [pendingUpdates, setPendingUpdates] = useState(0);
+  const [showCompletedWork, setShowCompletedWork] = useState(true);
   const lifecycleEvents = coalesceActionLifecycle(turn.events);
   const visibleEvents = lifecycleEvents.slice(-MAX_RENDERED_TURN_EVENTS);
   const omitted = lifecycleEvents.length - visibleEvents.length;
@@ -1135,6 +1136,8 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
   const isToolGenTurn = turn.turn_id.startsWith("web_toolgen_turn_")
     || turn.user_entries.some((entry) => entry.kind === "toolgen_instruction")
     || turn.events.some((event) => event.source === "core_topic" && (event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen");
+  const canCollapseCompletedWork = turn.state !== "working" && !!turn.final_answer;
+  const showWorkStream = !canCollapseCompletedWork || showCompletedWork;
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -1167,9 +1170,9 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
         {!!entry.attachments?.length && <div className="turn-entry-attachments">{entry.attachments.map((attachment) => <span key={attachment.id} title={attachment.path}><Paperclip size={13}/><i aria-hidden="true">:</i><b>{attachment.name}</b><small>{formatBytes(attachment.bytes)}</small></span>)}</div>}
       </div>)}</div>
     </section>}
-    {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state}`}>
-      {turn.state === "working" && <div className="turn-assistant-heading"><span className={`working-chip${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>}{isToolGenTurn ? "Generating tools…" : "working"}</span></div>}
-      <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
+    {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}>
+      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading"><span className={`working-chip${isToolGenTurn ? " toolgen-working" : ""}`} role={turn.state === "working" ? "status" : undefined} aria-live={turn.state === "working" ? "polite" : undefined}>{turn.state === "working" ? isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/> : <CheckCheck size={11}/>} {turn.state === "working" ? isToolGenTurn ? "Generating tools…" : "working" : "work details"}</span>{canCollapseCompletedWork && <button type="button" className="work-collapse-toggle" title={showCompletedWork ? "Hide completed work details" : "Show completed work details"} aria-label={showCompletedWork ? "Hide completed work details" : "Show completed work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}>{showCompletedWork ? "Hide" : "Show"}</button>}</div>}
+      {showWorkStream && <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
         const remaining = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight;
         followLatest.current = remaining < 36;
         if (followLatest.current) setPendingUpdates(0);
@@ -1179,8 +1182,8 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
         {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
         {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
         {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>}
-      </div>
-      {pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13}/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
+      </div>}
+      {showWorkStream && pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13}/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
     </section>}
     {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}/>}
     {!turn.final_answer && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}

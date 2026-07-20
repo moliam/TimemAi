@@ -46,6 +46,9 @@ button:disabled { cursor: not-allowed; }
 .working-chip { display: inline-flex; align-items: center; gap: 7px; color: #d6b46f; font-size: 11px; font-weight: 700; }
 .working-chip.toolgen-working, .working-indicator.toolgen-working { color: #73aee8; }
 .working-chip.toolgen-working svg { animation: toolgen-turn 1.8s ease-in-out infinite; }
+.work-collapse-toggle { border: 0; border-radius: 5px; padding: 4px 7px; background: transparent; color: #7f98a5; font-size: 11px; font-weight: 650; }
+.work-collapse-toggle:hover { background: #ffffff0d; color: #c6d8df; }
+.turn-assistant-frame.collapsed-work { border-left-color: #34434b; }
 .turn-work-scroll { max-height: min(480px, 55vh); min-height: 52px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 7px 12px 10px; }
 .turn-work-scroll.has-pending-updates { padding-bottom: 46px; }
 .turn-work-item { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 9px 2px; color: #c4d2dc; font-size: 12px; line-height: 1.5; animation: work-row-enter .2s ease-out both; }
@@ -511,6 +514,9 @@ button:disabled { cursor: not-allowed; }
 .turn-assistant-heading { min-height: 26px; padding: 0 0 5px; border: 0; }
 .turn-assistant-heading .message-label { color: #b4b4b4; font-size: 11px; }
 .working-chip { gap: 5px; border: 0; padding: 0; background: transparent; color: #8d8d8d; font-size: 10px; }
+.work-collapse-toggle { padding: 2px 6px; color: #777; font-size: 10px; }
+.work-collapse-toggle:hover { background: #2d2d2d; color: #cfcfcf; }
+.turn-assistant-frame.collapsed-work { margin-bottom: -10px; border-left-color: #303030; }
 .working-chip .pulse { width: 5px; height: 5px; background: #aaa; }
 @keyframes toolgen-turn { 0%, 100% { transform: rotate(-8deg); opacity: .7; } 50% { transform: rotate(16deg); opacity: 1; } }
 .turn-work-scroll { max-height: min(420px, 50vh); padding: 0; scrollbar-gutter: auto; }
@@ -621,6 +627,9 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .turn-user-entry.approval { background: #eee; }
 :root[data-theme="light"] .turn-assistant-frame,
 :root[data-theme="light"] .turn-assistant-frame.working { border: 0; border-left: 1px solid #e2e2e2; background: transparent; }
+:root[data-theme="light"] .work-collapse-toggle { color: #777; }
+:root[data-theme="light"] .work-collapse-toggle:hover { background: #eee; color: #333; }
+:root[data-theme="light"] .turn-assistant-frame.collapsed-work { border-left-color: #ececec; }
 :root[data-theme="light"] .turn-work-item { color: #666; }
 :root[data-theme="light"] .turn-work-item strong { color: #444; }
 :root[data-theme="light"] .activity-mark,
