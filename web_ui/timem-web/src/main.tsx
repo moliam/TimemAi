@@ -1001,6 +1001,13 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
   const hiddenTurnCount = Math.max(0, turns.length - visibleTurnCount);
   const canLoadStoredHistory = !!activeSession?.history_has_more && !!activeSession.history_before_cursor;
   const visibleTurns = hiddenTurnCount > 0 ? turns.slice(-visibleTurnCount) : turns;
+  const historyButtonLabel = sessionInteractionLocked
+    ? "Earlier history is locked while switching mem"
+    : loadingHistory
+      ? "Loading earlier history…"
+      : hiddenTurnCount > 0
+        ? `Load ${Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks`
+        : "Load earlier history";
   const latestTurn = turns.at(-1);
   const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
   const liveSessionKey = sessionIds.join("\u0000");
@@ -1085,7 +1092,7 @@ function TimemThread({ activeSession, sessionIds, sessionInteractionLocked, deci
       {(activeSession?.turns.length ?? 0) === 0 &&
         <div className="welcome"><Sparkles size={24}/><h2>{welcomeTitle}</h2><p>{welcomeText}</p></div>
       }
-      {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button type="button" className={`load-history ${loadingHistory ? "loading" : ""}`} aria-live="polite" disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory && <LoaderCircle size={13}/>}<span>{loadingHistory ? "Loading earlier history…" : hiddenTurnCount > 0 ? `Load ${Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks` : "Load earlier history"}</span></button>}
+      {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button type="button" className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory && <LoaderCircle size={13}/>}<span>{historyButtonLabel}</span></button>}
       {visibleTurns.map((turn) => <TurnInteraction
         key={turn.turn_id}
         sessionId={activeSession?.session_id ?? ""}

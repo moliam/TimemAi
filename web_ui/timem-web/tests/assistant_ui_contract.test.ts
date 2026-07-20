@@ -110,9 +110,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("preservePrependScrollTop(previous, viewport.scrollHeight)");
     expect(source).toContain("canLoadStoredHistory");
     expect(source).toContain('sendCommand({ type: "history_page"');
+    expect(source).toContain('const historyButtonLabel = sessionInteractionLocked');
+    expect(source).toContain('"Earlier history is locked while switching mem"');
     expect(source).toContain("Loading earlier history…");
-    expect(source).toContain('className={`load-history ${loadingHistory ? "loading" : ""}`} aria-live="polite"');
+    expect(source).toContain('className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite"');
     expect(source).toContain('{loadingHistory && <LoaderCircle size={13}/>}');
+    expect(source).toContain("<span>{historyButtonLabel}</span>");
     expect(styles).toContain(".load-history");
     expect(styles).toContain(".load-history.loading svg");
     expect(styles).toContain(".load-history.loading svg, .send-button.sending svg");
