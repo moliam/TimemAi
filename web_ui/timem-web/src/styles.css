@@ -284,7 +284,7 @@ button:disabled { cursor: not-allowed; }
 @keyframes compact-after-settle { from { width: 100%; } }
 @keyframes work-row-enter { from { opacity: 0; transform: translateY(3px); } }
 @keyframes working-frame-breathe { 50% { border-left-color: #e4bc72; box-shadow: inset 3px 0 12px #d0a75f12; } }
-@media (prefers-reduced-motion: reduce) { .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .turn-work-item { animation: none; }.scroll-to-bottom { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.pulse, .connection.offline, .session-dot.working, .session-row.working, .session-working-icon, .worker-state-dot.working, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-toggle.count-pulse > span, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.scroll-to-bottom { transition: none; } }
 @media (max-width: 1050px) { .app-shell, .app-shell:has(.activity-panel) { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.activity-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); }.context-compact-notice { grid-template-columns: 32px minmax(0, auto) minmax(90px, 1fr); } }
 @media (max-width: 720px) { .app-shell, .app-shell:has(.activity-panel) { grid-template-columns: 1fr; }.context-compact-notice { grid-template-columns: 32px 1fr; }.compact-meter { grid-column: 1 / -1; } }
 @media (max-width: 720px) { .session-runtime-grid { grid-template-columns: 1fr; } }
@@ -844,4 +844,3 @@ button:disabled { cursor: not-allowed; }
 :where(button, input, textarea, select, summary):focus-visible { outline: 2px solid #72d7c2; outline-offset: 2px; }
 :root[data-theme="light"] :where(button, input, textarea, select, summary):focus-visible { outline-color: #167669; }
 @keyframes search-pending-pulse { 50% { opacity: .35; transform: scale(.72); } }
-@media (prefers-reduced-motion: reduce) { .toolrepo-toggle.count-pulse > span, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; } }
