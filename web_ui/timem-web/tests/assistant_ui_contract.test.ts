@@ -782,13 +782,14 @@ describe("assistant-ui thread integration", () => {
     expect(appearanceSource).toContain('root.dataset.font = appearance.font');
     expect(appearanceSource).toContain('root.dataset.textSize = appearance.textSize');
     expect(source).toContain('aria-label="Appearance"');
+    expect(source).toContain('aria-expanded={showAppearance} aria-controls="appearance-panel"');
     expect(source).toContain('<AppearancePanel appearance={appearance}');
     expect(source).toContain("aria-pressed={appearance.theme === theme}");
     expect(source).toContain("aria-pressed={appearance.font === font}");
     expect(source).toContain("aria-pressed={appearance.textSize === size}");
     expect(source).toContain('if (!showAppearance) return;');
     expect(source).toContain('if (event.key === "Escape") setShowAppearance(false)');
-    expect(source).toContain('role="dialog" aria-modal="false" aria-label="Appearance settings" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}');
+    expect(source).toContain('id="appearance-panel" className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}');
     expect(source).toContain('setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible);');
     expect(styles).toContain(':root[data-theme="light"]');
     expect(styles).toContain(':root[data-font="serif"]');
