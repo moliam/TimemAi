@@ -213,7 +213,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('pendingToolgenRequestsRef.current.clear();');
     expect(source).toContain('function ToolGenDialog');
     expect(source).toContain("Extract reusable tool");
-    expect(source).toContain("reusable function from the completed task");
+    expect(source).toContain("preserve reusable work from the completed task");
+    expect(source).toContain("Optional: preferred interface, language, scope, or reusable workflow…");
     expect(source).toContain('Additional guidance');
     expect(source).toContain('pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}');
     expect(source).toContain('toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}');
