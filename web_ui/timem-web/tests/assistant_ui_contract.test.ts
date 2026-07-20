@@ -686,7 +686,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("<ContextUsageBar session={activeSession}");
     expect(source).toContain("<LiveTurnUsage turn={turn}");
     expect(source).toContain('aria-label="Current task token usage"');
-    expect(source).toContain('aria-label="Context usage"');
+    expect(source).toContain('const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";');
+    expect(source).toContain('className={`context-usage-bar ${level}`}');
+    expect(source).toContain('aria-label={usage && limit ? `Context usage ${ratio}%` : "Context usage waiting for usage"}');
     expect(source).toContain('role="status" aria-live="polite"');
     expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
     expect(source).toContain('title="Scroll to latest work update"');
@@ -695,6 +697,10 @@ describe("assistant-ui thread integration", () => {
     expect(viewModelSource).toContain("turnLiveUsage");
     expect(viewModelSource).toContain("sessionContextUsage");
     expect(styles).toContain(".context-usage-bar");
+    expect(styles).toContain(".context-usage-bar.warning strong");
+    expect(styles).toContain(".context-usage-bar.critical strong");
+    expect(styles).toContain(':root[data-theme="light"] .context-usage-bar.warning strong');
+    expect(styles).toContain(':root[data-theme="light"] .context-usage-bar.critical strong');
     expect(styles).toContain(".turn-work-scroll.has-pending-updates");
     expect(styles).toContain(".live-turn-usage");
   });
