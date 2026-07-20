@@ -864,13 +864,16 @@ describe("assistant-ui thread integration", () => {
 
   it("lets runtime setting drafts reset to the latest server snapshot value", () => {
     expect(source).toContain("useEffect(() => setDrafts({}), [server?.runtime_options]);");
+    expect(source).toContain('const pendingRuntimeLabel = pendingKeys.size ? `Applying runtime setting${pendingKeys.size === 1 ? "" : "s"}: ${Array.from(pendingKeys).join(", ")}` : "";');
     expect(source).toContain("const dirty = value !== option.value;");
     expect(source).toContain('className="secondary compact runtime-reset"');
     expect(source).toContain('title={`Reset ${option.key} to current value`}');
     expect(source).toContain('aria-label={`Reset ${option.key} to current value`}');
     expect(source).toContain('disabled={pending || !dirty}');
+    expect(source).toContain('pendingRuntimeLabel && <p className="runtime-pending-status" role="status" aria-live="polite">{pendingRuntimeLabel}</p>');
     expect(styles).toContain(".runtime-options label > div input { flex: 1 1 auto; }");
     expect(styles).toContain(".runtime-reset { flex: none; }");
+    expect(styles).toContain(".runtime-pending-status");
   });
 
   it("renders context compaction outside chat messages with a reduced-motion fallback", () => {
