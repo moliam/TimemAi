@@ -247,6 +247,10 @@ button:disabled { cursor: not-allowed; }
 .session-runtime-grid label { margin: 0 !important; }
 .session-runtime-grid label > span { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
 .session-runtime-grid small { overflow: hidden; color: #657d89; font: 9px/1.2 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.session-runtime-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.session-runtime-control input, .session-runtime-control select { min-width: 0; }
+.session-runtime-reset { min-height: 31px; border: 1px solid #344753; border-radius: 5px; padding: 0 8px; background: #17242b; color: #91a7b1; font-size: 11px; font-weight: 650; }
+.session-runtime-reset:hover { border-color: #55717e; color: #d0dce1; }
 
 /* Runtime context maintenance is rendered separately from conversational messages. */
 .context-compact-notice { width: 100%; max-width: 760px; margin: -4px auto 22px; display: grid; grid-template-columns: 32px minmax(0, auto) minmax(120px, 1fr); align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #2d4852; border-radius: 6px; background: #101c23; color: #9fb5c1; animation: compact-enter .45s ease-out both; }
@@ -291,6 +295,8 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .session-runtime-overrides { border-color: #d4dfe3; }
 :root[data-theme="light"] .session-runtime-overrides summary { color: #405963; }
 :root[data-theme="light"] .session-runtime-grid small { color: #71868f; }
+:root[data-theme="light"] .session-runtime-reset { border-color: #c3d3d9; background: #edf3f5; color: #5d737d; }
+:root[data-theme="light"] .session-runtime-reset:hover { border-color: #96adb7; color: #2d444d; }
 :root[data-theme="light"] .sidebar-footer { color: #657984; }
 :root[data-theme="light"] .chat-header,
 :root[data-theme="light"] .composer-wrap { border-color: #d6dfe4; background: #fff; }

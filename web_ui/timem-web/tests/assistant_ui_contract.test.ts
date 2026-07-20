@@ -772,10 +772,19 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('TIMEM_STREAM');
     expect(source).toContain('kind === "boolean"');
     expect(source).toContain('type={kind}');
+    expect(source).toContain("const resetEnv = (key: string)");
+    expect(source).toContain('className="session-runtime-control"');
+    expect(source).toContain('className="session-runtime-reset"');
+    expect(source).toContain('title={`Reset ${label} to inherited value`}');
+    expect(source).toContain('aria-label={`Reset ${label} to inherited value`}');
+    expect(source).toContain('onClick={() => resetEnv(key)}>Reset</button>');
     expect(source).toContain('onCreate={(command) => {');
     expect(source).toContain('session.runtime_profile.provider');
     expect(source).toContain('session.runtime_profile.model');
     expect(styles).toContain('.session-runtime-grid');
+    expect(styles).toContain('.session-runtime-control');
+    expect(styles).toContain('.session-runtime-reset');
+    expect(styles).toContain(':root[data-theme="light"] .session-runtime-reset');
     expect(styles).toContain('.session-profile');
   });
 
