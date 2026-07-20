@@ -601,7 +601,7 @@ function TimemApp() {
     onCancel: cancelActiveTurn,
   });
 
-  const sessionActivities = activities.filter((activity) => activity.sessionId === activeSession?.session_id);
+  const sessionActivities = activities.filter((activity) => activity.sessionId === activeSession?.session_id || activity.sessionId === "system");
   const sessionActivityCount = sessionActivities.length;
   const sessionDecisions = decisions.filter((decision) => decision.event.session_id === activeSession?.session_id);
   const visibleErrors = activities.filter((activity) => activity.tone === "error" && (activity.sessionId === activeSession?.session_id || activity.sessionId === "system"));
