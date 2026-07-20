@@ -612,8 +612,11 @@ fn parse_action_blocks(
                     }
                 }
             }
-            Err(_) => {
-                *repair_issue = Some(format!("actions[{block_idx}].invalid_json"));
+            Err(error) => {
+                *repair_issue = Some(format!(
+                    "actions[{block_idx}].invalid_json:{}",
+                    compact_json_error(&error.to_string(), 160)
+                ));
                 return (Vec::new(), Vec::new());
             }
         }
@@ -651,6 +654,20 @@ fn parse_action_json_value(block: &str) -> serde_json::Result<Value> {
             }
             Err(original_error)
         }
+    }
+}
+
+fn compact_json_error(error: &str, max_chars: usize) -> String {
+    let normalized = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        normalized
+    } else {
+        let mut truncated = normalized
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        truncated.push('…');
+        truncated
     }
 }
 
@@ -772,8 +789,8 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         "state_branch_must_choose_one" => {
             "The response selected more than one state branch. Inside <response>, use exactly one of <working_still_action>, <context_compact>, or <final_answer>."
         }
-        issue if issue.ends_with(".invalid_json") => {
-            "The <action_json> content is not valid JSON. Keep it inside <![CDATA[...]]>, use one top-level JSON array, and ensure every string and special character is valid JSON."
+        issue if issue.contains(".invalid_json") => {
+            "The <action_json> content is not valid JSON. Keep it inside <![CDATA[...]]>, use one top-level JSON array, and ensure every string and special character inside cmd, README, scripts, and heredocs is valid JSON. For multi-line file generation, consider one shorter command that writes files via a script instead of embedding fragile unescaped quotes."
         }
         issue if issue.ends_with(".action_missing") => {
             "An action entry is missing its tool-name key. In the top-level workflow array, write each sequential action as {\"tool_name\":{...}}; write a parallel stage as an inner array of those tool objects."

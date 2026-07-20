@@ -291,7 +291,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             Case {
                 name: "invalid action json",
                 raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\",}}]]]></action_json></working_still_action></response>",
-                issue: "actions[0].invalid_json",
+                issue: "actions[0].invalid_json:trailing comma at line 1 column 27",
                 guidance: "not valid JSON",
             },
             Case {
@@ -736,7 +736,13 @@ fn string_field_protection_does_not_hide_malformed_action_json() {
         &caps(),
     );
 
-    assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
+    assert!(
+        env.repair_issue
+            .as_deref()
+            .is_some_and(|issue| issue.starts_with("actions[0].invalid_json:trailing comma")),
+        "{:?}",
+        env.repair_issue
+    );
     assert!(env.next_actions.is_empty());
     assert!(env.action_groups.is_empty());
 }
@@ -753,7 +759,13 @@ fn adjacent_top_level_action_arrays_request_repair_instead_of_execution() {
         &caps(),
     );
 
-    assert_eq!(env.repair_issue.as_deref(), Some("actions[0].invalid_json"));
+    assert!(
+        env.repair_issue
+            .as_deref()
+            .is_some_and(|issue| issue.starts_with("actions[0].invalid_json:trailing characters")),
+        "{:?}",
+        env.repair_issue
+    );
     assert!(env.next_actions.is_empty());
     assert!(env.action_groups.is_empty());
 }
@@ -1137,6 +1149,26 @@ fn repairs_external_tool_call_protocol() {
         env.repair_issue.as_deref(),
         Some("external_tool_call_protocol")
     );
+}
+
+#[test]
+fn malformed_action_json_reports_json_parser_reason() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <free_talk>writing files</free_talk>
+  <working_still_action>
+    <action_json><![CDATA[[{"run_bash":{"cmd":"bash tool.sh "$out"","timeout_ms":5000}}]]]></action_json>
+  </working_still_action>
+</response>"#,
+        &caps(),
+    );
+
+    let issue = env
+        .repair_issue
+        .as_deref()
+        .expect("malformed action json should request repair");
+    assert!(issue.starts_with("actions[0].invalid_json:"), "{issue}");
+    assert!(issue.contains("line"), "{issue}");
 }
 
 #[test]
