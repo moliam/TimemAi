@@ -310,6 +310,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('id={statusId} className="mem-validation" role="status" aria-live="polite"');
     expect(source).toContain('title={validationText || "Switch mem"}');
     expect(source).toContain('aria-label={validationText || "Switch mem"}');
+    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing && !pending && !invalid) { event.preventDefault(); onSwitch(cleaned); }');
     expect(source).toContain('className="modal-titlebar"');
     expect(source).toContain('aria-label="Close create session" disabled={creating} onClick={closeIfIdle}');
     expect(source).toContain('aria-label="Close ToolGen dialog" disabled={pending} onClick={closeIfIdle}');
