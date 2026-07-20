@@ -308,7 +308,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('onKeyDown={(event) => { if (event.key === "Escape") closeIfIdle(); }}');
     expect(source).toContain('onClose={() => { if (!creatingSessionRef.current) setShowNewSession(false); }}');
     expect(source).toContain('onClose={() => { if (!pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))) setToolgenDialog(null); }}');
-    expect(source).toContain('onClose={() => { if (!pendingMemSwitch) setShowMemSwitch(false); }}');
+    expect(source).toContain('onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }}');
+    expect(source).toContain('closeMemSwitchDialog();');
     expect(source).toContain("const validationText = pending");
     expect(source).toContain("Use a simple mem space name without slashes or '..'.");
     expect(source).toContain("This is the current mem space.");
@@ -848,8 +849,12 @@ describe("assistant-ui thread integration", () => {
   it("announces runtime connection state and explains mem switch availability", () => {
     expect(source).toContain('const connectionLabel = connected ? "Runtime connected" : "Reconnecting to runtime…";');
     expect(source).toContain('const memSwitchTitle = !connected ? "Reconnect before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";');
+    expect(source).toContain("const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);");
+    expect(source).toContain("const closeMemSwitchDialog = useCallback((restoreFocus = true) => {");
+    expect(source).toContain("if (restoreFocus) memSwitchButtonRef.current?.focus({ preventScroll: true });");
     expect(source).toContain('className="connection-row" role="status" aria-live="polite" title={connectionLabel}');
     expect(source).toContain('className="connection-label">{connectionLabel}</span>');
+    expect(source).toContain('ref={memSwitchButtonRef} className="mem-switch-button"');
     expect(source).toContain('title={memSwitchTitle} aria-label={memSwitchTitle}');
     expect(styles).toContain(".connection-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
     expect(styles).toContain(".connection.offline { background: #d77b75; box-shadow: 0 0 0 3px #d77b7522; animation: connection-retry 1.1s ease-in-out infinite; }");
