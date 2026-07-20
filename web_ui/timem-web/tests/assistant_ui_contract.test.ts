@@ -585,6 +585,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<figcaption><span title={language}>{language}</span>');
     expect(source).toContain("navigator.clipboard.writeText(text)");
     expect(source).toContain("window.clearTimeout(resetTimerRef.current)");
+    expect(source).toContain('setCopyState("idle");\n  }, [text]);');
     expect(source).toContain("<CompletionCard completion={completion}");
     expect(styles).toContain(".completion-card");
     expect(styles).toContain(".turn-final-toolbar");

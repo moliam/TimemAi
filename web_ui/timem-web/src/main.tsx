@@ -1380,6 +1380,13 @@ function useTimedClipboardCopy(text: string, labels: { idle: string; copied: str
   useEffect(() => () => {
     if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
   }, []);
+  useEffect(() => {
+    if (resetTimerRef.current !== null) {
+      window.clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = null;
+    }
+    setCopyState("idle");
+  }, [text]);
   const copy = async () => {
     if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
     try {
