@@ -235,6 +235,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}');
     expect(source).toContain('className={`completion-toolgen ${toolGenPending ? "sending" : ""}`}');
     expect(source).toContain('aria-label={toolGenPending ? "ToolGen is starting for this task" : toolGenBlocked ? "Another ToolGen task is already running in this session" : "Extract reusable tool from this task"}');
+    expect(source).toContain('aria-busy={toolGenPending || undefined}');
     expect(source).toContain('disabled={toolGenPending || toolGenBlocked}');
     expect(source).toContain('{toolGenPending ? "Starting…" : toolGenBlocked ? "ToolGen busy" : "ToolGen"}');
     expect(source).toContain('isToolGenTurn ? "Generating tools…" : "working"');
