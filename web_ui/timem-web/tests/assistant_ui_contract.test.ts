@@ -1079,6 +1079,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className={`primary ${pending ? "sending" : ""}`} title={acceptLabel} aria-label={acceptLabel} disabled={disabled}');
     expect(source).toContain('{pending ? <LoaderCircle size={16}/> : <Check size={16}/>} {pending ? "Sending…" : "Continue"}');
     expect(styles).toContain(".inline-decision-status");
+    expect(styles).toContain(".inline-decision pre { max-height: min(240px, 34vh); overflow: auto;");
     expect(styles).toContain(".decision-actions .primary.sending svg");
     expect(styles).toContain(':root[data-theme="light"] .inline-decision-status');
   });

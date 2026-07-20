@@ -125,7 +125,7 @@ button:disabled { cursor: not-allowed; }
 .decision-actions .primary.sending svg { animation: spin 1.2s linear infinite; }
 .inline-decision-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .inline-decision h2 { margin: 0; font-size: 14px; font-weight: 700; }
-.inline-decision pre { margin: 11px 0 0; white-space: pre-wrap; word-break: break-word; color: #b2c4cc; font: 12px/1.55 "SFMono-Regular", Consolas, monospace; }
+.inline-decision pre { max-height: min(240px, 34vh); overflow: auto; margin: 11px 0 0; white-space: pre-wrap; word-break: break-word; color: #b2c4cc; font: 12px/1.55 "SFMono-Regular", Consolas, monospace; }
 .inline-decision-status { display: block; margin-top: 10px; color: #d8ad61; font-size: 11px; font-weight: 650; }
 .inline-decision .decision-actions { margin-top: 12px; }
 /* Web-native runtime controls intentionally live in the UI layer, not agent_core. */
