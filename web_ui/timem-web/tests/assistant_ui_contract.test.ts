@@ -697,7 +697,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label="Current task token usage"');
     expect(source).toContain('const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";');
     expect(source).toContain('className={`context-usage-bar ${level}`}');
-    expect(source).toContain('aria-label={usage && limit ? `Context usage ${ratio}%` : "Context usage waiting for usage"}');
+    expect(source).toContain('const contextUsageLabel = usage && limit');
+    expect(source).toContain('`Context usage ${ratio}% · ${formatTokens(usage.prompt_tokens)} / ${formatTokens(limit)} input tokens`');
+    expect(source).toContain('title={contextUsageLabel} aria-label={contextUsageLabel}');
     expect(source).toContain('role="status" aria-live="polite"');
     expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
     expect(source).toContain('title="Scroll to latest work update"');
