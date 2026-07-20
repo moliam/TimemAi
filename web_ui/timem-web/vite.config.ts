@@ -10,6 +10,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           assistantUi: ["@assistant-ui/react"],
+          highlighting: ["highlight.js", "rehype-highlight"],
           markdown: ["react-markdown"],
         },
       },
