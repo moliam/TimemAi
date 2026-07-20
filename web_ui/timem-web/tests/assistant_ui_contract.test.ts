@@ -719,6 +719,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="connection-label">{connectionLabel}</span>');
     expect(source).toContain('title={memSwitchTitle} aria-label={memSwitchTitle}');
     expect(styles).toContain(".connection-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
+    expect(styles).toContain(".connection.offline { background: #d77b75; box-shadow: 0 0 0 3px #d77b7522; animation: connection-retry 1.1s ease-in-out infinite; }");
+    expect(styles).toContain("@keyframes connection-retry");
+    expect(styles).toContain("@media (prefers-reduced-motion: reduce) { .connection.offline,");
   });
 
   it("uses session terminology consistently for the creation workflow", () => {
