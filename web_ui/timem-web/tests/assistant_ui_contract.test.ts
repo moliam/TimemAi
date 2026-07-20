@@ -259,6 +259,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("preserve reusable work from the completed task");
     expect(source).toContain("Optional: preferred interface, language, scope, or reusable workflow…");
     expect(source).toContain('Additional guidance');
+    expect(source).toContain('event.key === "Enter" && !event.nativeEvent.isComposing');
     expect(source).toContain('pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}');
     expect(source).toContain('toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}');
     expect(source).toContain('toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}');
@@ -323,7 +324,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing)');
     expect(source).toContain('{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}');
     expect(source).toContain("const submit = () => { if (!pending) onSubmit(instruction.trim()); };");
-    expect(source).toContain('if ((event.metaKey || event.ctrlKey) && event.key === "Enter")');
+    expect(source).toContain('if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.nativeEvent.isComposing)');
     expect(source).toContain("Cmd/Ctrl+Enter to generate; Escape closes before it starts.");
     expect(source).toContain('className={`primary ${pending ? "sending" : ""}`} disabled={pending} onClick={submit}');
     expect(source).toContain('{pending ? <LoaderCircle size={16}/> : <Wrench size={15}/>} {pending ? "Starting…" : "Generate tool"}');
