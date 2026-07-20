@@ -459,7 +459,8 @@ button:disabled { cursor: not-allowed; }
 .host-error-detail { color: inherit; }
 .host-error-banner strong { color: #ffd8d6; }
 .host-error-banner em { display: inline-block; margin-left: 8px; color: #f1a6a1; font-style: normal; font-weight: 700; white-space: nowrap; }
-.host-error-actions { flex: none; display: inline-flex; align-items: center; gap: 6px; }
+.host-error-actions { flex: none; display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.host-error-actions .icon-button { flex: none; }
 .host-error-dismiss-all, .host-error-details { border: 0; border-radius: 4px; padding: 4px 7px; background: #4a2928; color: #ffd2cf; font-size: 11px; font-weight: 650; white-space: nowrap; }
 .host-error-details { background: #3a2d26; color: #f2c79b; }
 .host-error-dismiss-all:hover { background: #613431; color: #fff0ef; }

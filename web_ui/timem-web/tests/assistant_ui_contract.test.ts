@@ -1198,6 +1198,8 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".host-error-detail");
     expect(styles).toContain(".host-error-banner em");
     expect(styles).toContain(".host-error-actions");
+    expect(styles).toContain(".host-error-actions { flex: none; display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap;");
+    expect(styles).toContain(".host-error-actions .icon-button { flex: none; }");
     expect(styles).toContain(".host-error-details");
     expect(styles).toContain(".host-error-dismiss-all");
     expect(styles).toContain(':root[data-theme="light"] .host-error-banner em');
