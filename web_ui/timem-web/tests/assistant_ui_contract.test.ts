@@ -949,6 +949,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('type: "attachment_remove"');
     expect(source).toContain("const attachedFileCount = activeSession?.attachments.length ?? 0;");
     expect(source).toContain('const attachmentSummary = attachedFileCount === 1 ? "1 file attached" : `${attachedFileCount} files attached`;');
+    expect(source).toContain('const attachmentStripLabel = uploadingAttachment');
+    expect(source).toContain('? `${attachmentSummary}; ${uploadingAttachmentText}`');
+    expect(source).toContain(': `Files attached to the next message; ${attachmentSummary}`;');
     expect(source).toContain('className="attachment-summary" title={attachmentSummary}');
     expect(source).toContain('className="pending-attachment-name"');
     expect(source).toContain('title={attachment.name}');
@@ -982,7 +985,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label={attachLabel}');
     expect(source).toContain("disabled={!activeSession || uploadingAttachment || sessionInteractionLocked}");
     expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
-    expect(source).toContain('aria-live="polite">{attachedFileCount > 0 && <div className="attachment-summary"');
+    expect(source).toContain('aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}');
     expect(source).toContain('uploadingAttachment && <div className="pending-attachment uploading" role="status"');
     expect(source).toContain('aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText}');
     expect(source).toContain("title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}");
