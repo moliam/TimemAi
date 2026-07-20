@@ -379,6 +379,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("Reconnect to Timem Web before renaming this tool.");
     expect(source).toContain("Reconnect to Timem Web before opening a tool directory.");
     expect(source).toContain("if (name && name !== tool.name && !onRenameTool(tool.tool_id, name)) return;");
+    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishToolRename(tool); }');
+    expect(source).toContain('if (event.key === "Escape") { event.preventDefault(); setRenameToolId(""); setRenameValue(""); }');
     expect(source).toContain('const renameKey = toolKey(activeSession.session_id, toolId);');
     expect(source).toContain('setPendingToolRenameKeys((current) => new Set(current).add(renameKey));');
     expect(source).toContain('setPendingToolRenameKeys((current) => { const next = new Set(current); next.delete(renameKey); return next; });');
@@ -771,6 +773,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="sr-only">Session state: {session.state}</span>');
     expect(source).not.toContain("Agent working");
     expect(source).toContain("session-rename-input");
+    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); }');
+    expect(source).toContain('if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }');
     expect(styles).toContain("@keyframes session-working-glow");
     expect(styles).toContain(".sr-only { position: absolute; width: 1px; height: 1px;");
   });
