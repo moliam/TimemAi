@@ -592,7 +592,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       return detail ? { id: crypto.randomUUID(), sessionId: event.session_id, tone: "thinking", title: "", detail, createdAt: Date.now() } : null;
     }
     case "core.model.repair":
-      return { id: crypto.randomUUID(), sessionId: event.session_id, tone: "warning", title: `Response format repair (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
+      return { id: crypto.randomUUID(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";

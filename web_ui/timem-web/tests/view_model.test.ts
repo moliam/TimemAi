@@ -83,7 +83,7 @@ describe("web topic view model", () => {
     });
     expect(activityFromTopic(topic("core.model.repair", { runtime_phase: "toolgen", attempt: 1, max_attempts: 5, issue: "invalid_xml" }))).toMatchObject({
       tone: "warning",
-      title: "Response format repair (1/5)",
+      title: "⚠️ 模型回复偏离协议，重试 (1/5)",
     });
   });
 
@@ -531,7 +531,7 @@ describe("web topic view model", () => {
 
   it("renders response repair as a visible warning", () => {
     const activity = activityFromTopic(topic("core.model.repair", { attempt: 2, max_attempts: 5, issue: "missing_response_root" }));
-    expect(activity).toMatchObject({ tone: "warning", title: "Response format repair (2/5)", detail: "missing_response_root" });
+    expect(activity).toMatchObject({ tone: "warning", title: "⚠️ 模型回复偏离协议，重试 (2/5)", detail: "missing_response_root" });
   });
 
   it("renders model free talk verbatim without an invented completion label", () => {
