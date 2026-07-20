@@ -31,6 +31,10 @@ export type SessionRenameDecision =
   | { kind: "skip"; reason: "no_session" | "empty_name" | "already_pending" | "mem_switching" }
   | { kind: "send"; command: Extract<ClientCommand, { type: "session_rename" }>; displayName: string };
 
+export type SessionCreateDecision =
+  | { kind: "skip"; reason: "empty_workspace" | "creating" | "mem_switching" }
+  | { kind: "send"; command: Extract<ClientCommand, { type: "session_create" }>; displayName: string; workspaceDir: string; env: Record<string, string> };
+
 export type DraftSubmissionLock = { current: boolean };
 export type SessionDraftSubmissionLocks = { current: Set<string> };
 export type SessionDrafts = Record<string, string>;
@@ -181,12 +185,47 @@ export function sessionRenameDecision(
   };
 }
 
+export function sessionCreateDecision(
+  displayNameDraft: string,
+  workspaceDirDraft: string,
+  envDraft: Record<string, string>,
+  creating: boolean,
+  isMemSwitching = false,
+): SessionCreateDecision {
+  if (isMemSwitching) return { kind: "skip", reason: "mem_switching" };
+  if (creating) return { kind: "skip", reason: "creating" };
+  const workspaceDir = workspaceDirDraft.trim();
+  if (!workspaceDir) return { kind: "skip", reason: "empty_workspace" };
+  const displayName = displayNameDraft.trim();
+  const env = Object.fromEntries(Object.entries(envDraft)
+    .map(([key, value]) => [key, value.trim()])
+    .filter(([, value]) => value));
+  return {
+    kind: "send",
+    displayName,
+    workspaceDir,
+    env,
+    command: {
+      type: "session_create",
+      ...(displayName ? { display_name: displayName } : {}),
+      workspace_dir: workspaceDir,
+      env,
+    },
+  };
+}
+
 function actionLifecycleKey(event: WebTurnEvent) {
   if (event.source !== "core_topic") return undefined;
   const topicEvent = event.payload as unknown as CoreTopicEvent;
   if (topicEvent.topic?.name !== "core.action") return undefined;
   const action = typeof topicEvent.payload.action === "string" ? topicEvent.payload.action : "";
   if (!action) return undefined;
+  const actionId = typeof topicEvent.payload.action_id === "string"
+    ? topicEvent.payload.action_id
+    : typeof topicEvent.topic.attributes?.action_id === "string"
+      ? topicEvent.topic.attributes.action_id
+      : "";
+  if (actionId) return `id:${actionId}`;
   return `${action}:${JSON.stringify(topicEvent.payload.input ?? null)}`;
 }
 
@@ -355,6 +394,8 @@ function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[]
 
 export function appendTurnEvent(session: Session, turnId: string | null | undefined, event: WebTurnEvent): Session {
   if (!turnId) return session;
+  const eventSessionId = turnEventSessionId(event);
+  if (eventSessionId && eventSessionId !== session.session_id) return session;
   return {
     ...session,
     turns: session.turns.map((turn) => turn.turn_id === turnId
@@ -367,6 +408,17 @@ export function appendTurnEvent(session: Session, turnId: string | null | undefi
         }
       : turn),
   };
+}
+
+function turnEventSessionId(event: WebTurnEvent) {
+  const direct = event.payload.session_id;
+  if (typeof direct === "string") return direct;
+  const nested = event.payload.payload;
+  if (nested && typeof nested === "object") {
+    const sessionId = (nested as Record<string, unknown>).session_id;
+    if (typeof sessionId === "string") return sessionId;
+  }
+  return undefined;
 }
 
 function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
@@ -535,13 +587,16 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
   switch (event.topic.name) {
     case "core.model.response": {
       const freeTalk = label(payload.free_talk);
-      return freeTalk ? { id: crypto.randomUUID(), sessionId: event.session_id, tone: "thinking", title: "", detail: freeTalk, createdAt: Date.now() } : null;
+      const progress = label(payload.progress);
+      const detail = [freeTalk, progress].filter((text) => text.trim()).join("\n\n");
+      return detail ? { id: crypto.randomUUID(), sessionId: event.session_id, tone: "thinking", title: "", detail, createdAt: Date.now() } : null;
     }
     case "core.model.repair":
       return { id: crypto.randomUUID(), sessionId: event.session_id, tone: "warning", title: `Response format repair (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";
+      const statusText = displayToolStatus(status);
       const input = payload.input && typeof payload.input === "object" ? payload.input as Record<string, unknown> : undefined;
       const command = action === "run_bash" && input
         ? [input.cmd, input.loop_cmd].find((value): value is string => typeof value === "string")
@@ -551,7 +606,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         id: crypto.randomUUID(),
         sessionId: event.session_id,
         tone: "action",
-        title: `${action} · ${status}`,
+        title: `${toolDisplayName(action)} · ${statusText}`,
         tool_name: action,
         tool_status: status,
         detail,
@@ -602,6 +657,20 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
     default:
       return null;
   }
+}
+
+export function toolDisplayName(name: string) {
+  if (name === "run_bash") return "Bash";
+  if (name === "memmgr") return "MemMgr";
+  if (name === "capmgr") return "CapMgr";
+  if (name === "self_tool") return "Self tool";
+  return name;
+}
+
+function displayToolStatus(status: string) {
+  if (status === "background_running") return "background running";
+  if (status === "timeout") return "timed out";
+  return status.replaceAll("_", " ");
 }
 
 function formatToolArguments(input: Record<string, unknown> | undefined) {

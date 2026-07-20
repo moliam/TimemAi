@@ -2338,7 +2338,7 @@ fn session_context(
         None
     } else {
         Some(format!(
-            "Previously accumulated reusable scripts are available at: {}\nThe tool directories have semantic names. When one may help with the current task, inspect its short README and use the script through run_bash as needed.",
+            "Previously accumulated reusable scripts are available at: {}\nThe tool directories have semantic names. When one may help with the current task, inspect the directory and run the script's --help through run_bash as needed.",
             tool_repo.root().display()
         ))
     };

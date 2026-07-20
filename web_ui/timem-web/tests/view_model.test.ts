@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionCreateDecision, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -51,15 +51,16 @@ const actionEvent = (
   lifecycle: "start" | "finish",
   status: string,
   input: Record<string, unknown> = { cmd: "git status" },
+  actionId?: string,
 ): WebTurnEvent => ({
   event_id: id,
   source: "core_topic",
   created_at_ms: Number(id.replace(/\D/g, "")) || 1,
   payload: {
     session_id: "session_1",
-    topic: { name: "core.action", attributes: { event: lifecycle } },
+    topic: { name: "core.action", attributes: { event: lifecycle, ...(actionId ? { action_id: actionId } : {}) } },
     state: { name: "running" },
-    payload: { action: "run_bash", input, event: lifecycle, status },
+    payload: { action: "run_bash", input, event: lifecycle, status, ...(actionId ? { action_id: actionId } : {}) },
   },
 });
 
@@ -223,6 +224,35 @@ describe("web topic view model", () => {
     });
   });
 
+  it("builds a session create command from cleaned form input", () => {
+    expect(sessionCreateDecision("  Research  ", "  /work/project  ", {
+      TIMEM_MODEL: " qwen-plus ",
+      TIMEM_API_KEY: "   ",
+      TIMEM_STREAM: " true ",
+    }, false)).toEqual({
+      kind: "send",
+      displayName: "Research",
+      workspaceDir: "/work/project",
+      env: { TIMEM_MODEL: "qwen-plus", TIMEM_STREAM: "true" },
+      command: {
+        type: "session_create",
+        display_name: "Research",
+        workspace_dir: "/work/project",
+        env: { TIMEM_MODEL: "qwen-plus", TIMEM_STREAM: "true" },
+      },
+    });
+    expect(sessionCreateDecision("   ", "/work/project", {}, false)).toMatchObject({
+      kind: "send",
+      command: { type: "session_create", workspace_dir: "/work/project", env: {} },
+    });
+  });
+
+  it("blocks session creation while creating, mem switching, or missing a workspace", () => {
+    expect(sessionCreateDecision("name", "   ", {}, false)).toEqual({ kind: "skip", reason: "empty_workspace" });
+    expect(sessionCreateDecision("name", "/work", {}, true)).toEqual({ kind: "skip", reason: "creating" });
+    expect(sessionCreateDecision("name", "/work", {}, false, true)).toEqual({ kind: "skip", reason: "mem_switching" });
+  });
+
   it("skips empty text and missing sessions before touching the socket", () => {
     expect(composerSendDecision(session("session_1"), "   \n\t", false)).toEqual({ kind: "skip", reason: "empty_text" });
     expect(composerSendDecision(undefined, "hello", false)).toEqual({ kind: "skip", reason: "no_session" });
@@ -252,6 +282,14 @@ describe("web topic view model", () => {
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
   });
 
+  it("does not append a topic event to another session even if turn ids collide", () => {
+    const target = { ...session("session_1"), turns: [turn("turn_shared")] };
+    const other = { ...session("session_2"), turns: [turn("turn_shared")] };
+    const event = actionEvent("event_1", "start", "running");
+    expect(appendTurnEvent(target, "turn_shared", event).turns[0].events).toHaveLength(1);
+    expect(appendTurnEvent(other, "turn_shared", event).turns[0].events).toHaveLength(0);
+  });
+
   it("pairs duplicate concurrent actions in order without collapsing either invocation", () => {
     const events = coalesceActionLifecycle([
       actionEvent("event_1", "start", "running"),
@@ -260,6 +298,18 @@ describe("web topic view model", () => {
       actionEvent("event_4", "finish", "timeout"),
     ]);
     expect(events).toHaveLength(2);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["completed", "timeout"]);
+  });
+
+  it("uses structured action ids to keep out-of-order parallel action completion aligned", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_1", "start", "running", { cmd: "same command" }, "action_a"),
+      actionEvent("event_2", "start", "running", { cmd: "same command" }, "action_b"),
+      actionEvent("event_3", "finish", "timeout", { cmd: "same command" }, "action_b"),
+      actionEvent("event_4", "finish", "completed", { cmd: "same command" }, "action_a"),
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).action_id)).toEqual(["action_a", "action_b"]);
     expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["completed", "timeout"]);
   });
 
@@ -323,6 +373,24 @@ describe("web topic view model", () => {
       { kind: "approval", text: "approved run_bash", attachments: [], created_at_ms: 3 },
     ]);
     expect(turns[0].final_answer).toBe("done");
+  });
+
+  it("restores the last assistant message as the turn final answer while preserving chat order", () => {
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, kind: "task", content: "analyze this" },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 2, content: "partial answer" },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 3, content: "final answer" },
+    ];
+    const turns = turnsFromHistoryRecords(records);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].final_answer).toBe("final answer");
+
+    const restored = prependHistoryRecords(session("session_1"), records);
+    expect(restored.messages.map((message) => `${message.role}:${message.text}`)).toEqual([
+      "user:analyze this",
+      "assistant:partial answer",
+      "assistant:final answer",
+    ]);
   });
 
   it("sorts restored entries and events within one turn by creation time", () => {
@@ -478,6 +546,26 @@ describe("web topic view model", () => {
     });
   });
 
+  it("renders model progress even when free talk is omitted", () => {
+    const activity = activityFromTopic(topic("core.model.response", {
+      status: "working",
+      progress: "正在检查日志并提取关键错误。",
+    }));
+    expect(activity).toMatchObject({
+      tone: "thinking",
+      title: "",
+      detail: "正在检查日志并提取关键错误。",
+    });
+  });
+
+  it("keeps free talk before progress for one model response topic", () => {
+    const activity = activityFromTopic(topic("core.model.response", {
+      free_talk: "先判断需要哪些证据。",
+      progress: "正在读取本地文件。",
+    }));
+    expect(activity?.detail).toBe("先判断需要哪些证据。\n\n正在读取本地文件。");
+  });
+
   it("does not turn work-instruction bookkeeping into user-visible activity", () => {
     expect(activityFromTopic(topic("core.work_instruction_load", {
       status: "loaded",
@@ -500,7 +588,15 @@ describe("web topic view model", () => {
 
   it("renders run_bash commands as Bash code and keeps the structured status", () => {
     const activity = activityFromTopic(topic("core.action", { action: "run_bash", status: "running", input: { cmd: "git status" } }));
-    expect(activity).toMatchObject({ tone: "action", title: "run_bash · running", detail: "", code: "git status", code_language: "bash" });
+    expect(activity).toMatchObject({ tone: "action", title: "Bash · running", tool_name: "run_bash", detail: "", code: "git status", code_language: "bash" });
+  });
+
+  it("shows human-readable action statuses while preserving structured tool status", () => {
+    const background = activityFromTopic(topic("core.action", { action: "run_bash", status: "background_running", input: { cmd: "cargo test" } }));
+    expect(background).toMatchObject({ title: "Bash · background running", tool_status: "background_running" });
+
+    const timeout = activityFromTopic(topic("core.action", { action: "run_bash", status: "timeout", input: { cmd: "sleep 30" } }));
+    expect(timeout).toMatchObject({ title: "Bash · timed out", tool_status: "timeout" });
   });
 
   it("renders builtin tool usage as a readable invocation", () => {
@@ -511,7 +607,8 @@ describe("web topic view model", () => {
     }));
     expect(activity).toMatchObject({
       tone: "action",
-      title: "memmgr · running",
+      title: "MemMgr · running",
+      tool_name: "memmgr",
       detail: 'type="durable" op="sql" sql="SELECT id, content FROM memories"',
     });
   });

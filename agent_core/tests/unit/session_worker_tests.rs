@@ -655,9 +655,13 @@ fn toolgen_system_task_is_marked_and_contains_a_complete_fence_free_reference() 
         "README.md",
         ".timem-tool.json",
         "count_errors.sh",
+        "--help",
         "\"entrypoint\": \"count_errors.sh\"",
         "\"self_test\"",
-        "runtime executes it independently before publication",
+        "lightweight repository metadata",
+        "publishing:",
+        "When creating multi-line files through `run_bash`",
+        "Future turns can search this ToolRepo",
     ] {
         assert!(
             TOOLGEN_CONTEXT_INSTRUCTIONS.contains(required),
