@@ -144,10 +144,10 @@ describe("assistant-ui thread integration", () => {
 
   it("lets the session tools side panel collapse from the header, Escape key, and narrow-screen backdrop", () => {
     expect(source).toContain('const sessionActivityCount = sessionActivities.length;');
-    expect(source).toContain('aria-label={`Session tools and activity${sessionActivityCount ? `, ${sessionActivityCount} updates` : ""}`}');
+    expect(source).toContain('const sidePanelLabel = `${showActivity ? "Close" : "Open"} session tools and activity${sessionActivityCount ? `, ${sessionActivityCount} updates` : ""}`;');
     expect(source).toContain('aria-expanded={showActivity}');
     expect(source).toContain('aria-expanded={showActivity} aria-controls="session-side-panel"');
-    expect(source).toContain('title={`Session tools and activity${sessionActivityCount ? ` · ${sessionActivityCount} updates` : ""}`}');
+    expect(source).toContain('title={sidePanelLabel} aria-label={sidePanelLabel}');
     expect(source).toContain('className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`}');
     expect(source).toContain('{sessionActivityCount > 0 && <span className="activity-count-badge">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}');
     expect(source).toContain('setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible);');
@@ -201,7 +201,8 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("labels the runtime settings control for assistive and contract testing", () => {
-    expect(source).toContain('aria-label="Runtime information"');
+    expect(source).toContain('const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";');
+    expect(source).toContain('title={runtimeLabel} aria-label={runtimeLabel}');
     expect(source).toContain('aria-expanded={showRuntime}');
     expect(source).toContain('aria-expanded={showRuntime} aria-controls="runtime-panel"');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card"');
@@ -833,6 +834,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('runtimeButtonRef.current?.contains(target)');
     expect(source).toContain('runtimePanelRef.current?.contains(target)');
     expect(source).toContain('if (event.key === "Escape") setShowRuntime(false)');
+    expect(source).toContain('const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";');
+    expect(source).toContain('title={runtimeLabel} aria-label={runtimeLabel}');
     expect(source).toContain('aria-expanded={showRuntime}');
   });
 
@@ -858,7 +861,8 @@ describe("assistant-ui thread integration", () => {
     expect(appearanceSource).toContain('root.dataset.theme = appearance.theme');
     expect(appearanceSource).toContain('root.dataset.font = appearance.font');
     expect(appearanceSource).toContain('root.dataset.textSize = appearance.textSize');
-    expect(source).toContain('aria-label="Appearance"');
+    expect(source).toContain('const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";');
+    expect(source).toContain('title={appearanceLabel} aria-label={appearanceLabel}');
     expect(source).toContain('aria-expanded={showAppearance} aria-controls="appearance-panel"');
     expect(source).toContain('<AppearancePanel appearance={appearance}');
     expect(source).toContain("aria-pressed={appearance.theme === theme}");
