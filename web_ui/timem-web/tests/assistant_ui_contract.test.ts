@@ -299,6 +299,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('onClick={(event) => event.stopPropagation()}');
     expect(source).toContain('const closeIfIdle = () => { if (!creating) onClose(); };');
     expect(source).toContain('const closeIfIdle = () => { if (!pending) onClose(); };');
+    expect(source).toContain("const newSessionButtonRef = useRef<HTMLButtonElement | null>(null);");
+    expect(source).toContain("const closeNewSessionDialog = useCallback((restoreFocus = true) => {");
+    expect(source).toContain('window.getComputedStyle(newSessionButton).visibility !== "hidden"');
+    expect(source).toContain('newSessionButton.focus({ preventScroll: true });');
+    expect(source).toContain('mobileSessionButtonRef.current?.focus({ preventScroll: true });');
     expect(source).toContain('const descriptionId = "new-session-dialog-description";');
     expect(source).toContain('const statusId = "new-session-dialog-status";');
     expect(source).toContain('const describedBy = creating ? `${descriptionId} ${statusId}` : descriptionId;');
@@ -306,7 +311,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<p id={descriptionId}>Choose a workspace and optional runtime overrides for this session.</p>');
     expect(source).toContain('{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}');
     expect(source).toContain('onKeyDown={(event) => { if (event.key === "Escape") closeIfIdle(); }}');
-    expect(source).toContain('onClose={() => { if (!creatingSessionRef.current) setShowNewSession(false); }}');
+    expect(source).toContain('onClose={() => { if (!creatingSessionRef.current) closeNewSessionDialog(); }}');
     expect(source).toContain('onClose={() => { if (!pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))) setToolgenDialog(null); }}');
     expect(source).toContain('onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }}');
     expect(source).toContain('closeMemSwitchDialog();');
@@ -331,6 +336,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label="Close mem switch" disabled={pending} onClick={closeIfIdle}');
     expect(source).toContain('className={`primary ${creating ? "sending" : ""}`}');
     expect(source).toContain("const createDecision = sessionCreateDecision(displayName, workspaceDir, env, creating, memSwitching);");
+    expect(source).toContain('closeNewSessionDialog();');
     expect(source).toContain('memSwitching={pendingMemSwitch}');
     expect(source).toContain("const submit = () => { if (createDecision.kind === \"send\") onCreate(createDecision.command); };");
     expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing)');
@@ -736,7 +742,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const disabled = pending || locked;");
     expect(source).toContain("disabled={disabled}");
     expect(source).toContain('const newSessionLabel = pendingMemSwitch ? "New session is locked while switching mem" : "New session";');
-    expect(source).toContain('className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch}');
+    expect(source).toContain('ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch}');
     expect(source).toContain('title={pendingMemSwitch ? "Mem switch is in progress" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`}');
     expect(source).toContain('aria-label={pendingMemSwitch ? `Workers locked while switching mem for ${session.display_name}`');
     expect(source).toContain('aria-expanded={expandedSessionIds.has(session.session_id)} disabled={pendingMemSwitch}');

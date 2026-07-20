@@ -88,6 +88,7 @@ function TimemApp() {
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const newSessionButtonRef = useRef<HTMLButtonElement | null>(null);
   const appearanceButtonRef = useRef<HTMLButtonElement | null>(null);
   const appearancePanelRef = useRef<HTMLElement | null>(null);
   const runtimeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -135,6 +136,16 @@ function TimemApp() {
   const closeMemSwitchDialog = useCallback((restoreFocus = true) => {
     setShowMemSwitch(false);
     if (restoreFocus) memSwitchButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeNewSessionDialog = useCallback((restoreFocus = true) => {
+    setShowNewSession(false);
+    if (!restoreFocus) return;
+    const newSessionButton = newSessionButtonRef.current;
+    if (newSessionButton && window.getComputedStyle(newSessionButton).visibility !== "hidden") {
+      newSessionButton.focus({ preventScroll: true });
+    } else {
+      mobileSessionButtonRef.current?.focus({ preventScroll: true });
+    }
   }, []);
 
   useEffect(() => {
@@ -664,7 +675,7 @@ function TimemApp() {
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
         <div className="brand"><Sparkles size={18}/><span>Timem</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
-        <button type="button" className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button>
+        <button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
           {sessions.map((session) => {
             const renamingSession = pendingRenameSessionIds.has(session.session_id);
@@ -825,13 +836,13 @@ function TimemApp() {
           return false;
         }}
       />}
-      {showNewSession && <NewSessionDialog workspaces={server?.workspace_dirs ?? []} runtimeDefaults={server?.session_env_defaults ?? {}} creating={creatingSession} memSwitching={pendingMemSwitch} onClose={() => { if (!creatingSessionRef.current) setShowNewSession(false); }} onCreate={(command) => {
+      {showNewSession && <NewSessionDialog workspaces={server?.workspace_dirs ?? []} runtimeDefaults={server?.session_env_defaults ?? {}} creating={creatingSession} memSwitching={pendingMemSwitch} onClose={() => { if (!creatingSessionRef.current) closeNewSessionDialog(); }} onCreate={(command) => {
         if (pendingMemSwitch) return;
         if (creatingSessionRef.current) return;
         creatingSessionRef.current = true;
         setCreatingSession(true);
         if (sendCommand(command)) {
-          setShowNewSession(false);
+          closeNewSessionDialog();
         } else {
           creatingSessionRef.current = false;
           setCreatingSession(false);
