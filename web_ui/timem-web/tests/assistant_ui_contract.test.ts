@@ -130,13 +130,19 @@ describe("assistant-ui thread integration", () => {
 
   it("keeps multi-session navigation reachable on mobile", () => {
     expect(source).toContain('const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";');
+    expect(source).toContain("const mobileSessionButtonRef = useRef<HTMLButtonElement | null>(null);");
     expect(source).toContain("const mobileSidebarRef = useRef<HTMLElement | null>(null);");
+    expect(source).toContain("const closeMobileSidebar = useCallback((restoreFocus = true) => {");
+    expect(source).toContain("if (restoreFocus) mobileSessionButtonRef.current?.focus({ preventScroll: true });");
     expect(source).toContain("mobileSidebarRef.current?.focus({ preventScroll: true });");
     expect(source).toContain('id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}');
-    expect(source).toContain('title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation"');
-    expect(source).toContain('<button type="button" className="mobile-sidebar-backdrop"');
+    expect(source).toContain('ref={mobileSessionButtonRef} title={mobileSessionsLabel} aria-label={mobileSessionsLabel}');
+    expect(source).toContain('<button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}');
+    expect(source).toContain('aria-label="Close sessions" onClick={() => closeMobileSidebar()}');
+    expect(source).toContain('setShowNewSession(true); closeMobileSidebar(false);');
     expect(source).toContain("if (!showMobileSessions) return;");
-    expect(source).toContain('if (event.key === "Escape") setShowMobileSessions(false)');
+    expect(source).toContain('if (event.key === "Escape") closeMobileSidebar()');
+    expect(source).toContain('setActiveSessionId(session.session_id); closeMobileSidebar();');
     expect(source).toContain('aria-current={session.session_id === activeSession?.session_id ? "page" : undefined}');
     expect(styles).toContain(".icon-button.mobile-session-button");
     expect(styles).toContain(".mobile-sidebar-backdrop");
