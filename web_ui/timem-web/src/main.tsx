@@ -1444,11 +1444,13 @@ function formatBytes(bytes: number) {
 
 function RuntimePanel({ panelRef, server, pendingKeys, onUpdate }: { panelRef: MutableRefObject<HTMLElement | null>; server: Snapshot["server"] | null; pendingKeys: Set<string>; onUpdate: (key: string, value: string) => void }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  useEffect(() => setDrafts({}), [server?.runtime_options]);
   if (!server) return <section id="runtime-panel" ref={panelRef} className="runtime-card"><Cpu size={16}/><span>Loading runtime settings…</span></section>;
   return <section id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings"><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/> localhost:{server.port}</span></div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
     const value = drafts[option.key] ?? option.value;
     const pending = pendingKeys.has(option.key);
-    return <label key={option.key}><span>{option.key}</span><div><input value={value} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))}/><button type="button" className="secondary compact" disabled={pending || value === option.value} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
+    const dirty = value !== option.value;
+    return <label key={option.key}><span>{option.key}</span><div><input value={value} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))}/>{dirty && <button type="button" className="secondary compact runtime-reset" title={`Reset ${option.key} to current value`} aria-label={`Reset ${option.key} to current value`} disabled={pending} onClick={() => setDrafts((current) => { const { [option.key]: _removed, ...rest } = current; return rest; })}>Reset</button>}<button type="button" className="secondary compact" disabled={pending || !dirty} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
   })}</div></section>;
 }
 
