@@ -356,6 +356,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const loadingDetail = pendingToolDetailId === tool.tool_id;');
     expect(source).toContain('const renamingTool = pendingToolRenameIds.has(tool.tool_id);');
     expect(source).toContain('useEffect(() => {\n    setRenameToolId("");\n    setRenameValue("");\n    setContextMenu(null);\n  }, [session?.session_id, tab]);');
+    expect(source).toContain('useEffect(() => {\n    setContextMenu(null);\n  }, [searchQuery, sort, selectedTool?.summary.tool_id, tools.length]);');
     expect(source).toContain('const pendingToolDetailLabel = pendingTool ? `Loading ${pendingTool.name} tool directory` : "";');
     expect(source).toContain('aria-busy={loadingDetail || renamingTool || undefined}');
     expect(source).toContain('renamingTool ? "Renaming..." : loadingDetail ? "Loading details..."');

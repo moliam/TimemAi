@@ -873,6 +873,9 @@ function SessionSidePanel({ tab, onTabChange, onClose, session, activities, sear
     setContextMenu(null);
   }, [session?.session_id, tab]);
   useEffect(() => {
+    setContextMenu(null);
+  }, [searchQuery, sort, selectedTool?.summary.tool_id, tools.length]);
+  useEffect(() => {
     if (!contextMenu) return;
     const dismiss = () => setContextMenu(null);
     const dismissOnEscape = (event: KeyboardEvent) => {
