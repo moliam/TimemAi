@@ -934,8 +934,9 @@ function ActivityListItem({ activity }: { activity: Activity }) {
   const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
   if (!hasExpandableDetail) return <div className={`activity ${activity.tone}`}><span className="activity-mark">{mark}</span><div>{activity.title && <strong>{activity.title}</strong>}</div></div>;
   const collapse = () => setOpen(false);
+  const summaryLabel = `${open ? "收起" : "展开"} Activity 详情${activity.title ? `：${activity.title}` : ""}`;
   return <details className={`activity ${activity.tone}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary title={open ? "收起详情" : "展开详情"} aria-label={open ? "收起 Activity 详情" : "展开 Activity 详情"}><span className="activity-mark">{mark}</span><div>{activity.title && <strong>{activity.title}</strong>}<span className="activity-expand-label">{open ? "收起" : "展开"}</span></div></summary>
+    <summary title={open ? "收起详情" : "展开详情"} aria-label={summaryLabel}><span className="activity-mark">{mark}</span><div>{activity.title && <strong>{activity.title}</strong>}<span className="activity-expand-label">{open ? "收起" : "展开"}</span></div></summary>
     <div className="activity-body"><button type="button" className="activity-collapse top" onClick={collapse}>收起详情</button>{activity.detail && <div className="activity-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}<button type="button" className="activity-collapse" onClick={collapse}>收起详情</button></div>
   </details>;
 }
@@ -1238,8 +1239,9 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
   const hasDetail = !!activity.detail?.trim();
   if (!hasDetail) return <blockquote className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}><span>{activity.title}</span></blockquote>;
   const collapse = () => setOpen(false);
+  const summaryLabel = `${open ? "收起" : "展开"} ToolGen 详情${activity.title ? `：${activity.title}` : ""}`;
   return <details className={`toolgen-notice ${activity.toolgen_phase ?? ""}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary title={open ? "收起 ToolGen 详情" : "展开 ToolGen 详情"} aria-label={open ? "收起 ToolGen 详情" : "展开 ToolGen 详情"}><ChevronRight size={13}/><span>{activity.title}</span></summary>
+    <summary title={open ? "收起 ToolGen 详情" : "展开 ToolGen 详情"} aria-label={summaryLabel}><ChevronRight size={13}/><span>{activity.title}</span></summary>
     <div><button type="button" className="toolgen-collapse top" onClick={collapse}>收起详情</button><MarkdownContent text={activity.detail ?? ""}/><button type="button" className="toolgen-collapse" onClick={collapse}>收起详情</button></div>
   </details>;
 }
@@ -1251,9 +1253,11 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const invocationPreview = toolInvocationPreview(activity);
   const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
   const collapse = () => setOpen(false);
+  const toolName = toolDisplayName(activity.tool_name || activity.title);
+  const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
   const summaryContent = <>
     <span className="tool-activity-icon">{activity.tool_name === "run_bash" ? <Terminal size={14}/> : <Wrench size={14}/>}</span>
-    <b>{toolDisplayName(activity.tool_name || activity.title)}</b>
+    <b>{toolName}</b>
     <span className="tool-activity-status">{humanizeToolStatus(status)}</span>
     {invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}
   </>;
@@ -1261,7 +1265,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     {summaryContent}
   </div>;
   return <details className={`tool-activity ${running ? "running" : "settled"}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary title={open ? "收起工具详情" : "展开工具详情"} aria-label={open ? "收起工具详情" : "展开工具详情"}>
+    <summary title={open ? "收起工具详情" : "展开工具详情"} aria-label={summaryLabel}>
       {summaryContent}
       <ChevronRight className="tool-activity-chevron" size={14}/>
     </summary>
