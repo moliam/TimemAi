@@ -1033,6 +1033,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="host-error-details"');
     expect(source).toContain('onClick={() => { setShowAppearance(false); setShowRuntime(false); setSidePanelTab("activity"); setShowActivity(true); }}');
     expect(source).toContain('aria-label="Show error details in Activity"');
+    expect(source).toContain('aria-controls="session-side-panel" aria-expanded={showActivity && sidePanelTab === "activity"}');
     expect(source).toContain('setSidePanelTab("activity"); setShowActivity(true);');
     expect(source).toContain('className="host-error-dismiss-all"');
     expect(source).toContain('aria-label="Dismiss all visible errors"');

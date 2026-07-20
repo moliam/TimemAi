@@ -661,7 +661,7 @@ function TimemApp() {
         {visibleError && <div className="host-error-banner" role="alert">
           <span className="host-error-text" title={visibleErrorText}><strong>{visibleError.title}</strong>{visibleError.detail && <span className="host-error-detail"> · {visibleError.detail}</span>}{hiddenErrorCount > 0 && <em>{hiddenErrorCount} more hidden error{hiddenErrorCount === 1 ? "" : "s"}</em>}</span>
           <div className="host-error-actions">
-            <button type="button" className="host-error-details" title="Show error details in Activity" aria-label="Show error details in Activity" onClick={() => { setShowAppearance(false); setShowRuntime(false); setSidePanelTab("activity"); setShowActivity(true); }}>Details</button>
+            <button type="button" className="host-error-details" title="Show error details in Activity" aria-label="Show error details in Activity" aria-controls="session-side-panel" aria-expanded={showActivity && sidePanelTab === "activity"} onClick={() => { setShowAppearance(false); setShowRuntime(false); setSidePanelTab("activity"); setShowActivity(true); }}>Details</button>
             {hiddenErrorCount > 0 && <button type="button" className="host-error-dismiss-all" title="Dismiss all visible errors" aria-label="Dismiss all visible errors" onClick={() => setActivities((current) => current.filter((activity) => activity.tone !== "error" || (activity.sessionId !== activeSession?.session_id && activity.sessionId !== "system")))}>Dismiss all</button>}
             <button type="button" className="icon-button" title="Dismiss error" aria-label="Dismiss error" onClick={() => setActivities((current) => current.filter((activity) => activity.id !== visibleError.id))}><X size={15}/></button>
           </div>
