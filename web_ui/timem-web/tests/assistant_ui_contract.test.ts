@@ -206,6 +206,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-expanded={showRuntime} aria-controls="runtime-panel"');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card"');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings"');
+    expect(source).toContain('const inputLabel = `${option.key} current value`;');
+    expect(source).toContain('const applyLabel = pending ? `Applying ${option.key}` : dirty ? `Apply ${option.key}` : `${option.key} has no changes`;');
+    expect(source).toContain('title={inputLabel} aria-label={inputLabel}');
+    expect(source).toContain('title={applyLabel} aria-label={applyLabel}');
     expect(source).toContain('setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible);');
   });
 

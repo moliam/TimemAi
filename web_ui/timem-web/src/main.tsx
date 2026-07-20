@@ -1470,7 +1470,9 @@ function RuntimePanel({ panelRef, server, pendingKeys, onUpdate }: { panelRef: M
     const value = drafts[option.key] ?? option.value;
     const pending = pendingKeys.has(option.key);
     const dirty = value !== option.value;
-    return <label key={option.key}><span>{option.key}</span><div><input value={value} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))}/>{dirty && <button type="button" className="secondary compact runtime-reset" title={`Reset ${option.key} to current value`} aria-label={`Reset ${option.key} to current value`} disabled={pending} onClick={() => setDrafts((current) => { const { [option.key]: _removed, ...rest } = current; return rest; })}>Reset</button>}<button type="button" className="secondary compact" disabled={pending || !dirty} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
+    const inputLabel = `${option.key} current value`;
+    const applyLabel = pending ? `Applying ${option.key}` : dirty ? `Apply ${option.key}` : `${option.key} has no changes`;
+    return <label key={option.key}><span>{option.key}</span><div><input value={value} title={inputLabel} aria-label={inputLabel} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))}/>{dirty && <button type="button" className="secondary compact runtime-reset" title={`Reset ${option.key} to current value`} aria-label={`Reset ${option.key} to current value`} disabled={pending} onClick={() => setDrafts((current) => { const { [option.key]: _removed, ...rest } = current; return rest; })}>Reset</button>}<button type="button" className="secondary compact" title={applyLabel} aria-label={applyLabel} disabled={pending || !dirty} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
   })}</div></section>;
 }
 
