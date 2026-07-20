@@ -1222,18 +1222,11 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
 }
 
 function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, onToolGen }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void }) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
-    }
-    window.setTimeout(() => setCopyState("idle"), 1400);
-  };
-  const copyLabel = copyState === "copied" ? "Answer copied" : copyState === "failed" ? "Copy answer failed" : "Copy answer";
-  const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";
+  const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {
+    idle: "Copy answer",
+    copied: "Answer copied",
+    failed: "Copy answer failed",
+  });
   return <section className="turn-final-delivery">
     <div className="turn-final-toolbar"><button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}<span aria-live="polite">{copyLabel}</span></button></div>
     <div className="message-content"><MarkdownContent text={text}/></div>
@@ -1366,26 +1359,43 @@ function MarkdownContent({ text }: { text: string }) {
 }
 
 function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const child = Children.count(children) === 1 ? Children.only(children) : null;
   const className = isValidElement<{ className?: string }>(child) ? child.props.className ?? "" : "";
   const language = className.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? "text";
   const code = textFromNode(children).replace(/\n$/, "");
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
-    }
-    window.setTimeout(() => setCopyState("idle"), 1400);
-  };
-  const copyLabel = copyState === "copied" ? "Code copied" : copyState === "failed" ? "Copy code failed" : "Copy code";
-  const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";
+  const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(code, {
+    idle: "Copy code",
+    copied: "Code copied",
+    failed: "Copy code failed",
+  });
   return <figure className="code-block">
     <figcaption><span title={language}>{language}</span><button type="button" className={copyClass} onClick={() => void copy()} title={copyLabel} aria-label={copyLabel}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}<span aria-live="polite">{copyLabel}</span></button></figcaption>
     <pre>{children}</pre>
   </figure>;
+}
+
+function useTimedClipboardCopy(text: string, labels: { idle: string; copied: string; failed: string }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const resetTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+  }, []);
+  const copy = async () => {
+    if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    resetTimerRef.current = window.setTimeout(() => {
+      setCopyState("idle");
+      resetTimerRef.current = null;
+    }, 1400);
+  };
+  const copyLabel = copyState === "copied" ? labels.copied : copyState === "failed" ? labels.failed : labels.idle;
+  const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";
+  return { copyState, copy, copyLabel, copyClass };
 }
 
 function textFromNode(node: React.ReactNode): string {
