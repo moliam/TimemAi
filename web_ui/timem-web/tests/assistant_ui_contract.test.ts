@@ -867,6 +867,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("disabled={!activeSession || uploadingAttachment || sessionInteractionLocked}");
     expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
     expect(source).toContain('aria-live="polite">{uploadingAttachment && <div className="pending-attachment uploading" role="status"');
+    expect(source).toContain('aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText}');
     expect(source).toContain("title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}");
     expect(source).toContain('className="upload-dot" aria-hidden="true"');
     expect(source).toContain('uploadingAttachmentFile?.name ?? "Uploading file…"');
