@@ -119,6 +119,7 @@ function TimemApp() {
 
   useEffect(() => {
     if (!showRuntime) return;
+    runtimePanelRef.current?.focus({ preventScroll: true });
     const dismissOnOutsidePointer = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
@@ -1551,9 +1552,9 @@ function formatBytes(bytes: number) {
 function RuntimePanel({ panelRef, server, pendingKeys, onUpdate }: { panelRef: MutableRefObject<HTMLElement | null>; server: Snapshot["server"] | null; pendingKeys: Set<string>; onUpdate: (key: string, value: string) => void }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   useEffect(() => setDrafts({}), [server?.runtime_options]);
-  if (!server) return <section id="runtime-panel" ref={panelRef} className="runtime-card"><Cpu size={16}/><span>Loading runtime settings…</span></section>;
+  if (!server) return <section id="runtime-panel" ref={panelRef} className="runtime-card" tabIndex={-1}><Cpu size={16}/><span>Loading runtime settings…</span></section>;
   const pendingRuntimeLabel = pendingKeys.size ? `Applying runtime setting${pendingKeys.size === 1 ? "" : "s"}: ${Array.from(pendingKeys).join(", ")}` : "";
-  return <section id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings"><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/> localhost:{server.port}</span></div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
+  return <section id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/> localhost:{server.port}</span></div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
     const value = drafts[option.key] ?? option.value;
     const pending = pendingKeys.has(option.key);
     const dirty = value !== option.value;

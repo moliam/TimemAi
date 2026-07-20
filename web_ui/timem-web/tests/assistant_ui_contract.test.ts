@@ -890,6 +890,7 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("dismisses the runtime configuration card on outside click or Escape", () => {
+    expect(source).toContain('runtimePanelRef.current?.focus({ preventScroll: true });');
     expect(source).toContain('document.addEventListener("pointerdown", dismissOnOutsidePointer)');
     expect(source).toContain('runtimeButtonRef.current?.contains(target)');
     expect(source).toContain('runtimePanelRef.current?.contains(target)');
@@ -897,6 +898,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";');
     expect(source).toContain('title={runtimeLabel} aria-label={runtimeLabel}');
     expect(source).toContain('aria-expanded={showRuntime}');
+    expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card" tabIndex={-1}');
+    expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}');
   });
 
   it("lets runtime setting drafts reset to the latest server snapshot value", () => {
