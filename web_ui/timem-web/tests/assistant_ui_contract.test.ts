@@ -1094,6 +1094,7 @@ describe("assistant-ui thread integration", () => {
 
   it("shows host and session errors outside the default-hidden diagnostic panel", () => {
     expect(source).toContain("const visibleErrors = activities.filter");
+    expect(source).toContain('const sessionActivities = activities.filter((activity) => activity.sessionId === activeSession?.session_id || activity.sessionId === "system");');
     expect(source).toContain("const visibleErrorText = visibleError ? `${visibleError.title}${visibleError.detail ? ` · ${visibleError.detail}` : \"\"}` : \"\";");
     expect(source).toContain("const hiddenErrorCount = Math.max(0, visibleErrors.length - 1)");
     expect(source).toContain('className="host-error-banner" role="alert"');
