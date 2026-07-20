@@ -250,6 +250,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('isToolGenTurn ? "Generating tools…" : "working"');
     expect(source).toContain('isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"');
     expect(styles).toContain(".working-chip.toolgen-working");
+    expect(styles).toContain(".completion-toolgen { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 0 3px 0 9px; border: 0; border-left: 1px solid #333;");
+    expect(styles).toContain(".completion-toolgen:hover { color: #8ebce0; border-left-color: #4f6474; }");
+    expect(styles).toContain(':root[data-theme="light"] .completion-toolgen { border-left-color: #d5dde2; color: #437ba8; }');
     expect(styles).toContain(".completion-toolgen.sending svg");
   });
 
