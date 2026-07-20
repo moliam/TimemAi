@@ -770,6 +770,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('sessionCreateDecision');
     expect(source).toContain("const canCreateSession = createDecision.kind === \"send\";");
     expect(source).toContain("disabled={creating || workspaces.length === 0}");
+    expect(source).toContain('workspaces.map((workspace) => <option value={workspace} key={workspace} title={workspace}>{tailPath(workspace, 64)}</option>)');
     expect(source).toContain("No workspace available");
     expect(source).toContain("No workspace is available from the runtime snapshot.");
     expect(source).toContain("disabled={!canCreateSession}");
