@@ -295,7 +295,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const validationText = pending");
     expect(source).toContain("Use a simple mem space name without slashes or '..'.");
     expect(source).toContain("This is the current mem space.");
-    expect(source).toContain('className="mem-validation" role="status" aria-live="polite"');
+    expect(source).toContain('const descriptionId = "mem-switch-dialog-description";');
+    expect(source).toContain('const statusId = "mem-switch-dialog-status";');
+    expect(source).toContain('const describedBy = validationText ? `${descriptionId} ${statusId}` : descriptionId;');
+    expect(source).toContain('aria-label="Switch memory space" aria-describedby={describedBy}');
+    expect(source).toContain('<p id={descriptionId}>Switching mem stops current workers');
+    expect(source).toContain('id={statusId} className="mem-validation" role="status" aria-live="polite"');
     expect(source).toContain('title={validationText || "Switch mem"}');
     expect(source).toContain('aria-label={validationText || "Switch mem"}');
     expect(source).toContain('className="modal-titlebar"');
