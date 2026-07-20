@@ -705,8 +705,8 @@ button:disabled { cursor: not-allowed; }
 .toolrepo-toggle:hover { color: #ddd; border-color: #666; }
 .toolrepo-toggle > span { min-width: 13px; color: #d8d8d8; font-size: 10px; font-weight: 700; line-height: 1; text-align: center; }
 .toolrepo-toggle.count-pulse > span { animation: tool-count-pulse .7s ease-in-out 3; }
-.completion-toolgen { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 0 3px; border: 0; background: transparent; color: #6f8fa8; font: inherit; font-weight: 650; }
-.completion-toolgen:hover { color: #8ebce0; }
+.completion-toolgen { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 0 3px 0 9px; border: 0; border-left: 1px solid #333; background: transparent; color: #6f8fa8; font: inherit; font-weight: 650; }
+.completion-toolgen:hover { color: #8ebce0; border-left-color: #4f6474; }
 .completion-toolgen.sending svg { animation: spin 1.2s linear infinite; }
 .toolgen-dialog p { margin: 0 0 15px; color: #9eabb4; font-size: 13px; line-height: 1.55; }
 .toolgen-dialog-status { border-left: 2px solid #4d8fd7; padding-left: 9px; color: #b8d8ee !important; }
@@ -796,7 +796,8 @@ button:disabled { cursor: not-allowed; }
 .toolrepo-context-menu button:hover { background: #373737; }
 :root[data-theme="light"] .toolrepo-toggle { border-color: #ccc; color: #666; }
 :root[data-theme="light"] .toolrepo-toggle > span { color: #444; }
-:root[data-theme="light"] .completion-toolgen { color: #437ba8; }
+:root[data-theme="light"] .completion-toolgen { border-left-color: #d5dde2; color: #437ba8; }
+:root[data-theme="light"] .completion-toolgen:hover { border-left-color: #a8bfd0; }
 :root[data-theme="light"] .toolgen-dialog p { color: #61717a; }
 :root[data-theme="light"] .toolgen-dialog-status { color: #315f86 !important; }
 :root[data-theme="light"] .toolgen-dialog label { color: #34434a; }
