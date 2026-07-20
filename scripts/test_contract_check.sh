@@ -84,6 +84,8 @@ required_patterns=(
   "sorts restored entries and events within one turn by creation time"
   "shell_resume_uses_stored_session_cwd_for_core_prompt_context"
   "shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence"
+  "shell_can_resume_web_style_session_history"
+  "formatted_response_trailer_parser_preserves_assistant_heading"
 )
 
 for pattern in "${required_patterns[@]}"; do
