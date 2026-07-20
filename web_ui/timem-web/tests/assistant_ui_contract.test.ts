@@ -314,6 +314,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('Loading tool directory…');
     expect(source).toContain('className="toolrepo-detail-loading" role="status" aria-live="polite"');
     expect(source).toContain('Loading details...');
+    expect(source).toContain('role="treeitem" aria-selected={selectedTool?.summary.tool_id === tool.tool_id} aria-expanded={expanded}');
     expect(source).toContain('setPendingToolDetailKey(`${activeSession.session_id}:${toolId}`);');
     expect(source).toContain('setPendingToolDetailKey((key) => key === `${event.session_id}:${event.detail.summary.tool_id}` ? "" : key);');
     expect(source).toContain("Tool detail failed");
