@@ -155,7 +155,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('role="tablist" aria-label="Session side panel sections" onKeyDown={switchSidePanelTabFromKeyboard}');
     expect(source).toContain('ref={toolsTabRef} type="button" id="side-panel-tab-tools" role="tab" aria-label={`ToolRepo, ${session?.tools.length ?? 0} tools`} aria-controls="side-panel-tools"');
     expect(source).toContain('ref={activityTabRef} type="button" id="side-panel-tab-activity" role="tab" aria-label={`Activity, ${activities.length} updates`} aria-controls="side-panel-activity"');
-    expect(source).toContain('>Activity<small>{activities.length}</small></button>');
+    expect(source).toContain('const activityTabCount = activities.length > 99 ? "99+" : String(activities.length);');
+    expect(source).toContain('>Activity<small>{activityTabCount}</small></button>');
     expect(source).toContain('ToolRepo{session && <> <small>{session.tools.length}</small></>}');
     expect(source).toContain('tabIndex={tab === "tools" ? 0 : -1}');
     expect(source).toContain('tabIndex={tab === "activity" ? 0 : -1}');
