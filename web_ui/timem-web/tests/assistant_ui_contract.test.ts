@@ -120,7 +120,8 @@ describe("assistant-ui thread integration", () => {
 
   it("keeps multi-session navigation reachable on mobile", () => {
     expect(source).toContain('aria-label="Sessions"');
-    expect(source).toContain('className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}');
+    expect(source).toContain('id="session-navigation" className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`}');
+    expect(source).toContain('className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation"');
     expect(source).toContain('<button type="button" className="mobile-sidebar-backdrop"');
     expect(source).toContain("if (!showMobileSessions) return;");
     expect(source).toContain('if (event.key === "Escape") setShowMobileSessions(false)');
