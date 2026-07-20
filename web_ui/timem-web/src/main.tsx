@@ -1445,7 +1445,10 @@ function activityFromTurnEvent(event: WebTurnEvent, sessionId: string): Activity
   if (event.source !== "worker_activity") return null;
   const kind = String(event.payload.kind ?? "worker_event");
   if (kind === "model_request" || kind === "model_response") return null;
-  const detail = Object.entries(event.payload).filter(([key]) => key !== "kind").map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`).join("\n");
+  const detail = Object.entries(event.payload)
+    .filter(([key]) => !["kind", "session_id", "context_id", "worker_id"].includes(key))
+    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join("\n");
   return { id: event.event_id, sessionId, tone: kind.includes("error") ? "error" : kind.includes("retry") || kind.includes("discarded") ? "warning" : "notice", title: kind.replaceAll("_", " "), detail, createdAt: event.created_at_ms };
 }
 

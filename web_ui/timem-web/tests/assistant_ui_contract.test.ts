@@ -986,6 +986,10 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain("prefers-reduced-motion: reduce");
   });
 
+  it("keeps routing identifiers out of the task work stream", () => {
+    expect(source).toContain('["kind", "session_id", "context_id", "worker_id"].includes(key)');
+  });
+
   it("persists theme, font, and text-size appearance without changing core state", () => {
     expect(appearanceSource).toContain('APPEARANCE_STORAGE_KEY = "timem-web-appearance-v1"');
     expect(appearanceSource).toContain('root.dataset.theme = appearance.theme');
