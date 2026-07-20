@@ -147,7 +147,10 @@ describe("assistant-ui thread integration", () => {
   it("defaults the diagnostic activity panel to hidden", () => {
     expect(source).toContain("const [showActivity, setShowActivity] = useState(false);");
     expect(source).toContain("if (!showActivity) return;");
-    expect(source).toContain('if (event.key === "Escape") setShowActivity(false)');
+    expect(source).toContain("const sidePanelButtonRef = useRef<HTMLButtonElement | null>(null);");
+    expect(source).toContain("const closeSidePanel = useCallback(() => {");
+    expect(source).toContain("sidePanelButtonRef.current?.focus({ preventScroll: true });");
+    expect(source).toContain('if (event.key === "Escape") closeSidePanel()');
   });
 
   it("lets the session tools side panel collapse from the header, Escape key, and narrow-screen backdrop", () => {
@@ -158,7 +161,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={sidePanelLabel} aria-label={sidePanelLabel}');
     expect(source).toContain('className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`}');
     expect(source).toContain('{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}');
-    expect(source).toContain('setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible);');
+    expect(source).toContain('ref={sidePanelButtonRef} title={sidePanelLabel}');
+    expect(source).toContain('setShowAppearance(false); setShowRuntime(false); if (showActivity) closeSidePanel(); else setShowActivity(true);');
     expect(source).toContain("const switchSidePanelTabFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>)");
     expect(source).toContain('const tabButton = tab === "tools" ? toolsTabRef.current : activityTabRef.current;');
     expect(source).toContain('tabButton?.focus({ preventScroll: true });');
@@ -181,9 +185,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('type="button" className="icon-button" title="Close side panel"');
     expect(source).toContain('id="side-panel-tools" className="toolrepo-panel" role="tabpanel" aria-labelledby="side-panel-tab-tools"');
     expect(source).toContain('id="side-panel-activity" className="activity-list" role="tabpanel" aria-labelledby="side-panel-tab-activity"');
-    expect(source).toContain('<button type="button" className="side-panel-backdrop"');
+    expect(source).toContain('<button type="button" className="side-panel-backdrop" aria-label="Close session tools and activity" onClick={closeSidePanel}');
+    expect(source).toContain('onClose={closeSidePanel}');
     expect(source).toContain('aria-label="Close session tools and activity"');
-    expect(source).toContain('onClick={() => setShowActivity(false)}');
     expect(source).toContain('id="session-side-panel" className="activity-panel session-side-panel" aria-label="Session tools and activity panel"');
     expect(styles).toContain(".side-panel-backdrop");
     expect(styles).toContain("z-index: 3");

@@ -93,6 +93,7 @@ function TimemApp() {
   const runtimeButtonRef = useRef<HTMLButtonElement | null>(null);
   const runtimePanelRef = useRef<HTMLElement | null>(null);
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
+  const sidePanelButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   const activeMessages = activeSession?.messages ?? EMPTY_CHAT_MESSAGES;
   const pushActivity = useCallback((activity: Activity) => {
@@ -113,6 +114,10 @@ function TimemApp() {
   const reportUiError = useCallback((title: string, detail: string, sessionId = activeSessionIdRef.current || "system") => {
     pushActivity({ id: crypto.randomUUID(), sessionId, tone: "error", title, detail, createdAt: Date.now() });
   }, [pushActivity]);
+  const closeSidePanel = useCallback(() => {
+    setShowActivity(false);
+    sidePanelButtonRef.current?.focus({ preventScroll: true });
+  }, []);
 
   useEffect(() => {
     applyAppearance(appearance);
@@ -141,11 +146,11 @@ function TimemApp() {
   useEffect(() => {
     if (!showActivity) return;
     const dismissOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowActivity(false);
+      if (event.key === "Escape") closeSidePanel();
     };
     document.addEventListener("keydown", dismissOnEscape);
     return () => document.removeEventListener("keydown", dismissOnEscape);
-  }, [showActivity]);
+  }, [closeSidePanel, showActivity]);
 
   useEffect(() => {
     if (!showMobileSessions) return;
@@ -682,7 +687,7 @@ function TimemApp() {
             <button type="button" title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
             <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible); }}><Palette size={17}/></button>
             <button type="button" ref={runtimeButtonRef} title={runtimeLabel} aria-label={runtimeLabel} className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible); }}><Settings2 size={17}/></button>
-            <button type="button" title={sidePanelLabel} aria-label={sidePanelLabel} className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible); }}><PanelRight size={17}/>{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}</button>
+            <button type="button" ref={sidePanelButtonRef} title={sidePanelLabel} aria-label={sidePanelLabel} className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); if (showActivity) closeSidePanel(); else setShowActivity(true); }}><PanelRight size={17}/>{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}</button>
           </div>
         </header>
         {showAppearance && <AppearancePanel panelRef={appearancePanelRef} appearance={appearance} onChange={setAppearance} onClose={() => setShowAppearance(false)}/>}
@@ -751,11 +756,11 @@ function TimemApp() {
           }}
         />
       </main>
-      {showActivity && <button type="button" className="side-panel-backdrop" aria-label="Close session tools and activity" onClick={() => setShowActivity(false)}/>}
+      {showActivity && <button type="button" className="side-panel-backdrop" aria-label="Close session tools and activity" onClick={closeSidePanel}/>}
       {showActivity && <SessionSidePanel
         tab={sidePanelTab}
         onTabChange={setSidePanelTab}
-        onClose={() => setShowActivity(false)}
+        onClose={closeSidePanel}
         session={activeSession}
         activities={sessionActivities}
         searchQuery={toolSearchQuery}
