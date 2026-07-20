@@ -465,6 +465,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="tool-activity-collapse top" onClick={collapse}>收起详情</button>');
     expect(source).toContain('className="tool-activity-collapse" onClick={collapse}>收起详情</button>');
     expect(styles).toContain(".tool-activity-collapse");
+    expect(styles).toContain(".tool-activity summary:focus-visible { background: #1f1f1f; box-shadow: inset 2px 0 0 #4d8fd7; }");
+    expect(styles).toContain(':root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }');
     expect(source).toContain("toolDisplayName(activity.tool_name || activity.title)");
     expect(source).toContain("{invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}");
     expect(source).toContain('if (status === "background_running") return "background running";');
