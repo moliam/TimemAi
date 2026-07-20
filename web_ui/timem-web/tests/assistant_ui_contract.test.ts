@@ -6,6 +6,7 @@ const appearanceSource = readFileSync(new URL("../src/appearance.ts", import.met
 const viewModelSource = readFileSync(new URL("../src/view_model.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+const viteConfig = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
 
 describe("assistant-ui thread integration", () => {
   it("keeps the brand concise and describes collaboration without a local-only qualifier", () => {
@@ -277,6 +278,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('onClick={(event) => event.stopPropagation()}');
     expect(source).toContain('const closeIfIdle = () => { if (!creating) onClose(); };');
     expect(source).toContain('const closeIfIdle = () => { if (!pending) onClose(); };');
+    expect(source).toContain('const descriptionId = "new-session-dialog-description";');
+    expect(source).toContain('const statusId = "new-session-dialog-status";');
+    expect(source).toContain('const describedBy = creating ? `${descriptionId} ${statusId}` : descriptionId;');
+    expect(source).toContain('aria-label="Create session" aria-describedby={describedBy}');
+    expect(source).toContain('<p id={descriptionId}>Choose a workspace and optional runtime overrides for this session.</p>');
+    expect(source).toContain('{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}');
     expect(source).toContain('onKeyDown={(event) => { if (event.key === "Escape") closeIfIdle(); }}');
     expect(source).toContain('onClose={() => { if (!creatingSessionRef.current) setShowNewSession(false); }}');
     expect(source).toContain('onClose={() => { if (!pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))) setToolgenDialog(null); }}');
@@ -567,6 +574,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('import rehypeHighlight from "rehype-highlight";');
     expect(source).toContain("rehypePlugins={[rehypeHighlight]}");
     expect(source).toContain("fencedCode(activity.code_language ?? \"text\", activity.code)");
+    expect(viteConfig).toContain('highlighting: ["highlight.js", "rehype-highlight"]');
   });
 
   it("renders completion telemetry below final answers", () => {
