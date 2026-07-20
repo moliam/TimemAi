@@ -194,7 +194,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<button type="button" className="side-panel-backdrop" aria-label="Close session tools and activity" onClick={closeSidePanel}');
     expect(source).toContain('onClose={closeSidePanel}');
     expect(source).toContain('aria-label="Close session tools and activity"');
-    expect(source).toContain('id="session-side-panel" className="activity-panel session-side-panel" aria-label="Session tools and activity panel"');
+    expect(source).toContain('id="session-side-panel" ref={panelRef} className="activity-panel session-side-panel" aria-label="Session tools and activity panel" tabIndex={-1}');
+    expect(source).toContain('const sidePanelRef = useRef<HTMLElement | null>(null);');
+    expect(source).toContain('sidePanelRef.current?.focus({ preventScroll: true });');
+    expect(source).toContain('panelRef={sidePanelRef}');
+    expect(source).toContain('ref={panelRef} className="activity-panel session-side-panel" aria-label="Session tools and activity panel" tabIndex={-1}');
     expect(styles).toContain(".side-panel-backdrop");
     expect(styles).toContain("z-index: 3");
     expect(styles).toContain(".app-shell, .app-shell:has(.activity-panel)");
