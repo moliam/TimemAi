@@ -869,6 +869,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('copyState === "copied" ? "Code copied" : copyState === "failed" ? "Copy code failed" : "Copy code"');
     expect(styles).toContain('.markdown-body blockquote');
     expect(styles).toContain(".table-scroll");
+    expect(styles).toContain("scrollbar-gutter: stable;");
+    expect(styles).toContain(".table-scroll:focus-visible");
+    expect(styles).toContain(':root[data-theme="light"] .table-scroll');
     expect(styles).toContain('.code-block figcaption');
     expect(styles).toContain(".code-block figcaption > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
     expect(styles).toContain(".code-block figcaption button { flex: none;");
