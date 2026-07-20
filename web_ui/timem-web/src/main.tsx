@@ -1409,7 +1409,7 @@ function useTimedClipboardCopy(text: string, labels: { idle: string; copied: str
   const copy = async () => {
     if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextToClipboard(text);
       setCopyState("copied");
     } catch {
       setCopyState("failed");
@@ -1422,6 +1422,29 @@ function useTimedClipboardCopy(text: string, labels: { idle: string; copied: str
   const copyLabel = copyState === "copied" ? labels.copied : copyState === "failed" ? labels.failed : labels.idle;
   const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";
   return { copyState, copy, copyLabel, copyClass };
+}
+
+async function copyTextToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      if (!document.execCommand("copy")) throw new Error("execCommand copy failed");
+    } finally {
+      document.body.removeChild(textarea);
+      window.getSelection()?.removeAllRanges();
+    }
+  }
 }
 
 function textFromNode(node: React.ReactNode): string {
