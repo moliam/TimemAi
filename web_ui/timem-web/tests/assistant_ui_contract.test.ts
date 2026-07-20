@@ -463,10 +463,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label="Tool directory tree"');
     expect(source).toContain('aria-label="Collapse tool detail"');
     expect(source).toContain('if (event.key === "Escape") setContextMenu(null);');
+    expect(source).toContain('const contextMenuActionRef = useRef<HTMLButtonElement>(null);');
+    expect(source).toContain('contextMenuActionRef.current?.focus({ preventScroll: true });');
     expect(source).toContain("Math.max(8, Math.min(event.clientX, window.innerWidth - 220))");
     expect(source).toContain("Math.max(8, Math.min(event.clientY, window.innerHeight - 76))");
     expect(source).toContain('className="toolrepo-context-menu" role="menu" aria-label="Tool actions"');
-    expect(source).toContain('<button type="button" role="menuitem" onClick={() => { onOpenTerminal(contextMenu.toolId); setContextMenu(null); }}>');
+    expect(source).toContain('onKeyDownCapture={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setContextMenu(null); } }}');
+    expect(source).toContain('<button ref={contextMenuActionRef} type="button" role="menuitem" onClick={() => { onOpenTerminal(contextMenu.toolId); setContextMenu(null); }}>');
     expect(source).toContain('className="toolrepo-detail-collapse"');
     expect(source).toContain(">收起详情</button>");
     expect(source).not.toContain('className="toolrepo-detail-footer"');
