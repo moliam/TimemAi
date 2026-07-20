@@ -118,6 +118,14 @@ function TimemApp() {
     setShowActivity(false);
     sidePanelButtonRef.current?.focus({ preventScroll: true });
   }, []);
+  const closeRuntimePanel = useCallback((restoreFocus = true) => {
+    setShowRuntime(false);
+    if (restoreFocus) runtimeButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeAppearancePanel = useCallback((restoreFocus = true) => {
+    setShowAppearance(false);
+    if (restoreFocus) appearanceButtonRef.current?.focus({ preventScroll: true });
+  }, []);
 
   useEffect(() => {
     applyAppearance(appearance);
@@ -130,10 +138,10 @@ function TimemApp() {
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (runtimeButtonRef.current?.contains(target) || runtimePanelRef.current?.contains(target)) return;
-      setShowRuntime(false);
+      closeRuntimePanel(false);
     };
     const dismissOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowRuntime(false);
+      if (event.key === "Escape") closeRuntimePanel();
     };
     document.addEventListener("pointerdown", dismissOnOutsidePointer);
     document.addEventListener("keydown", dismissOnEscape);
@@ -141,7 +149,7 @@ function TimemApp() {
       document.removeEventListener("pointerdown", dismissOnOutsidePointer);
       document.removeEventListener("keydown", dismissOnEscape);
     };
-  }, [showRuntime]);
+  }, [closeRuntimePanel, showRuntime]);
 
   useEffect(() => {
     if (!showActivity) return;
@@ -169,10 +177,10 @@ function TimemApp() {
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (appearanceButtonRef.current?.contains(target) || appearancePanelRef.current?.contains(target)) return;
-      setShowAppearance(false);
+      closeAppearancePanel(false);
     };
     const dismissOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowAppearance(false);
+      if (event.key === "Escape") closeAppearancePanel();
     };
     document.addEventListener("pointerdown", dismissOnOutsidePointer);
     document.addEventListener("keydown", dismissOnEscape);
@@ -180,7 +188,7 @@ function TimemApp() {
       document.removeEventListener("pointerdown", dismissOnOutsidePointer);
       document.removeEventListener("keydown", dismissOnEscape);
     };
-  }, [showAppearance]);
+  }, [closeAppearancePanel, showAppearance]);
 
   useEffect(() => {
     if (new URLSearchParams(window.location.search).has("token")) {
@@ -685,12 +693,12 @@ function TimemApp() {
           <span className="header-model" title={headerModelLabel}>{headerModelLabel}</span>
           <div className="header-actions">
             <button type="button" title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
-            <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible); }}><Palette size={17}/></button>
-            <button type="button" ref={runtimeButtonRef} title={runtimeLabel} aria-label={runtimeLabel} className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible); }}><Settings2 size={17}/></button>
+            <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true); }}><Palette size={17}/></button>
+            <button type="button" ref={runtimeButtonRef} title={runtimeLabel} aria-label={runtimeLabel} className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowActivity(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><Settings2 size={17}/></button>
             <button type="button" ref={sidePanelButtonRef} title={sidePanelLabel} aria-label={sidePanelLabel} className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); if (showActivity) closeSidePanel(); else setShowActivity(true); }}><PanelRight size={17}/>{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}</button>
           </div>
         </header>
-        {showAppearance && <AppearancePanel panelRef={appearancePanelRef} appearance={appearance} onChange={setAppearance} onClose={() => setShowAppearance(false)}/>}
+        {showAppearance && <AppearancePanel panelRef={appearancePanelRef} appearance={appearance} onChange={setAppearance} onClose={closeAppearancePanel}/>}
         {visibleError && <div className="host-error-banner" role="alert">
           <span className="host-error-text" title={visibleErrorText}><strong>{visibleError.title}</strong>{visibleError.detail && <span className="host-error-detail"> · {visibleError.detail}</span>}{hiddenErrorCount > 0 && <em>{hiddenErrorCount} more hidden error{hiddenErrorCount === 1 ? "" : "s"}</em>}</span>
           <div className="host-error-actions">

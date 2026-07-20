@@ -225,7 +225,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const applyLabel = pending ? `Applying ${option.key}` : dirty ? `Apply ${option.key}` : `${option.key} has no changes`;');
     expect(source).toContain('title={inputLabel} aria-label={inputLabel}');
     expect(source).toContain('title={applyLabel} aria-label={applyLabel}');
-    expect(source).toContain('setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible);');
+    expect(source).toContain('setShowAppearance(false); setShowActivity(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true);');
   });
 
   it("opens ToolRepo from the composer and keeps the tool count inside the control", () => {
@@ -899,13 +899,17 @@ describe("assistant-ui thread integration", () => {
 
   it("dismisses the runtime configuration card on outside click or Escape", () => {
     expect(source).toContain('runtimePanelRef.current?.focus({ preventScroll: true });');
+    expect(source).toContain('const closeRuntimePanel = useCallback((restoreFocus = true) => {');
+    expect(source).toContain('if (restoreFocus) runtimeButtonRef.current?.focus({ preventScroll: true });');
     expect(source).toContain('document.addEventListener("pointerdown", dismissOnOutsidePointer)');
     expect(source).toContain('runtimeButtonRef.current?.contains(target)');
     expect(source).toContain('runtimePanelRef.current?.contains(target)');
-    expect(source).toContain('if (event.key === "Escape") setShowRuntime(false)');
+    expect(source).toContain('closeRuntimePanel(false);');
+    expect(source).toContain('if (event.key === "Escape") closeRuntimePanel()');
     expect(source).toContain('const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";');
     expect(source).toContain('title={runtimeLabel} aria-label={runtimeLabel}');
     expect(source).toContain('aria-expanded={showRuntime}');
+    expect(source).toContain('if (showRuntime) closeRuntimePanel(); else setShowRuntime(true);');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card" tabIndex={-1}');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}');
   });
@@ -954,13 +958,16 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={`Use ${size === "medium" ? "default" : size} text size`}');
     expect(source).toContain('if (!showAppearance) return;');
     expect(source).toContain('appearancePanelRef.current?.focus({ preventScroll: true });');
+    expect(source).toContain('const closeAppearancePanel = useCallback((restoreFocus = true) => {');
+    expect(source).toContain('if (restoreFocus) appearanceButtonRef.current?.focus({ preventScroll: true });');
     expect(source).toContain('appearanceButtonRef.current?.contains(target)');
     expect(source).toContain('appearancePanelRef.current?.contains(target)');
-    expect(source).toContain('if (event.key === "Escape") setShowAppearance(false)');
+    expect(source).toContain('closeAppearancePanel(false);');
+    expect(source).toContain('if (event.key === "Escape") closeAppearancePanel()');
     expect(source).toContain('const descriptionId = "appearance-panel-description";');
     expect(source).toContain('id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} tabIndex={-1}');
     expect(source).toContain('<p id={descriptionId}>Adjust theme, font, and message text size for this browser.</p>');
-    expect(source).toContain('setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible);');
+    expect(source).toContain('setShowRuntime(false); setShowActivity(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true);');
     expect(styles).toContain(".appearance-panel header p");
     expect(styles).toContain(':root[data-theme="light"]');
     expect(styles).toContain(':root[data-font="serif"]');
