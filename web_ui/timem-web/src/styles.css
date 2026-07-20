@@ -68,6 +68,7 @@ button:disabled { cursor: not-allowed; }
 .turn-work-scroll .inline-decision { max-width: none; margin: 8px 0; }
 .turn-new-updates { position: absolute; z-index: 2; right: 12px; bottom: 10px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #40616c; border-radius: 999px; padding: 6px 10px; background: #17303a; color: #cce9e4; box-shadow: 0 5px 18px #0008; font-size: 11px; font-weight: 700; }
 .turn-new-updates:hover { border-color: #62a89d; background: #1d3c43; }
+.turn-new-updates:focus-visible, .scroll-to-bottom:focus-visible { outline: 2px solid #4d9a91; outline-offset: 2px; }
 .turn-final-delivery { margin-top: 15px; padding: 2px 2px 0; }
 .turn-final-delivery > .message-label { color: #79cbb9; }
 .turn-final-delivery > .message-content { color: #e6edf4; font-size: var(--content-size); line-height: 1.68; }
