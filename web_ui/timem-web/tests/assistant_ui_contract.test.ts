@@ -41,7 +41,8 @@ describe("assistant-ui thread integration", () => {
 
   it("keeps the composer usable on narrow screens while stop and tool buttons are visible", () => {
     expect(styles).toContain("@media (max-width: 520px)");
-    expect(styles).toContain(".composer-actions > span { display: none; }");
+    expect(styles).toContain(".composer-actions { align-items: flex-start; gap: 8px; justify-content: space-between; }");
+    expect(styles).toContain(".composer-actions > span { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
     expect(styles).toContain(".composer-buttons { width: 100%; flex-wrap: wrap; justify-content: flex-end; }");
     expect(styles).toContain(".attachment-strip { align-items: stretch; }");
     expect(styles).toContain(".pending-attachment { width: 100%; max-width: none; }");

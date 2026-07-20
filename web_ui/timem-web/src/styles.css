@@ -650,8 +650,8 @@ button:disabled { cursor: not-allowed; }
 }
 
 @media (max-width: 520px) {
-  .composer-actions { justify-content: flex-end; }
-  .composer-actions > span { display: none; }
+  .composer-actions { align-items: flex-start; gap: 8px; justify-content: space-between; }
+  .composer-actions > span { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-buttons { width: 100%; flex-wrap: wrap; justify-content: flex-end; }
   .stop-button { padding-inline: 8px; }
   .attachment-strip { align-items: stretch; }
