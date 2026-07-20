@@ -1124,7 +1124,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain("animation: none;");
   });
 
-  it("keeps working-turn input visually close to normal input while naming supplement behavior", () => {
+  it("keeps working-turn input visually consistent with a normal send", () => {
     expect(source).toContain('placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? sessionInteractionLockReason : activeSession.state === "working" ? "继续输入…"');
     expect(source).toContain('"Ask Timem to investigate, write, or work with you."');
     expect(source).not.toContain("Ask Timem anything about this workspace");
