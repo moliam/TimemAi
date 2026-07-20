@@ -668,7 +668,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label="Current task token usage"');
     expect(source).toContain('aria-label="Context usage"');
     expect(source).toContain('role="status" aria-live="polite"');
-    expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`}');
+    expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
     expect(source).toContain('title="Scroll to latest work update"');
     expect(source).toContain('aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`}');
     expect(source).toContain("!turn.final_answer && turn.completion");
