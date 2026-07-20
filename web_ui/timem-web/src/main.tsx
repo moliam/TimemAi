@@ -652,7 +652,7 @@ function TimemApp() {
           <span className="header-model" title={headerModelLabel}>{headerModelLabel}</span>
           <div className="header-actions">
             <button type="button" title="Sessions" aria-label="Sessions" className="icon-button mobile-session-button" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
-            <button type="button" title="Appearance" aria-label="Appearance" className={`icon-button ${showAppearance ? "selected" : ""}`} onClick={() => { setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible); }}><Palette size={17}/></button>
+            <button type="button" title="Appearance" aria-label="Appearance" className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible); }}><Palette size={17}/></button>
             <button type="button" ref={runtimeButtonRef} title="Runtime information" aria-label="Runtime information" className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} onClick={() => { setShowAppearance(false); setShowActivity(false); setShowRuntime((visible) => !visible); }}><Settings2 size={17}/></button>
             <button type="button" title="Session tools and activity" aria-label="Session tools and activity" className={`icon-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowActivity((visible) => !visible); }}><PanelRight size={17}/></button>
           </div>
@@ -1360,7 +1360,7 @@ function AppearancePanel({ appearance, onChange, onClose }: { appearance: Appear
   const update = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onChange({ ...appearance, [key]: value });
   return <>
     <div className="appearance-dismiss" aria-hidden="true" onClick={onClose}/>
-    <section className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}>
+    <section id="appearance-panel" className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}>
       <header><div><span className="eyebrow">APPEARANCE</span><h2>Reading preferences</h2></div><button type="button" className="icon-button" aria-label="Close appearance settings" onClick={onClose}><X size={16}/></button></header>
       <fieldset><legend>Theme</legend><div className="segmented-control">{(["dark", "light"] as const).map((theme) => <button type="button" className={appearance.theme === theme ? "active" : ""} aria-pressed={appearance.theme === theme} key={theme} onClick={() => update("theme", theme)}>{theme === "dark" ? "Dark" : "Light"}</button>)}</div></fieldset>
       <fieldset><legend>Font</legend><div className="appearance-options">{(["system", "serif", "mono"] as const).map((font) => <button type="button" className={`${font}-sample ${appearance.font === font ? "active" : ""}`} aria-pressed={appearance.font === font} key={font} onClick={() => update("font", font)}>{font === "system" ? "System" : font === "serif" ? "Serif" : "Mono"}<small>Aa</small></button>)}</div></fieldset>
