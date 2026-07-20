@@ -540,7 +540,7 @@ button:disabled { cursor: not-allowed; }
 .tool-activity summary::-webkit-details-marker { display: none; }
 .tool-activity summary:hover { background: transparent; }
 .tool-activity summary:focus { outline: none; }
-.tool-activity summary:focus-visible { background: transparent; box-shadow: none; }
+.tool-activity summary:focus-visible { background: #1f1f1f; box-shadow: inset 2px 0 0 #4d8fd7; }
 .tool-activity summary:hover b,
 .tool-activity summary:focus-visible b { color: #ddd; }
 .tool-activity-icon { height: 16px; display: grid; place-items: center; color: #858585; }
@@ -618,7 +618,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .turn-work-item.notice .activity-mark { background: transparent; color: #777; }
 :root[data-theme="light"] .turn-work-detail { color: #666; }
 :root[data-theme="light"] .tool-activity summary:hover,
-:root[data-theme="light"] .tool-activity summary:focus-visible { background: transparent; box-shadow: none; }
+:root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }
 :root[data-theme="light"] .tool-activity summary:hover b,
 :root[data-theme="light"] .tool-activity summary:focus-visible b { color: #202020; }
 :root[data-theme="light"] .tool-activity b { color: #4c4c4c; }
