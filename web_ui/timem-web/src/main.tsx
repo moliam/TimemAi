@@ -92,6 +92,7 @@ function TimemApp() {
   const appearancePanelRef = useRef<HTMLElement | null>(null);
   const runtimeButtonRef = useRef<HTMLButtonElement | null>(null);
   const runtimePanelRef = useRef<HTMLElement | null>(null);
+  const mobileSessionButtonRef = useRef<HTMLButtonElement | null>(null);
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const sidePanelButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
@@ -125,6 +126,10 @@ function TimemApp() {
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
     setShowAppearance(false);
     if (restoreFocus) appearanceButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeMobileSidebar = useCallback((restoreFocus = true) => {
+    setShowMobileSessions(false);
+    if (restoreFocus) mobileSessionButtonRef.current?.focus({ preventScroll: true });
   }, []);
 
   useEffect(() => {
@@ -164,11 +169,11 @@ function TimemApp() {
     if (!showMobileSessions) return;
     mobileSidebarRef.current?.focus({ preventScroll: true });
     const dismissOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowMobileSessions(false);
+      if (event.key === "Escape") closeMobileSidebar();
     };
     document.addEventListener("keydown", dismissOnEscape);
     return () => document.removeEventListener("keydown", dismissOnEscape);
-  }, [showMobileSessions]);
+  }, [closeMobileSidebar, showMobileSessions]);
 
   useEffect(() => {
     if (!showAppearance) return;
@@ -651,10 +656,10 @@ function TimemApp() {
   const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="app-shell">
-      {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => setShowMobileSessions(false)}/>}
+      {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
-        <div className="brand"><Sparkles size={18}/><span>Timem</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => setShowMobileSessions(false)}><X size={17}/></button></div>
-        <button type="button" className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); setShowMobileSessions(false); }}><Plus size={16}/> New session</button>
+        <div className="brand"><Sparkles size={18}/><span>Timem</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
+        <button type="button" className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={pendingMemSwitch} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
           {sessions.map((session) => {
             const renamingSession = pendingRenameSessionIds.has(session.session_id);
@@ -676,7 +681,7 @@ function TimemApp() {
                 if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); }
                 if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }
               }}
-            /> : <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={pendingMemSwitch ? "Mem switch is in progress" : session.current_dir} aria-label={pendingMemSwitch ? `${session.display_name} locked while switching mem` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={pendingMemSwitch} onClick={() => { setActiveSessionId(session.session_id); setShowMobileSessions(false); }}>
+            /> : <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={pendingMemSwitch ? "Mem switch is in progress" : session.current_dir} aria-label={pendingMemSwitch ? `${session.display_name} locked while switching mem` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={pendingMemSwitch} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
               {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name}>{session.display_name}</span><span className="session-cwd" title={session.current_dir}>{tailPath(session.current_dir)}</span>{renamingSession ? <span className="session-pending">Saving name...</span> : session.runtime_profile && <span className="session-profile" title={`${session.runtime_profile.provider}:${session.runtime_profile.model}`}>{session.runtime_profile.provider}:{session.runtime_profile.model}</span>}</span><span className="sr-only">Session state: {session.state}</span>
             </button>}
             {renamingSessionId !== session.session_id && <button type="button" className="session-rename" title={`Rename ${session.display_name}`} aria-label={`Rename ${session.display_name}`} disabled={pendingMemSwitch || renamingSession} onClick={() => beginRename(session)}><Pencil size={13}/></button>}
@@ -692,7 +697,7 @@ function TimemApp() {
         <header className="chat-header">
           <span className="header-model" title={headerModelLabel}>{headerModelLabel}</span>
           <div className="header-actions">
-            <button type="button" title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
+            <button type="button" ref={mobileSessionButtonRef} title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
             <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true); }}><Palette size={17}/></button>
             <button type="button" ref={runtimeButtonRef} title={runtimeLabel} aria-label={runtimeLabel} className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowActivity(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><Settings2 size={17}/></button>
             <button type="button" ref={sidePanelButtonRef} title={sidePanelLabel} aria-label={sidePanelLabel} className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); if (showActivity) closeSidePanel(); else setShowActivity(true); }}><PanelRight size={17}/>{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}</button>
