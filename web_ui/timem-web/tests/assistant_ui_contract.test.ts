@@ -982,15 +982,25 @@ describe("assistant-ui thread integration", () => {
 
   it("groups each task into user input, bounded process, and separate final delivery", () => {
     expect(source).toContain('className="turn-user-frame"');
-    expect(source).toContain('className={`turn-assistant-frame ${turn.state}`}');
+    expect(source).toContain('className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}');
     expect(source).toContain('sessionId={activeSession?.session_id ?? ""}');
     expect(source).toContain('function TurnInteraction({ sessionId, turn, decisions');
     expect(source).toContain('<TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>');
     expect(source).not.toContain('<TurnEventView key={event.event_id} event={event} sessionId={turn.turn_id}/>');
     expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`}');
     expect(source).toContain('className="turn-final-delivery"');
+    expect(source).toContain("const [showCompletedWork, setShowCompletedWork] = useState(true);");
+    expect(source).toContain('const canCollapseCompletedWork = turn.state !== "working" && !!turn.final_answer;');
+    expect(source).toContain('const showWorkStream = !canCollapseCompletedWork || showCompletedWork;');
+    expect(source).toContain('className="work-collapse-toggle"');
+    expect(source).toContain('aria-expanded={showCompletedWork}');
+    expect(source).toContain('onClick={() => setShowCompletedWork((visible) => !visible)}');
+    expect(source).toContain('{showWorkStream && <div className={`turn-work-scroll');
+    expect(source).toContain('showWorkStream && pendingUpdates > 0');
     expect(styles).toContain(".turn-work-scroll { max-height:");
     expect(styles).toContain(".turn-work-scroll.has-pending-updates");
+    expect(styles).toContain(".work-collapse-toggle");
+    expect(styles).toContain(".turn-assistant-frame.collapsed-work");
     expect(styles).toContain("overflow-y: auto;");
     expect(source).toContain("followLatest.current = remaining < 36");
     expect(source).toContain('className="turn-new-updates"');
