@@ -409,6 +409,8 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".toolrepo-item.renaming-tool");
     expect(styles).toContain(".toolrepo-edit:disabled");
     expect(styles).toContain(".toolrepo-item.loading-detail .toolrepo-item-main small");
+    expect(styles).toContain(".toolrepo-item.selected .toolrepo-open");
+    expect(styles).toContain(".toolrepo-item.selected .toolrepo-edit");
     expect(styles).toContain(".toolrepo-controls label button");
     expect(styles).toContain(".toolrepo-controls label.searching");
     expect(styles).toContain(".toolrepo-search-pending");

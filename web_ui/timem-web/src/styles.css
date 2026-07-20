@@ -770,7 +770,7 @@ button:disabled { cursor: not-allowed; }
 .toolrepo-item.loading-detail .toolrepo-item-main small { color: #8fb9d5; }
 .toolrepo-item.renaming-tool .toolrepo-item-main small { color: #9ac7a8; }
 .toolrepo-open, .toolrepo-edit { width: 25px; height: 25px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777; opacity: 0; }
-.toolrepo-item:hover .toolrepo-open, .toolrepo-item:hover .toolrepo-edit, .toolrepo-open:focus-visible, .toolrepo-edit:focus-visible { opacity: 1; }
+.toolrepo-item:hover .toolrepo-open, .toolrepo-item:hover .toolrepo-edit, .toolrepo-item.selected .toolrepo-open, .toolrepo-item.selected .toolrepo-edit, .toolrepo-open:focus-visible, .toolrepo-edit:focus-visible { opacity: 1; }
 .toolrepo-open:hover, .toolrepo-edit:hover { color: #ccc; background: #343434; }
 .toolrepo-open:disabled, .toolrepo-edit:disabled { opacity: .55; color: #69806f; }
 .toolrepo-rename { margin: 4px; border: 1px solid #4c87c6; border-radius: 5px; padding: 5px 6px; background: #202b37; }
