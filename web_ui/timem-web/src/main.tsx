@@ -95,6 +95,7 @@ function TimemApp() {
   const mobileSessionButtonRef = useRef<HTMLButtonElement | null>(null);
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const sidePanelButtonRef = useRef<HTMLButtonElement | null>(null);
+  const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   const activeMessages = activeSession?.messages ?? EMPTY_CHAT_MESSAGES;
   const pushActivity = useCallback((activity: Activity) => {
@@ -130,6 +131,10 @@ function TimemApp() {
   const closeMobileSidebar = useCallback((restoreFocus = true) => {
     setShowMobileSessions(false);
     if (restoreFocus) mobileSessionButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeMemSwitchDialog = useCallback((restoreFocus = true) => {
+    setShowMemSwitch(false);
+    if (restoreFocus) memSwitchButtonRef.current?.focus({ preventScroll: true });
   }, []);
 
   useEffect(() => {
@@ -690,7 +695,7 @@ function TimemApp() {
         </nav>
         <div className="sidebar-footer">
           <div className="connection-row" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span className="connection-label">{connectionLabel}</span></div>
-          <div className="mem-row" title={server?.mem?.memory_dir ?? ""}><span>mem</span><code>{server?.mem?.space ?? "…"}</code><button type="button" className="mem-switch-button" title={memSwitchTitle} aria-label={memSwitchTitle} disabled={!connected || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}>{pendingMemSwitch ? "Switching…" : "Switch"}</button></div>
+          <div className="mem-row" title={server?.mem?.memory_dir ?? ""}><span>mem</span><code>{server?.mem?.space ?? "…"}</code><button type="button" ref={memSwitchButtonRef} className="mem-switch-button" title={memSwitchTitle} aria-label={memSwitchTitle} disabled={!connected || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}>{pendingMemSwitch ? "Switching…" : "Switch"}</button></div>
         </div>
       </aside>
       <main className="chat-shell">
@@ -833,12 +838,12 @@ function TimemApp() {
           reportUiError("Create session failed", "Reconnect to Timem Web before creating a new session.", "system");
         }
       }} />}
-      {showMemSwitch && <MemSwitchDialog current={server?.mem?.space ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) setShowMemSwitch(false); }} onSwitch={(space) => {
+      {showMemSwitch && <MemSwitchDialog current={server?.mem?.space ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }} onSwitch={(space) => {
         setRenamingSessionId("");
         setRenameDraft("");
         setPendingMemSwitch(true);
         if (sendCommand({ type: "mem_switch", space })) {
-          setShowMemSwitch(false);
+          closeMemSwitchDialog();
         } else {
           setPendingMemSwitch(false);
           reportUiError("Mem switch failed", "Reconnect to Timem Web before switching memory space.", "system");
