@@ -1022,7 +1022,22 @@ function SessionSidePanel({ tab, onTabChange, onClose, session, activities, sear
         const renamingTool = pendingToolRenameIds.has(tool.tool_id);
         const expanded = selectedTool?.summary.tool_id === tool.tool_id;
         const toolToggleLabel = expanded ? `收起 ${tool.name} 详情` : `展开 ${tool.name} 详情`;
-        return <div className={`toolrepo-item ${selectedTool?.summary.tool_id === tool.tool_id ? "selected" : ""} ${loadingDetail ? "loading-detail" : ""} ${renamingTool ? "renaming-tool" : ""}`} role="treeitem" aria-selected={selectedTool?.summary.tool_id === tool.tool_id} aria-expanded={expanded} aria-busy={loadingDetail || renamingTool || undefined} key={tool.tool_id} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ toolId: tool.tool_id, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 76)) }); }}>
+        return <div className={`toolrepo-item ${selectedTool?.summary.tool_id === tool.tool_id ? "selected" : ""} ${loadingDetail ? "loading-detail" : ""} ${renamingTool ? "renaming-tool" : ""}`} role="treeitem" tabIndex={0} aria-selected={selectedTool?.summary.tool_id === tool.tool_id} aria-expanded={expanded} aria-busy={loadingDetail || renamingTool || undefined} key={tool.tool_id} onKeyDown={(event) => {
+          if (event.target instanceof HTMLElement && (event.target.closest("button, input, select, textarea") || event.target !== event.currentTarget)) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            if (expanded) onCollapseTool(); else onSelectTool(tool.tool_id);
+          } else if (event.key === "ArrowRight" && !expanded) {
+            event.preventDefault();
+            onSelectTool(tool.tool_id);
+          } else if (event.key === "ArrowLeft" && expanded) {
+            event.preventDefault();
+            onCollapseTool();
+          } else if (event.key === "Escape" && expanded) {
+            event.preventDefault();
+            onCollapseTool();
+          }
+        }} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ toolId: tool.tool_id, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 76)) }); }}>
         <button type="button" className="toolrepo-item-main" title={`${toolToggleLabel} · ${tool.language} · ${tool.tool_type}`} aria-label={toolToggleLabel} aria-expanded={expanded} onClick={() => { if (expanded) onCollapseTool(); else onSelectTool(tool.tool_id); }}><ChevronRight size={13}/><span><strong>{tool.name}</strong><small>{renamingTool ? "Renaming..." : loadingDetail ? "Loading details..." : `${tool.language} · ${tool.tool_type}`}</small><em className="toolrepo-toggle-state">{expanded ? "收起" : "展开"}</em></span></button>
         <button type="button" className="toolrepo-open" title={`Open ${tool.name} directory in terminal`} aria-label={`Open ${tool.name} directory in terminal`} onClick={() => onOpenTerminal(tool.tool_id)}><Terminal size={12}/></button>
         {renameToolId === tool.tool_id ? <input className="toolrepo-rename" autoFocus value={renameValue} aria-label={`Rename ${tool.name}`} disabled={renamingTool} onChange={(event) => setRenameValue(event.target.value)} onBlur={() => finishToolRename(tool)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishToolRename(tool); } if (event.key === "Escape") { event.preventDefault(); setRenameToolId(""); setRenameValue(""); } }}/> : <button type="button" className="toolrepo-edit" title={renamingTool ? `Renaming ${tool.name}` : `Rename ${tool.name}`} aria-label={renamingTool ? `Renaming ${tool.name}` : `Rename ${tool.name}`} disabled={renamingTool} onClick={() => { setRenameToolId(tool.tool_id); setRenameValue(tool.name); }}><Pencil size={12}/></button>}

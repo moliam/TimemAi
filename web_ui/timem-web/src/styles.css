@@ -762,6 +762,7 @@ button:disabled { cursor: not-allowed; }
 .toolrepo-browser { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .toolrepo-list { min-height: 0; flex: 1 1 auto; display: grid; align-content: start; overflow: auto; padding: 6px; }
 .toolrepo-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 26px 26px; align-items: center; border-radius: 6px; }
+.toolrepo-item:focus-visible { outline: 2px solid #4d8fd7; outline-offset: -2px; }
 .toolrepo-item:hover { background: #252525; }
 .toolrepo-item.selected { background: #27394c; }
 .toolrepo-item.loading-detail { background: #202b34; }

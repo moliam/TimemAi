@@ -405,7 +405,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label={`Stop viewing ${pendingTool.name} details`}');
     expect(source).toContain('className="toolrepo-detail-loading" role="status" aria-live="polite" aria-label={pendingToolDetailLabel}');
     expect(source).toContain('Reading directory tree...');
-    expect(source).toContain('role="treeitem" aria-selected={selectedTool?.summary.tool_id === tool.tool_id} aria-expanded={expanded}');
+    expect(source).toContain('role="treeitem" tabIndex={0} aria-selected={selectedTool?.summary.tool_id === tool.tool_id} aria-expanded={expanded}');
     expect(source).toContain('setPendingToolDetailKey(`${activeSession.session_id}:${toolId}`);');
     expect(source).toContain('setPendingToolDetailKey((key) => key === `${event.session_id}:${event.detail.summary.tool_id}` ? "" : key);');
     expect(source).toContain("Tool detail failed");
@@ -520,6 +520,16 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(':root[data-theme="light"] .toolrepo-item.loading-detail');
     expect(styles).toContain(':root[data-theme="light"] .toolrepo-files > div');
     expect(styles).not.toContain(".toolrepo-readme");
+  });
+
+  it("makes ToolRepo tree items keyboard navigable without hijacking nested controls", () => {
+    expect(source).toContain('role="treeitem" tabIndex={0}');
+    expect(source).toContain('event.target.closest("button, input, select, textarea")');
+    expect(source).toContain('event.key === "Enter" || event.key === " "');
+    expect(source).toContain('event.key === "ArrowRight" && !expanded');
+    expect(source).toContain('event.key === "ArrowLeft" && expanded');
+    expect(source).toContain('event.key === "Escape" && expanded');
+    expect(styles).toContain(".toolrepo-item:focus-visible");
   });
 
   it("shows a quiet empty state for the activity tab", () => {
