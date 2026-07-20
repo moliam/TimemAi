@@ -1265,10 +1265,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
     <span className="tool-activity-status">{humanizeToolStatus(status)}</span>
     {invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}
   </>;
-  if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`}>
+  if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`} aria-busy={running || undefined}>
     {summaryContent}
   </div>;
-  return <details className={`tool-activity ${running ? "running" : "settled"}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details className={`tool-activity ${running ? "running" : "settled"}`} aria-busy={running || undefined} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary title={open ? "收起工具详情" : "展开工具详情"} aria-label={summaryLabel}>
       {summaryContent}
       <ChevronRight className="tool-activity-chevron" size={14}/>
