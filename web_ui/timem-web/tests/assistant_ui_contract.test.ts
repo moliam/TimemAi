@@ -687,7 +687,7 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("announces runtime connection state and explains mem switch availability", () => {
-    expect(source).toContain('const connectionLabel = connected ? "Local runtime connected" : "Reconnecting to local runtime…";');
+    expect(source).toContain('const connectionLabel = connected ? "Runtime connected" : "Reconnecting to runtime…";');
     expect(source).toContain('const memSwitchTitle = !connected ? "Reconnect before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";');
     expect(source).toContain('className="connection-row" role="status" aria-live="polite" title={connectionLabel}');
     expect(source).toContain('className="connection-label">{connectionLabel}</span>');

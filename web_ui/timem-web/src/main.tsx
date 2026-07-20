@@ -607,7 +607,7 @@ function TimemApp() {
   const visibleError = visibleErrors[0];
   const visibleErrorText = visibleError ? `${visibleError.title}${visibleError.detail ? ` · ${visibleError.detail}` : ""}` : "";
   const hiddenErrorCount = Math.max(0, visibleErrors.length - 1);
-  const connectionLabel = connected ? "Local runtime connected" : "Reconnecting to local runtime…";
+  const connectionLabel = connected ? "Runtime connected" : "Reconnecting to runtime…";
   const memSwitchTitle = !connected ? "Reconnect before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";
   const headerModelLabel = activeSession?.runtime_profile ? `${activeSession.runtime_profile.provider}:${activeSession.runtime_profile.model}` : "";
   return <AssistantRuntimeProvider runtime={runtime}>
