@@ -869,8 +869,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={`Use ${size === "medium" ? "default" : size} text size`}');
     expect(source).toContain('if (!showAppearance) return;');
     expect(source).toContain('if (event.key === "Escape") setShowAppearance(false)');
-    expect(source).toContain('id="appearance-panel" className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}');
+    expect(source).toContain('const descriptionId = "appearance-panel-description";');
+    expect(source).toContain('id="appearance-panel" className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId}');
+    expect(source).toContain('<p id={descriptionId}>Adjust theme, font, and message text size for this browser.</p>');
     expect(source).toContain('setShowRuntime(false); setShowActivity(false); setShowAppearance((visible) => !visible);');
+    expect(styles).toContain(".appearance-panel header p");
     expect(styles).toContain(':root[data-theme="light"]');
     expect(styles).toContain(':root[data-font="serif"]');
     expect(styles).toContain(':root[data-text-size="large"]');
