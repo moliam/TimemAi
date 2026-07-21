@@ -198,6 +198,18 @@ for file in resources/capabilities/tools/*.yaml; do
   fi
 done
 
+if search_lines_regex '"(action|args)"[[:space:]]*:' README.md; then
+  echo "README action examples must use current single-key tool objects, not action/args:" >&2
+  search_lines_regex '"(action|args)"[[:space:]]*:' README.md >&2
+  exit 1
+fi
+
+if search_regex '(^|[^<])!\[CDATA\[' resources/protocol/xml; then
+  echo "XML protocol docs must spell CDATA as <![CDATA[, not ![CDATA[:" >&2
+  search_lines_regex '(^|[^<])!\[CDATA\[' resources/protocol/xml >&2
+  exit 1
+fi
+
 legacy_action_input_hits="$(
   search_lines_regex 'next_actions.*"input"[[:space:]]*:' \
     agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs \
