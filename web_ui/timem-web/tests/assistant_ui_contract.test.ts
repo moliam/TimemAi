@@ -936,6 +936,14 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("if (restoreFocus) memSwitchButtonRef.current?.focus({ preventScroll: true });");
     expect(source).toContain('className="connection-row" role="status" aria-live="polite" title={connectionLabel}');
     expect(source).toContain('className="connection-label">{connectionLabel}</span>');
+    expect(source).toContain("const runtimeDisconnected = runtimeEverConnected && !connected;");
+    expect(source).toContain('const runtimeDisconnectedTitle = "Runtime exited";');
+    expect(source).toContain('const runtimeDisconnectedDetail = "Restart timem-web and reopen the authenticated URL to continue.";');
+    expect(source).toContain('className="runtime-disconnect-banner" role="alert"');
+    expect(source).toContain("<strong>{runtimeDisconnectedTitle}</strong>");
+    expect(source).toContain("<span>{runtimeDisconnectedDetail}</span>");
+    expect(styles).toContain(".runtime-disconnect-banner");
+    expect(styles).toContain(":root[data-theme=\"light\"] .runtime-disconnect-banner");
     expect(source).toContain('ref={memSwitchButtonRef} className="mem-switch-button"');
     expect(source).toContain('title={memSwitchTitle} aria-label={memSwitchTitle}');
     expect(styles).toContain(".connection-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
@@ -1389,7 +1397,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(':root[data-theme="light"] .host-error-banner em');
     expect(styles).toContain(':root[data-theme="light"] .host-error-dismiss-all');
     expect(styles).toContain(':root[data-theme="light"] .host-error-details');
-    expect(styles).toContain("@media (max-width: 720px) { .host-error-banner { align-items: flex-start; flex-wrap: wrap;");
+    expect(styles).toContain("@media (max-width: 720px) { .host-error-banner, .runtime-disconnect-banner { align-items: flex-start; flex-wrap: wrap;");
     expect(styles).toContain(".host-error-actions { width: 100%; justify-content: flex-end;");
   });
 });

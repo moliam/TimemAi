@@ -462,6 +462,9 @@ button:disabled { cursor: not-allowed; }
 }
 @keyframes session-working-glow-light { 50% { background: #e8eee9; box-shadow: inset 2px 0 #b58535, 0 0 0 1px #b5853522; } }
 .host-error-banner { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 26px 0; padding: 8px 10px 8px 12px; border: 1px solid #6d3d3b; border-left: 3px solid #ef7c78; border-radius: 5px; background: #2c1d1d; color: #efc7c5; font-size: 12px; line-height: 1.4; }
+.runtime-disconnect-banner { flex: none; display: flex; align-items: center; gap: 10px; margin: 10px 26px 0; padding: 8px 12px; border: 1px solid #51472c; border-left: 3px solid #c7a646; border-radius: 5px; background: #252116; color: #e9d99b; font-size: 12px; line-height: 1.4; }
+.runtime-disconnect-banner strong { color: #ffe7a3; font-weight: 750; }
+.runtime-disconnect-banner span { min-width: 0; overflow-wrap: anywhere; }
 .host-error-text { flex: 1 1 auto; min-width: 0; display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .host-error-detail { color: inherit; }
 .host-error-banner strong { color: #ffd8d6; }
@@ -473,13 +476,15 @@ button:disabled { cursor: not-allowed; }
 .host-error-dismiss-all:hover { background: #613431; color: #fff0ef; }
 .host-error-details:hover { background: #4c382d; color: #ffe0bd; }
 :root[data-theme="light"] .host-error-banner { border-color: #dfaaa7; border-left-color: #c94f4a; background: #fff1f0; color: #7a3733; }
+:root[data-theme="light"] .runtime-disconnect-banner { border-color: #e1c978; border-left-color: #af8418; background: #fff9df; color: #6d5517; }
+:root[data-theme="light"] .runtime-disconnect-banner strong { color: #5c4711; }
 :root[data-theme="light"] .host-error-banner strong { color: #742c28; }
 :root[data-theme="light"] .host-error-banner em { color: #9b443d; }
 :root[data-theme="light"] .host-error-dismiss-all { background: #f6d9d7; color: #7d302c; }
 :root[data-theme="light"] .host-error-dismiss-all:hover { background: #efcac7; color: #5d201d; }
 :root[data-theme="light"] .host-error-details { background: #f4e4d5; color: #7a4d22; }
 :root[data-theme="light"] .host-error-details:hover { background: #ebd7c3; color: #563615; }
-@media (max-width: 720px) { .host-error-banner { align-items: flex-start; flex-wrap: wrap; margin: 9px 17px 0; }.host-error-actions { width: 100%; justify-content: flex-end; } }
+@media (max-width: 720px) { .host-error-banner, .runtime-disconnect-banner { align-items: flex-start; flex-wrap: wrap; margin: 9px 17px 0; }.host-error-actions { width: 100%; justify-content: flex-end; } }
 
 /* ChatGPT-inspired conversation surface: content leads, runtime chrome recedes. */
 .app-shell,

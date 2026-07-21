@@ -709,6 +709,9 @@ function TimemApp() {
   const hiddenErrorCount = Math.max(0, visibleErrorCount - 1);
   const errorDetailsLabel = visibleErrorCount === 1 ? "Show this error in Activity" : `Show ${visibleErrorCount} errors in Activity`;
   const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";
+  const runtimeDisconnected = runtimeEverConnected && !connected;
+  const runtimeDisconnectedTitle = "Runtime exited";
+  const runtimeDisconnectedDetail = "Restart timem-web and reopen the authenticated URL to continue.";
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
   const connectionLabel = !connected && runtimeEverConnected ? "Runtime exited. Restart timem-web." : !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";
@@ -769,6 +772,10 @@ function TimemApp() {
           </div>
         </header>
         {showAppearance && <AppearancePanel panelRef={appearancePanelRef} appearance={appearance} onChange={setAppearance} onClose={closeAppearancePanel}/>}
+        {runtimeDisconnected && <div className="runtime-disconnect-banner" role="alert">
+          <strong>{runtimeDisconnectedTitle}</strong>
+          <span>{runtimeDisconnectedDetail}</span>
+        </div>}
         {visibleError && <div className="host-error-banner" role="alert">
           <span className="host-error-text" title={visibleErrorText}><strong>{visibleError.title}</strong>{visibleError.detail && <span className="host-error-detail"> · {visibleError.detail}</span>}{hiddenErrorCount > 0 && <em>{hiddenErrorCount} more hidden error{hiddenErrorCount === 1 ? "" : "s"}</em>}</span>
           <div className="host-error-actions">
