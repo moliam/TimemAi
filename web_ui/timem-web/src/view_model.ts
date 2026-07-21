@@ -23,15 +23,19 @@ export function tailPath(path: string, maxChars = 28) {
   return `…${path.slice(-(Math.max(2, maxChars) - 1))}`;
 }
 
-export function runtimeConnectionLabel(connected: boolean, snapshotReady: boolean, runtimeEverConnected: boolean) {
-  if (!connected && runtimeEverConnected) return "Runtime exited. Restart timem-web.";
-  if (!connected) return "Reconnecting to runtime…";
+export function runtimeConnectionLabel(connected: boolean, snapshotReady: boolean, runtimeEverConnected: boolean, reconnectAttempt = 0) {
+  if (!connected && runtimeEverConnected) {
+    return reconnectAttempt >= 3 ? "Runtime unavailable. Restart timem-web." : "Connection lost. Reconnecting…";
+  }
+  if (!connected) return "Connecting to runtime…";
   return snapshotReady ? "Runtime connected" : "Syncing runtime…";
 }
 
-export function sessionInteractionLockReason(pendingMemSwitch: boolean, connected: boolean, runtimeEverConnected: boolean) {
+export function sessionInteractionLockReason(pendingMemSwitch: boolean, connected: boolean, runtimeEverConnected: boolean, reconnectAttempt = 0) {
   if (pendingMemSwitch) return "Mem switch is in progress";
-  if (!connected && runtimeEverConnected) return "Runtime exited. Restart timem-web.";
+  if (!connected && runtimeEverConnected) {
+    return reconnectAttempt >= 3 ? "Runtime unavailable. Restart timem-web." : "Connection lost. Reconnecting…";
+  }
   return "Waiting for runtime snapshot…";
 }
 
