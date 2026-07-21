@@ -1197,6 +1197,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const TOKEN_STORAGE_KEY = "timem-web-access-token";');
     expect(source).toContain("window.sessionStorage.setItem(TOKEN_STORAGE_KEY, query)");
     expect(source).toContain("window.history.replaceState");
+    expect(source).toContain('const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";');
+    expect(source).toContain('new WebSocket(`${scheme}://${window.location.host}/ws${tokenQuery}`)');
+    expect(source).not.toContain("Access token missing");
+    expect(source).not.toContain("if (!token) {\n      setActivities");
   });
 
   it("does not create an optimistic ghost turn when the WebSocket send fails", () => {
@@ -1228,7 +1232,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("Remove attachment failed");
     expect(source).toContain("Reconnect to Timem Web before removing this attachment.");
     expect(source).toContain("File upload failed");
-    expect(source).toContain("Open Timem Web using the authenticated URL before attaching files.");
+    expect(source).toContain("const params = new URLSearchParams({ session_id: activeSession.session_id });");
+    expect(source).toContain('if (token) params.set("token", token);');
     expect(source).toContain("Runtime update failed");
     expect(source).toContain("Reconnect to Timem Web before applying runtime configuration.");
     expect(source).toContain("Decision reply failed");

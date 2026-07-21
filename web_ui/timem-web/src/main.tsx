@@ -552,17 +552,14 @@ function TimemApp() {
 
   useEffect(() => {
     const token = queryToken();
-    if (!token) {
-      setActivities([{ id: crypto.randomUUID(), sessionId: "system", tone: "error", title: "Access token missing", detail: "Open Timem Web using the authenticated URL printed by the local host.", createdAt: Date.now() }]);
-      return;
-    }
     let stopped = false;
     let retryTimer: number | undefined;
     let retryAttempt = 0;
     const connect = () => {
       if (stopped) return;
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${scheme}://${window.location.host}/ws?token=${encodeURIComponent(token)}`);
+      const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+      const ws = new WebSocket(`${scheme}://${window.location.host}/ws${tokenQuery}`);
       socket.current = ws;
       ws.onopen = () => { retryAttempt = 0; setConnected(true); setRuntimeEverConnected(true); setSnapshotReady(false); };
       ws.onclose = () => {
@@ -620,20 +617,12 @@ function TimemApp() {
     }
     setPendingUploadFiles((current) => ({ ...current, [activeSession.session_id]: { name: file.name, bytes: file.size } }));
     const token = queryToken();
-    if (!token) {
-      reportUiError("File upload failed", "Open Timem Web using the authenticated URL before attaching files.", activeSession.session_id);
-      removePendingKey(pendingUploadSessionIdsRef, setPendingUploadSessionIds, activeSession.session_id);
-      setPendingUploadFiles((current) => {
-        const next = { ...current };
-        delete next[activeSession.session_id];
-        return next;
-      });
-      return;
-    }
     const form = new FormData();
     form.append("file", file);
     try {
-      const response = await fetch(`/api/upload?token=${encodeURIComponent(token)}&session_id=${encodeURIComponent(activeSession.session_id)}`, { method: "POST", body: form });
+      const params = new URLSearchParams({ session_id: activeSession.session_id });
+      if (token) params.set("token", token);
+      const response = await fetch(`/api/upload?${params.toString()}`, { method: "POST", body: form });
       if (!response.ok) throw new Error((await response.json() as { error?: string }).error ?? "upload_failed");
     } catch (error) {
       const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "error", title: "File upload failed", detail: error instanceof Error ? error.message : "upload_failed", createdAt: Date.now() };
