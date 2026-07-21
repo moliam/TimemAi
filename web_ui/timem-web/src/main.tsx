@@ -555,18 +555,38 @@ function TimemApp() {
     let stopped = false;
     let retryTimer: number | undefined;
     let retryAttempt = 0;
+    let hasConnectedOnce = false;
+    let disconnectNoticeShown = false;
     const connect = () => {
       if (stopped) return;
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
       const ws = new WebSocket(`${scheme}://${window.location.host}/ws${tokenQuery}`);
       socket.current = ws;
-      ws.onopen = () => { retryAttempt = 0; setConnected(true); setRuntimeEverConnected(true); setSnapshotReady(false); };
+      ws.onopen = () => {
+        hasConnectedOnce = true;
+        disconnectNoticeShown = false;
+        retryAttempt = 0;
+        setConnected(true);
+        setRuntimeEverConnected(true);
+        setSnapshotReady(false);
+      };
       ws.onclose = () => {
         if (socket.current === ws) socket.current = null;
         setConnected(false);
         setSnapshotReady(false);
         if (!stopped) {
+          if (hasConnectedOnce && !disconnectNoticeShown) {
+            disconnectNoticeShown = true;
+            pushActivity({
+              id: crypto.randomUUID(),
+              sessionId: activeSessionIdRef.current || "system",
+              tone: "notice",
+              title: "Runtime disconnected",
+              detail: "Timem Web lost its runtime connection. If timem-web has exited, restart it and reopen the authenticated URL.",
+              createdAt: Date.now(),
+            });
+          }
           const delay = Math.min(10_000, 500 * 2 ** Math.min(retryAttempt, 5));
           retryAttempt += 1;
           retryTimer = window.setTimeout(connect, delay);
@@ -584,7 +604,7 @@ function TimemApp() {
       socket.current?.close();
       socket.current = null;
     };
-  }, [receive]);
+  }, [pushActivity, receive]);
 
   const sendText = useCallback((text: string): boolean => {
     const decision = composerSendDecision(
