@@ -712,6 +712,11 @@ function TimemApp() {
   const runtimeDisconnected = runtimeEverConnected && !connected;
   const runtimeDisconnectedTitle = "Runtime exited";
   const runtimeDisconnectedDetail = "Restart timem-web and reopen the authenticated URL to continue.";
+  const sessionInteractionLockReason = pendingMemSwitch
+    ? "Mem switch is in progress"
+    : runtimeDisconnected
+      ? "Runtime exited. Restart timem-web."
+      : "Waiting for runtime snapshot…";
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
   const connectionLabel = !connected && runtimeEverConnected ? "Runtime exited. Restart timem-web." : !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";
@@ -797,7 +802,7 @@ function TimemApp() {
           completedTurnKey={completedTurnKey}
           sessionIds={sessions.map((session) => session.session_id)}
           sessionInteractionLocked={runtimeLocked}
-          sessionInteractionLockReason={pendingMemSwitch ? "Mem switch is in progress" : "Waiting for runtime snapshot…"}
+          sessionInteractionLockReason={sessionInteractionLockReason}
           decisions={sessionDecisions}
           fileInput={fileInput}
           isCancelling={!!activeSession && cancellingSessionIdSet.has(activeSession.session_id)}

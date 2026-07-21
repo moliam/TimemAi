@@ -939,6 +939,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const runtimeDisconnected = runtimeEverConnected && !connected;");
     expect(source).toContain('const runtimeDisconnectedTitle = "Runtime exited";');
     expect(source).toContain('const runtimeDisconnectedDetail = "Restart timem-web and reopen the authenticated URL to continue.";');
+    expect(source).toContain("const sessionInteractionLockReason = pendingMemSwitch");
+    expect(source).toContain('? "Runtime exited. Restart timem-web."');
+    expect(source).toContain("sessionInteractionLockReason={sessionInteractionLockReason}");
     expect(source).toContain('className="runtime-disconnect-banner" role="alert"');
     expect(source).toContain("<strong>{runtimeDisconnectedTitle}</strong>");
     expect(source).toContain("<span>{runtimeDisconnectedDetail}</span>");
