@@ -127,7 +127,7 @@ timem-web
 and opens the authenticated local page in the default browser. Use
 `timem-web --public` only when you intentionally want it reachable through the
 machine's network address; browser entry, API, upload, and WebSocket access
-require the printed token.
+require the printed token or an authenticated browser session cookie.
 
 Run directly from source during development:
 

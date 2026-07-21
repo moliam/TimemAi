@@ -48,18 +48,35 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     let public = snapshot_for(&state, TEST_PORT);
     assert_eq!(public.server.bind_host, "0.0.0.0");
     assert!(public.server.public_access);
-    assert!(!authorized(&state, &AuthQuery { token: None }));
+    assert!(!authorized(
+        &state,
+        &AuthQuery { token: None },
+        &HeaderMap::new()
+    ));
     assert!(!authorized(
         &state,
         &AuthQuery {
             token: Some("wrong".to_string())
-        }
+        },
+        &HeaderMap::new()
     ));
     assert!(authorized(
         &state,
         &AuthQuery {
             token: Some("test".to_string())
-        }
+        },
+        &HeaderMap::new()
+    ));
+
+    let mut cookie_headers = HeaderMap::new();
+    cookie_headers.insert(
+        header::COOKIE,
+        HeaderValue::from_static("timem_web_token=test"),
+    );
+    assert!(authorized(
+        &state,
+        &AuthQuery { token: None },
+        &cookie_headers
     ));
 }
 

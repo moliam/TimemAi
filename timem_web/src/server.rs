@@ -548,9 +548,10 @@ fn apply_browser_security_headers(response: &mut Response) {
 async fn upload_file(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<UploadQuery>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    if query.token.as_deref() != Some(state.token.as_str()) {
+    if !authorized_token_or_cookie(&state, query.token.as_deref(), &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let result = async {
@@ -655,8 +656,9 @@ fn mime_for_path(path: &str) -> &'static str {
 async fn health(
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Response {
-    if !authorized(&state, &auth) {
+    if !authorized(&state, &auth, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({ "ok": true, "port": port })).into_response()
@@ -665,8 +667,9 @@ async fn health(
 async fn snapshot(
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Response {
-    if !authorized(&state, &auth) {
+    if !authorized(&state, &auth, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(snapshot_for(&state, port)).into_response()
@@ -676,15 +679,20 @@ async fn websocket(
     ws: WebSocketUpgrade,
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Response {
-    if !authorized(&state, &auth) {
+    if !authorized(&state, &auth, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.on_upgrade(move |socket| websocket_session(socket, state, port))
 }
 
-fn authorized(state: &AppState, auth: &AuthQuery) -> bool {
-    auth.token.as_deref() == Some(state.token.as_str())
+fn authorized(state: &AppState, auth: &AuthQuery, headers: &HeaderMap) -> bool {
+    authorized_token_or_cookie(state, auth.token.as_deref(), headers)
+}
+
+fn authorized_token_or_cookie(state: &AppState, token: Option<&str>, headers: &HeaderMap) -> bool {
+    token == Some(state.token.as_str()) || authorized_by_cookie(state, headers)
 }
 
 fn current_mem_state(state: &AppState) -> Result<WebMemState, String> {
