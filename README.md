@@ -11,6 +11,27 @@ management, memory, capability execution, audit logs, session history,
 provider adapters, and safety boundaries are shared. The UI layer only decides
 how to collect input and render structured core events.
 
+## 1.0: Web As A First-Class Host
+
+Version 1.0 makes the browser host a first-class Timem experience while the
+terminal remains fully supported. `timem-web` provides an authenticated local
+browser workspace built on assistant-ui with:
+
+- multiple isolated Sessions with independent model/provider profiles
+- persistent chat history, cross-host resume, paged history loading, and mem
+  space switching
+- live Thought/Action work streams, compact tool rows, inline runtime decisions,
+  active-turn supplements, cancellation, and reconnect handling
+- Markdown/GFM answers, syntax-highlighted code, attachments, context-compact
+  visualization, cwd display, and token/time telemetry
+- responsive desktop/mobile layout with theme, font, text-size, accessibility,
+  and keyboard interaction support
+
+The browser UI is a host renderer, not a second agent runtime. Provider calls,
+memory, prompt construction, tool execution, safety checks, session workers,
+and structured topics remain in `agent_core`; `timem_web` transports those
+structures over authenticated HTTP/WebSocket connections.
+
 ## What It Does
 
 - Runs local agent turns with provider adapters for OpenAI-compatible,
@@ -47,6 +68,7 @@ Start with:
 - [Capability system](docs/capability-system.md)
 - [Test strategy](docs/test-strategy.md)
 - [Feature/test ledger](docs/feature-test-management.md)
+- [Release smoke checklist](docs/manual-release-smoke.md)
 
 ## Install
 

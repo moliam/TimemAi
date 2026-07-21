@@ -14,6 +14,36 @@ Timem is now a multi-host local agent:
 - `timem-web` is a loopback-only browser host with an assistant-ui frontend.
 - Both hosts run the same `agent_core` and use the same memory/session store.
 
+### 1.0 Product Boundary
+
+Version 1.0 promotes `timem-web` from an auxiliary host to a first-class
+browser interface. The Web host owns browser transport and presentation, while
+the core remains the single source of truth for agent behavior:
+
+```text
+Browser / assistant-ui
+        |
+        | authenticated HTTP + WebSocket, structured commands/topics
+        v
+timem_web host
+        |
+        | session/context/worker routing
+        v
+agent_core
+        |
+        +-- provider transport and protocol adapters
+        +-- prompt/context and memory persistence
+        +-- capability registry and safe execution
+        +-- session workers and cross-host resume
+```
+
+The Web-specific 1.0 surface includes multi-session profiles, paged history,
+attachments, active-turn supplements, inline decisions, live action lifecycle
+rows, reconnect/runtime-exit states, context-compact visualization, Markdown
+rendering, syntax highlighting, responsive layout, and final usage telemetry.
+These are host renderings of core data; they must not be reimplemented as a
+second provider, prompt, memory, or action runtime.
+
 The split is intentional. Core owns reusable behavior and emits structured
 events. Hosts own presentation, input, and host-only ergonomics. A feature that
 affects model behavior, provider calls, memory, tools, sessions, protocol

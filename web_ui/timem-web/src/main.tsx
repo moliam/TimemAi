@@ -1375,7 +1375,7 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
     </section>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}>
       {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading"><span className={`working-chip${isToolGenTurn ? " toolgen-working" : ""}${turn.state !== "working" ? ` completed-work-title${isToolGenTurn ? " toolgen-completed-title" : ""}` : ""}`} role={turn.state === "working" ? "status" : undefined} aria-live={turn.state === "working" ? "polite" : undefined}>{turn.state === "working" ? isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/> : <CheckCheck size={11}/>} {turn.state === "working" ? isToolGenTurn ? "Generating tools…" : "working" : isToolGenTurn ? "ToolGen" : "Thought/Action"}</span>{canCollapseCompletedWork && <button type="button" className="work-collapse-toggle" title={showCompletedWork ? "Hide completed work details" : "Show completed work details"} aria-label={showCompletedWork ? "Hide completed work details" : "Show completed work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}>{showCompletedWork ? "Hide" : "Show"}</button>}</div>}
-      {showWorkStream && <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
+      {showWorkStream && <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
         const remaining = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight;
         followLatest.current = remaining < 36;
         if (followLatest.current) setPendingUpdates(0);
@@ -1468,6 +1468,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     <span className="tool-activity-icon">{activity.tool_name === "run_bash" ? <Terminal size={14}/> : <Wrench size={14}/>}</span>
     <b>{toolName}</b>
     <span className="tool-activity-status">{humanizeToolStatus(status)}</span>
+    {activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}
     {invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}
   </>;
   if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`} aria-busy={running || undefined}>

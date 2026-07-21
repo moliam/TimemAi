@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent_core"
-version = "0.9.10"
+version = "1.0.0"
 dependencies = [
  "libc",
  "rusqlite",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "timem_shell"
-version = "0.9.10"
+version = "1.0.0"
 dependencies = [
  "agent_core",
  "crossterm",
@@ -1439,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "timem_web"
-version = "0.9.10"
+version = "1.0.0"
 dependencies = [
  "agent_core",
  "axum",
