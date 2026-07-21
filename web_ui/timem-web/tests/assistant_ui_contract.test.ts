@@ -927,7 +927,8 @@ describe("assistant-ui thread integration", () => {
   it("announces runtime connection state and explains mem switch availability", () => {
     expect(source).toContain('const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);');
     expect(source).toContain('setRuntimeEverConnected(true)');
-    expect(source).toContain('const connectionLabel = !connected && runtimeEverConnected ? "Runtime exited. Restart timem-web." : !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";');
+    expect(source).toContain("const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected);");
+    expect(viewModelSource).toContain("export function runtimeConnectionLabel");
     expect(source).toContain('const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";');
     expect(source).toContain('setSnapshotReady(false)');
     expect(source).toContain('setSnapshotReady(true)');
@@ -939,8 +940,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const runtimeDisconnected = runtimeEverConnected && !connected;");
     expect(source).toContain('const runtimeDisconnectedTitle = "Runtime exited";');
     expect(source).toContain('const runtimeDisconnectedDetail = "Restart timem-web and reopen the authenticated URL to continue.";');
-    expect(source).toContain("const sessionInteractionLockReason = pendingMemSwitch");
-    expect(source).toContain('? "Runtime exited. Restart timem-web."');
+    expect(source).toContain("sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected)");
+    expect(viewModelSource).toContain('return "Runtime exited. Restart timem-web.";');
     expect(source).toContain("sessionInteractionLockReason={sessionInteractionLockReason}");
     expect(source).toContain('className="runtime-disconnect-banner" role="alert"');
     expect(source).toContain("<strong>{runtimeDisconnectedTitle}</strong>");

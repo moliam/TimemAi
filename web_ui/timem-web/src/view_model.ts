@@ -23,6 +23,18 @@ export function tailPath(path: string, maxChars = 28) {
   return `…${path.slice(-(Math.max(2, maxChars) - 1))}`;
 }
 
+export function runtimeConnectionLabel(connected: boolean, snapshotReady: boolean, runtimeEverConnected: boolean) {
+  if (!connected && runtimeEverConnected) return "Runtime exited. Restart timem-web.";
+  if (!connected) return "Reconnecting to runtime…";
+  return snapshotReady ? "Runtime connected" : "Syncing runtime…";
+}
+
+export function sessionInteractionLockReason(pendingMemSwitch: boolean, connected: boolean, runtimeEverConnected: boolean) {
+  if (pendingMemSwitch) return "Mem switch is in progress";
+  if (!connected && runtimeEverConnected) return "Runtime exited. Restart timem-web.";
+  return "Waiting for runtime snapshot…";
+}
+
 export type ComposerSendDecision =
   | { kind: "skip"; reason: "no_session" | "empty_text" | "cancelling" | "mem_switching" }
   | { kind: "send"; command: Extract<ClientCommand, { type: "turn_submit" | "turn_supplement" }>; text: string; clearDraftOnSuccess: true };
