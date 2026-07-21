@@ -51,7 +51,8 @@ button:disabled { cursor: not-allowed; }
 .work-collapse-toggle { border: 0; border-radius: 5px; padding: 4px 7px; background: transparent; color: #7f98a5; font-size: 11px; font-weight: 650; }
 .work-collapse-toggle:hover { background: #ffffff0d; color: #c6d8df; }
 .turn-assistant-frame.collapsed-work { border-left-color: #34434b; }
-.turn-work-scroll { max-height: min(480px, 55vh); min-height: 52px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 7px 12px 10px; }
+.turn-work-scroll { max-height: min(480px, 55vh); min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 7px 12px 10px; }
+.turn-work-scroll.empty { min-height: 52px; }
 .turn-work-scroll.has-pending-updates { padding-bottom: 46px; }
 .turn-work-item { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 9px 2px; color: #c4d2dc; font-size: 12px; line-height: 1.5; animation: work-row-enter .2s ease-out both; }
 .turn-work-item + .turn-work-item { border-top: 1px solid #1d2932; }
@@ -876,3 +877,30 @@ button:disabled { cursor: not-allowed; }
 :where(button, input, textarea, select, summary):focus-visible { outline: 2px solid #72d7c2; outline-offset: 2px; }
 :root[data-theme="light"] :where(button, input, textarea, select, summary):focus-visible { outline-color: #167669; }
 @keyframes search-pending-pulse { 50% { opacity: .35; transform: scale(.72); } }
+
+/* Keep the task stream useful without turning every tool into a card. */
+.turn-interaction { margin-bottom: 30px; }
+.turn-user-frame { max-width: min(86%, 680px); margin-bottom: 11px; }
+.turn-assistant-frame { border-color: #292929; border-left-width: 2px; background: #1f1f1f; }
+.turn-assistant-frame.working { border-left-color: #b18d5b; }
+.turn-assistant-heading { min-height: 34px; padding: 7px 11px; border-bottom-color: #2a2a2a; }
+.turn-work-scroll { padding: 2px 10px 6px; }
+.turn-work-scroll.empty { min-height: 48px; padding-block: 5px; }
+.tool-activity { margin: 0; }
+.tool-activity summary,
+.tool-activity-static { min-height: 27px; padding: 2px 4px; gap: 6px; }
+.tool-activity-icon { height: 15px; }
+.tool-activity b { font-weight: 600; }
+.tool-activity-body { margin: 0 0 5px 21px; }
+.turn-final-delivery { margin-top: 11px; }
+.completion-card { margin-top: 8px; padding: 6px 8px; background: #202020; }
+.composer-wrap { padding-top: 14px; padding-bottom: 17px; background: linear-gradient(180deg, transparent 0, #212121 32%); }
+.composer { border-radius: 14px; padding: 8px 10px 8px 12px; }
+.composer-actions { min-height: 26px; }
+.composer-actions > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) {
+  .turn-user-frame { max-width: 94%; }
+  .turn-assistant-heading { padding-inline: 10px; }
+  .turn-work-scroll { padding-inline: 7px; }
+  .composer-wrap { padding-top: 10px; padding-bottom: 13px; }
+}

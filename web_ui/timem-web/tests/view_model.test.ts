@@ -779,12 +779,38 @@ describe("web topic view model", () => {
     expect(activity).toMatchObject({ tone: "action", title: "Bash · running", tool_name: "run_bash", detail: "", code: "git status", code_language: "bash" });
   });
 
+  it("keeps the Bash command visible when a finish topic only carries its action kind", () => {
+    const activity = activityFromTopic(topic("core.action", {
+      action: "run_bash",
+      status: "completed",
+      kind: { kind: "bash", command: "gh run list --limit 5", mode: "normal" },
+    }, "ready"));
+    expect(activity).toMatchObject({
+      title: "Bash · completed",
+      code: "gh run list --limit 5",
+      code_language: "bash",
+    });
+  });
+
   it("shows human-readable action statuses while preserving structured tool status", () => {
     const background = activityFromTopic(topic("core.action", { action: "run_bash", status: "background_running", input: { cmd: "cargo test" } }));
     expect(background).toMatchObject({ title: "Bash · background running", tool_status: "background_running" });
 
     const timeout = activityFromTopic(topic("core.action", { action: "run_bash", status: "timeout", input: { cmd: "sleep 30" } }));
     expect(timeout).toMatchObject({ title: "Bash · timed out", tool_status: "timeout" });
+  });
+
+  it("derives completed action duration from its start and finish topics", () => {
+    const start = actionEvent("1000", "start", "running", { cmd: "scripts/ci.sh" }, "ci");
+    const finish = actionEvent("84250", "finish", "completed", { cmd: "scripts/ci.sh" }, "ci");
+    const [completed] = coalesceActionLifecycle([start, finish]);
+    const completedTopic = completed.payload as unknown as CoreTopicEvent;
+
+    expect(completedTopic.payload.elapsed_ms).toBe(83250);
+    expect(activityFromTopic(completedTopic)).toMatchObject({
+      tool_status: "completed",
+      elapsed_ms: 83250,
+    });
   });
 
   it("renders builtin tool usage as a readable invocation", () => {
@@ -818,6 +844,22 @@ describe("web topic view model", () => {
     const decision = requestDecision(topic("core.request", { request: { command: "git status" } }, "waiting_user_with_timeout"));
     expect(decision?.detail).toBe("git status");
     expect(requestDecision(topic("core.request", {}, "running"))).toBeNull();
+  });
+
+  it("explains elapsed time and timeout for a long-running command decision", () => {
+    const decision = requestDecision(topic("core.user.long_running_command.request", {
+      kind: "long_running_command_continue",
+      request: {
+        command: "scripts/ci.sh 2>&1 | tee /tmp/ci_output.log; echo EXIT_CODE=$?",
+        elapsed_ms: 60_250,
+        timeout_ms: 600_000,
+      },
+    }, "waiting_user"));
+
+    expect(decision).toMatchObject({
+      title: "Long-running command",
+      detail: "The command has been running for 1m00s; timeout is 10m00s.\nCommand: scripts/ci.sh 2>&1 | tee /tmp/ci_output.log; echo EXIT_CODE=$?",
+    });
   });
 
   it("queues concurrent decisions by session and request id without cross-session replacement", () => {

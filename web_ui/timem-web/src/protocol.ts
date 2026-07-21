@@ -132,6 +132,7 @@ export type Activity = {
   code_language?: string;
   tool_name?: string;
   tool_status?: string;
+  elapsed_ms?: number;
   kind?: "context_compact" | "toolgen";
   toolgen_phase?: string;
   before_tokens?: number;

@@ -847,7 +847,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('`Context usage ${ratio}% · ${formatTokens(usage.prompt_tokens)} / ${formatTokens(limit)} input tokens`');
     expect(source).toContain('title={contextUsageLabel} aria-label={contextUsageLabel}');
     expect(source).toContain('role="status" aria-live="polite"');
-    expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
+    expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
     expect(source).toContain("const persistentToolGenEvents = visibleEvents.filter");
     expect(source).toContain('activity.toolgen_phase === "published"');
     expect(source).toContain("const scrollEvents = visibleEvents.filter");
@@ -1275,7 +1275,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('function TurnInteraction({ sessionId, turn, decisions');
     expect(source).toContain('<TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>');
     expect(source).not.toContain('<TurnEventView key={event.event_id} event={event} sessionId={turn.turn_id}/>');
-    expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}`}');
+    expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`}');
     expect(source).toContain('className="turn-final-delivery"');
     expect(source).toContain("const [showCompletedWork, setShowCompletedWork] = useState(true);");
     expect(source).toContain('const canCollapseCompletedWork = turn.state !== "working" && !!turn.final_answer;');
@@ -1286,6 +1286,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('{showWorkStream && <div className={`turn-work-scroll');
     expect(source).toContain('showWorkStream && pendingUpdates > 0');
     expect(styles).toContain(".turn-work-scroll { max-height:");
+    expect(styles).toContain(".turn-work-scroll.empty { min-height: 52px; }");
     expect(styles).toContain(".turn-work-scroll.has-pending-updates");
     expect(styles).toContain(".work-collapse-toggle");
     expect(styles).toContain(".turn-assistant-frame.collapsed-work");

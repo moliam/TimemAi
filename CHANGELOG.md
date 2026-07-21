@@ -94,6 +94,35 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   the next submitted task consumes them into a compact user-message file row,
   and later turns do not receive stale upload context.
 
+## [1.0.0] - 2026-07-21
+
+Timem 1.0 is the first release with the browser host treated as a first-class
+product surface. The terminal and browser hosts share one local-first agent
+core, memory/session store, capability system, provider layer, and structured
+topic protocol.
+
+### Highlights
+
+- Added the authenticated `timem-web` browser workspace built on assistant-ui.
+- Added isolated multi-session Web use with per-session provider/model profiles,
+  persistent history, paged restore, mem switching, and cross-host resume.
+- Added live Web rendering for Thought/Action work, tool lifecycle, inline
+  decisions, supplements, cancellation, runtime disconnects, context compact,
+  attachments, Markdown/code output, and final token/time telemetry.
+- Added responsive desktop/mobile layout, appearance settings, keyboard and
+  accessibility behavior, and bounded rendering for long conversations/output.
+- Kept the terminal host as a supported first-class interface using the same
+  core and persisted session data.
+
+### Release Quality
+
+- Rust host/core and Web frontend tests pass locally.
+- Web frontend production assets are rebuilt and embedded into `timem-web`.
+- CI covers Linux/macOS builds, Web tests/build, capability/protocol checks,
+  session isolation, resume, cancellation pressure, and performance guards.
+- Manual release smoke remains required for Safari, Firefox, iTerm2,
+  Terminal.app, tmux, SSH, clean-machine installation, and live-provider use.
+
 ## [0.9.10] - 2026-07-12
 
 ### Fixed

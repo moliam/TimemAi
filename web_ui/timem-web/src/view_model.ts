@@ -301,7 +301,11 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
     if (lifecycle === "finish") {
       const indexes = pendingStarts.get(key);
       const index = indexes?.shift();
-      if (index !== undefined) visible[index] = event;
+      if (index !== undefined) {
+        const started = visible[index];
+        const elapsedMs = event.created_at_ms - started.created_at_ms;
+        visible[index] = elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event;
+      }
       else visible.push(event);
       if (indexes?.length === 0) pendingStarts.delete(key);
       continue;
@@ -309,6 +313,20 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
     visible.push(event);
   }
   return visible;
+}
+
+function withActionElapsed(event: WebTurnEvent, elapsedMs: number): WebTurnEvent {
+  const topic = event.payload as unknown as CoreTopicEvent;
+  return {
+    ...event,
+    payload: {
+      ...event.payload,
+      payload: {
+        ...topic.payload,
+        elapsed_ms: elapsedMs,
+      },
+    },
+  };
 }
 
 export function boundSessionHistory(session: Session): Session {
@@ -684,8 +702,9 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const status = label(payload.status) || label(payload.event) || "running";
       const statusText = displayToolStatus(status);
       const input = payload.input && typeof payload.input === "object" ? payload.input as Record<string, unknown> : undefined;
-      const command = action === "run_bash" && input
-        ? [input.cmd, input.loop_cmd].find((value): value is string => typeof value === "string")
+      const kind = payload.kind && typeof payload.kind === "object" ? payload.kind as Record<string, unknown> : undefined;
+      const command = action === "run_bash"
+        ? [input?.cmd, input?.loop_cmd, kind?.command].find((value): value is string => typeof value === "string" && value.trim().length > 0)
         : undefined;
       const detail = command ? "" : formatToolArguments(input);
       return {
@@ -695,6 +714,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         title: `${toolDisplayName(action)} · ${statusText}`,
         tool_name: action,
         tool_status: status,
+        elapsed_ms: typeof payload.elapsed_ms === "number" ? payload.elapsed_ms : undefined,
         detail,
         code: command,
         code_language: command ? "bash" : undefined,
@@ -776,17 +796,41 @@ export function requestDecision(event: CoreTopicEvent, turnId?: string | null): 
   if (event.state.name !== "waiting_user" && event.state.name !== "waiting_user_with_timeout") return null;
   const payload = event.payload;
   const request = payload.request && typeof payload.request === "object" ? payload.request as Record<string, unknown> : {};
+  const isLongRunningCommand = event.topic.name === "core.user.long_running_command.request";
   const workInstructionFiles = Array.isArray(request.file_names)
     ? request.file_names.filter((name): name is string => typeof name === "string")
     : [];
-  const detail = typeof request.command === "string"
-    ? request.command
+  const detail = isLongRunningCommand && typeof request.command === "string"
+    ? formatLongRunningCommandDecision(request)
+    : typeof request.command === "string"
+      ? request.command
     : workInstructionFiles.length > 0
       ? `Load ${workInstructionFiles.join(", ")} from ${typeof request.directory === "string" ? request.directory : "this workspace"}?`
-    : typeof request.message === "string"
-      ? request.message
-      : typeof payload.kind === "string"
-        ? payload.kind
-        : "Timem needs your decision before it can continue.";
-  return { event, turnId: turnId ?? undefined, title: "Decision required", detail };
+      : typeof request.message === "string"
+        ? request.message
+        : typeof payload.kind === "string"
+          ? payload.kind
+          : "Timem needs your decision before it can continue.";
+  return {
+    event,
+    turnId: turnId ?? undefined,
+    title: isLongRunningCommand ? "Long-running command" : "Decision required",
+    detail,
+  };
+}
+
+function formatLongRunningCommandDecision(request: Record<string, unknown>): string {
+  const elapsed = typeof request.elapsed_ms === "number" && Number.isFinite(request.elapsed_ms)
+    ? formatDecisionDuration(request.elapsed_ms)
+    : "an extended period";
+  const timeout = typeof request.timeout_ms === "number" && Number.isFinite(request.timeout_ms)
+    ? `; timeout is ${formatDecisionDuration(request.timeout_ms)}`
+    : "";
+  return `The command has been running for ${elapsed}${timeout}.\nCommand: ${request.command}`;
+}
+
+function formatDecisionDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
 }
