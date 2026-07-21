@@ -27,10 +27,40 @@ fn parses_basic_web_launch_options() {
     assert_eq!(options.port, Some(12345));
     assert_eq!(options.space.as_deref(), Some("web_test"));
     assert_eq!(options.model.as_deref(), Some("test-model"));
+    assert!(!options.public_access);
     assert!(options.open_browser);
 
-    let headless = WebLaunchOptions::parse(&["--no-open".to_string()]).unwrap();
+    let headless =
+        WebLaunchOptions::parse(&["--no-open".to_string(), "--public".to_string()]).unwrap();
     assert!(!headless.open_browser);
+    assert!(headless.public_access);
+}
+
+#[test]
+fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
+    let mut state = routing_test_state();
+    assert!(!state.public_access);
+    let local = snapshot_for(&state, TEST_PORT);
+    assert_eq!(local.server.bind_host, "127.0.0.1");
+    assert!(!local.server.public_access);
+
+    state.public_access = true;
+    let public = snapshot_for(&state, TEST_PORT);
+    assert_eq!(public.server.bind_host, "0.0.0.0");
+    assert!(public.server.public_access);
+    assert!(!authorized(&state, &AuthQuery { token: None }));
+    assert!(!authorized(
+        &state,
+        &AuthQuery {
+            token: Some("wrong".to_string())
+        }
+    ));
+    assert!(authorized(
+        &state,
+        &AuthQuery {
+            token: Some("test".to_string())
+        }
+    ));
 }
 
 #[test]
@@ -1363,6 +1393,7 @@ fn routing_test_state() -> AppState {
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     AppState {
         token: "test".to_string(),
+        public_access: false,
         manager: Arc::new(Mutex::new(CoreSessionWorkerManager::new())),
         mem: Arc::new(Mutex::new(
             WebMemState::new(template.data_dir.clone(), template.initial_space.clone()).unwrap(),

@@ -3,7 +3,8 @@
 TimemAi is a local-first AI agent runtime with two user interfaces:
 
 - `timem`: a native terminal UI for shell-heavy work.
-- `timem-web`: a loopback-only browser UI built on assistant-ui.
+- `timem-web`: a token-protected browser UI built on assistant-ui; it binds to
+  loopback by default and can opt into public binding.
 
 Both hosts use the same Rust `agent_core`: model calls, prompt/context
 management, memory, capability execution, audit logs, session history,
@@ -121,9 +122,12 @@ source /path/to/your/env
 timem-web
 ```
 
-`timem-web` binds only to `127.0.0.1`, chooses a port in `12345..=23456`
-unless `--port` is set, generates a per-process access token, and opens the
-authenticated local page in the default browser.
+`timem-web` binds to `127.0.0.1` by default, chooses a port in
+`12345..=23456` unless `--port` is set, generates a per-process access token,
+and opens the authenticated local page in the default browser. Use
+`timem-web --public` only when you intentionally want it reachable through the
+machine's network address; API, upload, and WebSocket access still require the
+printed token.
 
 Run directly from source during development:
 

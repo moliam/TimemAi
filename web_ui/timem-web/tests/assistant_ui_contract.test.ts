@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 const appearanceSource = readFileSync(new URL("../src/appearance.ts", import.meta.url), "utf8");
 const viewModelSource = readFileSync(new URL("../src/view_model.ts", import.meta.url), "utf8");
+const protocolSource = readFileSync(new URL("../src/protocol.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const viteConfig = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
@@ -236,6 +237,15 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={inputLabel} aria-label={inputLabel}');
     expect(source).toContain('title={applyLabel} aria-label={applyLabel}');
     expect(source).toContain('setShowAppearance(false); setShowActivity(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true);');
+  });
+
+  it("shows the runtime bind host and public-token mode from the server snapshot", () => {
+    expect(protocolSource).toContain("bind_host: string;");
+    expect(protocolSource).toContain("public_access: boolean;");
+    expect(source).toContain('const bindLabel = `${server.bind_host || "127.0.0.1"}:${server.port}`;');
+    expect(source).toContain("{bindLabel}");
+    expect(source).toContain("public · token required");
+    expect(source).not.toContain("localhost:{server.port}");
   });
 
   it("opens ToolRepo from the composer and keeps the tool count inside the control", () => {
@@ -808,7 +818,7 @@ describe("assistant-ui thread integration", () => {
     expect(helloBranch).toContain("applySnapshot(event.snapshot);");
     expect(helloBranch).toContain("setSnapshotReady(true);");
     expect(source).toContain('if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return false;');
-    expect(source).toContain('ws.onopen = () => { retryAttempt = 0; setConnected(true); setSnapshotReady(false); };');
+    expect(source).toContain('ws.onopen = () => { retryAttempt = 0; setConnected(true); setRuntimeEverConnected(true); setSnapshotReady(false); };');
     expect(source).toContain('setConnected(false);\n        setSnapshotReady(false);');
   });
 
@@ -910,7 +920,9 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("announces runtime connection state and explains mem switch availability", () => {
-    expect(source).toContain('const connectionLabel = !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";');
+    expect(source).toContain('const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);');
+    expect(source).toContain('setRuntimeEverConnected(true)');
+    expect(source).toContain('const connectionLabel = !connected && runtimeEverConnected ? "Runtime exited. Restart timem-web." : !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";');
     expect(source).toContain('const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";');
     expect(source).toContain('setSnapshotReady(false)');
     expect(source).toContain('setSnapshotReady(true)');
@@ -1209,6 +1221,8 @@ describe("assistant-ui thread integration", () => {
     expect([...source.matchAll(/pushActivity\(activity\);/g)].length).toBeGreaterThanOrEqual(10);
     expect(source).toContain("Load history failed");
     expect(source).toContain("Reconnect to Timem Web before loading earlier history.");
+    expect(source).toContain("Runtime unavailable");
+    expect(source).toContain("Timem Web runtime is not connected. Restart timem-web and reopen the authenticated URL before sending another message.");
     expect(source).toContain("Cancel failed");
     expect(source).toContain("Reconnect to Timem Web before cancelling this turn.");
     expect(source).toContain("Remove attachment failed");
