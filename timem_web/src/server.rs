@@ -63,6 +63,7 @@ static NEXT_WEB_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone)]
 struct AppState {
     token: String,
+    public_access: bool,
     manager: Arc<Mutex<CoreSessionWorkerManager>>,
     template: Arc<WorkerTemplate>,
     mem: Arc<Mutex<WebMemState>>,
@@ -324,6 +325,8 @@ struct ServerInfo {
     version: String,
     protocol_version: u8,
     port: u16,
+    bind_host: String,
+    public_access: bool,
     mem: WebMemInfo,
     runtime_options: Vec<WebRuntimeOption>,
     session_env_defaults: BTreeMap<String, String>,
@@ -450,6 +453,7 @@ pub async fn run_from_env() -> Result<(), String> {
     )?));
     let state = AppState {
         token: token.clone(),
+        public_access: launch.public_access,
         manager,
         template: Arc::new(template),
         mem,
@@ -463,21 +467,36 @@ pub async fn run_from_env() -> Result<(), String> {
     }
     spawn_event_bridge(state.clone());
 
-    let listener = bind_loopback(launch.port).await?;
+    let listener = bind_web_listener(launch.port, launch.public_access).await?;
     let port = listener
         .local_addr()
         .map_err(|error| error.to_string())?
         .port();
     let app = build_router(state.clone(), port);
-    let url = format!("http://127.0.0.1:{port}/?token={token}");
+    let local_url = format!("http://127.0.0.1:{port}/?token={token}");
+    let public_url = format!("http://<server-ip>:{port}/?token={token}");
+    let url = if launch.public_access {
+        public_url.as_str()
+    } else {
+        local_url.as_str()
+    };
     println!("Timem Web is ready at {url}");
+    if launch.public_access {
+        println!(
+            "Public mode is enabled. API, upload, and WebSocket access require the token above."
+        );
+        println!("Local access: {local_url}");
+    }
     if launch.open_browser {
-        if let Err(error) = open_browser(&url) {
+        if let Err(error) = open_browser(&local_url) {
             eprintln!("Could not open the browser automatically: {error}");
-            eprintln!("Open this URL manually: {url}");
+            eprintln!("Open this URL manually: {local_url}");
         }
     }
-    println!("The server is bound to 127.0.0.1 only. Press Ctrl+C to stop.");
+    println!(
+        "The server is bound to {}. Press Ctrl+C to stop.",
+        web_bind_host(launch.public_access)
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -3000,6 +3019,8 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: 1,
             port,
+            bind_host: web_bind_host(state.public_access).to_string(),
+            public_access: state.public_access,
             mem,
             runtime_options,
             session_env_defaults,
@@ -3448,6 +3469,7 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
 #[derive(Debug)]
 struct WebLaunchOptions {
     port: Option<u16>,
+    public_access: bool,
     space: Option<String>,
     provider: Option<String>,
     api_protocol: Option<String>,
@@ -3468,6 +3490,7 @@ impl Default for WebLaunchOptions {
     fn default() -> Self {
         Self {
             port: None,
+            public_access: false,
             space: None,
             provider: None,
             api_protocol: None,
@@ -3511,6 +3534,10 @@ impl WebLaunchOptions {
                             .map_err(|_| "invalid_port".to_string())?,
                     );
                     index += 2;
+                }
+                "--public" => {
+                    options.public_access = true;
+                    index += 1;
                 }
                 "--space" => string(&mut options.space)?,
                 "--gateway-provider" => string(&mut options.provider)?,
@@ -3667,7 +3694,10 @@ fn open_directory_in_terminal(path: &Path) -> Result<(), String> {
     }
 }
 
-async fn bind_loopback(requested_port: Option<u16>) -> Result<TcpListener, String> {
+async fn bind_web_listener(
+    requested_port: Option<u16>,
+    public_access: bool,
+) -> Result<TcpListener, String> {
     let explicitly_requested = requested_port.is_some();
     let ports = match requested_port {
         Some(port) => vec![port],
@@ -3678,8 +3708,13 @@ async fn bind_loopback(requested_port: Option<u16>) -> Result<TcpListener, Strin
                 .collect()
         }
     };
+    let bind_ip = if public_access {
+        Ipv4Addr::UNSPECIFIED
+    } else {
+        Ipv4Addr::LOCALHOST
+    };
     for port in ports {
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let address = SocketAddr::new(IpAddr::V4(bind_ip), port);
         if let Ok(listener) = TcpListener::bind(address).await {
             return Ok(listener);
         }
@@ -3690,6 +3725,14 @@ async fn bind_loopback(requested_port: Option<u16>) -> Result<TcpListener, Strin
         Err(format!(
             "no_available_port_in_range:{PORT_START}..={PORT_END}"
         ))
+    }
+}
+
+fn web_bind_host(public_access: bool) -> &'static str {
+    if public_access {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
     }
 }
 
@@ -3743,7 +3786,7 @@ fn nonempty_text(text: String, label: &str) -> Result<String, String> {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   loopback port in {PORT_START}..={PORT_END}; default auto-select\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --gateway-provider <name>    provider\n  --api-protocol <protocol>    provider wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             provider base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          provider timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default auto-select\n  --public                     bind to 0.0.0.0; API/WebSocket/upload still require the access token\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --gateway-provider <name>    provider\n  --api-protocol <protocol>    provider wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             provider base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          provider timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 #[cfg(test)]

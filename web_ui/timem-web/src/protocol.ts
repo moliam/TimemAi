@@ -151,6 +151,8 @@ export type Snapshot = {
     version: string;
     protocol_version: number;
     port: number;
+    bind_host: string;
+    public_access: boolean;
     mem: {
       space: string;
       data_dir: string;

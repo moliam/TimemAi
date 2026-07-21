@@ -72,6 +72,7 @@ function TimemApp() {
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [connected, setConnected] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
+  const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);
   // The activity feed is a diagnostic view. Keep the normal chat workspace focused.
   const [showActivity, setShowActivity] = useState(false);
   const [sidePanelTab, setSidePanelTab] = useState<"tools" | "activity">("tools");
@@ -563,7 +564,7 @@ function TimemApp() {
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${scheme}://${window.location.host}/ws?token=${encodeURIComponent(token)}`);
       socket.current = ws;
-      ws.onopen = () => { retryAttempt = 0; setConnected(true); setSnapshotReady(false); };
+      ws.onopen = () => { retryAttempt = 0; setConnected(true); setRuntimeEverConnected(true); setSnapshotReady(false); };
       ws.onclose = () => {
         if (socket.current === ws) socket.current = null;
         setConnected(false);
@@ -604,7 +605,7 @@ function TimemApp() {
       return false;
     }
     if (!sendCommand(decision.command)) {
-      pushActivity({ id: crypto.randomUUID(), sessionId: decision.command.session_id, tone: "error", title: "Not connected", detail: "Reconnect to Timem Web before sending another message.", createdAt: Date.now() });
+      pushActivity({ id: crypto.randomUUID(), sessionId: decision.command.session_id, tone: "error", title: "Runtime unavailable", detail: "Timem Web runtime is not connected. Restart timem-web and reopen the authenticated URL before sending another message.", createdAt: Date.now() });
       return false;
     }
     return decision.clearDraftOnSuccess;
@@ -701,7 +702,7 @@ function TimemApp() {
   const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
-  const connectionLabel = !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";
+  const connectionLabel = !connected && runtimeEverConnected ? "Runtime exited. Restart timem-web." : !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";
   const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
   const headerModelLabel = activeSession?.runtime_profile ? `${activeSession.runtime_profile.provider}:${activeSession.runtime_profile.model}` : "";
@@ -1684,7 +1685,8 @@ function RuntimePanel({ panelRef, server, pendingKeys, onUpdate }: { panelRef: M
   useEffect(() => setDrafts({}), [server?.runtime_options]);
   if (!server) return <section id="runtime-panel" ref={panelRef} className="runtime-card" tabIndex={-1}><Cpu size={16}/><span>Loading runtime settings…</span></section>;
   const pendingRuntimeLabel = pendingKeys.size ? `Applying runtime setting${pendingKeys.size === 1 ? "" : "s"}: ${Array.from(pendingKeys).join(", ")}` : "";
-  return <section id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/> localhost:{server.port}</span></div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
+  const bindLabel = `${server.bind_host || "127.0.0.1"}:${server.port}`;
+  return <section id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/>{bindLabel}</span>{server.public_access && <span>public · token required</span>}</div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
     const value = drafts[option.key] ?? option.value;
     const pending = pendingKeys.has(option.key);
     const dirty = value !== option.value;

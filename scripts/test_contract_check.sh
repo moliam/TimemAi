@@ -286,7 +286,7 @@ fi
 
 web_ui_matrix_required=(
   "Web UI Feature-Test Matrix"
-  "| Authenticated local host |"
+  "| Authenticated Web host |"
   "| Session creation and naming |"
   "| Per-session runtime profile |"
   "| Multi-session topic isolation |"
@@ -374,6 +374,8 @@ web_ui_required_test_names=(
   "attaches completion telemetry only to the matching final answer"
   "persists theme, font, and text-size appearance without changing core state"
   "removes the access token from the visible URL while retaining the session credential"
+  "public_web_launch_keeps_token_auth_and_reports_bind_mode"
+  "shows the runtime bind host and public-token mode from the server snapshot"
   "shows host and session errors outside the default-hidden diagnostic panel"
   "defaults the diagnostic activity panel to hidden"
   "bounds a reconnect snapshot with many turns and high-frequency events"
