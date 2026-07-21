@@ -83,7 +83,7 @@ fn command_action_receives_json_payload_on_stdin() {
     let dir = temp_case_dir("command_payload");
     fs::write(
             dir.join("echo_payload.sh"),
-            "#!/bin/sh\npython3 -c 'import sys,json; data=json.load(sys.stdin); print(data[\"args\"][\"message\"])'\n",
+            "#!/bin/sh\npayload=$(cat)\ncase \"$payload\" in\n  *'\"message\":\"hello from payload\"'*) printf '%s\\n' 'hello from payload' ;;\n  *) printf 'unexpected payload: %s\\n' \"$payload\"; exit 7 ;;\nesac\n",
         )
         .unwrap();
 
