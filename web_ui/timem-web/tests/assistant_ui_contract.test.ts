@@ -818,7 +818,12 @@ describe("assistant-ui thread integration", () => {
     expect(helloBranch).toContain("applySnapshot(event.snapshot);");
     expect(helloBranch).toContain("setSnapshotReady(true);");
     expect(source).toContain('if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return false;');
-    expect(source).toContain('ws.onopen = () => { retryAttempt = 0; setConnected(true); setRuntimeEverConnected(true); setSnapshotReady(false); };');
+    expect(source).toContain("hasConnectedOnce = true;");
+    expect(source).toContain("disconnectNoticeShown = false;");
+    expect(source).toContain("retryAttempt = 0;");
+    expect(source).toContain("setConnected(true);");
+    expect(source).toContain("setRuntimeEverConnected(true);");
+    expect(source).toContain("setSnapshotReady(false);");
     expect(source).toContain('setConnected(false);\n        setSnapshotReady(false);');
   });
 
@@ -1340,6 +1345,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("Math.min(10_000, 500 * 2 ** Math.min(retryAttempt, 5))");
     expect(source).toContain("window.setTimeout(connect, delay)");
     expect(source).toContain("window.clearTimeout(retryTimer)");
+    expect(source).toContain("let hasConnectedOnce = false;");
+    expect(source).toContain("let disconnectNoticeShown = false;");
+    expect(source).toContain("hasConnectedOnce = true;");
+    expect(source).toContain("Runtime disconnected");
+    expect(source).toContain("Timem Web lost its runtime connection. If timem-web has exited, restart it and reopen the authenticated URL.");
   });
 
   it("shows host and session errors outside the default-hidden diagnostic panel", () => {
