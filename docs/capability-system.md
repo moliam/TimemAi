@@ -15,8 +15,8 @@ Capability Registry
 
 ### Tool
 
-A tool is executable. The model can request it through `next_actions`, and the
-runtime must have a matching executor binding.
+A tool is executable. The model can request it through the active response
+protocol's action block, and the runtime must have a matching executor binding.
 
 Current first-step implementation:
 

@@ -245,9 +245,10 @@ values are `silent` (default, auto-load and notify), `ask`, and `off`.
 reaches 90% of `TIMEM_MAX_LLM_INPUT`, runtime requires the model to compact
 dynamic prompt deltas before continuing: summarize useful dynamic context to
 about 10%-20% of its current token footprint, discard stale details, and place
-important but lengthy state into scratch memory before shrinking covered
-delta/slice ids. For prompt context the model can ask runtime to offload
-specific delta/slice ids instead of rewriting that context itself.
+important but lengthy state into scratch memory by using the response
+protocol's `context_compact` block. For prompt context the model can ask
+runtime to discard old prompt delta ids or offload prompt delta ids into
+scratch instead of rewriting that context itself.
 
 If a provider reports that output was cut off by the output-token limit, Timem
 asks whether to temporarily increase `TIMEM_MAX_LLM_OUTPUT` by `10K` and retry
