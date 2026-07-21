@@ -106,4 +106,4 @@ Task A is complete. Keep only: output path is ..., current workspace is ..., nex
   </context_compact>
 </response>
 
- ## NOTE: MUST use ![CDATA[ wrapper. Use proper escape character for special case, make sure the JSON_LITERAL_TEXT can be processed correctly by json parser.
+ ## NOTE: MUST use <![CDATA[ wrapper. Use proper escape character for special case, make sure the JSON_LITERAL_TEXT can be processed correctly by json parser.

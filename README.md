@@ -181,9 +181,9 @@ snapshots, sensitive scans, Rust format/clippy/tests, Web tests/build,
 performance guards, repeated edge regressions, release builds, cross-host
 resume smoke, and real TTY smoke/stress.
 
-## Update and Uninstall
+## Provider and Protocol Details
 
-Update from a clone:
+Common provider setups:
 
 ```bash
 # Aliyun DashScope compatible mode
@@ -308,15 +308,14 @@ required:
   - query
 example_json: |
   {
-    "action": "my_tool",
-    "args": {
+    "my_tool": {
       "query": "hello"
     }
   }
 ```
 
 Runtime invokes `/bin/sh scripts/my_tool.sh` and writes one JSON object to
-stdin: `{"action":"my_tool","args":{...}}`. Output is captured
+stdin: `{"my_tool":{...}}`. Output is captured
 as an action result with bounded size and timeout.
 
 ## Runtime Data
@@ -354,13 +353,14 @@ source /path/to/your/env
 package installs, or video commands, the model can request:
 
 ```json
-{
-  "action": "run_bash",
-  "args": {
-    "cmd": "cargo test",
-    "background": true
+[
+  {
+    "run_bash": {
+      "cmd": "cargo test",
+      "background": true
+    }
   }
-}
+]
 ```
 
 Runtime returns a process id such as `pid=12345, now keeps running in
@@ -381,12 +381,12 @@ That line is added to the current turn as a `user_supplement` prompt slice, so
 the next model round sees it as the newest user correction/instruction instead
 of waiting for a new chat turn.
 
-## Install Details
+## Update and Uninstall
 
-One-command install:
+Update from a clone:
 
 ```bash
-cd ~/timemai
+git pull --ff-only
 ./install.sh
 ```
 
