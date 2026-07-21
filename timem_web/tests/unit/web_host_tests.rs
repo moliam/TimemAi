@@ -37,6 +37,16 @@ fn parses_basic_web_launch_options() {
 }
 
 #[test]
+fn web_shutdown_signal_names_cover_terminal_and_service_stops() {
+    assert!(web_shutdown_signal_names().contains(&"Ctrl+C"));
+    #[cfg(unix)]
+    {
+        assert!(web_shutdown_signal_names().contains(&"SIGTERM"));
+        assert!(web_shutdown_signal_names().contains(&"SIGHUP"));
+    }
+}
+
+#[test]
 fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     let mut state = routing_test_state();
     assert!(!state.public_access);

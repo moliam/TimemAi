@@ -494,8 +494,9 @@ pub async fn run_from_env() -> Result<(), String> {
         }
     }
     println!(
-        "The server is bound to {}. Press Ctrl+C to stop.",
-        web_bind_host(launch.public_access)
+        "The server is bound to {}. Stop with {}.",
+        web_bind_host(launch.public_access),
+        web_shutdown_signal_names().join("/")
     );
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -508,7 +509,47 @@ pub async fn run_from_env() -> Result<(), String> {
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(unix)]
+    {
+        shutdown_signal_unix().await;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn web_shutdown_signal_names() -> &'static [&'static str] {
+    #[cfg(unix)]
+    {
+        &["Ctrl+C", "SIGTERM", "SIGHUP"]
+    }
+    #[cfg(not(unix))]
+    {
+        &["Ctrl+C"]
+    }
+}
+
+#[cfg(unix)]
+async fn shutdown_signal_unix() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate = signal(SignalKind::terminate()).ok();
+    let mut hangup = signal(SignalKind::hangup()).ok();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = recv_optional_signal(&mut terminate) => {},
+        _ = recv_optional_signal(&mut hangup) => {},
+    }
+}
+
+#[cfg(unix)]
+async fn recv_optional_signal(stream: &mut Option<tokio::signal::unix::Signal>) {
+    if let Some(stream) = stream.as_mut() {
+        let _ = stream.recv().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
