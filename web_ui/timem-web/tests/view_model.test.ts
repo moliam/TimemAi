@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionCreateDecision, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -329,6 +329,20 @@ describe("web topic view model", () => {
       kind: "send",
       command: { type: "turn_submit", session_id: "session_1", text: "recover" },
     });
+  });
+
+  it("uses explicit runtime-exit wording for disconnected interaction locks", () => {
+    expect(sessionInteractionLockReason(false, false, true)).toBe("Runtime exited. Restart timem-web.");
+    expect(sessionInteractionLockReason(false, false, false)).toBe("Waiting for runtime snapshot…");
+    expect(sessionInteractionLockReason(true, false, true)).toBe("Mem switch is in progress");
+    expect(sessionInteractionLockReason(true, true, true)).toBe("Mem switch is in progress");
+  });
+
+  it("reports connection state without hiding a runtime exit behind reconnect text", () => {
+    expect(runtimeConnectionLabel(false, false, false)).toBe("Reconnecting to runtime…");
+    expect(runtimeConnectionLabel(false, false, true)).toBe("Runtime exited. Restart timem-web.");
+    expect(runtimeConnectionLabel(true, false, true)).toBe("Syncing runtime…");
+    expect(runtimeConnectionLabel(true, true, true)).toBe("Runtime connected");
   });
 
   it("shows the tail of a long cwd while retaining short paths verbatim", () => {

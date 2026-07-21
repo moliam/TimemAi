@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, sessionContextUsage, sessionCreateDecision, sessionRenameDecision, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -712,14 +712,10 @@ function TimemApp() {
   const runtimeDisconnected = runtimeEverConnected && !connected;
   const runtimeDisconnectedTitle = "Runtime exited";
   const runtimeDisconnectedDetail = "Restart timem-web and reopen the authenticated URL to continue.";
-  const sessionInteractionLockReason = pendingMemSwitch
-    ? "Mem switch is in progress"
-    : runtimeDisconnected
-      ? "Runtime exited. Restart timem-web."
-      : "Waiting for runtime snapshot…";
+  const sessionInteractionLockReason = sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected);
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
-  const connectionLabel = !connected && runtimeEverConnected ? "Runtime exited. Restart timem-web." : !connected ? "Reconnecting to runtime…" : snapshotReady ? "Runtime connected" : "Syncing runtime…";
+  const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected);
   const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
   const headerModelLabel = activeSession?.runtime_profile ? `${activeSession.runtime_profile.provider}:${activeSession.runtime_profile.model}` : "";
