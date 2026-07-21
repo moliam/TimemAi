@@ -19,7 +19,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Multipart, Query, State,
     },
-    http::{header, HeaderName, HeaderValue, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -483,7 +483,7 @@ pub async fn run_from_env() -> Result<(), String> {
     println!("Timem Web is ready at {url}");
     if launch.public_access {
         println!(
-            "Public mode is enabled. API, upload, and WebSocket access require the token above."
+            "Public mode is enabled. Browser, API, upload, and WebSocket access require the token above."
         );
         println!("Local access: {local_url}");
     }
@@ -584,7 +584,16 @@ async fn upload_file(
     }
 }
 
-async fn static_asset(uri: Uri) -> Response {
+async fn static_asset(
+    State((state, _)): State<(AppState, u16)>,
+    Query(query): Query<AuthQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let token_from_query = query.token.as_deref() == Some(state.token.as_str());
+    if !token_from_query && !authorized_by_cookie(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let path = match uri.path() {
         "/" => "/index.html",
         path => path,
@@ -594,11 +603,33 @@ async fn static_asset(uri: Uri) -> Response {
         None => ("/index.html", "text/html; charset=utf-8"),
     };
     let body = embedded_web_asset(asset_path).expect("embedded index asset must exist");
-    (
+    let mut response = (
         [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
         body,
     )
-        .into_response()
+        .into_response();
+    if token_from_query {
+        if let Ok(cookie) = HeaderValue::from_str(&format!(
+            "timem_web_token={}; Path=/; SameSite=Strict; HttpOnly",
+            state.token
+        )) {
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
+        }
+    }
+    response
+}
+
+fn authorized_by_cookie(state: &AppState, headers: &HeaderMap) -> bool {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(|cookie| {
+            cookie
+                .split(';')
+                .map(str::trim)
+                .any(|part| part == format!("timem_web_token={}", state.token))
+        })
+        .unwrap_or(false)
 }
 
 fn mime_for_path(path: &str) -> &'static str {
@@ -3786,7 +3817,7 @@ fn nonempty_text(text: String, label: &str) -> Result<String, String> {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default auto-select\n  --public                     bind to 0.0.0.0; API/WebSocket/upload still require the access token\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --gateway-provider <name>    provider\n  --api-protocol <protocol>    provider wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             provider base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          provider timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default auto-select\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --gateway-provider <name>    provider\n  --api-protocol <protocol>    provider wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             provider base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          provider timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 #[cfg(test)]

@@ -126,8 +126,8 @@ timem-web
 `12345..=23456` unless `--port` is set, generates a per-process access token,
 and opens the authenticated local page in the default browser. Use
 `timem-web --public` only when you intentionally want it reachable through the
-machine's network address; API, upload, and WebSocket access still require the
-printed token.
+machine's network address; browser entry, API, upload, and WebSocket access
+require the printed token.
 
 Run directly from source during development:
 

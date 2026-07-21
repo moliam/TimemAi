@@ -63,6 +63,52 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     ));
 }
 
+#[tokio::test]
+async fn static_web_entry_requires_token_or_authenticated_cookie() {
+    let state = routing_test_state();
+    let denied = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        HeaderMap::new(),
+        Uri::from_static("/"),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+    let allowed = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+        }),
+        HeaderMap::new(),
+        Uri::from_static("/"),
+    )
+    .await;
+    assert_eq!(allowed.status(), StatusCode::OK);
+    assert_eq!(
+        allowed
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or(""),
+        "timem_web_token=test; Path=/; SameSite=Strict; HttpOnly"
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_static("timem_web_token=test"),
+    );
+    let cookie_allowed = static_asset(
+        State((state, TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        headers,
+        Uri::from_static("/assets/index.js"),
+    )
+    .await;
+    assert_ne!(cookie_allowed.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[test]
 fn rejects_ports_outside_the_local_web_range() {
     let error = WebLaunchOptions::parse(&["--port".to_string(), "12344".to_string()]).unwrap_err();
