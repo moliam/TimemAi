@@ -24,6 +24,14 @@ def extract_text(value):
     return ""
 
 
+def extract_prompt(body):
+    messages = body.get("messages", [])
+    if messages:
+        return "\n".join(extract_text(message.get("content", "")) for message in messages)
+    parts = [extract_text(body.get("instructions", "")), extract_text(body.get("input", ""))]
+    return "\n".join(part for part in parts if part)
+
+
 class Handler(BaseHTTPRequestHandler):
     response_delay = 0.0
     capture_prompt_file = None
@@ -40,8 +48,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": "invalid_json"})
             return
 
-        messages = body.get("messages", [])
-        prompt = "\n".join(extract_text(message.get("content", "")) for message in messages)
+        prompt = extract_prompt(body)
         if self.capture_prompt_file:
             with open(self.capture_prompt_file, "a", encoding="utf-8") as capture:
                 capture.write(prompt)
@@ -105,14 +112,35 @@ class Handler(BaseHTTPRequestHandler):
                 "</response>"
             )
 
+        self.send_provider_response(prompt, content)
+
+    def send_provider_response(self, prompt, content):
+        prompt_tokens = max(1, len(prompt) // 4)
+        completion_tokens = max(1, len(content) // 4)
+        total_tokens = max(2, (len(prompt) + len(content)) // 4)
+        if self.path.rstrip("/").endswith("/responses"):
+            self.send_json(
+                200,
+                {
+                    "output_text": content,
+                    "usage": {
+                        "input_tokens": prompt_tokens,
+                        "output_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
+                        "input_tokens_details": {"cached_tokens": 0},
+                        "output_tokens_details": {"reasoning_tokens": 0},
+                    },
+                },
+            )
+            return
         self.send_json(
             200,
             {
                 "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
                 "usage": {
-                    "prompt_tokens": max(1, len(prompt) // 4),
-                    "completion_tokens": max(1, len(content) // 4),
-                    "total_tokens": max(2, (len(prompt) + len(content)) // 4),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
                 },
             },
         )
@@ -218,6 +246,8 @@ def toolgen_scenario_response(prompt):
 
 
 def self_test():
+    assert extract_prompt({"messages": [{"content": "hello"}]}) == "hello"
+    assert extract_prompt({"instructions": "system", "input": "user"}) == "system\nuser"
     source = toolgen_scenario_response("TOOLGEN_E2E_SOURCE")
     assert '"run_bash"' in source and "TOOLGEN_E2E_SOURCE_DONE" in source
     completed = toolgen_scenario_response(
