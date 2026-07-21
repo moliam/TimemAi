@@ -497,15 +497,29 @@ pub async fn run_from_env() -> Result<(), String> {
         "The server is bound to {}. Press Ctrl+C to stop.",
         web_bind_host(launch.public_access)
     );
-    axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string());
+    let shutdown_result = shutdown_web_runtime(&state);
+    serve_result?;
+    shutdown_result?;
     Ok(())
 }
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
+    let manager = {
+        let mut manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        std::mem::take(&mut *manager)
+    };
+    manager.shutdown_all()
 }
 
 fn build_router(state: AppState, port: u16) -> Router {

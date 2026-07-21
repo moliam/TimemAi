@@ -1874,6 +1874,47 @@ fn child_context_worker_uses_its_owning_sessions_runtime_profile_and_env() {
     manager.shutdown_all().unwrap();
 }
 
+#[test]
+fn web_runtime_shutdown_stops_all_session_workers() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.contexts.clear();
+        session.workers.clear();
+        session.active_context_id.clear();
+        session.primary_worker_id.clear();
+    }
+
+    let primary_dir = std::env::temp_dir().join(unique_web_id("web_shutdown_primary"));
+    let child_dir = std::env::temp_dir().join(unique_web_id("web_shutdown_child"));
+    std::fs::create_dir_all(&primary_dir).unwrap();
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let (_primary_context_id, primary_worker_id) = create_context_with_worker(
+        &state,
+        session_id,
+        primary_dir,
+        Some("Primary worker".to_string()),
+        None,
+        true,
+    )
+    .unwrap();
+    let (_child_context_id, _child_worker_id) = create_context_with_worker(
+        &state,
+        session_id,
+        child_dir,
+        Some("Child worker".to_string()),
+        Some(primary_worker_id),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(state.manager.lock().unwrap().worker_count(), 2);
+    shutdown_web_runtime(&state).unwrap();
+    assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
+}
+
 struct CancelThenFinishModel {
     calls: Arc<AtomicUsize>,
     entered: Arc<AtomicUsize>,
