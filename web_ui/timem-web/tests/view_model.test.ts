@@ -332,15 +332,17 @@ describe("web topic view model", () => {
   });
 
   it("uses explicit runtime-exit wording for disconnected interaction locks", () => {
-    expect(sessionInteractionLockReason(false, false, true)).toBe("Runtime exited. Restart timem-web.");
+    expect(sessionInteractionLockReason(false, false, true)).toBe("Connection lost. Reconnecting…");
+    expect(sessionInteractionLockReason(false, false, true, 3)).toBe("Runtime unavailable. Restart timem-web.");
     expect(sessionInteractionLockReason(false, false, false)).toBe("Waiting for runtime snapshot…");
     expect(sessionInteractionLockReason(true, false, true)).toBe("Mem switch is in progress");
     expect(sessionInteractionLockReason(true, true, true)).toBe("Mem switch is in progress");
   });
 
   it("reports connection state without hiding a runtime exit behind reconnect text", () => {
-    expect(runtimeConnectionLabel(false, false, false)).toBe("Reconnecting to runtime…");
-    expect(runtimeConnectionLabel(false, false, true)).toBe("Runtime exited. Restart timem-web.");
+    expect(runtimeConnectionLabel(false, false, false)).toBe("Connecting to runtime…");
+    expect(runtimeConnectionLabel(false, false, true)).toBe("Connection lost. Reconnecting…");
+    expect(runtimeConnectionLabel(false, false, true, 3)).toBe("Runtime unavailable. Restart timem-web.");
     expect(runtimeConnectionLabel(true, false, true)).toBe("Syncing runtime…");
     expect(runtimeConnectionLabel(true, true, true)).toBe("Runtime connected");
   });

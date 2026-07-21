@@ -926,8 +926,9 @@ describe("assistant-ui thread integration", () => {
 
   it("announces runtime connection state and explains mem switch availability", () => {
     expect(source).toContain('const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);');
+    expect(source).toContain('const [reconnectAttempt, setReconnectAttempt] = useState(0);');
     expect(source).toContain('setRuntimeEverConnected(true)');
-    expect(source).toContain("const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected);");
+    expect(source).toContain("const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);");
     expect(viewModelSource).toContain("export function runtimeConnectionLabel");
     expect(source).toContain('const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";');
     expect(source).toContain('setSnapshotReady(false)');
@@ -938,10 +939,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="connection-row" role="status" aria-live="polite" title={connectionLabel}');
     expect(source).toContain('className="connection-label">{connectionLabel}</span>');
     expect(source).toContain("const runtimeDisconnected = runtimeEverConnected && !connected;");
-    expect(source).toContain('const runtimeDisconnectedTitle = "Runtime exited";');
-    expect(source).toContain('const runtimeDisconnectedDetail = "Restart timem-web and reopen the authenticated URL to continue.";');
-    expect(source).toContain("sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected)");
-    expect(viewModelSource).toContain('return "Runtime exited. Restart timem-web.";');
+    expect(source).toContain("const runtimeUnavailable = runtimeDisconnected && reconnectAttempt >= 3;");
+    expect(source).toContain('const runtimeDisconnectedTitle = runtimeUnavailable ? "Runtime unavailable" : "Connection lost";');
+    expect(source).toContain("sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected, reconnectAttempt)");
+    expect(viewModelSource).toContain('return reconnectAttempt >= 3 ? "Runtime unavailable. Restart timem-web." : "Connection lost. Reconnecting…";');
     expect(source).toContain("sessionInteractionLockReason={sessionInteractionLockReason}");
     expect(source).toContain('className="runtime-disconnect-banner" role="alert"');
     expect(source).toContain("<strong>{runtimeDisconnectedTitle}</strong>");
@@ -1354,7 +1355,7 @@ describe("assistant-ui thread integration", () => {
 
   it("backs off and reconnects the WebSocket instead of only changing the label", () => {
     expect(source).toContain("const connect = () =>");
-    expect(source).toContain("Math.min(10_000, 500 * 2 ** Math.min(retryAttempt, 5))");
+    expect(source).toContain("Math.min(10_000, 500 * 2 ** Math.min(nextAttempt - 1, 5))");
     expect(source).toContain("window.setTimeout(connect, delay)");
     expect(source).toContain("window.clearTimeout(retryTimer)");
     expect(source).toContain("let hasConnectedOnce = false;");

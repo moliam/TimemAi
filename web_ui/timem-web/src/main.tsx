@@ -73,6 +73,7 @@ function TimemApp() {
   const [connected, setConnected] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
   // The activity feed is a diagnostic view. Keep the normal chat workspace focused.
   const [showActivity, setShowActivity] = useState(false);
   const [sidePanelTab, setSidePanelTab] = useState<"tools" | "activity">("tools");
@@ -568,6 +569,7 @@ function TimemApp() {
         disconnectNoticeShown = false;
         retryAttempt = 0;
         setConnected(true);
+        setReconnectAttempt(0);
         setRuntimeEverConnected(true);
         setSnapshotReady(false);
       };
@@ -576,6 +578,9 @@ function TimemApp() {
         setConnected(false);
         setSnapshotReady(false);
         if (!stopped) {
+          const nextAttempt = retryAttempt + 1;
+          retryAttempt = nextAttempt;
+          setReconnectAttempt(nextAttempt);
           if (hasConnectedOnce && !disconnectNoticeShown) {
             disconnectNoticeShown = true;
             pushActivity({
@@ -587,8 +592,7 @@ function TimemApp() {
               createdAt: Date.now(),
             });
           }
-          const delay = Math.min(10_000, 500 * 2 ** Math.min(retryAttempt, 5));
-          retryAttempt += 1;
+          const delay = Math.min(10_000, 500 * 2 ** Math.min(nextAttempt - 1, 5));
           retryTimer = window.setTimeout(connect, delay);
         }
       };
@@ -710,12 +714,15 @@ function TimemApp() {
   const errorDetailsLabel = visibleErrorCount === 1 ? "Show this error in Activity" : `Show ${visibleErrorCount} errors in Activity`;
   const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";
   const runtimeDisconnected = runtimeEverConnected && !connected;
-  const runtimeDisconnectedTitle = "Runtime exited";
-  const runtimeDisconnectedDetail = "Restart timem-web and reopen the authenticated URL to continue.";
-  const sessionInteractionLockReason = sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected);
+  const runtimeUnavailable = runtimeDisconnected && reconnectAttempt >= 3;
+  const runtimeDisconnectedTitle = runtimeUnavailable ? "Runtime unavailable" : "Connection lost";
+  const runtimeDisconnectedDetail = runtimeUnavailable
+    ? "Restart timem-web and reopen the authenticated URL to continue."
+    : "Reconnecting to Timem runtime… sending and session changes are paused until it reconnects.";
+  const sessionInteractionLockReason = sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected, reconnectAttempt);
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
-  const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected);
+  const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);
   const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
   const headerModelLabel = activeSession?.runtime_profile ? `${activeSession.runtime_profile.provider}:${activeSession.runtime_profile.model}` : "";
