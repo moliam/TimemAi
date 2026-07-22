@@ -55,6 +55,17 @@ source ./env
 timem
 ```
 
+Example terminal session:
+
+```text
+┏━ Thought / Action ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ · Checking the project status                             ┃
+┃   └─ [✔] git status --short                               ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+Timem  Done. The working tree is clean.
+You ❯❯ _
+```
+
 Common controls:
 
 - `/help`: show interactive commands.
@@ -68,6 +79,11 @@ While the model is working, type an additional instruction and press Enter to
 send it as a supplement to the current task.
 
 ## Run Web
+
+The Web UI provides session switching, Markdown rendering, live work updates,
+attachments, runtime status, and context usage in the browser:
+
+![Timem Web UI](docs/assets/timem-web.png)
 
 Local mode binds to `127.0.0.1` and opens the authenticated page automatically
 when a local graphical session is available:
