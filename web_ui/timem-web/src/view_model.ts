@@ -1,4 +1,4 @@
-import { Activity, ChatHistoryRecord, ChatMessage, ClientCommand, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
+import { Activity, ChatHistoryRecord, ChatMessage, ClientCommand, clientId, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
 
 export const MAX_RENDERED_MESSAGES = 1000;
 export const MAX_CLIENT_TURNS = 200;
@@ -693,10 +693,10 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const freeTalk = label(payload.free_talk);
       const progress = label(payload.progress);
       const detail = [freeTalk, progress].filter((text) => text.trim()).join("\n\n");
-      return detail ? { id: crypto.randomUUID(), sessionId: event.session_id, tone: "thinking", title: "", detail, createdAt: Date.now() } : null;
+      return detail ? { id: clientId(), sessionId: event.session_id, tone: "thinking", title: "", detail, createdAt: Date.now() } : null;
     }
     case "core.model.repair":
-      return { id: crypto.randomUUID(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
+      return { id: clientId(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";
@@ -708,7 +708,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         : undefined;
       const detail = command ? "" : formatToolArguments(input);
       return {
-        id: crypto.randomUUID(),
+        id: clientId(),
         sessionId: event.session_id,
         tone: "action",
         title: `${toolDisplayName(action)} · ${statusText}`,
@@ -725,7 +725,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const before = typeof payload.estimated_before_tokens === "number" ? payload.estimated_before_tokens : undefined;
       const after = typeof payload.estimated_after_tokens === "number" ? payload.estimated_after_tokens : undefined;
       return {
-        id: crypto.randomUUID(),
+        id: clientId(),
         sessionId: event.session_id,
         tone: "notice",
         kind: "context_compact",
@@ -748,7 +748,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           ? "ToolGen: 正在评估…"
           : "ToolGen: 生成失败";
       return {
-        id: crypto.randomUUID(),
+        id: clientId(),
         sessionId: event.session_id,
         tone: phase === "published" || phase === "started" ? "notice" : "warning",
         kind: "toolgen",

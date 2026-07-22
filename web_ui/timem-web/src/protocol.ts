@@ -6,6 +6,25 @@ export type ChatMessage = {
   completion?: TurnCompletion;
 };
 
+let clientIdSequence = 0;
+
+export function clientId(prefix = "client") {
+  const randomUuid = globalThis.crypto?.randomUUID;
+  if (typeof randomUuid === "function") {
+    return `${prefix}-${randomUuid.call(globalThis.crypto)}`;
+  }
+
+  const random = new Uint32Array(2);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(random);
+  } else {
+    random[0] = Math.floor(Math.random() * 0x1_0000_0000);
+    random[1] = Math.floor(Math.random() * 0x1_0000_0000);
+  }
+  clientIdSequence = (clientIdSequence + 1) >>> 0;
+  return `${prefix}-${Date.now().toString(36)}-${random[0].toString(36)}${random[1].toString(36)}-${clientIdSequence.toString(36)}`;
+}
+
 export type UsageStats = {
   llm_calls?: number;
   repair_calls?: number;

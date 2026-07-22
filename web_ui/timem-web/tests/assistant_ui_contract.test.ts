@@ -15,6 +15,12 @@ describe("assistant-ui thread integration", () => {
     expect(html).toContain("Timem is loading...");
   });
 
+  it("does not require crypto.randomUUID on an HTTP public-IP origin", () => {
+    expect(protocolSource).toContain("export function clientId");
+    expect(source).not.toContain("crypto.randomUUID()");
+    expect(viewModelSource).not.toContain("crypto.randomUUID()");
+  });
+
   it("keeps the brand concise and describes collaboration without a local-only qualifier", () => {
     expect(source).toContain("Ask Timem to investigate, write, or work with you.");
     expect(source).not.toContain("work with your local environment");
@@ -1244,7 +1250,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("candidate.detail === activity.detail");
     expect(source).toContain("const withoutExisting = existingIndex >= 0");
     expect(source).toContain("const reportUiError = useCallback");
-    expect(source).toContain("pushActivity({ id: crypto.randomUUID(), sessionId, tone: \"error\", title, detail, createdAt: Date.now() });");
+    expect(source).toContain("pushActivity({ id: clientId(), sessionId, tone: \"error\", title, detail, createdAt: Date.now() });");
     expect([...source.matchAll(/pushActivity\(activity\);/g)].length).toBeGreaterThanOrEqual(10);
     expect(source).toContain("Load history failed");
     expect(source).toContain("Reconnect to Timem Web before loading earlier history.");
