@@ -16,8 +16,8 @@ cd TimemAi
 ./install.sh
 ```
 
-The installer builds and installs `timem` and `timem-web`. Rust dependencies
-are downloaded automatically. The released Web bundle is already included;
+The installer builds and installs `timem` and `timem-web`. Cargo downloads Rust crates
+automatically during the build. The released Web bundle is already included;
 Node.js is only needed when developing the Web frontend.
 
 ## Configure
