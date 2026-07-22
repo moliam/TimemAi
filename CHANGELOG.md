@@ -6,6 +6,12 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- Public Web startup now prints a directly usable host URL instead of the
+  `<server-ip>` placeholder, supports `TIMEM_PUBLIC_HOST`/`--public-host` for
+  multi-interface deployments, and skips opening a browser on the server.
+
 ### Added
 
 - Added manual per-Session ToolGen preservation. A ToolGen button on each

@@ -149,7 +149,20 @@ timem-web
 and opens the authenticated local page in the default browser. Use
 `timem-web --public` only when you intentionally want it reachable through the
 machine's network address; browser entry, API, upload, and WebSocket access
-require the printed token or an authenticated browser session cookie.
+require the printed token or an authenticated browser session cookie. Public
+mode prints a directly usable URL using the detected host address. For a
+multi-interface server or reverse proxy, set `TIMEM_PUBLIC_HOST` or pass
+`--public-host <host>`. Public mode does not try to open a browser on the
+server; use `--no-open` explicitly for clarity in scripts.
+
+Remote server example:
+
+```bash
+source /path/to/your/env
+timem-web --public --public-host 10.125.112.83 --port 20699 --no-open
+```
+
+Open the complete tokenized URL printed by the server on your local machine.
 
 Run directly from source during development:
 

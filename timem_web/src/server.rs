@@ -31,7 +31,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
     io::Read,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -474,20 +474,23 @@ pub async fn run_from_env() -> Result<(), String> {
         .port();
     let app = build_router(state.clone(), port);
     let local_url = format!("http://127.0.0.1:{port}/?token={token}");
-    let public_url = format!("http://<server-ip>:{port}/?token={token}");
-    let url = if launch.public_access {
-        public_url.as_str()
-    } else {
-        local_url.as_str()
-    };
-    println!("Timem Web is ready at {url}");
     if launch.public_access {
+        if let Some(public_url) = public_access_url(launch.public_host.as_deref(), port, &token) {
+            println!("Timem Web is ready at {public_url}");
+        } else {
+            println!("Timem Web is ready at {local_url}");
+            println!(
+                "Could not detect a reachable server address. Set TIMEM_PUBLIC_HOST or pass --public-host <host> to get a remote browser URL."
+            );
+        }
         println!(
             "Public mode is enabled. Browser, API, upload, and WebSocket access require the token above."
         );
         println!("Local access: {local_url}");
+    } else {
+        println!("Timem Web is ready at {local_url}");
     }
-    if launch.open_browser {
+    if launch.open_browser && !launch.public_access {
         if let Err(error) = open_browser(&local_url) {
             eprintln!("Could not open the browser automatically: {error}");
             eprintln!("Open this URL manually: {local_url}");
@@ -3564,6 +3567,7 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
 struct WebLaunchOptions {
     port: Option<u16>,
     public_access: bool,
+    public_host: Option<String>,
     space: Option<String>,
     provider: Option<String>,
     api_protocol: Option<String>,
@@ -3585,6 +3589,7 @@ impl Default for WebLaunchOptions {
         Self {
             port: None,
             public_access: false,
+            public_host: None,
             space: None,
             provider: None,
             api_protocol: None,
@@ -3633,6 +3638,7 @@ impl WebLaunchOptions {
                     options.public_access = true;
                     index += 1;
                 }
+                "--public-host" => string(&mut options.public_host)?,
                 "--space" => string(&mut options.space)?,
                 "--gateway-provider" => string(&mut options.provider)?,
                 "--api-protocol" => string(&mut options.api_protocol)?,
@@ -3880,7 +3886,40 @@ fn nonempty_text(text: String, label: &str) -> Result<String, String> {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default auto-select\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --gateway-provider <name>    provider\n  --api-protocol <protocol>    provider wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             provider base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          provider timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default auto-select\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --gateway-provider <name>    provider\n  --api-protocol <protocol>    provider wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             provider base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          provider timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+}
+
+fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {
+    let configured_host = configured_host
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("TIMEM_PUBLIC_HOST")
+                .ok()
+                .map(|host| host.trim().to_string())
+                .filter(|host| !host.is_empty())
+        });
+    let host = configured_host.or_else(detect_advertised_host)?;
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    Some(format!("http://{host}:{port}/?token={token}"))
+}
+
+fn detect_advertised_host() -> Option<String> {
+    // UDP connect selects the local route without sending application data.
+    // This avoids shelling out to platform-specific interface tools.
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    if ip.is_unspecified() || ip.is_loopback() {
+        None
+    } else {
+        Some(ip.to_string())
+    }
 }
 
 #[cfg(test)]
