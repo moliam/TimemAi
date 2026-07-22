@@ -411,6 +411,13 @@ fn browser_open_uses_a_direct_argument_without_shell_interpolation() {
 }
 
 #[test]
+fn browser_auto_open_requires_a_local_graphical_session() {
+    assert!(!browser_auto_open_allowed_for(true, true));
+    assert!(!browser_auto_open_allowed_for(false, false));
+    assert!(browser_auto_open_allowed_for(false, true));
+}
+
+#[test]
 fn web_runtime_updates_only_accept_the_shared_runtime_config_keys() {
     assert!(matches!(
         runtime_config_field_from_key("TIMEM_MAX_LLM_OUTPUT"),

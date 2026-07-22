@@ -491,9 +491,15 @@ pub async fn run_from_env() -> Result<(), String> {
         println!("Timem Web is ready at {local_url}");
     }
     if launch.open_browser && !launch.public_access {
-        if let Err(error) = open_browser(&local_url) {
-            eprintln!("Could not open the browser automatically: {error}");
-            eprintln!("Open this URL manually: {local_url}");
+        if should_auto_open_browser() {
+            if let Err(error) = open_browser(&local_url) {
+                eprintln!("Could not open the browser automatically: {error}");
+                eprintln!("Open this URL manually: {local_url}");
+            }
+        } else {
+            println!(
+                "[INFO] No local graphical session detected; browser auto-open skipped. Open: {local_url}"
+            );
         }
     }
     println!(
@@ -3762,6 +3768,28 @@ fn open_browser(url: &str) -> Result<(), String> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+fn should_auto_open_browser() -> bool {
+    let is_ssh = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .into_iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+
+    #[cfg(target_os = "linux")]
+    let has_graphical_session = std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty())
+        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let has_graphical_session = true;
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    let has_graphical_session = false;
+
+    browser_auto_open_allowed_for(is_ssh, has_graphical_session)
+}
+
+fn browser_auto_open_allowed_for(is_ssh: bool, has_graphical_session: bool) -> bool {
+    !is_ssh && has_graphical_session
 }
 
 fn open_directory_in_terminal(path: &Path) -> Result<(), String> {

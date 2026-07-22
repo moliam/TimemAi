@@ -146,20 +146,22 @@ timem-web
 
 `timem-web` binds to `127.0.0.1` by default, chooses a port in
 `12345..=23456` unless `--port` is set, generates a per-process access token,
-and opens the authenticated local page in the default browser. Use
+and opens the authenticated local page in the default browser when a local
+graphical session is detected. SSH/headless sessions keep the server running
+without trying to launch a browser. Use
 `timem-web --public` only when you intentionally want it reachable through the
 machine's network address; browser entry, API, upload, and WebSocket access
 require the printed token or an authenticated browser session cookie. Public
 mode prints a directly usable URL using the detected host address. For a
 multi-interface server or reverse proxy, set `TIMEM_PUBLIC_HOST` or pass
 `--public-host <host>`. Public mode does not try to open a browser on the
-server; use `--no-open` explicitly for clarity in scripts.
+server. Use `--no-open` when an explicit no-launch override is preferred.
 
 Remote server example:
 
 ```bash
 source /path/to/your/env
-timem-web --public --public-host 10.125.112.83 --port 20699 --no-open
+timem-web --public --public-host 10.125.112.83 --port 20699
 ```
 
 Open the complete tokenized URL printed by the server on your local machine.
