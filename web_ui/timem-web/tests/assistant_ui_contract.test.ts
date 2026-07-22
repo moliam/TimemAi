@@ -617,16 +617,18 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const toolName = toolDisplayName(activity.tool_name || activity.title);");
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;');
     expect(source).toContain("const summaryContent = <>");
+    expect(source).toContain("!hasExpandableDetail && invocationPreview");
     expect(source).toContain('open={open} onToggle={(event) => setOpen(event.currentTarget.open)}');
     expect(source).toContain('aria-busy={running || undefined} open={open}');
     expect(source).toContain('aria-label={summaryLabel}');
-    expect(source).toContain('className="tool-activity-collapse top" title={`Collapse ${toolName} details`} aria-label={`Collapse ${toolName} details`} onClick={collapse}>收起详情</button>');
-    expect(source).toContain('className="tool-activity-collapse" title={`Collapse ${toolName} details`} aria-label={`Collapse ${toolName} details`} onClick={collapse}>收起详情</button>');
-    expect(styles).toContain(".tool-activity-collapse");
+    expect(source).not.toContain("tool-activity-collapse");
+    expect(styles).not.toContain(".tool-activity-collapse");
+    expect(styles).toContain(".tool-activity-body { max-height: 280px; overflow: auto; margin: 0 0 5px 22px; padding: 0; border: 0; }");
+    expect(styles).toContain(".tool-activity-body .turn-work-detail { padding: 2px 0 3px; }");
     expect(styles).toContain(".tool-activity summary:focus-visible { background: #1f1f1f; box-shadow: inset 2px 0 0 #4d8fd7; }");
     expect(styles).toContain(':root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }');
     expect(source).toContain("toolDisplayName(activity.tool_name || activity.title)");
-    expect(source).toContain("{invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}");
+    expect(source).toContain("{!hasExpandableDetail && invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}");
     expect(source).toContain('if (status === "background_running") return "background running";');
     expect(source).toContain('if (status === "timeout") return "timed out";');
     expect(styles).toContain(".tool-activity-static");
@@ -635,6 +637,12 @@ describe("assistant-ui thread integration", () => {
     expect(viewModelSource).toContain('if (name === "memmgr") return "MemMgr";');
     expect(viewModelSource).toContain('if (name === "capmgr") return "CapMgr";');
     expect(viewModelSource).toContain('if (name === "self_tool") return "Self tool";');
+  });
+
+  it("makes the live working label larger than regular work stream text", () => {
+    expect(styles).toContain(".turn-assistant-frame.working .working-chip { font-size: 14px; font-weight: 720; color: #7ebce8; letter-spacing: 0; }");
+    expect(styles).toContain(".turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; }");
+    expect(styles).toContain(".turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 2px; color: #aaa; font-size: 12px;");
   });
 
   it("keeps ToolGen retrospective attached to its final delivery", () => {

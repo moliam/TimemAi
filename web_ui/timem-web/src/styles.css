@@ -539,12 +539,14 @@ button:disabled { cursor: not-allowed; }
 .turn-assistant-heading { min-height: 26px; padding: 0 0 5px; border: 0; }
 .turn-assistant-heading .message-label { color: #b4b4b4; font-size: 11px; }
 .working-chip { gap: 5px; border: 0; padding: 0; background: transparent; color: #8d8d8d; font-size: 10px; }
+.turn-assistant-frame.working .working-chip { font-size: 14px; font-weight: 720; color: #7ebce8; letter-spacing: 0; }
 .working-chip.completed-work-title { min-height: 24px; padding: 0 9px 0 7px; border: 1px solid #4b4b4b; border-radius: 999px; background: #303030; color: #d4d4d4; }
 .working-chip.completed-work-title.toolgen-completed-title { border-color: #476b8d; background: #24384b; color: #a9d3f4; }
 .work-collapse-toggle { padding: 2px 6px; color: #777; font-size: 10px; }
 .work-collapse-toggle:hover { background: #2d2d2d; color: #cfcfcf; }
 .turn-assistant-frame.collapsed-work { margin-bottom: -10px; border-left-color: #303030; }
 .working-chip .pulse { width: 5px; height: 5px; background: #aaa; }
+.turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; }
 @keyframes toolgen-turn { 0%, 100% { transform: rotate(-8deg); opacity: .7; } 50% { transform: rotate(16deg); opacity: 1; } }
 .turn-work-scroll { max-height: min(420px, 50vh); padding: 0; scrollbar-gutter: auto; }
 .turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 2px; color: #aaa; font-size: 12px; }
@@ -599,15 +601,12 @@ button:disabled { cursor: not-allowed; }
 .tool-activity summary code { min-width: 0; overflow: hidden; color: #7f7f7f; background: transparent; font: 10px/1.4 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .tool-activity-chevron { color: #696969; transition: transform .15s ease; }
 .tool-activity[open] .tool-activity-chevron { transform: rotate(90deg); }
-.tool-activity-body { max-height: 280px; overflow: auto; margin: 2px 0 7px 22px; padding-left: 0; border: 0; }
-.tool-activity-body .turn-work-detail { padding: 5px 0; }
+.tool-activity-body { max-height: 280px; overflow: auto; margin: 0 0 5px 22px; padding: 0; border: 0; }
+.tool-activity-body .turn-work-detail { padding: 2px 0 3px; }
 .tool-activity-body .code-block { margin: 2px 0; border: 0; border-radius: 0; background: transparent; }
 .tool-activity-body .code-block figcaption { display: none; }
 .tool-activity-body .code-block pre { max-height: 160px; padding: 5px 3px; background: transparent; font-size: 11px; line-height: 1.55; }
 .tool-activity-body .code-block code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.tool-activity-collapse { margin: 4px 0 0; border: 0; border-radius: 4px; padding: 3px 7px; background: transparent; color: #737373; font: inherit; font-size: 10px; font-weight: 650; }
-.tool-activity-collapse.top { margin: 0 0 5px; }
-.tool-activity-collapse:hover { color: #cfcfcf; background: #252525; }
 
 .turn-final-delivery { margin-top: 20px; }
 .turn-final-delivery > .message-label { color: #b4b4b4; font-size: 11px; }
@@ -688,8 +687,6 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .tool-activity summary code { color: #888; }
 :root[data-theme="light"] .tool-activity.running .tool-activity-status { color: #8d7654; }
 :root[data-theme="light"] .tool-activity-body { border-left-color: #ddd; }
-:root[data-theme="light"] .tool-activity-collapse { color: #777; }
-:root[data-theme="light"] .tool-activity-collapse:hover { color: #333; background: #eee; }
 :root[data-theme="light"] .completion-card { border: 0; background: transparent; color: #8a8a8a; }
 :root[data-theme="light"] .completion-card b { color: inherit; }
 :root[data-theme="light"] .completion-card span { border: 0; }
