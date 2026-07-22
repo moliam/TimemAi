@@ -10,6 +10,11 @@ const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const viteConfig = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
 
 describe("assistant-ui thread integration", () => {
+  it("keeps a visible boot state before the React bundle mounts", () => {
+    expect(html).toContain('<div id="root">');
+    expect(html).toContain("Timem is loading...");
+  });
+
   it("keeps the brand concise and describes collaboration without a local-only qualifier", () => {
     expect(source).toContain("Ask Timem to investigate, write, or work with you.");
     expect(source).not.toContain("work with your local environment");

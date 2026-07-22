@@ -121,6 +121,13 @@ async fn static_web_entry_requires_token_or_authenticated_cookie() {
     )
     .await;
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        denied
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain; charset=utf-8")
+    );
 
     let allowed = static_asset(
         State((state.clone(), TEST_PORT)),
