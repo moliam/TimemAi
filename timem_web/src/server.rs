@@ -651,7 +651,12 @@ async fn static_asset(
 ) -> Response {
     let token_from_query = query.token.as_deref() == Some(state.token.as_str());
     if !token_from_query && !authorized_by_cookie(&state, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))],
+            "Timem Web requires the full authenticated URL printed at startup, including ?token=... .\n",
+        )
+            .into_response();
     }
     let path = match uri.path() {
         "/" => "/index.html",
