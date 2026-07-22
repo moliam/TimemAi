@@ -92,7 +92,7 @@ fn dim_line(text: &str) -> String {
 }
 
 pub fn format_token_count(value: u32) -> String {
-    if value % 1_000 == 0 && value >= 1_000 {
+    if value.checked_rem(1_000) == Some(0) && value >= 1_000 {
         format!("{}K", value / 1_000)
     } else {
         value.to_string()
@@ -235,6 +235,7 @@ pub fn compact_status_text(text: &str, max_chars: usize) -> String {
     compact_runtime_status_text(text, max_chars)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_final_response_at(
     text: &str,
     stats: &UsageStats,
@@ -411,10 +412,8 @@ fn final_status_line(
     let view =
         runtime_token_status_view(stats, latest_usage, max_llm_input_tokens, stats.llm_calls);
     let mut parts = Vec::new();
-    if view.latest.is_some() {
-        if view.context_percent > 0 {
-            parts.push(format!("ctx[{}%]", view.context_percent));
-        }
+    if view.latest.is_some() && view.context_percent > 0 {
+        parts.push(format!("ctx[{}%]", view.context_percent));
     }
     parts.push(format!("▲{}", compact_count(view.total.input_tokens)));
     parts.push(format!("▼{}", compact_count(view.total.output_tokens)));
@@ -699,6 +698,9 @@ pub fn provider_config_from_env(
             timeout_secs: options.timeout_secs,
             max_llm_output_tokens: options.max_llm_output_tokens,
             max_llm_input_tokens: options.max_llm_input_tokens,
+            enable_thinking: None,
+            reasoning_effort: None,
+            stream: None,
             local_api_key: LocalLLMKeyFile::load(&local_llm_key_file_path())
                 .ok()
                 .map(|file| file.api_key),

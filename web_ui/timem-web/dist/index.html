@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Timem</title>
+    <script>
+      try {
+        const saved = JSON.parse(localStorage.getItem("timem-web-appearance-v1") || "{}");
+        document.documentElement.dataset.theme = saved.theme === "dark" || saved.theme === "light"
+          ? saved.theme
+          : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        document.documentElement.dataset.font = ["system", "serif", "mono"].includes(saved.font) ? saved.font : "system";
+        document.documentElement.dataset.textSize = ["small", "medium", "large"].includes(saved.textSize) ? saved.textSize : "medium";
+      } catch (_) {
+        document.documentElement.dataset.theme = "dark";
+        document.documentElement.dataset.font = "system";
+        document.documentElement.dataset.textSize = "medium";
+      }
+    </script>
+    <script type="module" crossorigin src="/assets/index-CnHxNXvZ.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/assistantUi-eG9OPbTi.js">
+    <link rel="modulepreload" crossorigin href="/assets/markdown-CGwoqA8S.js">
+    <link rel="modulepreload" crossorigin href="/assets/highlighting-C7uSrgmk.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-BNGil18i.css">
+  </head>
+  <body>
+    <div id="root">
+      <div style="box-sizing:border-box;min-height:100vh;display:grid;place-items:center;padding:24px;font:15px/1.5 system-ui,sans-serif;color:#425466;background:#f6f8fa">
+        Timem is loading...
+      </div>
+    </div>
+  </body>
+</html>

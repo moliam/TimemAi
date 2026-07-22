@@ -9,7 +9,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,6 +45,7 @@ pub mod runtime_context;
 #[path = "../../resources/capabilities/tools/self_tool.rs"]
 pub mod self_tool;
 pub mod session_runtime;
+pub mod session_store;
 pub mod session_worker;
 #[path = "../../resources/capabilities/tools/run_bash.rs"]
 pub mod shell_exec;
@@ -52,6 +54,9 @@ pub mod status_view;
 pub mod tool_jobs;
 #[path = "../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;
+pub mod tool_repo;
+#[path = "../../resources/capabilities/tools/toolgen.rs"]
+pub mod toolgen;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
@@ -83,9 +88,10 @@ pub use data_layout::{
     default_data_root, layout_for_space, workspace_config_file, RuntimeDataLayout,
 };
 pub use host::{
-    core_initialized_topic_event, core_initialized_topic_event_with_worker,
-    normalize_user_supplements, resolve_topic_reply, session_worker_default_display_name,
-    topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
+    context_compact_topic_event, core_initialized_topic_event,
+    core_initialized_topic_event_with_worker, normalize_user_supplements, resolve_topic_reply,
+    session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
+    work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
     CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
     CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
     CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
@@ -94,10 +100,11 @@ pub use host::{
     NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
     RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
     TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, CORE_TOPIC_ACTION,
-    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};
@@ -119,12 +126,13 @@ pub use provider::{
     parse_provider_response, plan_structured_output, prepare_provider_http_request,
     prepare_provider_request, prompt_cache_plan_audit, provider_http_error_message,
     provider_prompt_blocks, provider_request_audit_event, provider_response_audit_event,
-    ApiProtocol, PreparedProviderHttpRequest, PreparedProviderRequest, ProviderCacheControl,
-    ProviderConfig, ProviderHttpResponseInterpretation, ProviderPromptBlock, ProviderPromptRole,
-    StructuredOutputHint,
+    ApiProtocol, OpenAiCompatibleOptions, PreparedProviderHttpRequest, PreparedProviderRequest,
+    ProviderCacheControl, ProviderConfig, ProviderHttpResponseInterpretation, ProviderPromptBlock,
+    ProviderPromptRole, StructuredOutputHint,
 };
 pub use provider_config::{
-    provider_config_from_sources, validate_provider_api_key, LocalLLMKeyFile, ProviderConfigSource,
+    apply_openai_compatible_env_value, provider_config_from_sources, validate_provider_api_key,
+    LocalLLMKeyFile, ProviderConfigSource,
 };
 pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
 pub use redaction::{redact_value, REDACTED};
@@ -146,7 +154,7 @@ pub use session_runtime::{
 pub use session_worker::{
     CoreSessionWorker, CoreSessionWorkerConfig, CoreSessionWorkerEvent, CoreSessionWorkerHandle,
     CoreSessionWorkerLifecycleState, CoreSessionWorkerManager, CoreSessionWorkerRuntime,
-    CoreSessionWorkerStatus,
+    CoreSessionWorkerStatus, ToolGenRequest,
 };
 use shell_exec::FileShellJobStore;
 pub use shell_exec::ShellJobRecord;
@@ -161,6 +169,10 @@ pub use status_view::{
     RuntimeStatusSnapshot,
 };
 use tool_jobs::FileToolJobStore;
+pub use tool_repo::{
+    SessionToolRepo, ToolDetail, ToolFileEntry, ToolManifest, ToolPublishResult, ToolSelfTest,
+    ToolSummary,
+};
 pub use work_instructions::{
     combine_additional_contexts, discover_work_instruction_files, load_work_instruction_context,
     parse_work_instruction_mode, work_instruction_load_report, work_instruction_load_request,
@@ -255,6 +267,7 @@ pub enum AssistantReplayMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnFinal {
     pub final_answer: String,
+    pub toolgen_retrospect: String,
     pub stats: UsageStats,
     pub profile_label: String,
     pub repair_issue: Option<String>,
@@ -393,12 +406,12 @@ pub(crate) struct ScratchContextOffload {
     slice_ids: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChatHistoryRecord {
-    pub session: String,
-    pub turn_id: String,
-    pub started_at_ms: i64,
-    pub user_input: String,
-    pub assistant_output: String,
+pub(crate) struct RawChatHistoryRecord {
+    session: String,
+    turn_id: String,
+    started_at_ms: i64,
+    user_input: String,
+    assistant_output: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -431,12 +444,19 @@ pub(crate) enum PendingApprovedAction {
         turn_id: String,
         cwd: PathBuf,
     },
+    ToolgenPublish {
+        repo: SessionToolRepo,
+        draft_path: PathBuf,
+    },
 }
 
 impl PendingApprovedAction {
     fn command(&self) -> &str {
         match self {
             PendingApprovedAction::RunBash { command, .. } => command,
+            PendingApprovedAction::ToolgenPublish { draft_path, .. } => {
+                draft_path.to_str().unwrap_or("<invalid-path>")
+            }
         }
     }
 
@@ -461,6 +481,12 @@ impl PendingApprovedAction {
                 "session_id": session_id,
                 "turn_id": turn_id,
                 "cwd": cwd,
+                "approval_id": approval_id,
+                "risk": risk,
+                "reason": reason,
+            }),
+            PendingApprovedAction::ToolgenPublish { draft_path, .. } => json!({
+                "draft_path": draft_path,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -792,6 +818,7 @@ fn default_self_tool_process() -> SelfToolProcess {
 
 #[derive(Debug)]
 pub struct AgentCore {
+    memory_dir: PathBuf,
     static_prompt: String,
     rendered_static_prompt: String,
     profile: CoreProfile,
@@ -828,6 +855,7 @@ pub struct AgentCore {
     assistant_replay_mode: AssistantReplayMode,
     current_prompt_cwd: PathBuf,
     cwd_note_pending: bool,
+    tool_repo_session_id: String,
 }
 impl AgentCore {
     pub fn new(
@@ -843,7 +871,7 @@ impl AgentCore {
             default_self_tool_process(),
         );
         let static_prompt = static_prompt.into();
-        let capabilities = CapabilityRegistry::builtin();
+        let capabilities = CapabilityRegistry::builtin().without_tool("toolgen");
         let response_protocol = ResponseProtocolKind::default();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -854,6 +882,7 @@ impl AgentCore {
             &assistant_speaker_name,
         );
         Self {
+            memory_dir: memory_dir.to_path_buf(),
             static_prompt,
             rendered_static_prompt,
             profile,
@@ -890,7 +919,46 @@ impl AgentCore {
             assistant_replay_mode: AssistantReplayMode::RawOutput,
             current_prompt_cwd,
             cwd_note_pending: true,
+            tool_repo_session_id: "default".to_string(),
         }
+    }
+
+    pub fn set_tool_repo_session_id(&mut self, session_id: impl Into<String>) {
+        let session_id = session_id.into();
+        if !session_id.trim().is_empty() {
+            self.tool_repo_session_id = session_id;
+        }
+    }
+
+    pub fn tool_repo(&self) -> SessionToolRepo {
+        SessionToolRepo::new(&self.memory_dir, &self.tool_repo_session_id)
+    }
+
+    pub fn fork_ephemeral_context(&self, cwd: impl AsRef<Path>) -> Self {
+        let mut fork = Self::new(
+            self.static_prompt.clone(),
+            self.profile.clone(),
+            &self.memory_dir,
+        );
+        fork.capabilities = self.capabilities.clone();
+        fork.response_protocol = self.response_protocol;
+        fork.max_llm_input_tokens = self.max_llm_input_tokens;
+        fork.configured_round_budget = self.configured_round_budget;
+        fork.round_budget = self.configured_round_budget;
+        fork.bash_approval_mode = self.bash_approval_mode;
+        fork.assistant_speaker_name = self.assistant_speaker_name.clone();
+        fork.assistant_replay_mode = self.assistant_replay_mode;
+        fork.current_prompt_cwd = cwd.as_ref().to_path_buf();
+        fork.tool_repo_session_id = self.tool_repo_session_id.clone();
+        fork.refresh_rendered_static_prompt();
+        fork
+    }
+
+    pub fn set_round_budget(&mut self, rounds: u32) {
+        let rounds = rounds.max(1);
+        self.configured_round_budget = rounds;
+        self.round_budget = rounds;
+        self.current_round = 0;
     }
 
     pub fn set_assistant_speaker_name(&mut self, name: impl AsRef<str>) {
@@ -1153,7 +1221,16 @@ impl AgentCore {
         );
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
-        self.capabilities = capabilities;
+        self.capabilities = capabilities.without_tool("toolgen");
+        self.refresh_rendered_static_prompt();
+    }
+    pub(crate) fn enable_toolgen_capability(&mut self) -> Result<(), String> {
+        self.capabilities.enable_toolgen()?;
+        self.refresh_rendered_static_prompt();
+        Ok(())
+    }
+    pub(crate) fn disable_toolgen_capability(&mut self) {
+        self.capabilities.disable_toolgen();
         self.refresh_rendered_static_prompt();
     }
     pub fn set_response_protocol(&mut self, protocol: ResponseProtocolKind) {
@@ -1341,10 +1418,11 @@ impl AgentCore {
             .iter()
             .map(|component| estimate_prompt_tokens(&component.content))
             .sum::<u32>();
-        let should_memory_precheck = supporting_context
-            .map(should_run_memory_precheck)
-            .unwrap_or(false);
         let text = user_input.trim().to_string();
+        let should_memory_precheck = !text.is_empty()
+            && supporting_context
+                .map(should_run_memory_precheck)
+                .unwrap_or(false);
         let filtered_supporting_context = supporting_context
             .map(|ctx| self.filter_repeated_work_instructions(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
@@ -1365,12 +1443,14 @@ impl AgentCore {
         {
             system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
         }
-        self.submit_prompt_component(
-            PromptComponentRole::user(),
-            "user_question",
-            text,
-            "user_input",
-        );
+        if !text.is_empty() {
+            self.submit_prompt_component(
+                PromptComponentRole::user(),
+                "user_question",
+                text,
+                "user_input",
+            );
+        }
         for system_text in system_texts {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -1490,6 +1570,7 @@ impl AgentCore {
                 self.defer_next_turn_slices(slices);
                 return CoreStep::Final(TurnFinal {
                     final_answer: final_text,
+                    toolgen_retrospect: String::new(),
                     stats: self.current_stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: Some("invalid_json_plain_text_fallback".to_string()),
@@ -1501,6 +1582,7 @@ impl AgentCore {
             if final_text.is_empty() {
                 return CoreStep::Final(TurnFinal {
                     final_answer: String::new(),
+                    toolgen_retrospect: String::new(),
                     stats: self.current_stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: Some(issue.clone()),
@@ -1522,6 +1604,7 @@ impl AgentCore {
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
+                toolgen_retrospect: parsed.toolgen_retrospect.clone(),
                 stats: self.current_stats.clone(),
                 profile_label: self.profile.label(),
                 repair_issue: Some(issue),
@@ -1548,6 +1631,7 @@ impl AgentCore {
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
+                let estimated_before_tokens = self.dynamic_context_summary().estimated_tokens;
                 let offload_record = if compact.offload_delta_ids.is_empty() {
                     None
                 } else {
@@ -1588,6 +1672,18 @@ impl AgentCore {
                     &compact.delta_ids,
                     &compact.slice_ids,
                 );
+                let estimated_after_tokens = self
+                    .dynamic_context_summary()
+                    .estimated_tokens
+                    .saturating_add(estimate_prompt_tokens(&compact.summary));
+                runtime.on_core_topic_events(&[host::context_compact_topic_event(
+                    self.current_session_id(),
+                    estimated_before_tokens,
+                    estimated_after_tokens,
+                    &compact.discard_delta_ids,
+                    &compact.offload_delta_ids,
+                    offload_record.as_ref().map(|record| record.id.as_str()),
+                )]);
                 let scratch_line = offload_record
                     .as_ref()
                     .map(|record| {
@@ -1632,6 +1728,7 @@ impl AgentCore {
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
+                toolgen_retrospect: parsed.toolgen_retrospect.clone(),
                 stats: self.current_stats.clone(),
                 profile_label: self.profile.label(),
                 repair_issue: if self.repair_attempted
@@ -1734,6 +1831,7 @@ impl AgentCore {
         self.defer_next_turn_slices(slices);
         CoreStep::Final(TurnFinal {
             final_answer: final_text,
+            toolgen_retrospect: parsed.toolgen_retrospect,
             stats: self.current_stats.clone(),
             profile_label: self.profile.label(),
             repair_issue: None,
@@ -1819,6 +1917,7 @@ impl AgentCore {
         step
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_model_repair_audit_if_needed(
         &self,
         audit_file: &Path,
@@ -1997,6 +2096,9 @@ impl AgentCore {
                     &self.shell_jobs,
                     runtime,
                 ),
+                PendingApprovedAction::ToolgenPublish { repo, draft_path } => {
+                    toolgen::execute_approved_publish(repo, draft_path, &pending.request)
+                }
             }
         } else {
             format!(
@@ -2034,6 +2136,7 @@ impl AgentCore {
         )
     }
 
+    #[allow(clippy::result_large_err)]
     fn finish_parallel_group_after_approvals(
         &mut self,
         actions: Vec<ParsedAction>,
@@ -2043,6 +2146,7 @@ impl AgentCore {
         runtime: &mut dyn ActionRuntime,
     ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
         let mut results = vec![None; actions.len()];
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         for (idx, result) in denied_results.into_iter().chain(completed_results) {
             if let Some(slot) = results.get_mut(idx) {
                 *slot = Some(result);
@@ -2051,7 +2155,11 @@ impl AgentCore {
 
         let mut handles = Vec::new();
         for (idx, pending) in approved {
-            handles.push(self.spawn_approved_parallel_bash_action(idx, pending));
+            handles.push(self.spawn_approved_parallel_bash_action(
+                idx,
+                pending,
+                Arc::clone(&cancel_requested),
+            ));
         }
 
         for (idx, action) in actions.iter().cloned().enumerate() {
@@ -2065,13 +2173,23 @@ impl AgentCore {
                     }
                 }
                 ActionExecution::NeedsApproval(pending) => {
-                    self.collect_approved_parallel_bash_handles(handles, &mut results, runtime);
+                    self.collect_approved_parallel_bash_handles(
+                        handles,
+                        &mut results,
+                        runtime,
+                        &cancel_requested,
+                    );
                     return Err((Self::ordered_parallel_results(results), pending));
                 }
             }
         }
 
-        self.collect_approved_parallel_bash_handles(handles, &mut results, runtime);
+        self.collect_approved_parallel_bash_handles(
+            handles,
+            &mut results,
+            runtime,
+            &cancel_requested,
+        );
         Ok(Self::ordered_parallel_results(results))
     }
 
@@ -2247,6 +2365,7 @@ impl AgentCore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_output_expansion_with_audit(
         &self,
         config: &mut ProviderConfig,
@@ -2902,11 +3021,12 @@ impl AgentCore {
                 terms.iter().any(|term| text.contains(term))
             })
             .collect::<Vec<_>>();
-        rows.sort_by(|a, b| b.time_ms.cmp(&a.time_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.time_ms));
         rows.truncate(limit.clamp(1, 50));
         rows
     }
 
+    #[allow(clippy::result_large_err)]
     fn execute_action_groups(
         &mut self,
         groups: Vec<ParsedActionGroup>,
@@ -2944,6 +3064,7 @@ impl AgentCore {
         &mut self,
         idx: usize,
         pending: PendingApproval,
+        cancel_requested: Arc<AtomicBool>,
     ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)> {
         let action = ParsedAction {
             action: pending.request.action.clone(),
@@ -2968,7 +3089,7 @@ impl AgentCore {
                     turn_id,
                     cwd,
                 } => {
-                    let mut should_cancel = || false;
+                    let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                     shell_exec::execute_approved_bash(
                         command,
@@ -2985,6 +3106,9 @@ impl AgentCore {
                         &mut runtime,
                     )
                 }
+                PendingApprovedAction::ToolgenPublish { repo, draft_path } => {
+                    toolgen::execute_approved_publish(repo, draft_path, &pending_for_thread.request)
+                }
             };
             (idx, action, pending_for_thread, result)
         })
@@ -2994,6 +3118,7 @@ impl AgentCore {
         &mut self,
         idx: usize,
         action: ParsedAction,
+        cancel_requested: Arc<AtomicBool>,
     ) -> thread::JoinHandle<(usize, ParsedAction, String)> {
         let action_for_audit = action.clone();
         let shell_jobs = self.shell_jobs.clone();
@@ -3015,7 +3140,7 @@ impl AgentCore {
                     "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.".to_string(),
                 )
             } else {
-                let mut should_cancel = || false;
+                let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
                 shell_exec::execute_run_bash(
                     &command,
@@ -3040,7 +3165,7 @@ impl AgentCore {
                 ActionExecution::Completed(result) => result,
                 ActionExecution::NeedsApproval(_) => format!(
                     "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
-                    &command,
+                    command,
                 ),
             };
             (idx, action_for_audit, result)
@@ -3049,11 +3174,20 @@ impl AgentCore {
 
     fn collect_parallel_bash_handles(
         &self,
-        handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
+        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
+        cancel_requested: &Arc<AtomicBool>,
     ) {
-        for handle in handles {
+        while !handles.is_empty() {
+            if runtime.should_cancel() {
+                cancel_requested.store(true, Ordering::SeqCst);
+            }
+            let Some(position) = handles.iter().position(thread::JoinHandle::is_finished) else {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            let handle = handles.swap_remove(position);
             match handle.join() {
                 Ok((idx, action, result)) => {
                     self.record_action_audit(&action, "completed", Some(&result));
@@ -3075,11 +3209,20 @@ impl AgentCore {
 
     fn collect_approved_parallel_bash_handles(
         &self,
-        handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)>>,
+        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)>>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
+        cancel_requested: &Arc<AtomicBool>,
     ) {
-        for handle in handles {
+        while !handles.is_empty() {
+            if runtime.should_cancel() {
+                cancel_requested.store(true, Ordering::SeqCst);
+            }
+            let Some(position) = handles.iter().position(thread::JoinHandle::is_finished) else {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            let handle = handles.swap_remove(position);
             match handle.join() {
                 Ok((idx, action, pending, result)) => {
                     self.record_pending_approval_audit(&pending, true, &result);
@@ -3121,6 +3264,7 @@ impl AgentCore {
         pending
     }
 
+    #[allow(clippy::result_large_err)]
     fn execute_parallel_action_group(
         &mut self,
         actions: Vec<ParsedAction>,
@@ -3129,9 +3273,14 @@ impl AgentCore {
         let action_count = actions.len();
         let mut results = vec![None; action_count];
         let mut handles = Vec::new();
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         for (idx, action) in actions.iter().cloned().enumerate() {
             if self.can_spawn_parallel_bash_action(&action) {
-                handles.push(self.spawn_parallel_bash_action(idx, action));
+                handles.push(self.spawn_parallel_bash_action(
+                    idx,
+                    action,
+                    Arc::clone(&cancel_requested),
+                ));
                 continue;
             }
             match self.execute_action(action, runtime) {
@@ -3139,7 +3288,12 @@ impl AgentCore {
                     results[idx] = Some(result);
                 }
                 ActionExecution::NeedsApproval(pending) => {
-                    self.collect_parallel_bash_handles(handles, &mut results, runtime);
+                    self.collect_parallel_bash_handles(
+                        handles,
+                        &mut results,
+                        runtime,
+                        &cancel_requested,
+                    );
                     let pending = Self::pending_approval_with_parallel_continuation(
                         pending,
                         actions,
@@ -3156,7 +3310,7 @@ impl AgentCore {
                 }
             }
         }
-        self.collect_parallel_bash_handles(handles, &mut results, runtime);
+        self.collect_parallel_bash_handles(handles, &mut results, runtime, &cancel_requested);
         Ok(Self::ordered_parallel_results(results))
     }
 
@@ -3252,6 +3406,15 @@ impl AgentCore {
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
         event.payload["status"] = json!(Self::action_finish_status(action, result));
+        if action.action == "self_tool"
+            && action.input_lower("type") == "cwd"
+            && action.input_lower("op") == "chg_cwd"
+            && result.contains("status: updated_prompt_context_cwd")
+        {
+            event.payload["context_state"] = json!({
+                "cwd": self.current_prompt_cwd().display().to_string(),
+            });
+        }
         if let Some(pid) = action_result_pid(result) {
             event.payload["pid"] = json!(pid);
         }
@@ -3656,7 +3819,7 @@ impl FileMemoryStore {
                 }
             }
         }
-        rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
         rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
@@ -3664,7 +3827,7 @@ impl FileMemoryStore {
         self.guard
             .with_read(|| {
                 let mut rows = self.read_all_unlocked()?;
-                rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+                rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
                 rows.truncate(limit.clamp(1, 50));
                 Ok(rows)
             })
@@ -4169,7 +4332,7 @@ impl FileScratchStore {
                 terms.iter().any(|term| normalized.contains(term))
             });
         }
-        rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
         rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
@@ -4257,7 +4420,7 @@ impl FileChatHistoryStore {
         limit: usize,
         after_ms: Option<i64>,
         before_ms: Option<i64>,
-    ) -> std::io::Result<Vec<ChatHistoryRecord>> {
+    ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         self.guard
             .with_read(|| self.query_unlocked(query, limit, after_ms, before_ms))
             .map_err(std::io::Error::other)?
@@ -4269,14 +4432,14 @@ impl FileChatHistoryStore {
         limit: usize,
         after_ms: Option<i64>,
         before_ms: Option<i64>,
-    ) -> std::io::Result<Vec<ChatHistoryRecord>> {
+    ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         let terms = search_terms(query);
         let mut rows = self.read_all_unlocked()?;
         rows.retain(|record| time_in_window(record.started_at_ms, after_ms, before_ms));
         if !terms.is_empty() {
             rows.retain(|record| chat_record_matches(record, &terms));
         }
-        rows.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.started_at_ms));
         rows.truncate(limit.clamp(1, 50));
         Ok(rows)
     }
@@ -4332,14 +4495,14 @@ impl FileChatHistoryStore {
         })?
     }
 
-    fn read_all(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
+    fn read_all(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         self.guard
             .with_read(|| self.read_all_unlocked())
             .map_err(std::io::Error::other)?
     }
 
-    fn read_all_unlocked(&self) -> std::io::Result<Vec<ChatHistoryRecord>> {
-        let mut rows = Vec::<ChatHistoryRecord>::new();
+    fn read_all_unlocked(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
+        let mut rows = Vec::<RawChatHistoryRecord>::new();
         for audit_file in self.audit_files() {
             for value in read_audit_events_unlocked(&audit_file)? {
                 let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -4361,7 +4524,7 @@ impl FileChatHistoryStore {
                         if user_input.is_empty() {
                             continue;
                         }
-                        rows.push(ChatHistoryRecord {
+                        rows.push(RawChatHistoryRecord {
                             session: value
                                 .get("session")
                                 .and_then(Value::as_str)
@@ -4389,7 +4552,7 @@ impl FileChatHistoryStore {
                         {
                             existing.assistant_output = assistant_output.to_string();
                         } else {
-                            rows.push(ChatHistoryRecord {
+                            rows.push(RawChatHistoryRecord {
                                 session: value
                                     .get("session")
                                     .and_then(Value::as_str)
@@ -4616,7 +4779,7 @@ fn turn_id_millis(turn_id: &str) -> Option<i64> {
         .and_then(|value| value.parse::<i64>().ok())
 }
 
-fn chat_record_matches(record: &ChatHistoryRecord, terms: &[String]) -> bool {
+fn chat_record_matches(record: &RawChatHistoryRecord, terms: &[String]) -> bool {
     let haystack = format!(
         "{} {} {} {}",
         record.session, record.turn_id, record.user_input, record.assistant_output

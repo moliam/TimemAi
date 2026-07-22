@@ -1,4 +1,4 @@
-# Timem Shell Test Strategy
+# Timem Test Strategy
 
 This project uses layered tests. A feature is not considered protected when it
 only has a helper-function assertion; state-machine features need an end-to-end
@@ -8,10 +8,12 @@ The authoritative feature-to-test ledger is
 `docs/feature-test-management.md`. When adding or changing a feature, update
 that ledger in the same change so the feature, test suites, covered boundaries,
 and remaining supplement decisions stay visible.
+Host-specific release checks that cannot run in default CI are listed in
+`docs/manual-release-smoke.md`.
 
 ## Two Quality Axes
 
-Every feature test must be reviewed against two product-facing axes:
+Every feature test must be reviewed against these product-facing axes:
 
 1. Agent Core interaction correctness
 
@@ -23,16 +25,21 @@ Every feature test must be reviewed against two product-facing axes:
 
 2. UI display correctness
 
-   The shell UI must accurately and clearly represent what the runtime is doing.
-   These tests prove observation rendering, status/token lines, config/banner
-   layout, input editing, paste recovery, menus, elapsed time, cancellation
-   prompts, and that model free_talk/progress/action semantics are rendered in
-   the intended UI surfaces without leaking raw protocol names. Prefer render
-   contract tests plus real pseudo-TTY smoke for this axis.
+   Shell and Web must accurately and clearly represent what the runtime is
+   doing. Shell tests prove observation rendering, status/token lines,
+   config/banner layout, input editing, paste recovery, menus, elapsed time,
+   cancellation prompts, and model free_talk/action semantics. Web tests prove
+   session isolation, scoped topics, active-turn supplements, inline decisions,
+   cancellation pressure, attachments, history paging, per-session profiles,
+   cwd changes, context compaction display, final-answer telemetry, and bounded
+   rendering. Prefer shell render contracts plus real pseudo-TTY smoke/stress,
+   and Web host tests, frontend reducer/render tests, production builds, and
+   release browser smoke.
 
 A behavior that crosses both axes needs tests on both sides. For example,
-model-output parsing must prove that Agent Core can execute the action and that
-the UI can render the same model output as the correct intent/action display.
+model-output parsing must prove that Agent Core can execute the action, Shell
+can render the structured topic, and Web can render the same structured topic
+without leaking it into another Session.
 
 ## Four Coverage Dimensions
 
@@ -65,6 +72,34 @@ checks. If a dimension is not applicable, record that residual decision in
 - Real TTY stress: compiled release binary driven through a pseudo terminal
   while a fake provider causes repeated model/action redraws, long
   Thought/Action rows, and mid-turn user supplements.
+- Web host integration: real `CoreSessionWorker` instances publish concurrent
+  topics through `timem_web`, proving session isolation, request correlation,
+  completion telemetry, work-instruction decisions, bounded host state, and
+  independent per-session runtime profiles. Profile tests use two real workers,
+  verify lifecycle provider/model/protocol/context values, ensure global
+  defaults are not mutated, and assert that API keys never enter snapshots or
+  topics.
+  Same-Session tests also create separate Context/Worker identities, verify the
+  child inherits the owning Session profile/environment, reject scope mismatch,
+  and prove a child finishing cannot mark a still-running primary worker ready.
+- Web frontend: Vitest protects session-aware reducers and rendering contracts;
+  Vite production build is regenerated in CI and must match the tracked bundle.
+  Release review also includes a real browser smoke for scrolling, composer
+  docking, session creation/rename, persistent theme/font/text-size choices,
+  GFM tables/task lists, syntax-highlighted copyable code blocks, responsive
+  overflow, working-turn input, and concurrent activity. Turn-flow
+  coverage verifies that task/supplement/approval input stays in one user frame,
+  process events remain in a bounded scrollable frame, stable event ids prevent
+  replay duplicates, and final Markdown plus token/time telemetry appears below
+  the process frame without a reload. Long-history coverage feeds snapshots
+  beyond 200 turns and 500 events per turn, bursts 1,500 events through five
+  independent sessions, progressively mounts 24 tasks at a time, verifies
+  prepend scroll anchoring, and proves new user tasks remain visible after the
+  DOM window begins rotating. Multi-round fixture coverage also proves
+  live task totals, latest-call context usage, lifecycle-provided context limits,
+  cross-session token isolation, and Session-creation profile overrides. A live
+  Aliyun browser smoke submits turns to two Sessions with different models and
+  verifies that both complete in their own conversation.
 - Performance guard: `scripts/performance_guard.sh` runs bounded hot-path
   checks for large prompt rendering, topic fan-out, and observation panel
   rendering with long rows. Thresholds are intentionally broad enough for CI
@@ -100,6 +135,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Runtime performance | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_many_overlay_capabilities_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded` | real TTY stress covers redraw under fake-provider delay and mid-turn supplement | `scripts/performance_guard.sh` in full CI |
 | Audit and secrets | append audit, action grouping, redaction tests, sensitive scan | session tests assert turn/action/retry/repair audit records | sensitive scan + full CI |
 | Install/update scripts | install logic tests, install run-hint contract | CI script syntax and install logic | full CI |
+| Local Web host and UI | host auth/path/config/session tests, frontend session reducers and rendering contracts | real concurrent core workers, work-instruction decision flow, structured cwd updates, production Vite build, real browser smoke | Linux/macOS full CI plus release browser review |
 
 ## CI Gates
 
@@ -108,14 +144,19 @@ checks. If a dimension is not applicable, record that residual decision in
 1. shell script syntax checks
 2. module boundary check via `scripts/module_boundary_check.sh`
 3. install logic tests
-4. sensitive scan over tracked files
-5. `cargo fmt --check`
-6. `cargo test --workspace`
-7. performance guard via `scripts/performance_guard.sh`
-8. repeated edge regression via `scripts/edge_regression.sh`
-9. release build
-10. real TTY smoke through `expect`
-11. whitespace check
+4. contract checks and static prompt expansion snapshot checks
+5. sensitive scan over tracked files
+6. KVC replay script check
+7. `cargo fmt --check`
+8. clippy warning gate via `scripts/clippy_check.sh`
+9. `cargo test --workspace`
+10. Web dependency license scan, frontend tests, and reproducible production build
+11. performance guard via `scripts/performance_guard.sh`
+12. repeated edge regression via `scripts/edge_regression.sh`
+13. CLI and Web release builds
+14. cross-host resume smoke
+15. real TTY smoke through `expect`
+16. whitespace check
 
 `scripts/edge_regression.sh` defaults to two iterations. Increase pressure with:
 

@@ -15,8 +15,17 @@ struct ToggleCancelRuntime<'a> {
 
 impl ActionRuntime for ToggleCancelRuntime<'_> {
     fn should_cancel(&mut self) -> bool {
-        let previous = self.cancelled.swap(true, Ordering::Relaxed);
-        previous
+        self.cancelled.swap(true, Ordering::Relaxed)
+    }
+}
+
+struct CancelAfterFileRuntime {
+    path: PathBuf,
+}
+
+impl ActionRuntime for CancelAfterFileRuntime {
+    fn should_cancel(&mut self) -> bool {
+        self.path.exists()
     }
 }
 
@@ -115,6 +124,37 @@ fn normal_bash_positive_timeout_reports_long_running_status_to_runtime() {
     );
     assert_eq!(runtime.prompts[0].timeout_ms, Some(5000));
     assert!(runtime.prompts[0].elapsed >= Duration::from_millis(50));
+}
+
+#[cfg(unix)]
+#[test]
+fn normal_bash_cancel_terminates_the_entire_process_group() {
+    let cwd = tmp_cwd("cancel_process_group");
+    let child_pid_file = cwd.join("child.pid");
+    let command = format!(
+        "bash -c 'trap \"\" TERM; tail -f /dev/null' & echo $! > {}; wait",
+        shell_quote_path(&child_pid_file)
+    );
+    let mut runtime = CancelAfterFileRuntime {
+        path: child_pid_file.clone(),
+    };
+
+    let started = Instant::now();
+    let result = execute_one_bash_structured(&command, &cwd, 60_000, &mut runtime)
+        .to_action_result("run_bash");
+
+    assert!(result.contains("cancelled before it completed"), "{result}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let child_pid = fs::read_to_string(&child_pid_file)
+        .expect("child pid should be recorded before cancellation")
+        .trim()
+        .parse::<u32>()
+        .expect("child pid should be numeric");
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !process_running(child_pid),
+        "descendant process {child_pid} survived run_bash cancellation"
+    );
 }
 
 #[test]
@@ -604,6 +644,14 @@ fn process_running_treats_zombie_as_not_running() {
     let _ = child.wait();
 }
 
+#[cfg(unix)]
+#[test]
+fn terminate_process_ignores_missing_pid_without_signalling_broadly() {
+    let missing_pid = i32::MAX as u32;
+    terminate_process(missing_pid);
+    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
+}
+
 #[test]
 fn running_job_list_context_uses_pid_kind_and_command() {
     let dir = tmp_memory_dir("running_context");
@@ -637,4 +685,170 @@ fn bash_validation_rejects_empty_and_allows_long_commands() {
     let huge = "x".repeat(2001);
     assert!(validate_bash_request(&huge).is_ok());
     assert!(validate_bash_request("printf ok").is_ok());
+}
+
+#[test]
+fn bash_validation_blocks_recursive_force_root_delete_variants() {
+    for command in [
+        "rm -rf /",
+        "rm -fr -- /",
+        "rm -rf /*",
+        "echo ok; rm -rf /; echo done",
+        "EMPTY=; rm -rf \"$EMPTY\"/",
+        "EMPTY=; rm -rf ${EMPTY}/*",
+        "rm -rf $(printf '')/",
+        "rm -rf $(printf '')/*",
+        "if true; then rm -rf /; fi",
+    ] {
+        assert_eq!(
+            validate_bash_request(command),
+            Err("dangerous_recursive_root_delete".to_string()),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn bash_validation_allows_non_root_delete_variants() {
+    for command in [
+        "rm -rf ./target",
+        "rm -rf target",
+        "rm -rf /tmp/timem-test-dir",
+        "rm -r /",
+        "rm -f /",
+        "printf 'rm -rf / is only text'",
+    ] {
+        assert!(validate_bash_request(command).is_ok(), "{command}");
+    }
+}
+
+#[test]
+fn run_bash_blocks_dangerous_delete_before_spawning_or_approval() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("dangerous_delete_guard"));
+    let cwd = tmp_cwd("dangerous_delete_guard");
+    let marker = cwd.join("marker.txt");
+    let command = format!("rm -rf /; printf should_not_run > {}", marker.display());
+    let result = execute_run_bash(
+        &command,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Ask,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    match result {
+        ActionExecution::Completed(text) => {
+            assert!(text.contains("blocked by Timem safety policy"), "{text}");
+            assert!(
+                !marker.exists(),
+                "blocked command must not execute follow-up"
+            );
+        }
+        ActionExecution::NeedsApproval(_) => {
+            panic!("dangerous command should be blocked before approval")
+        }
+    }
+}
+
+#[test]
+fn run_bash_blocks_dangerous_polling_loop_command() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("dangerous_poll_guard"));
+    let cwd = tmp_cwd("dangerous_poll_guard");
+    let result = execute_run_bash(
+        "rm -rf $(printf '')/*",
+        &cwd,
+        false,
+        5000,
+        Some(1000),
+        1000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        false,
+        &mut NeverCancelRuntime,
+    );
+    match result {
+        ActionExecution::Completed(text) => {
+            assert!(text.contains("blocked by Timem safety policy"), "{text}");
+        }
+        other => panic!("expected safety block, got {other:?}"),
+    }
+}
+
+#[test]
+fn approved_bash_rechecks_safety_before_execution() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("approved_dangerous_guard"));
+    let cwd = tmp_cwd("approved_dangerous_guard");
+    let marker = cwd.join("marker.txt");
+    let request = ApprovalRequest {
+        approval_id: "approval_test".to_string(),
+        action: "run_bash".to_string(),
+        command: "rm -rf /".to_string(),
+        reason: "test".to_string(),
+        risk: "local_command_execution".to_string(),
+    };
+    let command = format!("rm -rf /; printf should_not_run > {}", marker.display());
+    let result = execute_approved_bash(
+        &command,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        "session_a",
+        "turn_a",
+        true,
+        &request,
+        &store,
+        &mut NeverCancelRuntime,
+    );
+    assert!(
+        result.contains("blocked by Timem safety policy"),
+        "{result}"
+    );
+    assert!(
+        result.contains("approval_status: approved_by_user"),
+        "{result}"
+    );
+    assert!(
+        !marker.exists(),
+        "blocked approved command must not execute"
+    );
+}
+
+#[test]
+fn run_bash_allows_safe_tmp_delete() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("safe_tmp_delete"));
+    let cwd = tmp_cwd("safe_tmp_delete");
+    let target = cwd.join("safe-delete");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("file.txt"), "ok").unwrap();
+    let result = execute_run_bash(
+        &format!("rm -rf {}", shell_quote_path(&target)),
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    match result {
+        ActionExecution::Completed(text) => {
+            assert!(text.contains("Exit code: 0"), "{text}");
+            assert!(!target.exists(), "safe temp dir should be removable");
+        }
+        other => panic!("expected safe command to run, got {other:?}"),
+    }
 }

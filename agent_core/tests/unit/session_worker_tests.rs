@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    ApiProtocol, BashApprovalMode, CoreProfile, LlmResponse, ResponseProtocolKind, UsageStats,
+    ApiProtocol, ApprovalRequest, BashApprovalMode, CoreProfile, LlmResponse, ResponseProtocolKind,
+    SessionToolRepo, UsageStats,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex};
@@ -32,6 +33,7 @@ fn test_config() -> ProviderConfig {
         max_llm_input_tokens: 100_000,
         api_protocol: ApiProtocol::OpenAiCompatible,
         response_protocol: crate::ResponseProtocolKind::Markdown,
+        openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
 
@@ -204,6 +206,712 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
 }
 
 #[test]
+fn session_worker_lifecycle_uses_provider_config_response_protocol_over_core_state() {
+    let dir = tmp_dir("lifecycle_config_protocol_wins");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let mut config = test_config();
+    config.response_protocol = ResponseProtocolKind::Xml;
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        config,
+        test_worker_config(&dir, "session_worker_protocol_sync", 1),
+        SupplementReplayModel {
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+
+    let lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+    let lifecycle = lifecycle
+        .as_topics_first_lifecycle()
+        .expect("worker lifecycle topic");
+    assert_eq!(lifecycle.response_protocol, "xml");
+
+    worker.handle().request_shutdown().unwrap();
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should stop")
+        {
+            CoreSessionWorkerEvent::WorkerStopped => break,
+            CoreSessionWorkerEvent::Topics(_) => {}
+            other => panic!("unexpected event while stopping worker: {other:?}"),
+        }
+    }
+    worker.shutdown().unwrap();
+}
+
+struct ToolGenWorkflowModel {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl ModelClient for ToolGenWorkflowModel {
+    fn call_model(
+        &mut self,
+        _config: &ProviderConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let (phase, content) = if prompt.contains("Follow the ToolGen repository standard") {
+            assert!(prompt.contains("[TOOL_GEN_TASK]"));
+            assert!(prompt.contains("reusable-main-evidence"));
+            assert!(prompt.contains("## ID0"));
+            assert!(!prompt.contains("ID0_TOOLGEN"));
+            assert!(!prompt.contains("Referenced completed turn id:"));
+            assert!(!prompt.contains("Completed task result:"));
+            if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
+                (
+                    "toolgen_finish",
+                    "<response><toolgen_retrospect>Created reusable-line-counter; runtime validation returned status: ready.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></response>".to_string(),
+                )
+            } else {
+                let marker = "Write the new tool files only in this temporary staging directory:\n";
+                let draft = prompt
+                    .split_once(marker)
+                    .and_then(|(_, rest)| rest.lines().next())
+                    .expect("ToolGen prompt must provide draft path");
+                std::fs::write(
+                    std::path::Path::new(draft).join("README.md"),
+                    "# reusable-line-counter\n\n`reusable-line-counter <file>` counts lines.\n",
+                )
+                .unwrap();
+                std::fs::write(
+                    std::path::Path::new(draft).join("count.sh"),
+                    "#!/bin/bash\nprintf 'validated\\n'\n",
+                )
+                .unwrap();
+                std::fs::write(
+                    std::path::Path::new(draft).join(".timem-tool.json"),
+                    serde_json::json!({
+                        "name": "reusable-line-counter",
+                        "type": "text",
+                        "language": "bash",
+                        "entrypoint": "count.sh",
+                        "synopsis": "reusable-line-counter <file>",
+                        "self_test": {"args": ["--self-test"], "timeout_ms": 2000}
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                (
+                    "toolgen_publish",
+                    format!("<response><free_talk>Writing and validating the reusable line counter.</free_talk><working_still_action><action_json><![CDATA[[{{\"toolgen\":{{\"op\":\"publish\",\"draft_path\":{}}}}}]]]></action_json></working_still_action></response>", serde_json::to_string(draft).unwrap()),
+                )
+            }
+        } else if prompt.contains("reusable-main-evidence") {
+            (
+                "main_finish",
+                "<response><final_answer>Main task completed.</final_answer></response>"
+                    .to_string(),
+            )
+        } else {
+            (
+                "main_action",
+                "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"printf reusable-main-evidence\",\"timeout_ms\":5000}}]]]></action_json></working_still_action></response>".to_string(),
+            )
+        };
+        let prompt_tokens = if phase.starts_with("toolgen") {
+            900
+        } else {
+            100
+        };
+        self.calls.lock().unwrap().push(phase.to_string());
+        Ok(LlmResponse {
+            content,
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens,
+                completion_tokens: 20,
+                total_tokens: 120,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn manual_toolgen_continues_in_current_context_and_preserves_source_answer() {
+    let dir = tmp_dir("toolgen_workflow");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".into(),
+            provider: "test".into(),
+            model: "test-model".into(),
+        },
+        &dir,
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    config.response_protocol = ResponseProtocolKind::Xml;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        config,
+        test_worker_config(&dir, "session_toolgen", 0),
+        ToolGenWorkflowModel {
+            calls: Arc::clone(&calls),
+        },
+    );
+    let handle = worker.handle();
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    handle.run_turn("Create evidence.", None).unwrap();
+    let main_outcome = wait_for_turn_finished(worker.events(), "main task", false);
+    assert_eq!(main_outcome.text, "Main task completed.");
+    assert_eq!(
+        main_outcome
+            .latest_usage
+            .as_ref()
+            .expect("main response should keep latest usage")
+            .prompt_tokens,
+        100
+    );
+    assert_eq!(main_outcome.stats.prompt_tokens, 200);
+
+    handle.run_toolgen(ToolGenRequest::new(None)).unwrap();
+    let mut phases = Vec::new();
+    let mut toolgen_topic_names = Vec::new();
+    let mut live_usage_rounds = Vec::new();
+    let toolgen_outcome = loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(8))
+            .unwrap()
+        {
+            CoreSessionWorkerEvent::Topics(events) => {
+                for event in events {
+                    if event.payload["runtime_phase"] == "toolgen" {
+                        toolgen_topic_names.push(event.topic.name.clone());
+                    }
+                    if event.topic.name == crate::CORE_TOPIC_TOOLGEN {
+                        phases.push((
+                            event.payload["phase"].as_str().unwrap().to_string(),
+                            event.context_id.unwrap(),
+                            event.worker_id.unwrap(),
+                        ));
+                    }
+                }
+            }
+            CoreSessionWorkerEvent::ModelResponse {
+                round,
+                runtime_phase,
+                ..
+            } => {
+                assert_eq!(runtime_phase.as_deref(), Some("toolgen"));
+                live_usage_rounds.push(round);
+            }
+            CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            _ => {}
+        }
+    };
+    assert_eq!(toolgen_outcome.text, "ToolGen review complete.");
+    assert_eq!(
+        toolgen_outcome
+            .latest_usage
+            .as_ref()
+            .expect("ToolGen response should keep latest usage")
+            .prompt_tokens,
+        900
+    );
+    assert_eq!(toolgen_outcome.stats.prompt_tokens, 1_800);
+    assert!(
+        toolgen_outcome
+            .toolgen_retrospect
+            .contains("reusable-line-counter"),
+        "outcome={toolgen_outcome:?}, calls={:?}",
+        calls.lock().unwrap()
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            "main_action",
+            "main_finish",
+            "toolgen_publish",
+            "toolgen_finish"
+        ]
+    );
+    assert_eq!(
+        phases
+            .iter()
+            .map(|item| item.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["started", "published"]
+    );
+    assert_eq!(phases[0].1, "context_0");
+    assert!(phases.iter().all(|item| item.2 == phases[0].2));
+    assert!(toolgen_topic_names
+        .iter()
+        .any(|name| name == crate::CORE_TOPIC_MODEL_RESPONSE));
+    assert!(toolgen_topic_names
+        .iter()
+        .any(|name| name == crate::CORE_TOPIC_ACTION));
+    assert_eq!(live_usage_rounds, vec![1, 2]);
+    let tools = SessionToolRepo::new(&dir, "session_toolgen")
+        .list()
+        .unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "reusable-line-counter");
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let mut ui = WorkerTurnUi {
+        event_tx,
+        session_id: "session_toolgen_approval".to_string(),
+        context_id: "context_0".to_string(),
+        worker_id: "worker_0".to_string(),
+        supplement_queue: Arc::new(Mutex::new(Vec::new())),
+        cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reply_rx,
+        runtime: CoreSessionWorkerRuntime::new(),
+        current_turn_active: None,
+        phase: Some("toolgen".to_string()),
+        accept_supplements: false,
+    };
+    let waiter = std::thread::spawn(move || {
+        ui.request_host_decision_topic(
+            "context_0",
+            HostDecisionRequest::UserApproval(ApprovalRequest {
+                approval_id: "approval_toolgen".to_string(),
+                action: "toolgen".to_string(),
+                command: "publish draft".to_string(),
+                reason: "validate candidate".to_string(),
+                risk: "local execution".to_string(),
+            }),
+        )
+    });
+
+    let CoreSessionWorkerEvent::Topics(events) = event_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("ToolGen approval topic")
+    else {
+        panic!("expected topic event");
+    };
+    let event = events.into_iter().next().unwrap();
+    assert_eq!(event.session_id, "session_toolgen_approval");
+    assert_eq!(event.context_id.as_deref(), Some("context_0"));
+    assert_eq!(event.worker_id.as_deref(), Some("worker_0"));
+    assert_eq!(event.payload["runtime_phase"], "toolgen");
+    assert_eq!(event.payload["request"]["action"], "toolgen");
+    reply_tx
+        .send(TopicReply::for_decision_request(&event, HostDecision::Accept).unwrap())
+        .unwrap();
+    assert_eq!(waiter.join().unwrap(), HostDecision::Accept);
+}
+
+#[test]
+fn ordinary_session_turn_never_starts_toolgen_implicitly() {
+    let dir = tmp_dir("toolgen_disabled");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".into(),
+            provider: "test".into(),
+            model: "test-model".into(),
+        },
+        &dir,
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    config.response_protocol = ResponseProtocolKind::Xml;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        config,
+        test_worker_config(&dir, "session_no_toolgen", 0),
+        ToolGenWorkflowModel {
+            calls: Arc::clone(&calls),
+        },
+    );
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    worker.handle().run_turn("Create evidence.", None).unwrap();
+    let outcome = wait_for_turn_finished(worker.events(), "toolgen disabled", false);
+    assert_eq!(outcome.text, "Main task completed.");
+    assert_eq!(*calls.lock().unwrap(), vec!["main_action", "main_finish"]);
+    assert!(SessionToolRepo::new(&dir, "session_no_toolgen")
+        .list()
+        .unwrap()
+        .is_empty());
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+struct FailingToolGenModel {
+    child_calls: Arc<Mutex<u32>>,
+}
+
+struct LongToolGenWorkflowModel {
+    calls: Arc<Mutex<u32>>,
+}
+
+impl ModelClient for LongToolGenWorkflowModel {
+    fn call_model(
+        &mut self,
+        _config: &ProviderConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let call = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        let content = if call <= 11 {
+            format!("<response><free_talk>ToolGen round {call}.</free_talk><working_still_action><action_json><![CDATA[[{{\"self_tool\":{{\"type\":\"about_me\",\"op\":\"read\"}}}}]]]></action_json></working_still_action></response>")
+        } else if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
+            "<response><toolgen_retrospect>Created long-running-tool after normal runtime validation.</toolgen_retrospect><final_answer>Extended ToolGen workflow completed.</final_answer></response>".to_string()
+        } else {
+            let marker = "Write the new tool files only in this temporary staging directory:\n";
+            let draft = prompt
+                .split_once(marker)
+                .and_then(|(_, rest)| rest.lines().next())
+                .expect("ToolGen prompt must provide draft path");
+            std::fs::write(
+                std::path::Path::new(draft).join("README.md"),
+                "# long-running-tool\n\nPurpose: verify extended ToolGen workflows.\nSynopsis: `long-running-tool --self-test`\nInput: optional self-test flag. Output: ready.\nExample: `./tool.sh --self-test`\n",
+            )
+            .unwrap();
+            std::fs::write(
+                std::path::Path::new(draft).join("tool.sh"),
+                "#!/bin/bash\nset -euo pipefail\n[[ ${1:-} == --self-test ]] && { echo ready; exit 0; }\necho ready\n",
+            )
+            .unwrap();
+            std::fs::write(
+                std::path::Path::new(draft).join(".timem-tool.json"),
+                serde_json::json!({
+                    "name": "long-running-tool",
+                    "type": "test-automation",
+                    "language": "bash",
+                    "entrypoint": "tool.sh",
+                    "synopsis": "long-running-tool [--self-test]",
+                    "self_test": {"args": ["--self-test"], "timeout_ms": 2000}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            format!("<response><free_talk>Publishing after {call} normal model calls.</free_talk><working_still_action><action_json><![CDATA[[{{\"toolgen\":{{\"op\":\"publish\",\"draft_path\":{}}}}}]]]></action_json></working_still_action></response>", serde_json::to_string(draft).unwrap())
+        };
+        Ok(LlmResponse {
+            content,
+            model_name: "test-model".into(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 100,
+                completion_tokens: 10,
+                total_tokens: 110,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn toolgen_completion_instruction_tracks_the_active_response_protocol() {
+    let xml = toolgen_completion_instruction(ResponseProtocolKind::Xml);
+    let json = toolgen_completion_instruction(ResponseProtocolKind::Json);
+    let markdown = toolgen_completion_instruction(ResponseProtocolKind::Markdown);
+    assert!(xml.contains("<toolgen_retrospect>"));
+    assert!(xml.contains("<final_answer>"));
+    assert!(json.contains("\"toolgen_retrospect\""));
+    assert!(json.contains("\"status\":\"ALL_FINISHED\""));
+    assert!(markdown.contains("## ToolGen_Retrospect"));
+    assert!(markdown.contains("## Final_Answer"));
+    assert!(!json.contains("## ToolGen_Retrospect"));
+    assert!(!markdown.contains("<toolgen_retrospect>"));
+}
+
+#[test]
+fn toolgen_system_task_is_marked_and_contains_a_complete_fence_free_reference() {
+    assert!(TOOLGEN_CONTEXT_INSTRUCTIONS.starts_with("[TOOL_GEN_TASK] "));
+    for required in [
+        "log-error-counter/",
+        "README.md",
+        ".timem-tool.json",
+        "count_errors.sh",
+        "--help",
+        "\"entrypoint\": \"count_errors.sh\"",
+        "\"self_test\"",
+        "lightweight repository metadata",
+        "publishing:",
+        "When creating multi-line files through `run_bash`",
+        "Future turns can search this ToolRepo",
+    ] {
+        assert!(
+            TOOLGEN_CONTEXT_INSTRUCTIONS.contains(required),
+            "missing ToolGen reference element: {required}"
+        );
+    }
+    assert!(!TOOLGEN_CONTEXT_INSTRUCTIONS.contains("```"));
+}
+
+#[test]
+fn ordinary_prompt_does_not_advertise_manual_toolgen_response_fields() {
+    for protocol in [
+        ResponseProtocolKind::Xml,
+        ResponseProtocolKind::Json,
+        ResponseProtocolKind::Markdown,
+    ] {
+        let dir = tmp_dir("ordinary_prompt_without_toolgen");
+        let mut core = AgentCore::new(
+            "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+            CoreProfile {
+                name: "test".into(),
+                provider: "test".into(),
+                model: "test-model".into(),
+            },
+            &dir,
+        );
+        core.set_response_protocol(protocol);
+        let prompt = match core.begin_turn("ordinary task", None) {
+            crate::CoreStep::NeedModel { prompt, .. } => prompt,
+            other => panic!("ordinary turn should request a model: {other:?}"),
+        };
+        assert!(!prompt.contains("toolgen_retrospect"));
+        assert!(!prompt.contains("ToolGen_Retrospect"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn toolgen_publish_capability_can_be_scoped_to_one_run_on_the_same_context() {
+    let dir = tmp_dir("toolgen_capability_scope");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".into(),
+            provider: "test".into(),
+            model: "test-model".into(),
+        },
+        &dir,
+    );
+    assert!(!core.capability_contains_tool("toolgen"));
+    assert!(!core
+        .capabilities
+        .render_tool_catalog_markdown()
+        .contains("`toolgen`"));
+
+    core.enable_toolgen_capability().unwrap();
+    assert!(core.capability_contains_tool("toolgen"));
+    assert!(core
+        .capabilities
+        .render_tool_catalog_markdown()
+        .contains("`toolgen`"));
+    core.disable_toolgen_capability();
+    assert!(!core.capability_contains_tool("toolgen"));
+    assert!(!core
+        .capabilities
+        .render_tool_catalog_markdown()
+        .contains("`toolgen`"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+impl ModelClient for FailingToolGenModel {
+    fn call_model(
+        &mut self,
+        _config: &ProviderConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let content = if prompt.contains("Follow the ToolGen repository standard") {
+            *self.child_calls.lock().unwrap() += 1;
+            "not xml".to_string()
+        } else if prompt.contains("reusable-main-evidence") {
+            "<response><final_answer>Main task survives ToolGen failure.</final_answer></response>"
+                .to_string()
+        } else {
+            "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"printf reusable-main-evidence\",\"timeout_ms\":5000}}]]]></action_json></working_still_action></response>".to_string()
+        };
+        Ok(LlmResponse {
+            content,
+            model_name: "test-model".into(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 100,
+                completion_tokens: 10,
+                total_tokens: 110,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source_result() {
+    let dir = tmp_dir("toolgen_failure_nonblocking");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".into(),
+            provider: "test".into(),
+            model: "test-model".into(),
+        },
+        &dir,
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    config.response_protocol = ResponseProtocolKind::Xml;
+    let child_calls = Arc::new(Mutex::new(0));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        config,
+        test_worker_config(&dir, "session_toolgen_failure", 0),
+        FailingToolGenModel {
+            child_calls: Arc::clone(&child_calls),
+        },
+    );
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    let handle = worker.handle();
+    handle.run_turn("Complete the main task.", None).unwrap();
+    let main_outcome = wait_for_turn_finished(worker.events(), "main task", false);
+    assert_eq!(main_outcome.text, "Main task survives ToolGen failure.");
+    assert!(main_outcome.stop_reason.is_none());
+
+    handle.run_toolgen(ToolGenRequest::new(None)).unwrap();
+    let mut terminal_phase = None;
+    let mut terminal_error = None;
+    let outcome = loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("failed ToolGen child timed out")
+        {
+            CoreSessionWorkerEvent::Topics(events) => {
+                for event in events {
+                    if event.topic.name == crate::CORE_TOPIC_TOOLGEN
+                        && event.payload["phase"] != "started"
+                    {
+                        terminal_phase = event.payload["phase"].as_str().map(str::to_string);
+                        terminal_error = event.payload["error"].as_str().map(str::to_string);
+                    }
+                }
+            }
+            CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            CoreSessionWorkerEvent::ModelRequest { .. }
+            | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+            other => panic!("failed ToolGen child emitted unexpected event: {other:?}"),
+        }
+    };
+    assert!(outcome.text.is_empty());
+    assert!(outcome
+        .toolgen_retrospect
+        .contains("did not publish a verified tool"));
+    assert_eq!(*child_calls.lock().unwrap(), 6);
+    assert_eq!(outcome.stats.repair_calls, 5);
+    assert_eq!(terminal_phase.as_deref(), Some("failed"));
+    assert!(terminal_error
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with("toolgen_protocol_repair_failed:"));
+    assert!(SessionToolRepo::new(&dir, "session_toolgen_failure")
+        .list()
+        .unwrap()
+        .is_empty());
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn toolgen_runs_beyond_ten_model_calls_with_the_normal_round_budget() {
+    let dir = tmp_dir("toolgen_normal_round_budget");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".into(),
+            provider: "test".into(),
+            model: "test-model".into(),
+        },
+        &dir,
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    config.response_protocol = ResponseProtocolKind::Xml;
+    let calls = Arc::new(Mutex::new(0));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        config,
+        test_worker_config(&dir, "session_toolgen_normal_budget", 0),
+        LongToolGenWorkflowModel {
+            calls: Arc::clone(&calls),
+        },
+    );
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    let handle = worker.handle();
+    handle.run_toolgen(ToolGenRequest::new(None)).unwrap();
+
+    let mut terminal_phase = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let outcome = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "extended ToolGen workflow timed out");
+        match worker.events().recv_timeout(remaining).unwrap() {
+            CoreSessionWorkerEvent::Topics(events) => {
+                for event in events {
+                    assert_ne!(event.topic.name, crate::CORE_TOPIC_ROUND_LIMIT_REQUEST);
+                    if event.topic.name == crate::CORE_TOPIC_TOOLGEN
+                        && event.payload["phase"] != "started"
+                    {
+                        terminal_phase = event.payload["phase"].as_str().map(str::to_string);
+                    }
+                }
+            }
+            CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            CoreSessionWorkerEvent::ModelRequest { .. }
+            | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+            other => panic!("unexpected ToolGen limit event: {other:?}"),
+        }
+    };
+
+    assert_eq!(*calls.lock().unwrap(), 13);
+    assert!(outcome.stop_reason.is_none());
+    assert_eq!(outcome.text, "Extended ToolGen workflow completed.");
+    assert_eq!(terminal_phase.as_deref(), Some("published"));
+    assert_eq!(
+        SessionToolRepo::new(&dir, "session_toolgen_normal_budget")
+            .list()
+            .unwrap()
+            .len(),
+        1
+    );
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_worker_rename_emits_updated_identity_topic() {
     let dir = tmp_dir("rename");
     let core = AgentCore::new(
@@ -322,7 +1030,8 @@ fn session_worker_manager_allocates_id0_default_and_tracks_lifecycle() {
             ManagerOkModel,
         )
         .expect("manager should spawn default worker");
-    assert_eq!(session_id, "session_0");
+    assert_eq!(session_id, "worker_0");
+    assert_eq!(manager.statuses()[0].identity.session_id, "session_0");
     assert_eq!(manager.worker_count(), 1);
     assert_eq!(manager.statuses()[0].identity.display_name, "ID0");
     assert_eq!(
@@ -409,13 +1118,138 @@ fn session_worker_manager_allocates_multiple_workers_from_id0() {
             .expect("manager should spawn worker");
         session_ids.push(session_id);
     }
-    assert_eq!(session_ids, vec!["session_0", "session_1"]);
+    assert_eq!(session_ids, vec!["worker_0", "worker_1"]);
     let names = manager
         .statuses()
         .into_iter()
         .map(|status| status.identity.display_name)
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["ID0", "ID1"]);
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn manager_scopes_multiple_context_workers_to_one_session() {
+    let mut manager = CoreSessionWorkerManager::new();
+    let mut worker_ids = Vec::new();
+    for context_index in 0..2 {
+        let dir = tmp_dir(&format!("shared_session_context_{context_index}"));
+        let core = AgentCore::new(
+            "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+            CoreProfile {
+                name: "test".to_string(),
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+            },
+            &dir,
+        );
+        let worker_id = manager
+            .spawn_worker_in_session_with_model_client(
+                core,
+                test_config(),
+                CoreSessionWorkerWorkspace::new(
+                    &dir,
+                    dir.join("api_audit.jsonl"),
+                    "test-runtime",
+                    "local",
+                ),
+                "shared_session",
+                format!("context_{context_index}"),
+                Some(format!("Context worker {context_index}")),
+                worker_ids.first().cloned(),
+                ManagerOkModel,
+            )
+            .expect("same-session worker should spawn");
+        worker_ids.push(worker_id);
+    }
+
+    assert_eq!(worker_ids, vec!["worker_0", "worker_1"]);
+    let statuses = manager.statuses();
+    assert_eq!(statuses.len(), 2);
+    assert!(statuses
+        .iter()
+        .all(|status| status.identity.session_id == "shared_session"));
+    assert_eq!(statuses[0].identity.context_id, "context_0");
+    assert_eq!(statuses[1].identity.context_id, "context_1");
+    assert_eq!(
+        statuses[1].identity.parent_worker_id.as_deref(),
+        Some("worker_0")
+    );
+
+    let duplicate_dir = tmp_dir("duplicate_context_worker");
+    let duplicate_core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        },
+        &duplicate_dir,
+    );
+    assert_eq!(
+        manager
+            .spawn_worker_in_session_with_model_client(
+                duplicate_core,
+                test_config(),
+                CoreSessionWorkerWorkspace::new(
+                    &duplicate_dir,
+                    duplicate_dir.join("api_audit.jsonl"),
+                    "test-runtime",
+                    "local",
+                ),
+                "shared_session",
+                "context_0",
+                None,
+                None,
+                ManagerOkModel,
+            )
+            .unwrap_err(),
+        "session_context_worker_exists"
+    );
+
+    let wrong_parent_dir = tmp_dir("cross_session_parent");
+    let wrong_parent_core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+        },
+        &wrong_parent_dir,
+    );
+    assert_eq!(
+        manager
+            .spawn_worker_in_session_with_model_client(
+                wrong_parent_core,
+                test_config(),
+                CoreSessionWorkerWorkspace::new(
+                    &wrong_parent_dir,
+                    wrong_parent_dir.join("api_audit.jsonl"),
+                    "test-runtime",
+                    "local",
+                ),
+                "other_session",
+                "context_0",
+                None,
+                Some("worker_0".to_string()),
+                ManagerOkModel,
+            )
+            .unwrap_err(),
+        "parent_worker_session_mismatch"
+    );
+
+    for (index, worker_id) in worker_ids.iter().enumerate() {
+        match wait_for_manager_event(&mut manager, worker_id, "scoped lifecycle") {
+            CoreSessionWorkerEvent::Topics(events) => {
+                assert!(events.iter().all(|event| {
+                    event.session_id == "shared_session"
+                        && event.context_id.as_deref() == Some(format!("context_{index}").as_str())
+                        && event.worker_id.as_deref() == Some(worker_id.as_str())
+                }));
+            }
+            other => panic!("unexpected scoped lifecycle event: {other:?}"),
+        }
+    }
     manager.shutdown_all().unwrap();
 }
 
@@ -572,7 +1406,6 @@ impl ModelClient for ApprovalReplayModel {
 
 struct AssistantHeadingModel {
     expected_heading: String,
-    calls: u32,
 }
 
 impl ModelClient for AssistantHeadingModel {
@@ -583,17 +1416,12 @@ impl ModelClient for AssistantHeadingModel {
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
-        self.calls += 1;
-        if self.calls == 1 {
-            assert!(!prompt.contains(&self.expected_heading));
-        } else {
-            assert!(
-                prompt.contains(&self.expected_heading),
-                "prompt should contain assistant heading {}:\n{}",
-                self.expected_heading,
-                prompt
-            );
-        }
+        assert!(
+            prompt.contains(&self.expected_heading),
+            "prompt should contain assistant heading {}:\n{}",
+            self.expected_heading,
+            prompt
+        );
         Ok(LlmResponse {
             content: "## Status\nfinished\n\n## Final_Answer\nok".to_string(),
             model_name: "test-model".to_string(),
@@ -627,7 +1455,6 @@ fn session_worker_identity_sets_prompt_assistant_heading() {
         test_worker_config(&dir, "session_worker_heading", 4),
         AssistantHeadingModel {
             expected_heading: "## ID4".to_string(),
-            calls: 0,
         },
     );
 
@@ -1292,7 +2119,7 @@ impl ModelClient for ProtocolTurnStressModel {
             has_own_supplement,
             saw_cross_session_marker,
         });
-        if turn_idx % 10 == 0 && !has_own_supplement {
+        if turn_idx.checked_rem(10) == Some(0) && !has_own_supplement {
             let started = Instant::now();
             while started.elapsed() < Duration::from_millis(80) {
                 if should_cancel() {
@@ -1707,7 +2534,8 @@ fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
     const WORKERS: usize = 6;
     const TURNS_PER_WORKER: usize = 167;
     const TOTAL_TURNS: usize = WORKERS * TURNS_PER_WORKER;
-    assert!(TOTAL_TURNS > 1000);
+    let total_turns = WORKERS * TURNS_PER_WORKER;
+    assert!(total_turns > 1000);
 
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut host_threads = Vec::new();
@@ -1952,11 +2780,11 @@ fn wait_for_stress_turn_finished(
                     "{label} tool call count mismatch"
                 );
                 assert!(
-                    model_requests >= expected_tool_calls + 1,
+                    model_requests > expected_tool_calls,
                     "{label} should request the model for each action plus final answer"
                 );
                 assert!(
-                    model_responses >= expected_tool_calls + 1,
+                    model_responses > expected_tool_calls,
                     "{label} should receive the model for each action plus final answer"
                 );
                 if expect_round_limit {

@@ -146,6 +146,8 @@ fn is_protocol_heading(heading: &str) -> bool {
             | "free_talk"
             | "free talk"
             | "freetalk"
+            | "toolgen_retrospect"
+            | "toolgen retrospect"
             | "working_still_action"
             | "context compact"
             | "context_compact"
@@ -238,6 +240,7 @@ fn has_unclosed_code_fence(text: &str) -> bool {
 fn malformed_markdown_response(issue: &str) -> ParsedEnvelope {
     ParsedEnvelope {
         final_answer: String::new(),
+        toolgen_retrospect: String::new(),
         continue_work: true,
         thought: String::new(),
         thought_keep_in_context: false,
@@ -252,6 +255,10 @@ fn malformed_markdown_response(issue: &str) -> ParsedEnvelope {
 
 pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let trimmed = content.trim();
+
+    if trimmed.is_empty() {
+        return malformed_markdown_response("empty_response");
+    }
 
     // JSON fallback
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
@@ -293,6 +300,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             }
             return ParsedEnvelope {
                 final_answer: candidate.to_string(),
+                toolgen_retrospect: String::new(),
                 continue_work: false,
                 thought: String::new(),
                 thought_keep_in_context: false,
@@ -309,6 +317,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         }
         return ParsedEnvelope {
             final_answer: candidate.to_string(),
+            toolgen_retrospect: String::new(),
             continue_work: false,
             thought: String::new(),
             thought_keep_in_context: false,
@@ -329,6 +338,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         }
         return ParsedEnvelope {
             final_answer: candidate.to_string(),
+            toolgen_retrospect: String::new(),
             continue_work: false,
             thought: String::new(),
             thought_keep_in_context: false,
@@ -345,6 +355,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
 
     let mut status_raw = String::new();
     let mut final_answer = String::new();
+    let mut toolgen_retrospect = String::new();
     let mut thought = String::new();
     let mut thought_keep_in_context = false;
     let mut actions_body = String::new();
@@ -357,6 +368,9 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             "answer" | "final_answer" | "final answer" => {
                 final_answer = section.body.clone();
             }
+            "toolgen_retrospect" | "toolgen retrospect" => {
+                toolgen_retrospect = section.body.trim().to_string();
+            }
             "free_talk" | "free talk" | "freetalk" => {
                 thought = section.body.trim().to_string();
                 thought_keep_in_context = !thought.is_empty();
@@ -367,10 +381,8 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             "context compact" | "context_compact" | "compact" => {
                 context_compact_body = section.body.clone();
             }
-            "" => {
-                if !has_sections && has_action_blocks && actions_body.is_empty() {
-                    actions_body = section.body.clone();
-                }
+            "" if !has_sections && has_action_blocks && actions_body.is_empty() => {
+                actions_body = section.body.clone();
             }
             _ => {}
         }
@@ -379,15 +391,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     let continue_work = match status_raw.as_str() {
         "finished" | "done" | "complete" => false,
         "working" | "in_progress" | "in progress" => true,
-        "" => {
-            if !actions_body.is_empty() {
-                true
-            } else if !final_answer.is_empty() {
-                false
-            } else {
-                true
-            }
-        }
+        "" => actions_body.is_empty() || final_answer.is_empty(),
         _ => {
             repair_issue = Some("status_must_be_working_or_finished".to_string());
             true
@@ -442,10 +446,35 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     if repair_issue.is_none() && !continue_work && final_answer.trim().is_empty() {
         repair_issue = Some("final_answer_required_when_status_finished".to_string());
     }
-    if repair_issue.is_none() && !final_answer.trim().is_empty() {
-        if status_raw != "finished" && status_raw != "done" && status_raw != "complete" {
-            repair_issue = Some("final_answer_requires_status_finished".to_string());
+    if repair_issue.is_none() && !toolgen_retrospect.trim().is_empty() {
+        let retrospect_index = sections.iter().position(|section| {
+            matches!(
+                section.heading.as_str(),
+                "toolgen_retrospect" | "toolgen retrospect"
+            )
+        });
+        let final_index = sections.iter().position(|section| {
+            matches!(
+                section.heading.as_str(),
+                "answer" | "final_answer" | "final answer"
+            )
+        });
+        if continue_work || final_answer.trim().is_empty() {
+            repair_issue = Some("toolgen_retrospect_requires_final_answer".to_string());
+        } else if match retrospect_index.zip(final_index) {
+            Some((retrospect, final_answer)) => retrospect + 1 != final_answer,
+            None => true,
+        } {
+            repair_issue = Some("toolgen_retrospect_must_precede_final_answer".to_string());
         }
+    }
+    if repair_issue.is_none()
+        && !final_answer.trim().is_empty()
+        && status_raw != "finished"
+        && status_raw != "done"
+        && status_raw != "complete"
+    {
+        repair_issue = Some("final_answer_requires_status_finished".to_string());
     }
     let runtime_note: Option<String> = None;
     if repair_issue.is_none() && !continue_work && !next_actions.is_empty() {
@@ -461,6 +490,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
 
     ParsedEnvelope {
         final_answer,
+        toolgen_retrospect,
         continue_work,
         thought,
         thought_keep_in_context,

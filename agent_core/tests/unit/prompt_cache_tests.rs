@@ -31,7 +31,7 @@ fn cache_planner_marks_only_recent_dynamic_tail() {
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>();
 
-    assert!(cached_texts.iter().any(|text| *text == "STATIC"));
+    assert!(cached_texts.contains(&"STATIC"));
     assert!(!cached_texts.iter().any(|text| text.contains("delta 2")));
     assert!(cached_texts.iter().any(|text| text.contains("delta 3")));
     assert!(cached_texts.iter().any(|text| text.contains("delta 4")));
@@ -53,26 +53,26 @@ fn cache_planner_keeps_one_delta_as_one_addressable_block() {
 fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer("XML")
+            crate::prompt_render::formatted_response_trailer("XML", "Ai3")
         );
 
     let parts = prompt_parts_from_rendered_prompt(&prompt);
     assert!(parts.new_delta.contains("delta1"));
     assert!(!parts
         .new_delta
-        .contains("Follow the system prompt, give your XML formatted response"));
+        .contains("Now please continue your ID's response part"));
 
     let blocks = plan_prompt_cache(&prompt);
     assert_eq!(blocks.len(), 3);
     assert!(blocks[1].text.contains("delta1"));
     assert!(!blocks[1]
         .text
-        .contains("Follow the system prompt, give your XML formatted response"));
+        .contains("Now please continue your ID's response part"));
     assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
     assert_eq!(
-            blocks[2].text,
-            "Follow the system prompt, give your XML formatted response. It must start with <response>:"
-        );
+        blocks[2].text,
+        "Now please continue your ID's response part in XML as required in protocol:\n## Ai3"
+    );
     assert_eq!(blocks[2].cache, CacheControl::None);
 }
 
@@ -80,7 +80,7 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
 fn temporary_repair_delta_is_not_cache_controlled() {
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## SYSTEM\nrepair\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer("XML")
+            crate::prompt_render::formatted_response_trailer("Markdown", "TIMEM_ASSISTANT")
         );
 
     let blocks = plan_prompt_cache(&prompt);

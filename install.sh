@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${TIMEM_SHELL_INSTALL_DIR:-$HOME/.local/bin}"
 ENV_TEMPLATE="$ROOT_DIR/env_template"
 BIN_NAME="timem-native-rs"
+WEB_BIN_NAME="timem-web"
 COMMAND_NAME="timem"
 OLD_WRAPPER_NAME="timem-shell"
 MIN_RUST_VERSION="1.78.0"
@@ -160,8 +161,12 @@ fetch_rust_dependencies() {
 }
 
 build_release_binary() {
-  echo "Building Timem release binary..."
-  if ! cargo build --locked -p timem_shell --release; then
+  echo "Building Timem CLI and Web binaries..."
+  if [ ! -f "$ROOT_DIR/web_ui/timem-web/dist/index.html" ]; then
+    echo "error: embedded Timem Web assets are missing from this source package." >&2
+    exit 1
+  fi
+  if ! cargo build --locked -p timem_shell -p timem_web --release; then
     echo "error: release build failed." >&2
     echo "If this is a fresh machine, rerun ./install.sh after confirming Rust and system build dependencies installed successfully." >&2
     exit 1
@@ -178,6 +183,7 @@ main() {
 
   mkdir -p "$INSTALL_DIR"
   cp "$ROOT_DIR/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  cp "$ROOT_DIR/target/release/$WEB_BIN_NAME" "$INSTALL_DIR/$WEB_BIN_NAME"
 
   cat > "$INSTALL_DIR/$COMMAND_NAME" <<SH
 #!/usr/bin/env bash
@@ -186,11 +192,12 @@ set -euo pipefail
 exec "\$(dirname "\$0")/timem-native-rs" "\$@"
 SH
   rm -f "$INSTALL_DIR/$OLD_WRAPPER_NAME"
-  chmod +x "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/$COMMAND_NAME"
+  chmod +x "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/$COMMAND_NAME" "$INSTALL_DIR/$WEB_BIN_NAME"
 
   echo "Installed:"
   echo "  binary:  $INSTALL_DIR/$BIN_NAME"
   echo "  command: $INSTALL_DIR/$COMMAND_NAME"
+  echo "  web:     $INSTALL_DIR/$WEB_BIN_NAME"
   echo "  env template: $ENV_TEMPLATE"
   echo "  uninstall: $ROOT_DIR/uninstall.sh"
   echo
@@ -201,6 +208,7 @@ SH
   echo "  3. Ensure $INSTALL_DIR is in PATH."
   echo "  4. Load env: source /path/to/your/env"
   echo "  5. Run: $COMMAND_NAME"
+  echo "     Or open the local Web UI: $WEB_BIN_NAME"
   echo
   echo "Update later from this git clone:"
   echo "  git pull --ff-only"

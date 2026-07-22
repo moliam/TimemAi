@@ -6,10 +6,11 @@ use serde_json::Value;
 
 use crate::capability::CapabilityRegistry;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResponseProtocolKind {
     Markdown,
     Json,
+    #[default]
     Xml,
 }
 
@@ -46,12 +47,6 @@ impl ResponseProtocolKind {
             Self::Json => &json_suite::JsonSuiteV1,
             Self::Xml => &xml_suite::XmlSuiteV1,
         }
-    }
-}
-
-impl Default for ResponseProtocolKind {
-    fn default() -> Self {
-        Self::Xml
     }
 }
 
@@ -329,6 +324,7 @@ impl ActionGroupOrder {
 
 pub struct ParsedEnvelope {
     pub final_answer: String,
+    pub toolgen_retrospect: String,
     pub continue_work: bool,
     pub thought: String,
     pub thought_keep_in_context: bool,

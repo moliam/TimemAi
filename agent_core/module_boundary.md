@@ -70,6 +70,19 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   structured turn input. Core consumes these values when assembling model
   context; reusable runtime loops should not hard-code a terminal host identity.
 - Memory, scratch, raw chat, context shrink/compact, and conflict handling.
+- Cross-host Session persistence schemas. Core owns `StoredSession`,
+  `ChatHistoryRecord`, history paging, and resume-notice format so Shell, Web,
+  iOS, and future hosts share one JSONL history contract. The first resume
+  layer stores session metadata and raw chat/event records, not live
+  Worker/Context execution state.
+- Session ToolRepo persistence and ToolGen retrospective execution. Core owns
+  Session-scoped draft/published paths, manifest/tree validation, bounded
+  self-tests, atomic publication/update, repository search/detail/rename data,
+  source-turn-bound manual requests, same-Context sequential execution, normal
+  turn lifecycle, temporary capability activation, and structured
+  `core.toolgen` lifecycle topics.
+  ToolGen failure must not replace a successful source-turn result. Hosts own
+  the manual trigger and repository presentation, not candidate validation.
 - Local tool execution abstractions that return structured action evidence.
 - Registered command-tool foreground/background execution semantics. Core owns
   background job ids, persisted status/output files, polling, cancellation,
@@ -83,7 +96,9 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Model-requested local tool execution, including `run_bash`, command approval
   application, process execution, command output/evidence shaping, and tool
   audit. Hosts may provide user decisions and cancellation signals, but the
-  executor remains a core responsibility.
+  executor remains a core responsibility. Parallel actions share the owning
+  turn's cancellation state; core must keep polling it while joins are pending
+  and must terminate the full command process group on explicit host Stop.
 - Action failure isolation. External command exits, including signal-based
   termination, are action results and must not terminate the core process.
   Builtin callback panics are contained at the tool registry boundary, reported
@@ -96,13 +111,15 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   insertion after host/user cancellation.
 - Structured reports, requests, stop reasons, status snapshots, and topic events
   for any host UI to render.
-- Optional per-session worker lifecycle. Core may provide a worker that owns one
-  `AgentCore`, one session id, one context, and one runtime loop on a dedicated
-  thread. This is a host adapter convenience for multi-session/web-style
+- Optional per-context worker lifecycle. Core may provide a worker that owns one
+  `AgentCore`, one Session identity, one Context identity, one Worker identity,
+  and one runtime loop on a dedicated thread. Multiple workers may belong to
+  the same Session while operating on separate contexts. This is a host adapter convenience for multi-session/web-style
   execution; it must preserve the same topic/request semantics as the
   synchronous `run_session_turn` path.
 - Multi-session worker management. Core owns the standard manager that allocates
-  session worker identities from `ID0`, keeps worker handles/status snapshots,
+  worker identities from `ID0`, keeps worker handles/status snapshots by
+  `worker_id`,
   shares global working-worker state across workers, polls worker events, and
   shuts workers down. Hosts may choose to use the manager or manage workers
   explicitly, but they should not create incompatible identity/lifecycle rules.
@@ -111,12 +128,18 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   queued turn/rename commands that have not started, emits a stop event, and
   joins the thread when the worker owner shuts down or is dropped.
 - Session worker identity and workspace metadata. Worker identity includes
-  `session_id`, display name, ordinal, and optional parent session id. Default
+  `session_id`, `context_id`, `worker_id`, display name, ordinal, and optional
+  `parent_worker_id`. Default
   display names are `ID0`, `ID1`, ... by ordinal, but host/user/parent-agent
   code may rename a worker through core's worker handle. Workspace metadata may
   include current directory, data/audit paths, runtime, bash target, sanitized
   environment, and workspace reference directories. Do not expose full prompt
   text as lifecycle metadata; expose only context summaries.
+- Context ownership is exclusive in the current runtime: one `(session_id,
+  context_id)` may have only one worker because that worker owns the mutable
+  `AgentCore` prompt state. A subtask worker must receive a new Context. Do not
+  allow two independent `AgentCore` instances to masquerade as one shared
+  Context without first introducing an explicit context coordinator.
 - A unified topic event surface for core-initiated runtime output. User/host
   initiated operations enter core through functions; core-initiated progress,
   status, requests, and decisions are represented as topic events with

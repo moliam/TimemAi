@@ -255,23 +255,45 @@ fn shell_quote_path(path: &Path) -> String {
 fn terminate_process(pid: u32) {
     #[cfg(unix)]
     {
-        let group = format!("-{}", pid);
-        let status = Command::new("/bin/kill")
+        terminate_process_unix(pid);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = Command::new("/bin/kill")
             .arg("-TERM")
-            .arg(&group)
+            .arg(pid.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        if status.as_ref().is_ok_and(|s| s.success()) {
-            return;
-        }
     }
-    let _ = Command::new("/bin/kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+}
+
+#[cfg(unix)]
+fn terminate_process_unix(pid: u32) {
+    let pid = pid as libc::pid_t;
+    let pgid = unsafe { libc::getpgid(pid) };
+    if pgid < 0 {
+        return;
+    }
+    if pgid == pid && pgid != unsafe { libc::getpgrp() } {
+        signal_process_group(pgid, libc::SIGTERM);
+        return;
+    }
+    signal_process(pid, libc::SIGTERM);
+}
+
+#[cfg(unix)]
+fn signal_process(pid: libc::pid_t, signal: libc::c_int) {
+    if pid > 1 && pid != unsafe { libc::getpid() } {
+        let _ = unsafe { libc::kill(pid, signal) };
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
+    if pgid > 1 && pgid != unsafe { libc::getpgrp() } {
+        let _ = unsafe { libc::kill(-pgid, signal) };
+    }
 }
 
 fn compact_text(text: &str, max_chars: usize) -> String {

@@ -28,6 +28,7 @@ pub struct TurnInput<'a> {
 #[derive(Debug, Clone)]
 pub struct TurnOutcome {
     pub text: String,
+    pub toolgen_retrospect: String,
     pub stats: UsageStats,
     pub latest_usage: Option<UsageStats>,
     pub elapsed: Duration,
@@ -47,6 +48,7 @@ impl TurnOutcome {
     ) -> Self {
         Self {
             text: text.into(),
+            toolgen_retrospect: String::new(),
             stats,
             latest_usage,
             elapsed,
@@ -60,6 +62,7 @@ impl TurnOutcome {
     pub fn stopped(text: impl Into<String>, stopped: StoppedTurn, elapsed: Duration) -> Self {
         Self {
             text: text.into(),
+            toolgen_retrospect: String::new(),
             stats: stopped.stats,
             latest_usage: stopped.latest_usage,
             elapsed,
@@ -72,6 +75,11 @@ impl TurnOutcome {
 
     pub fn with_running_jobs(mut self, running_jobs: Vec<crate::RunningShellJob>) -> Self {
         self.running_jobs = running_jobs;
+        self
+    }
+
+    pub fn with_toolgen_retrospect(mut self, retrospect: impl Into<String>) -> Self {
+        self.toolgen_retrospect = retrospect.into();
         self
     }
 }
@@ -129,7 +137,7 @@ impl TurnStopSummary {
         Self {
             stats: UsageStats::zero(),
             latest_usage: None,
-            repair_issue: Some("cancelled_by_user".to_string()),
+            repair_issue: None,
             stop_reason: TurnStopReason::CancelledByUser,
             detail: TurnStopDetail::None,
         }
@@ -336,6 +344,8 @@ impl CoreTopic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreTopicEvent {
     pub session_id: String,
+    pub context_id: Option<String>,
+    pub worker_id: Option<String>,
     pub topic: CoreTopic,
     pub state: CoreSessionState,
     pub payload: Value,
@@ -344,6 +354,8 @@ pub struct CoreTopicEvent {
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
+pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
+pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
@@ -370,6 +382,15 @@ pub struct CoreModelRepairTopic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreContextCompactTopic {
+    pub estimated_before_tokens: u32,
+    pub estimated_after_tokens: u32,
+    pub discarded_delta_ids: Vec<String>,
+    pub offloaded_delta_ids: Vec<String>,
+    pub scratch_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreWorkInstructionLoadTopic {
     pub status: String,
     pub directory: String,
@@ -377,7 +398,7 @@ pub struct CoreWorkInstructionLoadTopic {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CoreGlobalWorkerStatus {
     pub working_worker_count: usize,
 }
@@ -386,14 +407,6 @@ impl CoreGlobalWorkerStatus {
     pub fn new(working_worker_count: usize) -> Self {
         Self {
             working_worker_count,
-        }
-    }
-}
-
-impl Default for CoreGlobalWorkerStatus {
-    fn default() -> Self {
-        Self {
-            working_worker_count: 0,
         }
     }
 }
@@ -420,9 +433,11 @@ pub struct CoreTopicStatusHint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreSessionWorkerIdentity {
     pub session_id: String,
+    pub context_id: String,
+    pub worker_id: String,
     pub display_name: String,
     pub ordinal: u32,
-    pub parent_session_id: Option<String>,
+    pub parent_worker_id: Option<String>,
 }
 
 impl CoreSessionWorkerIdentity {
@@ -430,13 +445,34 @@ impl CoreSessionWorkerIdentity {
         session_id: impl Into<String>,
         ordinal: u32,
         display_name: Option<String>,
-        parent_session_id: Option<String>,
+        parent_worker_id: Option<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        Self::new_scoped(
+            session_id.clone(),
+            "context_0",
+            session_id,
+            ordinal,
+            display_name,
+            parent_worker_id,
+        )
+    }
+
+    pub fn new_scoped(
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        worker_id: impl Into<String>,
+        ordinal: u32,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
     ) -> Self {
         Self {
             session_id: session_id.into(),
+            context_id: context_id.into(),
+            worker_id: worker_id.into(),
             display_name: session_worker_default_display_name(ordinal, display_name),
             ordinal,
-            parent_session_id,
+            parent_worker_id,
         }
     }
 
@@ -546,10 +582,22 @@ impl CoreTopicEvent {
     ) -> Self {
         Self {
             session_id: session_id.into(),
+            context_id: None,
+            worker_id: None,
             topic,
             state,
             payload,
         }
+    }
+
+    pub fn with_worker_scope(
+        mut self,
+        context_id: impl Into<String>,
+        worker_id: impl Into<String>,
+    ) -> Self {
+        self.context_id = Some(context_id.into());
+        self.worker_id = Some(worker_id.into());
+        self
     }
 
     pub fn state_payload(&self) -> Value {
@@ -563,7 +611,7 @@ impl CoreTopicEvent {
     }
 
     pub fn wire_payload(&self) -> Value {
-        json!({
+        let mut payload = json!({
             "session_id": &self.session_id,
             "topic": {
                 "name": &self.topic.name,
@@ -571,7 +619,14 @@ impl CoreTopicEvent {
             },
             "state": self.state_payload(),
             "payload": &self.payload,
-        })
+        });
+        if let Some(context_id) = self.context_id.as_deref() {
+            payload["context_id"] = json!(context_id);
+        }
+        if let Some(worker_id) = self.worker_id.as_deref() {
+            payload["worker_id"] = json!(worker_id);
+        }
+        payload
     }
 
     pub fn expects_reply(&self) -> bool {
@@ -637,6 +692,19 @@ impl CoreTopicEvent {
                 .and_then(Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok())
                 .unwrap_or(0),
+        })
+    }
+
+    pub fn as_context_compact(&self) -> Option<CoreContextCompactTopic> {
+        if self.topic.name != CORE_TOPIC_CONTEXT_COMPACT {
+            return None;
+        }
+        Some(CoreContextCompactTopic {
+            estimated_before_tokens: self.payload["estimated_before_tokens"].as_u64()? as u32,
+            estimated_after_tokens: self.payload["estimated_after_tokens"].as_u64()? as u32,
+            discarded_delta_ids: string_array_payload(&self.payload["discarded_delta_ids"]),
+            offloaded_delta_ids: string_array_payload(&self.payload["offloaded_delta_ids"]),
+            scratch_id: self.payload["scratch_id"].as_str().map(str::to_string),
         })
     }
 
@@ -724,9 +792,7 @@ impl CoreTopicEvent {
         if self.topic.name != CORE_TOPIC_WORK_INSTRUCTION_LOAD {
             return None;
         }
-        if self.payload.get("status").is_none() {
-            return None;
-        }
+        self.payload.get("status")?;
         Some(CoreWorkInstructionLoadTopic {
             status: self.payload["status"].as_str()?.to_string(),
             directory: self.payload["directory"].as_str()?.to_string(),
@@ -764,6 +830,61 @@ pub fn model_repair_topic_event(
             "issue": issue,
             "attempt": attempt,
             "max_attempts": max_attempts,
+        }),
+    )
+}
+
+pub fn context_compact_topic_event(
+    session_id: impl Into<String>,
+    estimated_before_tokens: u32,
+    estimated_after_tokens: u32,
+    discarded_delta_ids: &[String],
+    offloaded_delta_ids: &[String],
+    scratch_id: Option<&str>,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_CONTEXT_COMPACT,
+            json!({
+                "name": CORE_TOPIC_CONTEXT_COMPACT,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "estimated_before_tokens": estimated_before_tokens,
+            "estimated_after_tokens": estimated_after_tokens,
+            "discarded_delta_ids": discarded_delta_ids,
+            "offloaded_delta_ids": offloaded_delta_ids,
+            "scratch_id": scratch_id,
+        }),
+    )
+}
+
+pub fn toolgen_topic_event(
+    session_id: impl Into<String>,
+    phase: &str,
+    tool_count: usize,
+    tool: Option<&crate::ToolSummary>,
+    retrospect: Option<&str>,
+    error: Option<&str>,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_TOOLGEN,
+            json!({
+                "name": CORE_TOPIC_TOOLGEN,
+                "phase": phase,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "phase": phase,
+            "tool_count": tool_count,
+            "tool": tool,
+            "retrospect": retrospect,
+            "error": error,
         }),
     )
 }
@@ -867,9 +988,11 @@ pub fn work_instruction_load_topic_event(
 fn worker_identity_payload(identity: &CoreSessionWorkerIdentity) -> Value {
     json!({
         "session_id": &identity.session_id,
+        "context_id": &identity.context_id,
+        "worker_id": &identity.worker_id,
         "display_name": &identity.display_name,
         "ordinal": identity.ordinal,
-        "parent_session_id": &identity.parent_session_id,
+        "parent_worker_id": &identity.parent_worker_id,
     })
 }
 
@@ -879,9 +1002,11 @@ fn parse_worker_identity(value: &Value) -> Option<CoreSessionWorkerIdentity> {
     }
     Some(CoreSessionWorkerIdentity {
         session_id: value["session_id"].as_str()?.to_string(),
+        context_id: value["context_id"].as_str()?.to_string(),
+        worker_id: value["worker_id"].as_str()?.to_string(),
         display_name: value["display_name"].as_str()?.to_string(),
         ordinal: value["ordinal"].as_u64()? as u32,
-        parent_session_id: value["parent_session_id"].as_str().map(str::to_string),
+        parent_worker_id: value["parent_worker_id"].as_str().map(str::to_string),
     })
 }
 
@@ -950,6 +1075,18 @@ fn parse_global_worker_status(value: &Value) -> CoreGlobalWorkerStatus {
     CoreGlobalWorkerStatus {
         working_worker_count: value["working_worker_count"].as_u64().unwrap_or(0) as usize,
     }
+}
+
+fn string_array_payload(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_dynamic_context_summary(value: &Value) -> Option<CoreDynamicContextSummary> {

@@ -2,10 +2,11 @@ use super::*;
 use crate::{
     ApprovalRequest, BashApprovalMode, CapabilityRegistry, CoreActionKind, CoreProfile,
     CoreTopicEvent, HostDecision, NoopTurnUi, TurnStopDetail, TurnStopReason,
-    CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
+use std::{fs, thread};
 
 fn tmp_dir(name: &str) -> std::path::PathBuf {
     let mut dir = std::env::temp_dir();
@@ -39,6 +40,7 @@ fn test_config() -> ProviderConfig {
         max_llm_input_tokens: 100_000,
         max_llm_output_tokens: 10_000,
         response_protocol: crate::ResponseProtocolKind::Markdown,
+        openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
 
@@ -79,6 +81,33 @@ fn read_audit_events(path: &Path) -> Vec<Value> {
 fn shell_quote(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
+}
+
+#[cfg(unix)]
+fn process_is_executing(pid: u32) -> bool {
+    let mut status = 0;
+    let wait = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if wait == pid as libc::pid_t {
+        return false;
+    }
+    if wait == 0 {
+        return true;
+    }
+    if let Ok(output) = std::process::Command::new("/bin/ps")
+        .arg("-o")
+        .arg("stat=")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output()
+    {
+        if !output.status.success() {
+            return false;
+        }
+        let stat = String::from_utf8_lossy(&output.stdout);
+        let state = stat.trim();
+        return !state.is_empty() && !state.starts_with('Z') && !state.contains('Z');
+    }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 fn audit_event_count(events: &[Value], event_type: &str) -> usize {
@@ -123,6 +152,39 @@ impl ModelClient for ReplayModel {
 
 struct PollingReplayModel {
     inner: ReplayModel,
+}
+
+struct CancelAfterDelayUi {
+    started: Instant,
+    delay: Duration,
+}
+
+impl TurnUi for CancelAfterDelayUi {
+    fn is_cancel_requested(&mut self) -> bool {
+        self.started.elapsed() >= self.delay
+    }
+}
+
+struct ApproveAndCancelAfterDelayUi {
+    started: Instant,
+    delay: Duration,
+    approvals: u32,
+}
+
+impl TurnUi for ApproveAndCancelAfterDelayUi {
+    fn is_cancel_requested(&mut self) -> bool {
+        self.started.elapsed() >= self.delay
+    }
+
+    fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
+        match request {
+            HostDecisionRequest::UserApproval(_) => {
+                self.approvals += 1;
+                HostDecision::Accept
+            }
+            other => other.safe_default().into(),
+        }
+    }
 }
 
 impl PollingReplayModel {
@@ -256,6 +318,40 @@ impl TurnUi for DeclineLongRunningCommandUi {
 }
 
 #[test]
+fn session_turn_uses_provider_config_response_protocol_over_core_state() {
+    let dir = tmp_dir("runtime_config_protocol_wins");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Json);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"<response><final_answer>xml config wins</final_answer></response>"#,
+        1_000,
+        false,
+    ))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "hello",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "xml config wins");
+    assert_eq!(outcome.repair_issue, None);
+}
+
+#[test]
 fn session_turn_retries_transient_provider_errors_and_reports_status() {
     let dir = tmp_dir("retry_transient_provider_error");
     let audit = dir.join("audit.json");
@@ -310,7 +406,7 @@ fn session_turn_repairs_empty_model_content() {
     let mut model = ReplayModel::new([
         Ok(llm("", 1_000, false)),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"空回复修复后成功。"}"#,
+            "## Status\nfinished\n\n## Final_Answer\n空回复修复后成功。",
             1_100,
             false,
         )),
@@ -359,6 +455,7 @@ fn session_turn_repairs_any_non_protocol_model_content() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Ok(llm("plain text that does not match protocol", 1_000, false)),
@@ -840,7 +937,13 @@ fn session_turn_xml_malformed_action_json_still_repairs() {
         .filter_map(CoreTopicEvent::as_model_repair)
         .collect::<Vec<_>>();
     assert_eq!(repair_topics.len(), 1);
-    assert_eq!(repair_topics[0].issue, "actions[0].invalid_json");
+    assert!(
+        repair_topics[0]
+            .issue
+            .starts_with("actions[0].invalid_json:trailing comma"),
+        "{}",
+        repair_topics[0].issue
+    );
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
     let _ = std::fs::remove_dir_all(dir);
@@ -903,6 +1006,7 @@ fn session_turn_emits_repair_topic_for_each_protocol_repair_attempt() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Ok(llm("first malformed response", 1_000, false)),
@@ -1268,6 +1372,210 @@ finished
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn session_turn_cancels_parallel_long_running_bash_actions() {
+    let dir = tmp_dir("cancel_parallel_bash_session");
+    let audit = dir.join("audit.json");
+    let pid_a = dir.join("child_a.pid");
+    let pid_b = dir.join("child_b.pid");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    let started = Instant::now();
+    let mut ui = CancelAfterDelayUi {
+        started,
+        delay: Duration::from_millis(150),
+    };
+    let command_a = format!(
+        "tail -f /dev/null & echo $! > {}; wait",
+        shell_quote(&pid_a)
+    );
+    let command_b = format!(
+        "tail -f /dev/null & echo $! > {}; wait",
+        shell_quote(&pid_b)
+    );
+    let response = format!(
+        r#"## Working_Still_Action
+```action
+[[
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
+]]
+```"#,
+        serde_json::to_string(&command_a).unwrap(),
+        serde_json::to_string(&command_b).unwrap(),
+    );
+    let mut model = ReplayModel::new([Ok(llm(response, 1_000, false))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "执行两个长时间上传任务",
+            session: "web_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "parallel cancellation took {:?}",
+        started.elapsed()
+    );
+    for pid_file in [&pid_a, &pid_b] {
+        let child_pid = fs::read_to_string(pid_file)
+            .expect("parallel child pid should be recorded")
+            .trim()
+            .parse::<u32>()
+            .expect("parallel child pid should be numeric");
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !process_is_executing(child_pid),
+            "parallel descendant process {child_pid} survived cancellation"
+        );
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_action() {
+    let dir = tmp_dir("cancel_parallel_after_completed_action");
+    let audit = dir.join("audit.json");
+    let completed_marker = dir.join("completed.txt");
+    let running_pid = dir.join("running.pid");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    let started = Instant::now();
+    let mut ui = CancelAfterDelayUi {
+        started,
+        delay: Duration::from_millis(200),
+    };
+    let completed_command = format!("printf uploaded > {}", shell_quote(&completed_marker));
+    let running_command = format!(
+        "tail -f /dev/null & echo $! > {}; wait",
+        shell_quote(&running_pid)
+    );
+    let response = format!(
+        r#"## Working_Still_Action
+```action
+[[
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
+]]
+```"#,
+        serde_json::to_string(&completed_command).unwrap(),
+        serde_json::to_string(&running_command).unwrap(),
+    );
+    let mut model = ReplayModel::new([Ok(llm(response, 1_000, false))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "并行上传两个文件，然后停止仍在运行的上传",
+            session: "web_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    assert!(
+        completed_marker.exists(),
+        "fast parallel action did not finish"
+    );
+    let pid = fs::read_to_string(&running_pid)
+        .expect("running action should record its descendant pid")
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    assert!(!process_is_executing(pid), "running action survived Stop");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_turn_stop_cancels_parallel_bash_after_approval() {
+    let dir = tmp_dir("cancel_approved_parallel_bash");
+    let audit = dir.join("audit.json");
+    let pid_a = dir.join("approved_a.pid");
+    let pid_b = dir.join("approved_b.pid");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
+    let mut config = test_config();
+    let started = Instant::now();
+    let mut ui = ApproveAndCancelAfterDelayUi {
+        started,
+        delay: Duration::from_millis(200),
+        approvals: 0,
+    };
+    let commands = [&pid_a, &pid_b].map(|pid_file| {
+        format!(
+            "tail -f /dev/null & echo $! > {}; wait",
+            shell_quote(pid_file)
+        )
+    });
+    let response = format!(
+        r#"## Working_Still_Action
+```action
+[[
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
+  {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
+]]
+```"#,
+        serde_json::to_string(&commands[0]).unwrap(),
+        serde_json::to_string(&commands[1]).unwrap(),
+    );
+    let mut model = ReplayModel::new([Ok(llm(response, 1_000, false))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "审批并行上传后停止",
+            session: "web_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(ui.approvals, 2);
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    for pid_file in [&pid_a, &pid_b] {
+        let pid = fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(!process_is_executing(pid), "approved action survived Stop");
+    }
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[test]
 fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_order() {
     let dir = tmp_dir("mixed_parallel_action_group_session");
@@ -1548,16 +1856,23 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     let dir = tmp_dir("session_cache_plan");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"status":"working","free_talk":"查询 scratch 后继续。","working_still_action":{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}}"#,
+            r#"<response>
+<free_talk>查询 scratch 后继续。</free_talk>
+<working_still_action>
+<action_json><![CDATA[[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}]]]></action_json>
+</working_still_action>
+</response>"#,
             5_000,
             false,
         )),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"没有找到相关 scratch。"}"#,
+            r#"<response><final_answer>没有找到相关 scratch。</final_answer></response>"#,
             5_800,
             false,
         )),
@@ -1589,7 +1904,7 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     assert_eq!(first_blocks[2].cache, crate::CacheControl::None);
     assert_eq!(
         first_blocks[2].text,
-        crate::prompt_render::formatted_response_trailer("XML")
+        crate::prompt_render::formatted_response_trailer("XML", "TIMEM_ASSISTANT")
     );
 
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
@@ -1617,6 +1932,7 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
     core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -1753,6 +2069,7 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
     );
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -2120,7 +2437,7 @@ fn session_turn_can_cancel_before_provider_call_without_network() {
     );
 
     assert!(outcome.text.is_empty());
-    assert_eq!(outcome.repair_issue.as_deref(), Some("cancelled_by_user"));
+    assert_eq!(outcome.repair_issue, None);
     assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
     assert_eq!(
         outcome.stop_summary.as_ref().map(|summary| &summary.detail),
@@ -2203,7 +2520,7 @@ fn session_turn_protocol_repair_failure_is_structured() {
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new((0..6).map(|idx| {
         Ok(llm(
-            &format!("{{not valid json repair attempt {idx}"),
+            format!("{{not valid json repair attempt {idx}"),
             5_000 + idx as u32,
             false,
         ))
@@ -2324,7 +2641,7 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
 
     let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
     let seed_step = core.apply_model_response(llm(
-        r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#,
+        r#"<response><final_answer>seeded</final_answer></response>"#,
         13_253,
         false,
     ));
@@ -3128,6 +3445,85 @@ impl TurnUi for RecordingTopicUi {
     }
 }
 
+struct CompactThenFinishModel {
+    prompts: Vec<String>,
+    calls: usize,
+}
+
+impl ModelClient for CompactThenFinishModel {
+    fn call_model(
+        &mut self,
+        _config: &ProviderConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.push(prompt.to_string());
+        self.calls += 1;
+        if self.calls == 1 {
+            let delta_id = prompt_field_values(prompt, "delta_id")
+                .into_iter()
+                .next()
+                .expect("delta id in first prompt");
+            Ok(llm(
+                format!(
+                    "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndiscard: {delta_id}\nsummary:\n保留当前任务目标和下一步。"
+                ),
+                3_000,
+                false,
+            ))
+        } else {
+            Ok(llm(
+                "## Status\nfinished\n\n## Final_Answer\ncompact done",
+                1_500,
+                false,
+            ))
+        }
+    }
+}
+
+#[test]
+fn session_turn_context_compact_emits_structured_topic() {
+    let dir = tmp_dir("context_compact_topic");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut ui = RecordingTopicUi::default();
+    let mut model = CompactThenFinishModel {
+        prompts: Vec::new(),
+        calls: 0,
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "OLD_DYNAMIC_CONTEXT_TO_COMPACT",
+            session: "compact_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "compact done");
+    let compact = ui
+        .events
+        .iter()
+        .find(|event| event.topic.name == CORE_TOPIC_CONTEXT_COMPACT)
+        .and_then(CoreTopicEvent::as_context_compact)
+        .expect("context compact topic");
+    assert!(compact.estimated_before_tokens > compact.estimated_after_tokens);
+    assert_eq!(compact.discarded_delta_ids.len(), 1);
+    assert!(compact.offloaded_delta_ids.is_empty());
+    assert!(compact.scratch_id.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn session_turn_markdown_protocol_executes_actions_and_emits_topic_events() {
     let dir = tmp_dir("markdown_protocol_observation_e2e");
@@ -3190,7 +3586,7 @@ Markdown 协议动作已执行。"#,
             .unwrap_or(false)
     }));
     assert!(ui.events.iter().any(|event| {
-        event.as_action().map_or(false, |topic| {
+        event.as_action().is_some_and(|topic| {
             topic.action == "run_bash"
                 && topic.active
                 && topic.kind

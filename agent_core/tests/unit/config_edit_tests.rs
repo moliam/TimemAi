@@ -12,6 +12,7 @@ fn test_config() -> ProviderConfig {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: crate::ResponseProtocolKind::Markdown,
+        openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
 

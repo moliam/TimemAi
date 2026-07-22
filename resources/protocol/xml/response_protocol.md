@@ -6,7 +6,7 @@ All responses must be valid XML wrapped in a single `<response>` root.
 
 1. **Root**: The entire output is one `<response>...</response>` element. No text or child tag may appear before `<response>` or after `</response>`.
 2. **Inside-Root Order**: Inside `<response>`, write optional `<free_talk>` first, then `<working_still_action>` OR `<context_compact>` OR `<final_answer>`.
-3. **Action Payload**: Inside `<working_still_action>`, use `<action_json><![CDATA[<JSON_LITERAL_TEXT>]]></action_json>`.
+3. **Action Payload**: JSON_LITERAL_TEXT. Inside `<working_still_action>`, use `<action_json><![CDATA[<JSON_LITERAL_TEXT>]]></action_json>`.
 4. **No Outer Fences**: Output directly starts with `<response>`, no markdown code blocks allowed as the root wrapper.
 
 ## Tag Dictionary & Streaming Flow
@@ -106,4 +106,4 @@ Task A is complete. Keep only: output path is ..., current workspace is ..., nex
   </context_compact>
 </response>
 
- ## NOTE: MUST use proper escape character for special case, make sure the JSON_LITERAL_TEXT can be processed correctly by json parser.
+ ## NOTE: MUST use <![CDATA[ wrapper. Use proper escape character for special case, make sure the JSON_LITERAL_TEXT can be processed correctly by json parser.

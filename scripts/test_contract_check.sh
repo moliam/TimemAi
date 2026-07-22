@@ -78,6 +78,14 @@ required_patterns=(
   "performance_guard_topic_generation_for_many_actions_is_bounded"
   "performance_guard_many_observation_events_render_bounded"
   "session_turn_preserves_cache_plan_with_xml_response_protocol"
+  "restored_web_turns_follow_history_time_not_turn_id_lexical_order"
+  "restored_web_turns_preserve_user_entry_kinds"
+  "turn_user_entries_are_persisted_with_raw_text_and_semantic_kind"
+  "sorts restored entries and events within one turn by creation time"
+  "shell_resume_uses_stored_session_cwd_for_core_prompt_context"
+  "shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence"
+  "shell_can_resume_web_style_session_history"
+  "formatted_response_trailer_parser_preserves_assistant_heading"
 )
 
 for pattern in "${required_patterns[@]}"; do
@@ -100,12 +108,19 @@ fi
 
 ci_required=(
   "cargo test --workspace"
+  "pnpm --dir web_ui/timem-web test"
+  "pnpm --dir web_ui/timem-web build"
+  "cargo build --locked -p timem_shell -p timem_web --release"
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
   "scripts/real_tty_supplement_smoke.expect"
   "scripts/sensitive_scan.sh --current"
+  "python3 scripts/web_ui_matrix_check.py"
   "scripts/update_static_prompt_snapshot.sh --check"
+  "scripts/clippy_check.sh"
   "scripts/performance_guard.sh"
+  "scripts/cross_host_resume_smoke.sh"
+  "scripts/web_license_check.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
@@ -183,6 +198,18 @@ for file in resources/capabilities/tools/*.yaml; do
   fi
 done
 
+if search_lines_regex '"(action|args)"[[:space:]]*:' README.md; then
+  echo "README action examples must use current single-key tool objects, not action/args:" >&2
+  search_lines_regex '"(action|args)"[[:space:]]*:' README.md >&2
+  exit 1
+fi
+
+if search_regex '(^|[^<])!\[CDATA\[' resources/protocol/xml; then
+  echo "XML protocol docs must spell CDATA as <![CDATA[, not ![CDATA[:" >&2
+  search_lines_regex '(^|[^<])!\[CDATA\[' resources/protocol/xml >&2
+  exit 1
+fi
+
 legacy_action_input_hits="$(
   search_lines_regex 'next_actions.*"input"[[:space:]]*:' \
     agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs \
@@ -245,11 +272,150 @@ feature_doc_required=(
   "Stress/repetition path"
   "Current Supplement Decisions"
   "every new feature"
+  "F32"
+  "Local Web host and assistant-ui experience"
+  "docs/manual-release-smoke.md"
 )
 
 for pattern in "${feature_doc_required[@]}"; do
   if ! search_fixed "$pattern" "$feature_doc"; then
     echo "missing required feature management item: $pattern" >&2
+    exit 1
+  fi
+done
+
+manual_smoke_doc="docs/manual-release-smoke.md"
+if [ ! -f "$manual_smoke_doc" ]; then
+  echo "missing manual release smoke document: $manual_smoke_doc" >&2
+  exit 1
+fi
+
+web_ui_matrix_doc="docs/web-ui-feature-test-matrix.md"
+if [ ! -f "$web_ui_matrix_doc" ]; then
+  echo "missing Web UI feature/test matrix: $web_ui_matrix_doc" >&2
+  exit 1
+fi
+
+web_ui_matrix_required=(
+  "Web UI Feature-Test Matrix"
+  "| Authenticated Web host |"
+  "| Session creation and naming |"
+  "| Per-session runtime profile |"
+  "| Multi-session topic isolation |"
+  "| Worker hierarchy and state |"
+  "| Stop/cancel under human pressure |"
+  "Send during active work"
+  "| Stale supplement recovery |"
+  "| Attachments |"
+  "| Inline decisions |"
+  "| Work instructions |"
+  "| Current cwd display |"
+  "| Turn process rendering |"
+  "| Final answer rendering |"
+  "| Usage and context status |"
+  "| History and resume |"
+  "| Mem switching |"
+  "| Appearance |"
+  "| Scroll and bounded rendering |"
+  "| Diagnostics and host errors |"
+  "| Release packaging |"
+)
+
+for pattern in "${web_ui_matrix_required[@]}"; do
+  if ! search_fixed "$pattern" "$web_ui_matrix_doc"; then
+    echo "missing required Web UI feature/test matrix item: $pattern" >&2
+    exit 1
+  fi
+done
+
+web_ui_required_test_names=(
+  "rapid_submit_during_an_active_turn_is_treated_as_a_supplement"
+  "repeated_user_sends_during_an_active_turn_are_ordered_supplements"
+  "active_turn_supplement_consumes_pending_attachments_into_the_same_turn"
+  "failed_active_turn_supplement_does_not_drop_pending_attachments"
+  "stale_supplement_after_cancel_completion_starts_a_new_turn"
+  "stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task"
+  "duplicate_cancel_commands_are_idempotent_for_one_active_turn"
+  "uses synchronous pending guards for rapid repeated browser clicks"
+  "guards one browser draft submission while preserving text typed during the pending send"
+  "keeps drafts and pending send guards isolated by session"
+  "prunes stale drafts and pending send locks when a snapshot swaps out sessions"
+  "recovers from an in-flight old-mem send after a mem snapshot swaps sessions"
+  "moves the active session to a live session when a snapshot swaps out the old one"
+  "moves active selection to a live session when a reconnect or mem snapshot swaps sessions"
+  "uses session terminology consistently for the creation workflow"
+  "supports agent rename and a distinct animated working state"
+  "expands each session into its scoped worker status list"
+  "accepts lifecycle topics that introduce a new scoped worker and context"
+  "binds assistant-ui running state to the authoritative session lifecycle"
+  "creates sessions with independent runtime environment overrides"
+  "does not send new tasks or supplements while a mem switch is pending"
+  "does not rename a session while mem switching or another rename is pending"
+  "locks old-session interactions while a mem switch snapshot is pending"
+  "does not send while cancellation is still in flight"
+  "keeps draft text and releases the pending guard when cancellation blocks a reserved send"
+  "sends a new task after a cancelled active turn is marked finished"
+  "keeps rapid repeated sends during a working turn as separate supplements"
+  "keeps a human click storm bounded and session scoped"
+  "lets users remove pending attachments without losing access to long file names"
+  "keeps working-turn input visually consistent with a normal send"
+  "restores task, supplement, and approval user entries inside one turn"
+  "moves submitted files from the composer into a compact user attachment list"
+  "queues concurrent decisions by session and request id without cross-session replacement"
+  "clears only the resumed workers decision within a shared session"
+  "uses an explicit session-created event and session-scoped inline decisions"
+  "does not turn work-instruction bookkeeping into user-visible activity"
+  "pairs duplicate concurrent actions in order without collapsing either invocation"
+  "pairs action lifecycle events even when input object key order changes"
+  "pairs action lifecycle events when nested input object key order changes"
+  "applies a model response only to the session named by the core topic"
+  "applies a structured cwd update only to the matching session"
+  "rejects core topics scoped to an unknown context before mutating a session"
+  "keeps a matched agent working without changing unrelated sessions"
+  "renders context compaction outside chat messages with a reduced-motion fallback"
+  "keeps context compaction as a typed system activity with token metrics"
+  "uses the Markdown highlighter for final answers and Bash activity commands"
+  "renders GFM and highlighted code with a copy affordance"
+  "groups each task into user input, bounded process, and separate final delivery"
+  "uses frame styling without repeating user or session identity labels"
+  "coalesces tool lifecycles and renders tools as compact subordinate rows"
+  "replaces an action start with its terminal lifecycle event"
+  "shows the live session cwd in navigation and above the composer"
+  "uses only the selected session's latest real provider usage for context"
+  "renders live task usage and session context without replacing final telemetry"
+  "attaches completion telemetry only to the matching final answer"
+  "persists theme, font, and text-size appearance without changing core state"
+  "removes the access token from the visible URL while retaining the session credential"
+  "public_web_launch_keeps_token_auth_and_reports_bind_mode"
+  "static_web_entry_requires_token_or_authenticated_cookie"
+  "shows the runtime bind host and public-token mode from the server snapshot"
+  "shows host and session errors outside the default-hidden diagnostic panel"
+  "defaults the diagnostic activity panel to hidden"
+  "bounds a reconnect snapshot with many turns and high-frequency events"
+  "bounds newly appended turns without changing chronological order"
+  "keeps repeated live event bursts bounded and isolated across sessions"
+)
+
+for pattern in "${web_ui_required_test_names[@]}"; do
+  if ! search_fixed "$pattern" timem_web/tests web_ui/timem-web/tests; then
+    echo "missing required Web UI regression test implementation: $pattern" >&2
+    exit 1
+  fi
+done
+
+manual_smoke_required=(
+  "Manual Release Smoke"
+  "Web Browser Matrix"
+  "Safari"
+  "Firefox"
+  "Terminal Emulator Matrix"
+  "Clean-Machine Install"
+  "Live Provider Smoke"
+)
+
+for pattern in "${manual_smoke_required[@]}"; do
+  if ! search_fixed "$pattern" "$manual_smoke_doc"; then
+    echo "missing required manual release smoke item: $pattern" >&2
     exit 1
   fi
 done
@@ -279,7 +445,7 @@ for pattern in "${test_strategy_required[@]}"; do
   fi
 done
 
-for id in $(seq 1 28); do
+for id in $(seq 1 33); do
   feature_id="$(printf 'F%02d' "$id")"
   if ! search_fixed "| $feature_id |" "$feature_doc"; then
     echo "missing required feature row: $feature_id" >&2
@@ -309,6 +475,11 @@ if ! search_fixed "scripts/update_static_prompt_snapshot.sh --check" scripts/ci.
   exit 1
 fi
 
+if ! search_fixed "scripts/clippy_check.sh" docs/test-strategy.md docs/feature-test-management.md scripts/ci.sh; then
+  echo "clippy warning gate must remain documented and wired into CI" >&2
+  exit 1
+fi
+
 workflow=".github/workflows/ci.yml"
 if [ ! -f "$workflow" ]; then
   echo "missing GitHub Actions workflow: $workflow" >&2
@@ -319,6 +490,7 @@ workflow_required=(
   "push:"
   "pull_request:"
   "scripts/ci.sh"
+  '"1.0"'
   "ubuntu-latest"
   "macos-latest"
   "expect"

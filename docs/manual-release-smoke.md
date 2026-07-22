@@ -1,0 +1,100 @@
+# Manual Release Smoke
+
+This checklist covers release evidence that is intentionally not part of
+default CI because it depends on local browsers, terminal emulators,
+credentials, or a disposable machine. Run the relevant rows before a broad
+public release or when changing the touched surface.
+
+Record the date, commit, host OS, and short result beside each row in the
+release notes or PR summary.
+
+## Web Browser Matrix
+
+Run `timem-web` with a fake provider for deterministic behavior, then repeat a
+short live-provider turn only when credentials are intentionally available.
+
+Required rows before a broad Web release:
+
+| Browser | Scope | Acceptance |
+|---|---|---|
+| Chromium or Chrome | Baseline automated-equivalent smoke | Page opens from the local URL, access token works, Session0 appears, composer stays docked, one normal turn completes, final answer and token telemetry render, no body horizontal overflow at desktop and narrow mobile width. |
+| Safari | Engine-specific manual smoke | Same as Chromium, plus reconnect after refresh keeps the session, local storage appearance preferences survive refresh, code blocks/tables render without layout breakage. |
+| Firefox | Engine-specific manual smoke | Same as Chromium, plus WebSocket reconnect, scroll anchoring after older-history load, and attachment remove/submit behavior remain correct. |
+
+Suggested fake-provider sequence:
+
+1. Start `target/release/timem-web --no-open` with
+   `TIMEM_BASE_URL=http://127.0.0.1:<fake-provider-port>/v1`.
+2. Submit one simple task.
+3. Submit one action-producing task.
+4. Rename the session.
+5. Upload and remove one pending attachment.
+6. Refresh the page and confirm state is not stale.
+7. Narrow the window to a mobile width and confirm the composer remains usable.
+
+## Terminal Emulator Matrix
+
+Run the release binary in each target terminal when changing input, paste,
+redraw, status, or cancellation code.
+
+| Environment | Scope | Acceptance |
+|---|---|---|
+| iTerm2 | Interactive shell baseline | `/help`, `/config`, multiline paste, edited paste recovery, Ctrl+C/Esc cancel, and mid-turn supplement behave like the pseudo-TTY smoke. |
+| Terminal.app | macOS default terminal | Same as iTerm2; no duplicate prompt rows or broken CJK/backspace behavior. |
+| tmux | Multiplexer path | Bracketed paste, redraw, and Ctrl+C remain usable inside a pane; if broken, document the limitation before release. |
+| SSH session | Remote pure shell path | Shell UI starts without desktop assumptions, paste/cancel works, and no Web-only behavior is required. |
+
+## Clean-Machine Install
+
+Use a disposable VM, container, or fresh user account.
+
+Acceptance:
+
+- `./install.sh` installs `timem`, `timem-native-rs`, and `timem-web` without
+  requiring undocumented manual steps.
+- `cp env_template env && source env` works after adding a test API key/model.
+- `timem --help` matches README startup/config guidance.
+- `timem` starts, `/help` is intercepted by the shell UI, and `/exit` exits.
+- `timem-web --no-open` prints a loopback URL and serves the embedded Web UI.
+- `./uninstall.sh` removes installed commands without deleting user-managed env
+  files or memory data.
+
+## Live Provider Smoke
+
+Run only with explicit throwaway credentials. Do not add credentials or raw live
+audit logs to git.
+
+Acceptance:
+
+- One normal XML response completes without protocol repair.
+- One run_bash action completes and renders as a tool event.
+- One malformed fixture or naturally malformed response enters protocol repair
+  and recovers, or produces a bounded user-visible failure after the configured
+  repair limit.
+- Provider usage fields update input/output/cache telemetry.
+- API audit redacts keys and does not store private prompt text outside the
+  intended audit files.
+
+## Evidence Rules
+
+- CI remains authoritative for deterministic checks.
+- Manual smoke is evidence for host-specific behavior only; do not use it to
+  waive failing unit, integration, Web, or script checks.
+- If a manual row fails, either fix it before release or explicitly document the
+  unsupported environment and the reason.
+
+## Recent Local Evidence
+
+| Date | Commit | Host | Scope | Result |
+|---|---|---|---|---|
+| 2026-07-16 | `fd6ac7f` | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser | Fake-provider Web smoke on `timem-web --no-open`: initial desktop layout, task submit, rapid repeated Stop/Send during an active turn, second turn completion, console error check, 390px mobile viewport composer/overflow check. | Passed: no horizontal overflow, composer stayed visible, session state returned from busy to ready, no `active_turn_not_found`/runtime-error text, no browser console errors. |
+| 2026-07-17 | working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, Aliyun XML provider | Manual ToolGen live-provider smoke: complete a tool-using task, invoke ToolGen from that task's completion row, provide optional guidance, run the same Session/Context turn, self-test and publish one Session tool, then inspect it through ToolRepo. | Passed: the source final answer remained visible; one semantically named tool was published after runtime validation; the composer control count changed from 0 to 1; ToolRepo rendered its tree, synopsis, README, and source; desktop and 390px mobile layouts had no overlap or horizontal overflow. Three genuinely malformed model responses (non-array action payload, invalid JSON, and malformed CDATA closing) were repaired successfully and retained as protocol-robustness evidence. No credential, raw audit payload, or local Session identifier is recorded here. |
+| 2026-07-20 | working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser | Responsive layout smoke at 1280px, 768px, 390px, and 320px, including shell width, composer width, header width, document overflow, and mobile sidebar transform/visibility. | Passed: each viewport had no horizontal overflow; the app shell matched the viewport width; the composer remained inside the shell; at 320px the sidebar stayed hidden off-canvas until explicitly opened. |
+| 2026-07-21 | `df659df` | macOS Darwin 25.5.0 arm64, release shell binary under `expect` pseudo-TTY | `scripts/real_tty_smoke.expect`: startup, `/help`, `/prof`, bracketed multiline paste, edited paste recovery with return-to-edit/cancel, `/config` provider switch and invalid custom provider rejection, `/workspace` cancel, `/exit`. | Passed: shell commands were intercepted locally without model calls; paste placeholders rendered in reverse video; recovery prompts accepted Ctrl+C/Esc/return-to-edit paths; no duplicate prompt row or stuck input was detected by the smoke. |
+| 2026-07-21 | `a897439` | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake OpenAI-compatible provider | Rebuilt `timem-web` release binary, opened authenticated local Web UI, confirmed connected baseline, stopped the runtime process, then inspected the page with the Activity panel closed. | Passed: sidebar state changed to `Runtime exited. Restart timem-web.`, the main chat workspace rendered a visible `Runtime exited` banner with restart guidance, and the document had no horizontal overflow. |
+| 2026-07-21 | working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake provider through OpenAI Responses wire protocol | Rebuilt `timem-web`, started `scripts/fake_openai_provider.py`, opened authenticated Web UI, submitted one simple task, then stopped the Web host and inspected the still-open page. | Passed: default XML response completed without protocol repair, final answer and token telemetry rendered, composer stayed docked with no horizontal overflow, and after Web host shutdown the page showed `Runtime exited` plus restart guidance while disabling the composer. |
+| 2026-07-21 | `1.0` working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake OpenAI-compatible provider | Browser UX smoke on `timem-web --no-open`: authenticated startup, connected baseline, one user turn, final answer telemetry, desktop overflow check, 390px mobile overflow/composer check, then Web host shutdown while the page stayed open. | Passed: Session0, cwd, mem, and `Runtime connected` rendered; final answer and token telemetry appeared; desktop and 390px views had no horizontal overflow; composer stayed visible and enabled while runtime was connected; after shutdown, the page showed `Runtime exited` / `Restart timem-web` and disabled the composer. |
+
+Rows not covered by this local smoke remain explicit manual release work:
+Safari, Firefox, iTerm2, Terminal.app, tmux, SSH, clean-machine install, and
+live-provider behavior with throwaway credentials.

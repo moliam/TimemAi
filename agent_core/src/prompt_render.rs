@@ -3,25 +3,36 @@ use crate::prompt_spec;
 use crate::response_protocol::ResponseProtocolSuite;
 use crate::{PromptDelta, PromptSlice};
 
-pub(crate) fn formatted_response_trailer(protocol_language: &str) -> String {
-    let protocol_language = protocol_language.trim();
-    if protocol_language.eq_ignore_ascii_case("XML") {
-        return "Follow the system prompt, give your XML formatted response. It must start with <response>:".to_string();
-    }
-    format!("Follow the system prompt, give your {protocol_language} formatted response:")
+pub(crate) fn formatted_response_trailer(
+    protocol_language: &str,
+    assistant_heading: &str,
+) -> String {
+    let instruction = if protocol_language.trim().eq_ignore_ascii_case("XML") {
+        "Now please continue your ID's response part in XML as required in protocol:"
+    } else {
+        "Now please continue your ID's response part as required in protocol:"
+    };
+    format!("{instruction}\n## {}", assistant_heading.trim())
 }
 
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
     let trimmed = rendered_prompt.trim_end();
-    let Some(line_start) = trimmed.rfind('\n') else {
+    let Some(trailer_start) = [
+        "\n\nNow please continue your ID's response part as required in protocol:\n## ",
+        "\n\nNow please continue your ID's response part in XML as required in protocol:\n## ",
+    ]
+    .into_iter()
+    .filter_map(|prefix| trimmed.rfind(prefix))
+    .max() else {
         return (rendered_prompt, None);
     };
-    let candidate = trimmed[line_start + 1..].trim();
-    if candidate.starts_with("Follow the system prompt, give your ")
-        && candidate.contains(" formatted response")
-        && candidate.ends_with(':')
-    {
-        let prefix = trimmed[..line_start].trim_end();
+    let candidate = &trimmed[trailer_start + 2..];
+    let assistant_heading = candidate
+        .split_once("\n## ")
+        .map(|(_, heading)| heading)
+        .unwrap_or_default();
+    if !assistant_heading.is_empty() && !assistant_heading.contains('\n') {
+        let prefix = trimmed[..trailer_start].trim_end();
         return (prefix, Some(candidate.to_string()));
     }
     (rendered_prompt, None)
@@ -73,8 +84,8 @@ pub(crate) fn render_static_prompt(
     let with_protocol =
         with_protocol.replace("{{CURRENT_PROTOCOL_LANG}}", protocol_suite.lang_format());
     let assistant_heading = assistant_heading.trim();
-    let with_protocol = with_protocol.replace("{{CURRENT_ASSISTANT_NAME}}", assistant_heading);
-    let with_protocol = with_protocol.replace("CURRENT_ASSISTANT_NAME", assistant_heading);
+    let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
+    let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
     // 2. Fill {{TOOL_CATALOG}} and {{SKILL_HEADERS}} from capabilities
     let with_caps = capabilities.enrich_static_prompt(&with_protocol);
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
@@ -95,7 +106,7 @@ pub(crate) fn render_prompt_with_rendered_static(
     assistant_heading: &str,
     protocol_language: &str,
 ) -> String {
-    let mut out = format!("{}", rendered_static_prompt);
+    let mut out = rendered_static_prompt.to_string();
 
     for delta in deltas {
         let slices = render_delta_slices(delta);
@@ -135,7 +146,10 @@ pub(crate) fn render_prompt_with_rendered_static(
     }
 
     out.push_str("\n\n");
-    out.push_str(&formatted_response_trailer(protocol_language));
+    out.push_str(&formatted_response_trailer(
+        protocol_language,
+        assistant_heading,
+    ));
     out
 }
 

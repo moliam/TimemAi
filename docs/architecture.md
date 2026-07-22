@@ -1,9 +1,77 @@
 # Timem Architecture
 
-Timem Shell is the terminal host for the reusable Timem Rust agent core. The
-terminal host owns CLI/input/rendering. `agent_core` owns the reusable runtime,
-provider transport, memory, model protocol parsing, capability execution, and
-structured core/UI topic protocol.
+Timem provides terminal and local-browser hosts for the reusable Timem Rust
+agent core. Each host owns its input and rendering. `agent_core` owns the
+reusable runtime, provider transport, memory, model protocol parsing,
+capability execution, session persistence, and structured core/UI topic
+protocol.
+
+## Current Product Shape
+
+Timem is now a multi-host local agent:
+
+- `timem` is the native terminal host.
+- `timem-web` is a loopback-only browser host with an assistant-ui frontend.
+- Both hosts run the same `agent_core` and use the same memory/session store.
+
+### 1.0 Product Boundary
+
+Version 1.0 promotes `timem-web` from an auxiliary host to a first-class
+browser interface. The Web host owns browser transport and presentation, while
+the core remains the single source of truth for agent behavior:
+
+```text
+Browser / assistant-ui
+        |
+        | authenticated HTTP + WebSocket, structured commands/topics
+        v
+timem_web host
+        |
+        | session/context/worker routing
+        v
+agent_core
+        |
+        +-- provider transport and protocol adapters
+        +-- prompt/context and memory persistence
+        +-- capability registry and safe execution
+        +-- session workers and cross-host resume
+```
+
+The Web-specific 1.0 surface includes multi-session profiles, paged history,
+attachments, active-turn supplements, inline decisions, live action lifecycle
+rows, reconnect/runtime-exit states, context-compact visualization, Markdown
+rendering, syntax highlighting, responsive layout, and final usage telemetry.
+These are host renderings of core data; they must not be reimplemented as a
+second provider, prompt, memory, or action runtime.
+
+The split is intentional. Core owns reusable behavior and emits structured
+events. Hosts own presentation, input, and host-only ergonomics. A feature that
+affects model behavior, provider calls, memory, tools, sessions, protocol
+parsing, or cross-host state belongs in core/resources. A feature that only
+changes terminal or browser presentation belongs in the host/UI layer.
+
+## Reading Order
+
+For a new contributor, read these in order:
+
+1. [`README.md`](../README.md): project overview, install, run, and docs map.
+2. [`install-and-configuration.md`](install-and-configuration.md): operational
+   setup, provider examples, and runtime data layout.
+3. This file: runtime architecture and module ownership.
+4. [`core-ui-topic-protocol.md`](core-ui-topic-protocol.md): cross-language
+   topic contract between core and hosts.
+5. [`capability-system.md`](capability-system.md): tool manifests and executor
+   registration.
+6. [`test-strategy.md`](test-strategy.md) and
+   [`feature-test-management.md`](feature-test-management.md): quality gates and
+   feature coverage ledger.
+
+For module-local work, also read:
+
+- [`agent_core/module_boundary.md`](../agent_core/module_boundary.md)
+- [`timem_shell/module_boundary.md`](../timem_shell/module_boundary.md)
+- [`timem_web/module_boundary.md`](../timem_web/module_boundary.md)
+- [`web_ui/module_boundary.md`](../web_ui/module_boundary.md)
 
 ## Goals
 
@@ -19,9 +87,10 @@ structured core/UI topic protocol.
 ```mermaid
 flowchart LR
     User["User terminal"] --> Shell["timem_shell\nterminal UI + CLI"]
-    Browser["Future local web UI"] -.-> Web["web adapter\nplanned"]
+    Browser["Local browser"] --> WebUI["web_ui\nassistant-ui + React"]
+    WebUI <--> Web["timem_web\nloopback HTTP/WebSocket host"]
     Shell --> Core["agent_core\nruntime + topic protocol"]
-    Web -.-> Core
+    Web --> Core
     Core --> Runtime["agent_core::session_runtime\nUI-neutral turn runner"]
     Runtime --> Provider["agent_core::provider_transport\nprovider I/O"]
     Provider --> Wire["agent_core::provider\nwire-format adapter"]
@@ -158,6 +227,103 @@ adapter ergonomics. If a feature must be visible to the model, callable by the
 model, shared by iOS/Web/CLI, or reflected in prompt/capability contracts, it
 belongs in `agent_core` or `resources` instead of being implemented as a
 shell-only shortcut.
+
+### `timem_web/`
+
+`timem_web` is a local host adapter, not a second agent runtime. It binds only
+to `127.0.0.1`, authenticates API and WebSocket access with a per-process token,
+embeds the production frontend, and maps browser commands to public
+`agent_core` worker/session interfaces. It preserves session and request ids on
+every topic, assigns stable event ids, and keeps one bounded host-side turn
+envelope for the task text, supplements, approvals, process events, final answer,
+and completion telemetry. Uploads, retained turns, per-turn user entries, and
+per-turn process events are bounded independently. Concurrent workers never
+share a turn envelope. Provider calls, prompt construction, memory, protocol
+parsing, and tool execution remain in `agent_core`.
+
+The Web Session is also the runtime-configuration ownership boundary. On
+creation, `timem_web` copies the current host defaults and applies a validated
+allowlist of Session overrides for provider, model, wire/response protocols,
+base URL, token limits, timeout, approval/work-instruction policy, and API key.
+Existing Sessions are immutable when host defaults change; later Sessions see
+the new defaults. The persisted `StoredSession.env` and `StoredSession.profile`
+are part of cross-host resume, not Web-only UI state. When Shell or Web resumes
+a stored Session, it must rebuild the active core/provider configuration from
+that Session environment while preserving explicit launch-time CLI overrides as
+the highest-priority source.
+API keys remain in the server-side Session runtime and are
+never serialized into snapshots or topics. A Session owns explicit
+`contexts[]` and `workers[]` registries. All of its workers share the Session
+profile, while each Context owns its prompt/workspace state. Different Sessions
+remain isolated and may use different profiles. The current UI creates one
+default Context and primary Worker, but identity and routing already support
+child workers on additional contexts.
+
+The current ownership cardinality is one mutable `AgentCore` per Context and
+one worker per Context. Spawning a concurrent subtask therefore allocates a new
+Context and then attaches a child Worker whose `parent_worker_id` names the
+requesting worker. The manager rejects duplicate `(session_id, context_id)`
+workers and cross-Session parent links. Sharing one mutable Context between
+workers requires a future context coordinator and is intentionally not implied
+by the present arrays.
+
+The primary Worker is the sole user-facing communication endpoint for a Web
+Session. Child-worker process output and decision requests are projected into
+the primary turn. Decision topics retain the requesting `worker_id` as a relay
+address; after the user's choice is recorded in the primary conversation, the
+host routes the structured reply back to that waiting worker. Child final
+answers remain internal task results and cannot close or directly append to the
+primary chat.
+Child creation never creates a browser Session or another user conversation.
+The sidebar remains a list of user-owned Sessions; internal contexts/workers
+are visible only through the owning Session's structured process stream and
+diagnostics.
+
+User Stop/Cancel is a Session-wide task barrier and cancels every active worker.
+The next user turn targets only the primary Worker. The primary may choose to
+create fresh child Context/Worker pairs, but cancelled children are never
+implicitly resumed.
+
+The shell host intentionally creates one default Session and does not add a
+Session-profile dialog. Its existing process environment and CLI options become
+that Session's profile. This keeps CLI behavior unchanged while preserving the
+same ownership model as Web.
+
+Session persistence and resume are core data capabilities, not Web-only state.
+`agent_core::session_store` owns the shared `StoredSession`,
+`ChatHistoryRecord`, history paging, and resume-notice schema used by Shell and
+Web. Hosts may render restored turns differently, but the persisted chat history
+format is JSONL with explicit `message` and `event` records so a future host can
+page and replay the same data. The first resume implementation intentionally
+does not persist live Worker/Context runtime state or running action queues:
+when a Session is restored, the host creates a fresh primary Worker and Context,
+then injects one `## SYSTEM` notice pointing the model to the raw chat history
+file and its exact format. The model should read that file only when needed for
+the current task, using bounded tools such as `tail`, `rg`, `jq`, or short
+scripts instead of loading the whole file into prompt context. Web restores the
+latest 200 history records by default and requests older pages in 200-record
+chunks; Shell uses the same Session store and appends its turns to the same raw
+history file so Web and Shell can continue the same mem-space work.
+
+### `web_ui/`
+
+`web_ui/timem-web` owns assistant-ui/React composition, Markdown and syntax
+highlighting, session navigation, session-scoped inline decision queues, themes,
+responsive layout, and turn rendering. One task is presented as a `YOU` frame
+that accumulates supplements and approval replies, a bounded scrollable Timem
+process frame for free talk/actions/repair/compaction/requests, and a separate
+final-delivery block with token and elapsed-time telemetry. Stable host event ids
+make reconnect/snapshot replay idempotent. Browser preferences such as dark/light
+theme remain local UI state.
+
+The Web session snapshot includes the prompt context's cwd. A successful
+`self_tool type=cwd op=chg_cwd` action adds `context_state.cwd` to the existing
+`core.action` finish topic. `timem_web` updates the authoritative session before
+forwarding the event, and the browser reducer updates only the matching session.
+This keeps reconnects, navigation, the composer, and later `run_bash` execution
+on the same cwd without creating a separate fine-grained topic.
+The ignored `web_ui/vendor/assistant-ui` checkout is only a pinned source
+reference; production uses the package lock and embeds the built `dist` assets.
 
 In short:
 
@@ -417,16 +583,22 @@ multiple sessions or recreate a terminal-specific model/action loop.
 
 `CoreSessionWorkerManager` is the core-side multi-session owner. It allocates
 worker identities from ordinal 0, creates `ID0` as the default worker when a
-host asks for the default session, keeps a registry of workers by session id,
+host asks for the default session, keeps a registry of workers by worker id,
 exposes handles/status snapshots, polls worker events without forcing a
 terminal-specific event loop, and requests or joins shutdown across all workers.
 Workers created by one manager share one `CoreSessionWorkerRuntime`, so global
 working-worker counts published in model-response topics reflect all active
 sessions managed by that host.
 
+Provider/runtime configuration belongs to the Session above its contexts and
+workers. A host must construct every worker/context in one Session from the
+same immutable Session profile; it must not let an individual worker silently
+drift to another provider or model. Cross-Session profiles are independent.
+
 A session worker has a stable identity and a workspace description. Identity is
-core/UI protocol data, not a shell label: `session_id`, display name, ordinal,
-and optional parent session id. If no display name is supplied, workers use
+core/UI protocol data, not a shell label: `session_id`, `context_id`,
+`worker_id`, display name, ordinal, and optional `parent_worker_id`. These three
+ids form the cross-language topic-routing scope. If no display name is supplied, workers use
 `ID0`, `ID1`, ... by ordinal. A parent agent or host may create a worker
 with a more specific name, and the name can later be changed through the worker
 handle; the update is emitted as a lifecycle topic. Workspace data describes
@@ -449,6 +621,24 @@ structured facts such as version, profile, response protocol, context limit,
 round budget, capability counts, optional worker identity, optional workspace
 metadata, and optional dynamic-context summary. A shell may render this as a
 startup status line; a web UI may render it as a session state event.
+
+Token telemetry follows the same structured boundary. Each worker
+`ModelResponse` event carries that provider call's `UsageStats`; a host may
+aggregate those events for live task spending while retaining the latest call's
+`prompt_tokens` as the observed context size. `TurnOutcome.stats` remains the
+authoritative completed-task aggregate. Web sessions retain their own
+`max_llm_input_tokens` from lifecycle state, so context percentages and usage
+never depend on a global UI setting or leak across sessions.
+
+Web command handling is deliberately idempotent under high-pressure human
+clicking. The browser uses same-event-loop local guards for Stop, Create
+Session, attachment removal, inline decisions, rename, and runtime config
+updates so repeated clicks show immediate feedback instead of issuing duplicate
+commands. The server remains authoritative: repeated Stop is harmless, Send
+during an active turn becomes a supplement, stale supplements can start a new
+turn after cancellation/completion, repeated attachment removal for the same
+session is treated as success, and stale decision replies after a turn has
+finished are ignored before they reach a worker.
 
 Stopped-turn outcomes are returned as `TurnStopSummary`/`TurnStopDetail`
 structure. The terminal host renders those structures into Chinese shell text;
@@ -556,11 +746,11 @@ time: 1782200000000
 ## USER
 new user input or mid-turn supplement
 
-## {{CURRENT_ASSISTANT_NAME}}
+## {{ASSSISTANT_ID}}
 raw model output recorded for continuity by default
 
 ## SYSTEM
-The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
+The following are results of {{ASSSISTANT_ID}} newly initiated actions:
 
 Action result: run_bash
 ...
@@ -679,7 +869,7 @@ Important invariants:
 - Every rendered dynamic delta has `delta_id` so runtime shrink review can refer
   to exact logical deltas.
 - Valid model-visible role blocks are `## USER`, the current assistant/session-worker
-  heading represented as `## {{CURRENT_ASSISTANT_NAME}}` in prompt examples, and
+  heading represented as `## {{ASSSISTANT_ID}}` in prompt examples, and
   `## SYSTEM`. Runtime replaces it with the actual worker role, such as `## ID0`.
 - The static prefix is sent through provider system-role/system-field support
   when available. Dynamic deltas go in the user message.
@@ -710,12 +900,13 @@ Algorithm:
    exact slice boundaries.
 4. Mark the latest `DYNAMIC_TAIL_CACHE_BLOCKS = 3` dynamic blocks cacheable.
 5. Leave older dynamic blocks unmarked.
-6. Append the temporary
-   `Follow the system prompt, give your <protocol> formatted response:` trailer
-   as the final user block without cache control, for example
-   `Follow the system prompt, give your XML formatted response:`. This trailer
-   is not a prompt delta and must not be merged into the latest delta cache
-   block.
+6. Append a temporary response trailer as the final user block without cache
+   control: XML uses `Now please continue your ID's response part in XML as required in protocol:`, while other
+   suites use `Now please continue your ID's response part as required in protocol:`; both are followed by
+   `## <ASSSISTANT_ID>`. The runtime resolves the assistant ID before
+   sending the prompt.
+   This trailer is not a prompt delta and must not be merged into the latest
+   delta cache block.
 
 This is a tail-checkpoint strategy, not an old-deltas strategy. It deliberately
 marks the newest prompt tail cacheable. For append-only conversations, the
@@ -766,7 +957,7 @@ model response protocol (`xml` by default; `markdown` and `json` optional). This
 is separate from `TIMEM_API_PROTOCOL`, which selects provider HTTP payload shape.
 
 Each response parses into the same runtime envelope: optional `status`, optional
-`free_talk`, optional `next_actions`, optional `context_compact`, and
+`free_talk`, optional `working_still_action`, optional `context_compact`, and
 optional `final_answer`. Protocols may express completion differently: JSON and
 Markdown use their status field/section, while XML uses `<final_answer>` as the
 completion branch.
@@ -783,8 +974,8 @@ answer as the closing user-visible answer.
 ```mermaid
 stateDiagram-v2
     [*] --> ModelResponse
-    ModelResponse --> Final: status:finished + final_answer
-    ModelResponse --> ValidateActions: working/default + next_actions
+    ModelResponse --> Final: completion branch + final_answer
+    ModelResponse --> ValidateActions: working/default + working_still_action
     ValidateActions --> Repair: invalid JSON or invalid action shape
     Repair --> ModelResponse: one repair prompt_delta
     ValidateActions --> ExecuteActions: valid action protocol
@@ -812,7 +1003,7 @@ remain JSON objects inside `<action_json>` blocks.
 ```json
 {
   "free_talk": "optional context-visible free talk or plan",
-  "next_actions": [
+  "working_still_action": [
     {
       "run_bash": {
         "cmd": "rg --files -g '*.rs' | xargs wc -l",
@@ -824,15 +1015,15 @@ remain JSON objects inside `<action_json>` blocks.
 ```
 
 With omitted `status` or `status:"working"` in status-based protocols,
-`next_actions` or `context_compact` is required and `free_talk` is shown in the
-Thought/Action panel. With `status:"finished"`, `final_answer` is required and
-shown as the closing answer before runtime stops this task's action/model loop.
-In XML, `<final_answer>` is the completion branch and must not appear together
-with `<working_still_action>` or `<context_compact>`. If the model still needs
-evidence, it must stay working, run actions, and answer after the action result
-is visible. The parser also tolerates common provider drift such as a valid JSON
-envelope embedded in Markdown text, but it never shows raw protocol fragments to
-the user.
+`working_still_action` or `context_compact` is required and `free_talk` is shown
+in the Thought/Action panel. With `status:"finished"`, `final_answer` is
+required and shown as the closing answer before runtime stops this task's
+action/model loop. In XML, `<final_answer>` is the completion branch and must
+not appear together with `<working_still_action>` or `<context_compact>`. If the
+model still needs evidence, it must stay working, run actions, and answer after
+the action result is visible. The parser also tolerates common provider drift
+such as a valid JSON envelope embedded in Markdown text, but it never shows raw
+protocol fragments to the user.
 
 Action sections accept the equivalent runtime shapes across JSON, Markdown, and
 XML suites: tool-name action objects such as `{ "run_bash": { ... } }`, direct
@@ -856,15 +1047,7 @@ model response:
     "discard": ["pd_1"],
     "offload": ["pd_2"],
     "summary": "Earlier work identified the retry redraw issue. Preserve the fix direction and test requirements."
-  },
-  "next_actions": [
-    {
-      "run_bash": {
-        "cmd": "rg -n 'retry_notice|render_thinking' timem_shell/src",
-        "timeout_ms": 5000
-      }
-    }
-  ]
+  }
 }
 ```
 
@@ -894,7 +1077,9 @@ Fields:
 
 - The object key is the canonical tool name, such as `memmgr`, `run_bash`,
   `capmgr`, or `self_tool`. `memmgr` is the single model-facing interface for
-  durable memory, raw chat history, scratch memory, and dynamic context discard.
+  durable memory, raw chat history, and scratch memory. Dynamic context
+  reduction is handled by the response protocol's `context_compact` branch,
+  not by `memmgr`.
 - The object value is the action-specific argument object. Put each parameter
   in its own JSON field. The top-level parser validates this object against the
   manifest registry; concrete option meaning and validation belong to the
@@ -924,7 +1109,7 @@ delta_id: pd_4
 time: 1782200001000
 
 ## SYSTEM
-The following are results of {{CURRENT_ASSISTANT_NAME}} newly initiated actions:
+The following are results of {{ASSSISTANT_ID}} newly initiated actions:
 
 Action result: memmgr
 type: raw_chat
@@ -956,11 +1141,11 @@ delta containing the malformed assistant response and a `## SYSTEM` block with
 the concrete protocol error:
 
 ```text
-## <CURRENT_ASSISTANT_NAME>
+## <ASSSISTANT_ID>
 <the malformed model response>
 
 ## SYSTEM
-<CURRENT_ASSISTANT_NAME>'s previous response is not protocol compliant.
+<ASSSISTANT_ID>'s previous response is not protocol compliant.
 error: invalid_xml_response_root
 
 The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'.
@@ -991,11 +1176,11 @@ fallback instead.
 ```mermaid
 flowchart TB
     Model["Model envelope"] --> Core["agent_core validator"]
-    Core --> Memmgr["memmgr\ntype=durable/raw_chat/scratch/context"]
+    Core --> Memmgr["memmgr\ntype=durable/raw_chat/scratch"]
     Memmgr --> Chat["raw_chat query/sql/delete\nUI-visible chat records"]
     Memmgr --> Memory["durable schema/sql/write/delete\nlong-lived facts"]
-    Memmgr --> Scratch["scratch query/write/read/delete\ntyped notes and context offload"]
-    Memmgr --> Shrink["context discard\nremove delta context"]
+    Memmgr --> Scratch["scratch search/write/read/delete\ntemporary notes"]
+    Core --> Compact["response protocol context_compact\ndiscard/offload/summary"]
     Core --> SelfTool["self_tool\nTimem runtime self-info"]
     Core --> Bash["run_bash\nlocal command"]
 ```
@@ -1091,7 +1276,13 @@ infer the user's semantic goal from the natural-language text.
 
 Normal commands use `cmd`. A positive model-provided `timeout_ms` is the
 runtime wait budget and is not upper-clamped by core. The execution path remains
-cancel-aware so host/UI cancellation can stop the active command. If such a
+cancel-aware so host/UI cancellation can stop the active command. Parallel Bash
+groups share one cancellation signal with the owning Session turn; the collector
+continues polling that signal while child actions run instead of blocking on a
+single thread join. Cancellation terminates the command's Unix process group so
+transport children such as `scp`/`ssh` do not survive after the outer shell exits.
+This applies both before and after command approval, including the case where one
+parallel action has already completed while another remains active. If such a
 command is still running after the long-command threshold, core emits a
 structured host decision request with elapsed/remaining time asking whether to
 keep waiting. If the host/user stops waiting, core terminates the active process
@@ -1187,6 +1378,42 @@ custom    -> set TIMEM_API_PROTOCOL and TIMEM_BASE_URL explicitly
 environment/config and are redacted from audit logs. The CLI adapter may choose
 a default local key-file path, but key-file parsing and conversion into provider
 configuration are core provider-config responsibilities.
+
+OpenAI-compatible Session profiles may additionally set
+`TIMEM_ENABLE_THINKING`, `TIMEM_REASONING_EFFORT`, and `TIMEM_STREAM`. Core owns
+validation and request-body injection. When streaming is enabled, provider
+transport collects SSE `delta.content` and the final usage event into the same
+`LlmResponse` contract used by non-streaming providers. It counts but does not
+retain or expose `delta.reasoning_content`, preserving the boundary that private
+provider reasoning is not user-facing model output. Shell and Web only collect
+or persist these Session options; they do not parse SSE.
+
+## Session ToolGen
+
+ToolGen is a manual, source-turn-bound per-Session preservation workflow. It
+does not run concurrently with another Session task and does not create a
+second user chat worker. A host may request it only for an exact completed turn
+while the Session is idle. The owning worker continues in its existing Context
+with a hard maximum of 10 model calls. The runtime appends one marked ToolGen
+SYSTEM component and optional USER guidance, temporarily enables the publishing
+capability, and restores the normal capability surface and round budget when the
+run ends. Existing task history is not copied into a second prompt block.
+
+The ToolGen run must create a reusable tool or update an existing one. A
+manual request that ends without publishing a verified tool is reported as a
+failure, not as a successful no-op. Candidates are written to a Session-scoped
+draft directory and must contain a short `README.md`, `.timem-tool.json`, and
+the declared entrypoint/support files. Runtime validates paths, size, symlinks, manifest
+shape, and a bounded self-test before atomically publishing a candidate. A
+failed or exhausted retrospective reports a structured `core.toolgen` outcome
+but never replaces a successful primary answer.
+
+Published tools live under the Session memory root and remain available until
+the user removes that memory data. Future prompts receive only the ToolRepo path and are
+instructed to inspect semantically named folders and their short README files
+as needed; runtime does not invent a second tool invocation protocol for them.
+Hosts may expose listing, code search, detail, rename, and terminal-open
+operations, but repository validation and publication remain core-owned.
 
 ## Runtime Data
 
