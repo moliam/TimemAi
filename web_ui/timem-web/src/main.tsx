@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, Decision, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
+import { Activity, ChatMessage, ClientCommand, clientId, Decision, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
 import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
 import "./styles.css";
@@ -60,7 +60,7 @@ function queryToken() {
 }
 
 function makeMessage(role: ChatMessage["role"], text: string, id?: string): ChatMessage {
-  return { id: id ?? `${role}-${crypto.randomUUID()}`, role, text, created_at_ms: Date.now() };
+  return { id: id ?? `${role}-${clientId()}`, role, text, created_at_ms: Date.now() };
 }
 
 function TimemApp() {
@@ -149,7 +149,7 @@ function TimemApp() {
     });
   }, []);
   const reportUiError = useCallback((title: string, detail: string, sessionId = activeSessionIdRef.current || "system") => {
-    pushActivity({ id: crypto.randomUUID(), sessionId, tone: "error", title, detail, createdAt: Date.now() });
+    pushActivity({ id: clientId(), sessionId, tone: "error", title, detail, createdAt: Date.now() });
   }, [pushActivity]);
   const closeSidePanel = useCallback(() => {
     setShowActivity(false);
@@ -382,7 +382,7 @@ function TimemApp() {
     }
     if (event.type === "host_error") {
       clearAllPendingCommands();
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: "system", tone: "error", title: "Runtime error", detail: event.message, createdAt: Date.now() };
+      const activity: Activity = { id: clientId(), sessionId: "system", tone: "error", title: "Runtime error", detail: event.message, createdAt: Date.now() };
       pushActivity(activity);
       return;
     }
@@ -393,7 +393,7 @@ function TimemApp() {
         runtime_options: current.runtime_options.map((option) => option.key === event.key ? { ...option, value: event.value } : option),
         session_env_defaults: event.session_env_defaults,
       } : current);
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: "system", tone: "notice", title: "Runtime setting updated", detail: `${event.key}: ${event.value}`, createdAt: Date.now() };
+      const activity: Activity = { id: clientId(), sessionId: "system", tone: "notice", title: "Runtime setting updated", detail: `${event.key}: ${event.value}`, createdAt: Date.now() };
       pushActivity(activity);
       return;
     }
@@ -401,7 +401,7 @@ function TimemApp() {
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...session, attachments: [...session.attachments, event.file] }
         : session));
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: event.session_id, tone: "notice", title: "File attached", detail: `${event.file.name} · ${formatBytes(event.file.bytes)}`, createdAt: Date.now() };
+      const activity: Activity = { id: clientId(), sessionId: event.session_id, tone: "notice", title: "File attached", detail: `${event.file.name} · ${formatBytes(event.file.bytes)}`, createdAt: Date.now() };
       pushActivity(activity);
       return;
     }
@@ -461,10 +461,10 @@ function TimemApp() {
       const kind = String(event.event.kind ?? "worker_event");
       if (kind !== "model_request" && kind !== "model_response") {
         const detail = Object.entries(event.event).filter(([key]) => !["kind", "session_id", "context_id", "worker_id"].includes(key)).map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`).join("\n");
-        const activity: Activity = { id: crypto.randomUUID(), sessionId: event.session_id, tone: kind.includes("error") ? "error" : kind.includes("retry") ? "warning" : "notice", title: kind.replaceAll("_", " "), detail, createdAt: Date.now() };
+        const activity: Activity = { id: clientId(), sessionId: event.session_id, tone: kind.includes("error") ? "error" : kind.includes("retry") ? "warning" : "notice", title: kind.replaceAll("_", " "), detail, createdAt: Date.now() };
         pushActivity(activity);
       }
-      const turnEvent: WebTurnEvent = { event_id: event.turn_event_id ?? crypto.randomUUID(), source: "worker_activity", payload: event.event, created_at_ms: Date.now() };
+      const turnEvent: WebTurnEvent = { event_id: event.turn_event_id ?? clientId(), source: "worker_activity", payload: event.event, created_at_ms: Date.now() };
       setSessions((current) => current.map((session) => session.session_id === event.session_id ? appendTurnEvent(session, event.turn_id, turnEvent) : session));
       if (kind === "model_request") {
         setSessions((current) => current.map((session) => session.session_id === event.session_id ? updateSessionWorkerState(session, event.worker_id, "working") : session));
@@ -494,7 +494,7 @@ function TimemApp() {
     const activity = activityFromTopic(topic);
     if (activity) setActivities((current) => [activity, ...current.filter((item) => !(activity.kind === "toolgen" && item.kind === "toolgen" && item.sessionId === activity.sessionId))].slice(0, MAX_ACTIVITY_ITEMS));
     setSessions((current) => current.map((session) => applyCoreTopicToSession(
-      appendTurnEvent(session, event.turn_id, { event_id: event.turn_event_id ?? crypto.randomUUID(), source: "core_topic", payload: topic as unknown as Record<string, unknown>, created_at_ms: Date.now() }),
+      appendTurnEvent(session, event.turn_id, { event_id: event.turn_event_id ?? clientId(), source: "core_topic", payload: topic as unknown as Record<string, unknown>, created_at_ms: Date.now() }),
       topic,
       (text) => makeMessage("assistant", text),
     )));
@@ -584,7 +584,7 @@ function TimemApp() {
           if (hasConnectedOnce && !disconnectNoticeShown) {
             disconnectNoticeShown = true;
             pushActivity({
-              id: crypto.randomUUID(),
+              id: clientId(),
               sessionId: activeSessionIdRef.current || "system",
               tone: "notice",
               title: "Runtime disconnected",
@@ -619,14 +619,14 @@ function TimemApp() {
     );
     if (decision.kind === "skip") {
       if (decision.reason === "cancelling" && activeSession) {
-        pushActivity({ id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() });
+        pushActivity({ id: clientId(), sessionId: activeSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() });
       } else if (decision.reason === "mem_switching") {
-        pushActivity({ id: crypto.randomUUID(), sessionId: activeSession?.session_id ?? "system", tone: "notice", title: "Switching mem", detail: "Wait for the new mem space to load before sending another message.", createdAt: Date.now() });
+        pushActivity({ id: clientId(), sessionId: activeSession?.session_id ?? "system", tone: "notice", title: "Switching mem", detail: "Wait for the new mem space to load before sending another message.", createdAt: Date.now() });
       }
       return false;
     }
     if (!sendCommand(decision.command)) {
-      pushActivity({ id: crypto.randomUUID(), sessionId: decision.command.session_id, tone: "error", title: "Runtime unavailable", detail: "Timem Web runtime is not connected. Restart timem-web and reopen the authenticated URL before sending another message.", createdAt: Date.now() });
+      pushActivity({ id: clientId(), sessionId: decision.command.session_id, tone: "error", title: "Runtime unavailable", detail: "Timem Web runtime is not connected. Restart timem-web and reopen the authenticated URL before sending another message.", createdAt: Date.now() });
       return false;
     }
     return decision.clearDraftOnSuccess;
@@ -635,7 +635,7 @@ function TimemApp() {
   const uploadFile = useCallback(async (file: File) => {
     if (!activeSession || pendingMemSwitch) return;
     if (!addPendingKey(pendingUploadSessionIdsRef, setPendingUploadSessionIds, activeSession.session_id)) {
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "notice", title: "Upload already in progress", detail: "Wait for the current file upload to finish before attaching another file.", createdAt: Date.now() };
+      const activity: Activity = { id: clientId(), sessionId: activeSession.session_id, tone: "notice", title: "Upload already in progress", detail: "Wait for the current file upload to finish before attaching another file.", createdAt: Date.now() };
       pushActivity(activity);
       return;
     }
@@ -649,7 +649,7 @@ function TimemApp() {
       const response = await fetch(`/api/upload?${params.toString()}`, { method: "POST", body: form });
       if (!response.ok) throw new Error((await response.json() as { error?: string }).error ?? "upload_failed");
     } catch (error) {
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "error", title: "File upload failed", detail: error instanceof Error ? error.message : "upload_failed", createdAt: Date.now() };
+      const activity: Activity = { id: clientId(), sessionId: activeSession.session_id, tone: "error", title: "File upload failed", detail: error instanceof Error ? error.message : "upload_failed", createdAt: Date.now() };
       pushActivity(activity);
     } finally {
       removePendingKey(pendingUploadSessionIdsRef, setPendingUploadSessionIds, activeSession.session_id);
@@ -667,7 +667,7 @@ function TimemApp() {
     if (!addPendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, session.session_id)) return;
     if (!sendCommand({ type: "history_page", session_id: session.session_id, before_cursor: session.history_before_cursor, limit: STORED_HISTORY_PAGE_SIZE })) {
       removePendingKey(pendingHistorySessionIdsRef, setPendingHistorySessionIds, session.session_id);
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: session.session_id, tone: "error", title: "Load history failed", detail: "Reconnect to Timem Web before loading earlier history.", createdAt: Date.now() };
+      const activity: Activity = { id: clientId(), sessionId: session.session_id, tone: "error", title: "Load history failed", detail: "Reconnect to Timem Web before loading earlier history.", createdAt: Date.now() };
       pushActivity(activity);
     }
   }, [addPendingKey, pendingMemSwitch, pushActivity, removePendingKey, sendCommand]);
@@ -687,7 +687,7 @@ function TimemApp() {
     if (!sendCommand({ type: "turn_cancel", session_id: activeSession.session_id })) {
       cancellingSessionIds.current.delete(activeSession.session_id);
       setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
-      const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "error", title: "Cancel failed", detail: "Reconnect to Timem Web before cancelling this turn.", createdAt: Date.now() };
+      const activity: Activity = { id: clientId(), sessionId: activeSession.session_id, tone: "error", title: "Cancel failed", detail: "Reconnect to Timem Web before cancelling this turn.", createdAt: Date.now() };
       pushActivity(activity);
     }
   }, [activeSession, pendingMemSwitch, pushActivity, sendCommand]);
@@ -833,7 +833,7 @@ function TimemApp() {
             if (!addPendingKey(pendingAttachmentRemoveIdsRef, setPendingAttachmentRemoveIds, key)) return;
             if (!sendCommand({ type: "attachment_remove", session_id: activeSession.session_id, attachment_id: attachmentId })) {
               removePendingKey(pendingAttachmentRemoveIdsRef, setPendingAttachmentRemoveIds, key);
-              const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession.session_id, tone: "error", title: "Remove attachment failed", detail: "Reconnect to Timem Web before removing this attachment.", createdAt: Date.now() };
+              const activity: Activity = { id: clientId(), sessionId: activeSession.session_id, tone: "error", title: "Remove attachment failed", detail: "Reconnect to Timem Web before removing this attachment.", createdAt: Date.now() };
               pushActivity(activity);
             }
           }}
@@ -892,13 +892,13 @@ function TimemApp() {
             if (sendCommand({ type: "tool_repo_rename", session_id: activeSession.session_id, tool_id: toolId, new_name: newName })) return true;
             setPendingToolRenameKeys((current) => { const next = new Set(current); next.delete(renameKey); return next; });
           }
-          const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession?.session_id ?? "system", tone: "error", title: "Tool rename failed", detail: "Reconnect to Timem Web before renaming this tool.", createdAt: Date.now() };
+          const activity: Activity = { id: clientId(), sessionId: activeSession?.session_id ?? "system", tone: "error", title: "Tool rename failed", detail: "Reconnect to Timem Web before renaming this tool.", createdAt: Date.now() };
           pushActivity(activity);
           return false;
         }}
         onOpenTerminal={(toolId) => {
           if (activeSession && sendCommand({ type: "tool_repo_open_terminal", session_id: activeSession.session_id, tool_id: toolId })) return true;
-          const activity: Activity = { id: crypto.randomUUID(), sessionId: activeSession?.session_id ?? "system", tone: "error", title: "Open terminal failed", detail: "Reconnect to Timem Web before opening a tool directory.", createdAt: Date.now() };
+          const activity: Activity = { id: clientId(), sessionId: activeSession?.session_id ?? "system", tone: "error", title: "Open terminal failed", detail: "Reconnect to Timem Web before opening a tool directory.", createdAt: Date.now() };
           pushActivity(activity);
           return false;
         }}
