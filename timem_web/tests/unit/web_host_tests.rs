@@ -34,6 +34,26 @@ fn parses_basic_web_launch_options() {
         WebLaunchOptions::parse(&["--no-open".to_string(), "--public".to_string()]).unwrap();
     assert!(!headless.open_browser);
     assert!(headless.public_access);
+
+    let advertised = WebLaunchOptions::parse(&[
+        "--public".to_string(),
+        "--public-host".to_string(),
+        "10.125.112.83".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(advertised.public_host.as_deref(), Some("10.125.112.83"));
+}
+
+#[test]
+fn public_url_uses_explicit_host_without_placeholder() {
+    assert_eq!(
+        public_access_url(Some("10.125.112.83"), 14983, "token"),
+        Some("http://10.125.112.83:14983/?token=token".to_string())
+    );
+    assert_eq!(
+        public_access_url(Some("2001:db8::10"), 14983, "token"),
+        Some("http://[2001:db8::10]:14983/?token=token".to_string())
+    );
 }
 
 #[test]
