@@ -1,0 +1,56 @@
+kind: tool
+id: toolgen
+binding_type: builtin
+binding_name: toolgen
+requires_host: local_command_execution
+summary: Validate and publish a reusable Session tool draft.
+prompt_synopsis: |
+  toolgen op=publish draft_path=<absolute_draft_directory>
+description: |
+  `toolgen` is used only while Timem asks you to retrospect and preserve a
+  reusable script. Build the candidate folder in the provided draft path, then
+  publish it. Runtime independently checks the folder, README, manifest,
+  entrypoint, size and symlinks, executes the declared self-test, and publishes
+  only a successful candidate. Do not claim the tool is usable before this
+  action returns status=ready.
+prompt_input: |
+  Use op=publish with the exact draft path supplied by runtime. The draft must
+  contain README.md, .timem-tool.json, and its entrypoint. The manifest requires
+  semantic kebab-case name, type, language, entrypoint, synopsis, and self_test
+  with entrypoint, args, and timeout_ms. `self_test.entrypoint` is the relative
+  path of a non-interactive test script; omit it only when the main entrypoint
+  itself accepts the supplied self-test args. To update an existing tool, copy
+  it into the draft and retain its tool_id in the manifest.
+prompt_result: |
+  A successful result includes status=ready, stable tool_id, semantic name,
+  published path and validation output. A failed result leaves the draft
+  unpublished and explains what must be corrected.
+input_schema: |
+  {
+    "type": "object",
+    "required": ["op", "draft_path"],
+    "properties": {
+      "op": {"type": "string", "enum": ["publish"], "description": "Publish a validated ToolGen draft."},
+      "draft_path": {"type": "string", "description": "Absolute draft directory supplied by runtime."}
+    }
+  }
+output_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "status": {"type": "string", "description": "ready on successful validation and publish."},
+      "tool_id": {"type": "string", "description": "Stable tool identity."},
+      "name": {"type": "string", "description": "Semantic folder name."},
+      "path": {"type": "string", "description": "Published tool directory."},
+      "updated_existing": {"type": "boolean", "description": "Whether an existing tool was replaced."},
+      "validation_output": {"type": "string", "description": "Bounded self-test evidence."},
+      "error": {"type": "string", "description": "Validation or publication failure."}
+    }
+  }
+example_json: |
+  {
+    "toolgen": {
+      "op": "publish",
+      "draft_path": "/path/provided/by/runtime"
+    }
+  }

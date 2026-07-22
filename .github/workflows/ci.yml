@@ -5,10 +5,12 @@ on:
     branches:
       - main
       - "0.9"
+      - "1.0"
   pull_request:
     branches:
       - main
       - "0.9"
+      - "1.0"
 
 permissions:
   contents: read
@@ -29,7 +31,7 @@ jobs:
           - macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install OS dependencies
         shell: bash
@@ -56,6 +58,18 @@ jobs:
           rustup default stable
           rustc --version
           cargo --version
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6.0.9
+        with:
+          version: 11.7.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web_ui/timem-web/pnpm-lock.yaml
 
       - name: Run production CI gate
         shell: bash

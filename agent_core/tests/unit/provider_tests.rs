@@ -11,6 +11,7 @@ fn config(api_protocol: ApiProtocol) -> ProviderConfig {
         max_llm_input_tokens: 100_000,
         api_protocol,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
 
@@ -100,6 +101,32 @@ fn openai_compatible_request_uses_messages_and_structured_output() {
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(body["response_format"]["type"], "json_object");
+}
+
+#[test]
+fn openai_compatible_request_supports_official_thinking_stream_options() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.model = "ZHIPU/GLM-5.2".to_string();
+    config.openai_compatible = OpenAiCompatibleOptions {
+        enable_thinking: Some(true),
+        reasoning_effort: Some("max".to_string()),
+        stream: true,
+    };
+
+    let body = build_provider_request(
+        &config,
+        &[ProviderPromptBlock {
+            role: ProviderPromptRole::User,
+            text: "hello".to_string(),
+            cache: ProviderCacheControl::None,
+        }],
+        StructuredOutputHint::None,
+    );
+
+    assert_eq!(body["enable_thinking"], true);
+    assert_eq!(body["reasoning_effort"], "max");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"]["include_usage"], true);
 }
 
 #[test]
@@ -199,21 +226,21 @@ fn anthropic_request_sends_formatted_response_trailer_without_cache_control() {
     config.provider = "anthropic".to_string();
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer("XML")
+            crate::prompt_render::formatted_response_trailer("XML", "Ai4")
         );
 
     let prepared = prepare_provider_request(&config, &prompt);
     let content = prepared.body["messages"][0]["content"].as_array().unwrap();
 
     assert_eq!(
-            content.last().unwrap()["text"],
-            "Follow the system prompt, give your XML formatted response. It must start with <response>:"
-        );
+        content.last().unwrap()["text"],
+        "Now please continue your ID's response part in XML as required in protocol:\n## Ai4"
+    );
     assert_eq!(content.last().unwrap().get("cache_control"), None);
     assert!(!content[0]["text"]
         .as_str()
         .unwrap()
-        .contains("Follow the system prompt, give your XML formatted response"));
+        .contains("Now please continue your ID's response part"));
 }
 
 #[test]
@@ -283,12 +310,12 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
     assert_eq!(messages[1].get("cache_control"), None);
     assert_eq!(messages[2].get("cache_control"), None);
 
-    for idx in 3..=5 {
-        assert!(messages[idx]["content"]
+    for (idx, message) in messages.iter().enumerate().take(6).skip(3) {
+        assert!(message["content"]
             .as_str()
             .unwrap()
             .contains(&format!("delta {idx}")));
-        assert_eq!(messages[idx]["cache_control"]["type"], "ephemeral");
+        assert_eq!(message["cache_control"]["type"], "ephemeral");
     }
 }
 
@@ -298,7 +325,7 @@ fn openai_compatible_request_sends_formatted_response_trailer_without_cache_cont
     config.provider = "aliyun".to_string();
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer("JSON")
+            crate::prompt_render::formatted_response_trailer("Markdown", "Ai9")
         );
 
     let prepared = prepare_provider_request(&config, &prompt);
@@ -306,13 +333,13 @@ fn openai_compatible_request_sends_formatted_response_trailer_without_cache_cont
 
     assert_eq!(
         messages.last().unwrap()["content"],
-        "Follow the system prompt, give your JSON formatted response:"
+        "Now please continue your ID's response part as required in protocol:\n## Ai9"
     );
     assert_eq!(messages.last().unwrap().get("cache_control"), None);
     assert!(!messages[messages.len() - 2]["content"]
         .as_str()
         .unwrap()
-        .contains("Follow the system prompt, give your JSON formatted response:"));
+        .contains("Now please continue your ID's response part"));
 }
 
 #[test]
@@ -420,6 +447,44 @@ fn provider_http_response_interpretation_is_core_owned() {
     assert_eq!(interpreted.raw_json["raw_text"], "not json");
     assert_eq!(interpreted.raw_json["stderr"], "curl stderr detail");
     assert_eq!(interpreted.result.unwrap().content, "not json");
+}
+
+#[test]
+fn openai_compatible_sse_collects_content_and_usage_without_exposing_reasoning() {
+    let config = config(ApiProtocol::OpenAiCompatible);
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private plan\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"<response>\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok</response>\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":16,\"completion_tokens\":7,\"total_tokens\":23,\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n",
+        "data: [DONE]\n",
+    );
+
+    let interpreted = interpret_provider_http_response(&config, 200, body, "");
+    let response = interpreted.result.unwrap();
+    assert_eq!(response.content, "<response>ok</response>");
+    assert_eq!(response.usage.prompt_tokens, 16);
+    assert_eq!(response.usage.completion_tokens, 7);
+    assert_eq!(interpreted.raw_json["stream_metadata"]["event_count"], 4);
+    assert_eq!(
+        interpreted.raw_json["stream_metadata"]["reasoning_chunk_count"],
+        1
+    );
+    assert!(!interpreted.raw_json.to_string().contains("private plan"));
+}
+
+#[test]
+fn malformed_openai_compatible_sse_is_a_provider_error_not_model_content() {
+    let interpreted = interpret_provider_http_response(
+        &config(ApiProtocol::OpenAiCompatible),
+        200,
+        "data: {not-json}\n\ndata: [DONE]\n",
+        "",
+    );
+    assert!(interpreted
+        .result
+        .unwrap_err()
+        .starts_with("invalid_provider_sse_event:"));
 }
 
 #[test]

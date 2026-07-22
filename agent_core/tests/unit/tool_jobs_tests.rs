@@ -72,6 +72,14 @@ fn command_tool_background_job_can_be_cancelled() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn tool_job_terminate_ignores_missing_pid_without_signalling_broadly() {
+    let missing_pid = i32::MAX as u32;
+    terminate_process(missing_pid);
+    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
+}
+
 fn temp_case_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "timem_tool_job_{name}_{}_{}",

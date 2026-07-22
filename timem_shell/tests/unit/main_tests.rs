@@ -1,16 +1,16 @@
 use super::{
     active_elapsed_secs, apply_config_value, boxed_config_table_at_width, cli_help_text,
-    config_field_value, consume_turn_cancel_request, display_width, epoch_millis,
+    config_field_value, consume_turn_cancel_request, display_width, load_or_create_shell_session,
     merge_queued_input, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
     paste_marker_segments, paste_recovery_return_edit_clear_lines,
     paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
-    push_thinking_supplement_bytes, queued_input_drain_from_bytes, queued_text_to_supplements,
-    random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
-    read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
-    reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
-    render_approval_choices, render_config_apply_report, render_config_menu,
-    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
-    render_paste_recovery_choices, render_paste_recovery_prompt,
+    provider_config_from_env, push_thinking_supplement_bytes, queued_input_drain_from_bytes,
+    queued_text_to_supplements, random_spinner_tick, raw_multiline_paste_display,
+    raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
+    read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
+    reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
+    render_config_menu, render_expand_output_choices, render_expand_output_prompt,
+    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
     render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
     render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
     render_stale_context_prompt, render_startup_banner, render_startup_status_block,
@@ -18,8 +18,10 @@ use super::{
     render_work_instructions_load_choices, render_work_instructions_load_prompt,
     render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
     rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
-    runtime_help_text, sanitize_user_input, shell_runtime_info_entries, startup_control_hint,
-    strip_ansi, strip_paste_markers, submitted_input_rows, thinking_supplement_terminal_mode,
+    runtime_help_text, sanitize_user_input, shell_runtime_info_entries,
+    shell_session_effective_env, shell_session_env_values, shell_session_profile,
+    shell_session_work_dir, startup_control_hint, strip_ansi, strip_paste_markers,
+    submitted_input_rows, take_shell_resume_notice, thinking_supplement_terminal_mode,
     timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
     workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
     ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey,
@@ -28,7 +30,19 @@ use super::{
     TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
     STATIC_PROMPT, TURN_CANCEL_REQUESTED,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn epoch_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
 use agent_core::{
+    session_store::{
+        ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole, SessionStore, StoredSession,
+        StoredSessionProfile, StoredSessionState,
+    },
     stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
     OutputExpansionRequest, ResponseProtocolKind, RoundLimitDecisionRequest,
     RuntimeConfigApplyError, StaleContextDecisionRequest, WorkInstructionLoadMode,
@@ -43,6 +57,7 @@ use reedline::{
     EditCommand, EditMode, Highlighter, KeyCode, KeyModifiers, Prompt, ReedlineEvent,
     ReedlineRawEvent,
 };
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
@@ -51,6 +66,7 @@ use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use timem_shell::CliOptions;
 use timem_shell::{
     workspace_menu_report, ApiProtocol, HostStatusLevel, ProviderConfig, SPINNER_ICONS,
 };
@@ -292,7 +308,7 @@ fn cancelled_turn_message_does_not_look_like_model_failure() {
     assert!(text.is_empty());
     assert_eq!(stats.llm_calls, 0);
     assert!(latest_usage.is_none());
-    assert_eq!(issue.as_deref(), Some("cancelled_by_user"));
+    assert_eq!(issue, None);
     assert_eq!(
         stop_reason,
         Some(timem_shell::TurnStopReason::CancelledByUser)
@@ -451,6 +467,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -538,6 +555,7 @@ fn config_provider_update_keeps_dependent_defaults_consistent() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -610,6 +628,7 @@ fn config_provider_update_resets_custom_settings_when_returning_to_known_provide
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -679,13 +698,14 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let banner = render_startup_banner(
         ".xxx_mem",
         &config,
-        std::path::Path::new("data"),
-        std::path::Path::new(".xxx_mem/audit/api_audit.json"),
-        std::path::Path::new(".xxx_mem/audit/action_audit.json"),
+        std::path::Path::new("/data"),
+        std::path::Path::new("/api_audit.json"),
+        std::path::Path::new("/action_audit.json"),
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
     );
@@ -824,6 +844,7 @@ fn startup_banner_highlights_values_outside_provider_defaults() {
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let default_banner = render_startup_banner(
         ".test_mem",
@@ -846,6 +867,7 @@ fn startup_banner_highlights_values_outside_provider_defaults() {
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let override_banner = render_startup_banner(
         ".test_mem",
@@ -881,6 +903,7 @@ fn startup_banner_does_not_highlight_custom_provider_model_or_base_url() {
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let banner = render_startup_banner(
         ".test_mem",
@@ -1088,6 +1111,38 @@ fn sourced_env_file_reaches_child_process_without_set_a() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "custom|anthropic");
+}
+
+#[test]
+fn shell_provider_and_session_env_keep_openai_thinking_stream_options() {
+    let env = HashMap::from([
+        ("TIMEM_API_KEY".to_string(), "test-key".to_string()),
+        ("TIMEM_ENABLE_THINKING".to_string(), "true".to_string()),
+        ("TIMEM_REASONING_EFFORT".to_string(), "max".to_string()),
+        ("TIMEM_STREAM".to_string(), "true".to_string()),
+    ]);
+    let config = provider_config_from_env(&CliOptions::default(), &env).unwrap();
+    assert_eq!(config.openai_compatible.enable_thinking, Some(true));
+    assert_eq!(
+        config.openai_compatible.reasoning_effort.as_deref(),
+        Some("max")
+    );
+    assert!(config.openai_compatible.stream);
+
+    let stored = shell_session_env_values(
+        &config,
+        BashApprovalMode::Ask,
+        WorkInstructionLoadMode::Silent,
+    );
+    assert_eq!(
+        stored.get("TIMEM_ENABLE_THINKING").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        stored.get("TIMEM_REASONING_EFFORT").map(String::as_str),
+        Some("max")
+    );
+    assert_eq!(stored.get("TIMEM_STREAM").map(String::as_str), Some("true"));
 }
 
 #[test]
@@ -1643,10 +1698,7 @@ fn paste_marker_matching_ignores_stale_preserved_records_when_placeholder_matche
             content: "new-a\nnew-b\nnew-c".to_string(),
         },
     ];
-    let raw = format!(
-        "问题 {}",
-        format!("{PASTE_START_MARKER}[ pasted 3 lines ]{PASTE_END_MARKER}")
-    );
+    let raw = format!("问题 {PASTE_START_MARKER}[ pasted 3 lines ]{PASTE_END_MARKER}");
 
     assert_eq!(paste_recovery_summary_from_markers(&raw, &records), None);
     assert_eq!(
@@ -1972,4 +2024,330 @@ fn shell_runtime_info_is_host_supplied_and_has_no_cwd() {
     assert!(joined.contains("run_bash: available"));
     assert!(!joined.contains("cwd:"));
     assert!(!joined.contains("/Users/"));
+}
+
+#[test]
+fn shell_session_resume_uses_shared_store_and_notice_format() {
+    let root = std::env::temp_dir().join(format!("timem_shell_session_resume_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    let config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    let stored = StoredSession {
+        session_id: "web_session_1".to_string(),
+        display_name: "Recovered Web".to_string(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        current_dir: workspace.display().to_string(),
+        profile: shell_session_profile(&config),
+        env: shell_session_env_values(
+            &config,
+            BashApprovalMode::Approve,
+            WorkInstructionLoadMode::Silent,
+        ),
+        env_overrides: None,
+        state: StoredSessionState::Ready,
+        last_turn_id: None,
+        raw_chat_history_path: store
+            .history_path_for_session("web_session_1")
+            .display()
+            .to_string(),
+    };
+    store.upsert_session(&stored).unwrap();
+
+    let loaded = load_or_create_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &workspace,
+    );
+    assert_eq!(loaded.session_id, "web_session_1");
+    assert_eq!(loaded.display_name, "Recovered Web");
+
+    let mut pending = true;
+    let notice = take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending)
+        .expect("first restored shell turn should include resume notice");
+    assert!(notice.contains("This session was restored"));
+    assert!(notice.contains("raw_chat_history.jsonl"));
+    assert!(notice.contains("format: JSONL, one record per line."));
+    assert!(!pending);
+    assert!(
+        take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending).is_none()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
+    let root = std::env::temp_dir().join(format!("timem_shell_session_cwd_{}", epoch_millis()));
+    let launch_dir = root.join("launch");
+    let restored_dir = root.join("restored");
+    fs::create_dir_all(&launch_dir).unwrap();
+    fs::create_dir_all(&restored_dir).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    let config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    store
+        .upsert_session(&StoredSession {
+            session_id: "web_session_cwd".to_string(),
+            display_name: "Recovered Web".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            current_dir: restored_dir.display().to_string(),
+            profile: shell_session_profile(&config),
+            env: shell_session_env_values(
+                &config,
+                BashApprovalMode::Approve,
+                WorkInstructionLoadMode::Silent,
+            ),
+            env_overrides: None,
+            state: StoredSessionState::Ready,
+            last_turn_id: None,
+            raw_chat_history_path: store
+                .history_path_for_session("web_session_cwd")
+                .display()
+                .to_string(),
+        })
+        .unwrap();
+
+    let loaded = load_or_create_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &launch_dir,
+    );
+    let work_dir = shell_session_work_dir(&loaded, &launch_dir);
+    let canonical_restored_dir = fs::canonicalize(&restored_dir).unwrap();
+    assert_eq!(work_dir, canonical_restored_dir);
+
+    let mut core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            name: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test".to_string(),
+        },
+        store.root(),
+    );
+    core.change_prompt_cwd(work_dir.to_string_lossy()).unwrap();
+    assert_eq!(core.current_prompt_cwd(), canonical_restored_dir.as_path());
+
+    let mut pending = true;
+    let notice = take_shell_resume_notice(&store, &loaded.session_id, &work_dir, &mut pending)
+        .expect("resume notice should use restored cwd");
+    assert!(notice.contains(&format!(
+        "Current cwd: {}",
+        canonical_restored_dir.display()
+    )));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
+    let root = std::env::temp_dir().join(format!("timem_shell_session_env_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let launch_env = HashMap::from([
+        ("TIMEM_API_KEY".to_string(), "test-key".to_string()),
+        ("TIMEM_GATEWAY_PROVIDER".to_string(), "aliyun".to_string()),
+        ("TIMEM_MODEL".to_string(), "launch-model".to_string()),
+        (
+            "TIMEM_RESPONSE_PROTOCOL".to_string(),
+            "markdown".to_string(),
+        ),
+    ]);
+    let session = StoredSession {
+        session_id: "web_session_env".to_string(),
+        display_name: "Recovered Web".to_string(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        current_dir: workspace.display().to_string(),
+        profile: StoredSessionProfile {
+            provider: "aliyun".to_string(),
+            model: "stored-model".to_string(),
+            api_protocol: "openai-compatible".to_string(),
+            response_protocol: "xml".to_string(),
+        },
+        env: BTreeMap::from([
+            ("TIMEM_GATEWAY_PROVIDER".to_string(), "aliyun".to_string()),
+            ("TIMEM_MODEL".to_string(), "stored-model".to_string()),
+            (
+                "TIMEM_API_PROTOCOL".to_string(),
+                "openai-compatible".to_string(),
+            ),
+            ("TIMEM_RESPONSE_PROTOCOL".to_string(), "xml".to_string()),
+            (
+                "TIMEM_BASE_URL".to_string(),
+                "https://stored.example/v1".to_string(),
+            ),
+            ("TIMEM_TIMEOUT".to_string(), "77".to_string()),
+        ]),
+        env_overrides: None,
+        state: StoredSessionState::Ready,
+        last_turn_id: None,
+        raw_chat_history_path: root
+            .join("memory/sessions/web_session_env/raw_chat_history.jsonl")
+            .display()
+            .to_string(),
+    };
+
+    let merged = shell_session_effective_env(&launch_env, &session);
+    let restored = provider_config_from_env(&CliOptions::default(), &merged).unwrap();
+    assert_eq!(restored.model, "stored-model");
+    assert_eq!(restored.base_url, "https://stored.example/v1");
+    assert_eq!(restored.timeout_secs, 77);
+    assert_eq!(
+        merged.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str),
+        Some("xml")
+    );
+
+    let cli_override = provider_config_from_env(
+        &CliOptions {
+            model: Some("cli-model".to_string()),
+            base_url: Some("https://cli.example/v1".to_string()),
+            ..CliOptions::default()
+        },
+        &merged,
+    )
+    .unwrap();
+    assert_eq!(cli_override.model, "cli-model");
+    assert_eq!(cli_override.base_url, "https://cli.example/v1");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_can_resume_web_style_session_history() {
+    let root = std::env::temp_dir().join(format!("timem_shell_cross_host_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    let session_id = "web_session_handoff";
+    let config = ProviderConfig {
+        provider: "aliyun".to_string(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    store
+        .upsert_session(&StoredSession {
+            session_id: session_id.to_string(),
+            display_name: "Session0".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 4,
+            current_dir: workspace.display().to_string(),
+            profile: shell_session_profile(&config),
+            env: shell_session_env_values(
+                &config,
+                BashApprovalMode::Approve,
+                WorkInstructionLoadMode::Silent,
+            ),
+            env_overrides: None,
+            state: StoredSessionState::Ready,
+            last_turn_id: Some("turn_web_1".to_string()),
+            raw_chat_history_path: store
+                .history_path_for_session(session_id)
+                .display()
+                .to_string(),
+        })
+        .unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "turn_web_1".to_string(),
+                created_at_ms: 2,
+                kind: None,
+                content: "web user question".to_string(),
+            },
+        )
+        .unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id: "turn_web_1".to_string(),
+                created_at_ms: 3,
+                kind: ChatHistoryEventKind::ActionResult,
+                content: "Action result: run_bash\nok".to_string(),
+                extra: BTreeMap::from([(
+                    "payload".to_string(),
+                    serde_json::json!({"action": "run_bash", "status": "completed"}),
+                )]),
+            },
+        )
+        .unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::Assistant,
+                turn_id: "turn_web_1".to_string(),
+                created_at_ms: 4,
+                kind: None,
+                content: "web final answer".to_string(),
+            },
+        )
+        .unwrap();
+
+    let loaded = load_or_create_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &workspace,
+    );
+    assert_eq!(loaded.session_id, session_id);
+    assert_eq!(loaded.display_name, "Session0");
+
+    let history = store.read_history_page(session_id, None, 200).unwrap();
+    assert_eq!(history.records.len(), 3);
+    assert_eq!(history.records[0].turn_id(), "turn_web_1");
+    assert!(serde_json::to_string(&history.records[1])
+        .unwrap()
+        .contains("\"kind\":\"action_result\""));
+
+    let mut pending = true;
+    let notice = take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending)
+        .expect("shell should inject a cross-host resume notice");
+    assert!(notice.contains("Refer to chat history when necessary:"));
+    assert!(notice.contains("record types:"));
+    assert!(notice.contains("\"type\":\"message\""));
+    assert!(notice.contains("\"type\":\"event\""));
+    assert!(notice.contains("Current cwd:"));
+    assert!(notice.contains("raw_chat_history.jsonl"));
+
+    fs::remove_dir_all(root).unwrap();
 }

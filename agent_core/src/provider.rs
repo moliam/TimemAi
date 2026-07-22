@@ -104,6 +104,14 @@ pub struct ProviderConfig {
     pub max_llm_input_tokens: u32,
     pub api_protocol: ApiProtocol,
     pub response_protocol: ResponseProtocolKind,
+    pub openai_compatible: OpenAiCompatibleOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenAiCompatibleOptions {
+    pub enable_thinking: Option<bool>,
+    pub reasoning_effort: Option<String>,
+    pub stream: bool,
 }
 
 impl ProviderConfig {
@@ -271,7 +279,7 @@ pub fn provider_request_audit_event(
 }
 
 pub fn provider_response_audit_event(status: u16, raw_body: &Value) -> Value {
-    let error_kind = if status < 200 || status >= 400 {
+    let error_kind = if !(200..400).contains(&status) {
         "http_error"
     } else {
         "http_success"
@@ -360,6 +368,16 @@ fn build_openai_compatible_request(
         "messages": messages,
         "max_tokens": config.max_llm_output_tokens
     });
+    if let Some(enable_thinking) = config.openai_compatible.enable_thinking {
+        body["enable_thinking"] = json!(enable_thinking);
+    }
+    if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
+        body["reasoning_effort"] = json!(reasoning_effort);
+    }
+    if config.openai_compatible.stream {
+        body["stream"] = json!(true);
+        body["stream_options"] = json!({"include_usage": true});
+    }
     apply_structured_output(&mut body, structured_output);
     body
 }
@@ -584,6 +602,12 @@ pub fn interpret_provider_http_response(
     body_text: &str,
     stderr_text: &str,
 ) -> ProviderHttpResponseInterpretation {
+    if (200..300).contains(&status)
+        && config.api_protocol == ApiProtocol::OpenAiCompatible
+        && looks_like_sse(body_text)
+    {
+        return interpret_openai_compatible_sse(config, status, body_text);
+    }
     let mut parsed_json = true;
     let raw_json: Value = serde_json::from_str(body_text).unwrap_or_else(|_| {
         parsed_json = false;
@@ -603,6 +627,89 @@ pub fn interpret_provider_http_response(
         })
     } else {
         parse_provider_response(config, &raw_json)
+    };
+    ProviderHttpResponseInterpretation {
+        status,
+        raw_json,
+        result,
+    }
+}
+
+fn looks_like_sse(body: &str) -> bool {
+    body.lines()
+        .map(str::trim_start)
+        .find(|line| !line.is_empty() && !line.starts_with(':'))
+        .is_some_and(|line| line.starts_with("data:") || line.starts_with("event:"))
+}
+
+fn interpret_openai_compatible_sse(
+    config: &ProviderConfig,
+    status: u16,
+    body_text: &str,
+) -> ProviderHttpResponseInterpretation {
+    let mut content = String::new();
+    let mut finish_reason = String::new();
+    let mut usage = Value::Null;
+    let mut event_count = 0_u64;
+    let mut reasoning_chunk_count = 0_u64;
+    let mut parse_error = None;
+
+    for line in body_text.lines() {
+        let line = line.trim_start();
+        let Some(payload) = line.strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+        let event: Value = match serde_json::from_str(payload) {
+            Ok(event) => event,
+            Err(error) => {
+                parse_error = Some(format!("invalid_provider_sse_event: {error}"));
+                break;
+            }
+        };
+        event_count += 1;
+        if event
+            .pointer("/choices/0/delta/reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        {
+            reasoning_chunk_count += 1;
+        }
+        if let Some(text) = event
+            .pointer("/choices/0/delta/content")
+            .and_then(Value::as_str)
+        {
+            content.push_str(text);
+        }
+        if let Some(reason) = event
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+        {
+            finish_reason = reason.to_string();
+        }
+        if !event.get("usage").unwrap_or(&Value::Null).is_null() {
+            usage = event["usage"].clone();
+        }
+    }
+
+    let raw_json = json!({
+        "stream": true,
+        "stream_metadata": {
+            "event_count": event_count,
+            "reasoning_chunk_count": reasoning_chunk_count,
+        },
+        "choices": [{
+            "message": {"content": content},
+            "finish_reason": finish_reason,
+        }],
+        "usage": usage,
+    });
+    let result = match parse_error {
+        Some(error) => Err(error),
+        None if event_count == 0 => Err("empty_provider_sse_response".to_string()),
+        None => parse_provider_response(config, &raw_json),
     };
     ProviderHttpResponseInterpretation {
         status,

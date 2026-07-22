@@ -1,6 +1,5 @@
 use super::{
-    markdown_suite, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
-    ResponseProtocolSuite,
+    ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite,
 };
 use crate::capability::CapabilityRegistry;
 use serde_json::Value;
@@ -54,11 +53,11 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
 pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let trimmed = content.trim();
     let protocol_text = strip_surrounding_xml_fence(trimmed).unwrap_or(trimmed);
-    if protocol_text.starts_with('{') || protocol_text.starts_with('[') {
-        return super::json_suite::parse_envelope(protocol_text, capabilities);
-    }
-    if starts_with_markdown_protocol(protocol_text) {
-        return markdown_suite::parse_markdown_envelope(protocol_text, capabilities);
+    if protocol_text.starts_with('{')
+        || protocol_text.starts_with('[')
+        || starts_with_markdown_protocol(protocol_text)
+    {
+        return malformed_xml_response("xml_response_root_missing");
     }
     if looks_like_external_tool_call_protocol(protocol_text) {
         return malformed_xml_response("external_tool_call_protocol");
@@ -74,31 +73,17 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         if protocol_text.starts_with('<') {
             return malformed_xml_response(classify_xml_root_issue(protocol_text));
         }
-        return ParsedEnvelope {
-            final_answer: protocol_text.to_string(),
-            continue_work: false,
-            thought: String::new(),
-            thought_keep_in_context: false,
-            next_actions: vec![],
-            action_groups: vec![],
-            context_compacts: vec![],
-            memory_candidates: vec![],
-            runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
-            repair_issue: None,
-        };
+        return malformed_xml_response("xml_response_root_missing");
     };
 
     let mut repair_issue = response.flow_issue.clone();
     let has_status = response.has_status;
     let final_answer = response.final_answer.clone();
+    let toolgen_retrospect = response.toolgen_retrospect.clone();
     let thought = response.free_talk.clone();
     let thought_keep_in_context = !thought.trim().is_empty();
 
-    let continue_work = if !final_answer.trim().is_empty() {
-        false
-    } else {
-        true
-    };
+    let continue_work = final_answer.trim().is_empty();
 
     let context_compacts = if repair_issue.is_none() {
         parse_context_compacts_from_fields(&response, &mut repair_issue)
@@ -130,6 +115,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     }
     ParsedEnvelope {
         final_answer,
+        toolgen_retrospect,
         continue_work,
         thought,
         thought_keep_in_context,
@@ -190,6 +176,7 @@ fn strip_surrounding_xml_fence(text: &str) -> Option<&str> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ResponseFields {
     free_talk: String,
+    toolgen_retrospect: String,
     final_answer: String,
     action_json_blocks: Vec<String>,
     context_compacts: Vec<ContextCompactFields>,
@@ -254,6 +241,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
         "freetalk",
         "working_still_action",
         "context_compact",
+        "toolgen_retrospect",
         "final_answer",
         "status",
     ];
@@ -281,6 +269,8 @@ fn scan_response_body(body: &str) -> ResponseFields {
             }
             has_free_talk = true;
             1
+        } else if tag == "toolgen_retrospect" {
+            2
         } else {
             state_branch_count += 1;
             if tag == "working_still_action" {
@@ -289,7 +279,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
             if tag == "final_answer" {
                 has_final_answer = true;
             }
-            2
+            3
         };
         if fields.flow_issue.is_none() && tag_order < last_order {
             fields.flow_issue = Some("xml_tags_out_of_order".to_string());
@@ -304,7 +294,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
             continue;
         }
 
-        let close_start = if tag == "final_answer" {
+        let close_start = if matches!(tag, "final_answer" | "toolgen_retrospect") {
             find_last_close_tag(body, open_end + 1, tag)
         } else if tag == "working_still_action" || tag == "context_compact" {
             find_close_tag_outside_cdata(body, open_end + 1, tag)
@@ -324,6 +314,9 @@ fn scan_response_body(body: &str) -> ResponseFields {
             }
             "final_answer" => {
                 fields.final_answer = decode_xml_text(&unwrap_cdata_text(inner));
+            }
+            "toolgen_retrospect" => {
+                fields.toolgen_retrospect = decode_xml_text(&unwrap_cdata_text(inner));
             }
             "status" => {
                 fields.has_status = true;
@@ -352,6 +345,12 @@ fn scan_response_body(body: &str) -> ResponseFields {
     }
     if fields.flow_issue.is_none() && state_branch_count > 1 {
         fields.flow_issue = Some("state_branch_must_choose_one".to_string());
+    }
+    if fields.flow_issue.is_none()
+        && !fields.toolgen_retrospect.trim().is_empty()
+        && !has_final_answer
+    {
+        fields.flow_issue = Some("toolgen_retrospect_requires_final_answer".to_string());
     }
     fields
 }
@@ -476,6 +475,7 @@ fn close_tag_len(tag: &str) -> usize {
 fn malformed_xml_response(issue: &str) -> ParsedEnvelope {
     ParsedEnvelope {
         final_answer: String::new(),
+        toolgen_retrospect: String::new(),
         continue_work: true,
         thought: String::new(),
         thought_keep_in_context: false,
@@ -579,7 +579,7 @@ fn parse_action_blocks(
 
     let mut action_groups = Vec::new();
     for (block_idx, block) in action_blocks.iter().enumerate() {
-        match serde_json::from_str::<Value>(block.trim()) {
+        match parse_action_json_value(block) {
             Ok(value) => {
                 if !value.is_array() {
                     if value.as_object().is_some_and(|object| {
@@ -612,8 +612,11 @@ fn parse_action_blocks(
                     }
                 }
             }
-            Err(_) => {
-                *repair_issue = Some(format!("actions[{block_idx}].invalid_json"));
+            Err(error) => {
+                *repair_issue = Some(format!(
+                    "actions[{block_idx}].invalid_json:{}",
+                    compact_json_error(&error.to_string(), 160)
+                ));
                 return (Vec::new(), Vec::new());
             }
         }
@@ -623,6 +626,66 @@ fn parse_action_blocks(
         .flat_map(|group| group.actions.clone())
         .collect::<Vec<_>>();
     (next_actions, action_groups)
+}
+
+fn parse_action_json_value(block: &str) -> serde_json::Result<Value> {
+    let trimmed = trim_json_boundary_whitespace(block.trim());
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => Ok(value),
+        Err(original_error) => {
+            // Models sometimes emit `]]>` after a top-level JSON array. In that
+            // spelling the first `]` closes CDATA instead of the JSON array.
+            // Recover only this single, unambiguous omission and only when the
+            // repaired value is still the required top-level array.
+            if trimmed.starts_with('[') && !trimmed.ends_with(']') {
+                let repaired = format!("{trimmed}]");
+                if let Ok(value) = serde_json::from_str::<Value>(&repaired) {
+                    if value.is_array() {
+                        return Ok(value);
+                    }
+                }
+            }
+            if let Some(repaired) = trimmed.strip_suffix(']') {
+                if let Ok(value) = serde_json::from_str::<Value>(repaired) {
+                    if value.is_array() {
+                        return Ok(value);
+                    }
+                }
+            }
+            Err(original_error)
+        }
+    }
+}
+
+fn compact_json_error(error: &str, max_chars: usize) -> String {
+    let normalized = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        normalized
+    } else {
+        let mut truncated = normalized
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        truncated.push('…');
+        truncated
+    }
+}
+
+fn trim_json_boundary_whitespace(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim();
+        let next = trimmed
+            .strip_prefix("\\n")
+            .or_else(|| trimmed.strip_prefix("\\r"))
+            .or_else(|| trimmed.strip_prefix("\\t"))
+            .or_else(|| trimmed.strip_suffix("\\n"))
+            .or_else(|| trimmed.strip_suffix("\\r"))
+            .or_else(|| trimmed.strip_suffix("\\t"));
+        match next {
+            Some(value) => text = value,
+            None => return trimmed,
+        }
+    }
 }
 
 fn parse_context_compacts_from_fields(
@@ -726,8 +789,8 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         "state_branch_must_choose_one" => {
             "The response selected more than one state branch. Inside <response>, use exactly one of <working_still_action>, <context_compact>, or <final_answer>."
         }
-        issue if issue.ends_with(".invalid_json") => {
-            "The <action_json> content is not valid JSON. Keep it inside <![CDATA[...]]>, use one top-level JSON array, and ensure every string and special character is valid JSON."
+        issue if issue.contains(".invalid_json") => {
+            "The <action_json> content is not valid JSON. Keep it inside <![CDATA[...]]>, use one top-level JSON array, and ensure every string and special character inside cmd, README, scripts, and heredocs is valid JSON. For multi-line file generation, consider one shorter command that writes files via a script instead of embedding fragile unescaped quotes."
         }
         issue if issue.ends_with(".action_missing") => {
             "An action entry is missing its tool-name key. In the top-level workflow array, write each sequential action as {\"tool_name\":{...}}; write a parallel stage as an inner array of those tool objects."

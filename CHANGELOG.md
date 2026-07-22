@@ -6,6 +6,129 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- Public Web startup now prints a directly usable host URL instead of the
+  `<server-ip>` placeholder, supports `TIMEM_PUBLIC_HOST`/`--public-host` for
+  multi-interface deployments, and skips opening a browser on the server.
+
+### Added
+
+- Added manual per-Session ToolGen preservation. A ToolGen button on each
+  completed task can open an optional-guidance dialog, then run a bounded
+  temporary Context against that exact source turn to create or update one or
+  more runtime-validated reusable scripts. The original final answer remains
+  unchanged on success or failure. The composer opens a default ToolRepo side
+  panel and shows its count inside the control; ToolRepo supports code search,
+  sorting, file tree, README, rename and terminal-open operations.
+
+- Added a local authenticated `timem-web` host with an assistant-ui conversation
+  surface, multiple isolated sessions, file attachments, runtime settings,
+  GFM Markdown rendering, syntax-highlighted copyable code blocks, completion
+  telemetry, context-compaction activity, and persistent theme/font/text-size
+  appearance controls.
+- Added Web handling for concurrent host-decision topics and 30-second optional
+  AGENTS/CLAUDE loading decisions without blocking other sessions.
+- Added task-level Web turn envelopes: the original task, mid-turn supplements,
+  and approvals remain together; model/runtime work streams in a bounded process
+  frame; final Markdown and token/time telemetry are delivered separately below.
+- Added live per-session cwd display in Web navigation and above the composer;
+  successful `self_tool cwd/chg_cwd` actions update both locations immediately.
+- Added per-session context usage above the Web conversation, live current-task
+  and latest-call token usage inside the working frame, and authoritative final
+  task token/time telemetry for both successful and non-answer turn endings.
+- Added per-session runtime profiles for Web sessions. A new session can select
+  its provider, model, API/response protocol, endpoint, token limits, approval
+  policy, and process-local API key without changing existing sessions or
+  exposing API keys in browser snapshots and topics.
+- Added explicit Session/Context/Worker ownership for the Web host. Sessions
+  own shared runtime profiles, contexts own workspace state, workers carry
+  parent linkage and scoped topic identities, and aggregate state remains
+  correct when a child worker finishes before its primary worker.
+- Added Session-wide task cancellation with primary-only continuation: Stop
+  cancels all internal workers, while the next user turn is sent only to the
+  primary worker.
+- Working-turn input now uses the normal send icon and a concise `继续输入…`
+  placeholder while preserving supplement routing inside the host protocol.
+- The Web conversation surface now follows assistant-ui's low-distraction chat
+  composition: process updates are visually subordinate, all tool calls use
+  compact borderless expandable rows, final telemetry is quiet inline text,
+  and long workspace paths retain their useful trailing components.
+- Default Web sessions are named `Session0`, `Session1`, and so on. Each Session
+  can expand in the sidebar to show its scoped `ID0`-style workers and live
+  worker states without exposing or changing routing identifiers.
+
+### Changed
+
+- Production CI now installs locked frontend dependencies, runs Web reducer and
+  rendering tests, rebuilds the embedded frontend, and builds both CLI and Web
+  release binaries on Linux and macOS.
+- Install and uninstall scripts now manage both `timem` and `timem-web`.
+
+### Fixed
+
+- Long Web conversations now retain bounded client state while progressively
+  mounting only the latest task window. New user tasks stay visible after the
+  window starts evicting old DOM nodes, earlier-history loading preserves the
+  reader's visual anchor, and overflowing process frames follow new events only
+  while the reader remains near the bottom.
+- New Web sessions now receive an explicit creation response instead of relying
+  on lifecycle timing, disconnected sends no longer create local ghost turns,
+  and decision requests render inside their owning session's chat flow so
+  concurrent agents cannot overwrite or obscure one another.
+- Web turn events now carry stable ids for reconnect-safe deduplication, retain
+  bounded per-turn history under burst load, and use `Compact` as the user-facing
+  label for context-reduction token statistics.
+- Local Web responses now include CSP, no-referrer, and nosniff headers; browser
+  command size, upload size/name, workspace selection, and numeric launch
+  options fail closed at their host boundaries.
+- Web action start/finish topics now coalesce into one lifecycle row, so a
+  completed final answer cannot retain a stale `run_bash · running` entry.
+- Web activity rendering no longer invents completion/reasoning captions,
+  duplicates activity titles, or exposes internal model request/response and
+  work-instruction bookkeeping as conversation content.
+- Task frames no longer repeat `You` or the active Session name above the user
+  message, process stream, and final answer; their existing visual treatment
+  already communicates ownership.
+- The Session drawer button is now hidden on desktop, where the Session sidebar
+  is already visible, and appears only on mobile layouts where it opens the
+  off-canvas navigation.
+- The chat header no longer repeats the `SESSION` label and active Session name;
+  it retains only a subdued provider/model identifier.
+- Uploaded files now behave as pending composer attachments: they can be removed
+  before sending, long names remain inspectable without breaking the composer,
+  the next submitted task consumes them into a compact user-message file row,
+  and later turns do not receive stale upload context.
+
+## [1.0.0] - 2026-07-21
+
+Timem 1.0 is the first release with the browser host treated as a first-class
+product surface. The terminal and browser hosts share one local-first agent
+core, memory/session store, capability system, provider layer, and structured
+topic protocol.
+
+### Highlights
+
+- Added the authenticated `timem-web` browser workspace built on assistant-ui.
+- Added isolated multi-session Web use with per-session provider/model profiles,
+  persistent history, paged restore, mem switching, and cross-host resume.
+- Added live Web rendering for Thought/Action work, tool lifecycle, inline
+  decisions, supplements, cancellation, runtime disconnects, context compact,
+  attachments, Markdown/code output, and final token/time telemetry.
+- Added responsive desktop/mobile layout, appearance settings, keyboard and
+  accessibility behavior, and bounded rendering for long conversations/output.
+- Kept the terminal host as a supported first-class interface using the same
+  core and persisted session data.
+
+### Release Quality
+
+- Rust host/core and Web frontend tests pass locally.
+- Web frontend production assets are rebuilt and embedded into `timem-web`.
+- CI covers Linux/macOS builds, Web tests/build, capability/protocol checks,
+  session isolation, resume, cancellation pressure, and performance guards.
+- Manual release smoke remains required for Safari, Firefox, iTerm2,
+  Terminal.app, tmux, SSH, clean-machine installation, and live-provider use.
+
 ## [0.9.10] - 2026-07-12
 
 ### Fixed

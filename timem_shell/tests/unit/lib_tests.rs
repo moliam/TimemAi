@@ -597,7 +597,7 @@ fn multi_worker_thinking_view_keeps_identity_and_bounded_layout() {
             "整理任务现场：保留用户目标、当前进度、下一步，不展示模型私有 thought。".into(),
         ));
         observations.apply(ObservationEvent::ActiveChild {
-            text: format!("{command}"),
+            text: command.to_string(),
             is_last: true,
         });
         observations.apply(ObservationEvent::Transient("思考中...".into()));

@@ -1,8 +1,8 @@
 [workspace]
-members = ["agent_core", "timem_shell"]
+members = ["agent_core", "timem_shell", "timem_web"]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.9.10"
-license = "UNLICENSED"
+version = "1.0.0"
+license = "Apache-2.0"

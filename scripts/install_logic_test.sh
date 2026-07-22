@@ -53,8 +53,13 @@ if ! grep -q 'cargo fetch --locked' "$ROOT_DIR/install.sh"; then
   exit 1
 fi
 
-if ! grep -q 'cargo build --locked -p timem_shell --release' "$ROOT_DIR/install.sh"; then
-  echo "install script should build the release binary with locked dependencies" >&2
+if ! grep -q 'cargo build --locked -p timem_shell -p timem_web --release' "$ROOT_DIR/install.sh"; then
+  echo "install script should build both release binaries with locked dependencies" >&2
+  exit 1
+fi
+
+if ! grep -q 'target/release/$WEB_BIN_NAME' "$ROOT_DIR/install.sh"; then
+  echo "install script should install the embedded Web UI binary" >&2
   exit 1
 fi
 

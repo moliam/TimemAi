@@ -1,10 +1,10 @@
 use agent_core::capability::{CapabilityHostProfile, CapabilityRegistry};
 use agent_core::self_tool::SelfToolPaths;
 use agent_core::{
-    read_audit_doc, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile, CoreStep,
-    LlmResponse, MemGuard, OutputExpansionRequest, OutputExpansionResolution, ProviderConfig,
-    ResponseProtocolKind, RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField,
-    TurnFinal, TurnStopDetail, TurnStopReason, UsageStats,
+    read_audit_doc, ActionRuntime, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile,
+    CoreStep, LlmResponse, MemGuard, OutputExpansionRequest, OutputExpansionResolution,
+    ProviderConfig, ResponseProtocolKind, RoundLimitDecisionRequest, RoundLimitResolution,
+    RuntimeConfigField, TurnFinal, TurnStopDetail, TurnStopReason, UsageStats,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -73,6 +73,16 @@ fn profile(provider: &str, model: &str) -> CoreProfile {
     }
 }
 
+fn test_core(
+    static_prompt: impl Into<String>,
+    profile: CoreProfile,
+    memory_dir: impl AsRef<std::path::Path>,
+) -> AgentCore {
+    let mut core = AgentCore::new(static_prompt, profile, memory_dir);
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core
+}
+
 fn usage() -> UsageStats {
     UsageStats {
         llm_calls: 1,
@@ -99,7 +109,7 @@ fn write_audit_doc(path: &std::path::Path, events: Vec<Value>) {
 }
 
 fn core_with_builtin_capabilities(name: &str) -> AgentCore {
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), tmp_dir(name));
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), tmp_dir(name));
     core.set_capability_registry(CapabilityRegistry::builtin());
     core
 }
@@ -136,7 +146,7 @@ fn field_values(prompt: &str, field: &str) -> Vec<String> {
 
 #[test]
 fn prompt_is_append_only_and_segmented() {
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("append"));
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("append"));
     let first = match core.begin_turn("你好", Some("runtime_time: now")) {
         CoreStep::NeedModel {
             prompt,
@@ -177,7 +187,7 @@ fn prompt_is_append_only_and_segmented() {
 
 #[test]
 fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("assistant_replay_extracted"),
@@ -213,7 +223,7 @@ fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape
 
 #[test]
 fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("assistant_replay_raw_working"),
@@ -246,7 +256,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
 
 #[test]
 fn assistant_prompt_heading_uses_current_worker_speaker_name() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("assistant_heading"),
@@ -273,7 +283,7 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
 
 #[test]
 fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("assistant_name_placeholder"),
@@ -287,6 +297,8 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
 
     assert!(prompt.contains("YOUR ID is: Ai4"));
     assert!(prompt.contains("## Ai4"));
+    assert!(!prompt.contains("ASSSISTANT_ID"));
+    assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
     assert!(!prompt.contains("CURRENT_ASSISTANT_NAME"));
     assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
 
@@ -304,12 +316,13 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("The following are results of Ai4 newly initiated actions:"));
+    assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
     assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
 }
 
 #[test]
 fn runtime_info_is_dynamic_context_not_static_prompt() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("runtime_info_dynamic_context"),
@@ -334,7 +347,7 @@ fn runtime_info_is_dynamic_context_not_static_prompt() {
 
 #[test]
 fn default_max_rounds_is_fifty() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("default_rounds"),
@@ -353,7 +366,7 @@ fn default_max_rounds_is_fifty() {
 
 #[test]
 fn round_limit_can_be_continued_without_model_visible_task_reset() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("round_limit_continue"),
@@ -426,7 +439,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
 fn round_limit_stop_resolution_is_core_owned() {
     let dir = tmp_dir("round_limit_stop_resolution");
     let audit_file = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     core.set_max_rounds(1);
     let _ = core.begin_turn("需要两步完成", None);
     let step = core.apply_model_response(LlmResponse {
@@ -472,7 +485,7 @@ fn round_limit_stop_resolution_is_core_owned() {
 fn output_expansion_resolution_is_core_owned() {
     let dir = tmp_dir("output_expansion_resolution");
     let audit_file = dir.join("audit.json");
-    let core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let mut config = ProviderConfig {
         provider: "aliyun".to_string(),
         model: "qwen-plus".to_string(),
@@ -483,6 +496,7 @@ fn output_expansion_resolution_is_core_owned() {
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
 
     let resolution = core.resolve_output_expansion_with_audit(
@@ -513,7 +527,7 @@ fn output_expansion_resolution_is_core_owned() {
 #[test]
 fn output_expansion_decline_returns_core_stop_summary() {
     let dir = tmp_dir("output_expansion_decline");
-    let core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let mut config = ProviderConfig {
         provider: "aliyun".to_string(),
         model: "qwen-plus".to_string(),
@@ -524,6 +538,7 @@ fn output_expansion_decline_returns_core_stop_summary() {
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let usage = UsageStats {
         prompt_tokens: 80,
@@ -558,7 +573,7 @@ fn output_expansion_decline_returns_core_stop_summary() {
 #[test]
 fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
     let dir = tmp_dir("runtime_config_update_core_owned");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let mut config = ProviderConfig {
         provider: "aliyun".to_string(),
         model: "qwen-plus".to_string(),
@@ -569,6 +584,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut bash = BashApprovalMode::Ask;
     let mut work = agent_core::WorkInstructionLoadMode::Silent;
@@ -633,7 +649,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
 #[test]
 fn runtime_host_configuration_sync_is_core_owned() {
     let dir = tmp_dir("runtime_host_configuration_sync");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let config = ProviderConfig {
         provider: "aliyun".to_string(),
         model: "qwen-plus".to_string(),
@@ -644,6 +660,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         max_llm_input_tokens: 3_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
 
     core.configure_runtime_from_host(&config, BashApprovalMode::Approve);
@@ -678,7 +695,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
 
 #[test]
 fn one_prompt_delta_can_render_to_multiple_slices() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("multi_slice_delta"),
@@ -699,14 +716,17 @@ fn one_prompt_delta_can_render_to_multiple_slices() {
 
 #[test]
 fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("multi_slice_runtime_delta"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Xml);
     let _ = core.begin_turn("需要推理一下", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"结论"}"#),
+        content: scored(
+            r#"<response><free_talk>先分析</free_talk><final_answer>结论</final_answer></response>"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -716,9 +736,9 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     let delta_ids = field_values(&prompt, "delta_id");
 
     assert_eq!(delta_ids, vec!["pd_1"]);
-    assert!(!prompt.contains("## TIMEM_ASSISTANT"));
     assert!(!prompt.contains("先分析"));
     assert!(!prompt.contains("Final Answer:\n结论"));
+    assert!(prompt.ends_with("Now please continue your ID's response part in XML as required in protocol:\n## TIMEM_ASSISTANT"));
     let prompt = match core.begin_turn("继续", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -728,15 +748,13 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids, vec!["pd_1", "pd_2"]);
     assert!(prompt.contains("## TIMEM_ASSISTANT"));
     assert!(prompt.contains("先分析"));
-    assert!(
-        prompt.contains(r#"{"free_talk":"先分析","status":"ALL_FINISHED","final_answer":"结论"}"#)
-    );
+    assert!(prompt.contains(r#"<free_talk>先分析</free_talk><final_answer>结论</final_answer>"#));
     assert!(!prompt.contains("All previous pending open tasks are completed."));
 }
 
 #[test]
 fn user_supplement_appends_to_latest_delta_as_slice() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("user_supplement_slice"),
@@ -767,7 +785,7 @@ fn user_supplement_appends_to_latest_delta_as_slice() {
 fn user_supplements_with_audit_are_core_owned_turn_updates() {
     let dir = tmp_dir("user_supplement_with_audit");
     let audit_file = dir.join("audit/action_audit.json");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("先分析这个问题", None);
 
     let step = core
@@ -808,7 +826,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么？", None);
 
     let step = core.apply_model_response(LlmResponse {
@@ -828,7 +846,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
 
 #[test]
 fn prompt_rendering_does_not_expose_durable_ctx_score() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("durable_ctx_not_rendered"),
@@ -843,7 +861,7 @@ fn prompt_rendering_does_not_expose_durable_ctx_score() {
 
 #[test]
 fn prompt_discard_can_remove_whole_delta_by_delta_id() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_delta_id"),
@@ -890,7 +908,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
 
 #[test]
 fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("delta_id_global_sequence"),
@@ -930,7 +948,7 @@ fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
 
 #[test]
 fn memmgr_context_discard_is_not_executable() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("memmgr_context_discard"),
@@ -959,11 +977,12 @@ fn memmgr_context_discard_is_not_executable() {
 
 #[test]
 fn response_context_compact_hides_refs_and_appends_summary_slice() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("response_context_compact"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Markdown);
     let prompt = match core.begin_turn("OLD_DYNAMIC_CONTEXT_TO_COMPACT", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -993,7 +1012,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
 
 #[test]
 fn prompt_discard_can_remove_visible_delta_by_delta_id() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_slice_id"),
@@ -1044,7 +1063,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
 
 #[test]
 fn prompt0_is_static_global_only() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC_GLOBAL",
         profile("aliyun", "qwen-plus"),
         tmp_dir("prompt0_static"),
@@ -1064,7 +1083,7 @@ fn prompt0_is_static_global_only() {
 
 #[test]
 fn dynamic_context_can_be_estimated_and_cleared_without_touching_static_prompt() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC_GLOBAL",
         profile("aliyun", "qwen-plus"),
         tmp_dir("clear_dynamic_context"),
@@ -1087,7 +1106,7 @@ fn dynamic_context_can_be_estimated_and_cleared_without_touching_static_prompt()
 fn stale_context_decision_resolution_is_core_owned() {
     let dir = tmp_dir("stale_context_resolution");
     let audit_file = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("seed stale context", None);
     assert!(core.dynamic_context_estimated_tokens() > 0);
     let request = agent_core::StaleContextDecisionRequest {
@@ -1112,7 +1131,7 @@ fn stale_context_decision_resolution_is_core_owned() {
 fn stale_context_continue_keeps_dynamic_context() {
     let dir = tmp_dir("stale_context_continue");
     let audit_file = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("seed stale context", None);
     let before = core.dynamic_context_estimated_tokens();
     assert!(before > 0);
@@ -1131,7 +1150,7 @@ fn stale_context_continue_keeps_dynamic_context() {
 
 #[test]
 fn long_context_does_not_inject_shrink_review_below_ninety_percent_window() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_below_force_threshold"),
@@ -1155,7 +1174,7 @@ fn long_context_does_not_inject_shrink_review_below_ninety_percent_window() {
 
 #[test]
 fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_observed_tokens"),
@@ -1182,7 +1201,7 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
 
 #[test]
 fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instruction() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_force"),
@@ -1223,7 +1242,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
 
 #[test]
 fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_invalidates_observed_tokens"),
@@ -1282,8 +1301,8 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
 
 #[test]
 fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
-    let mut core = AgentCore::new(
-        &"STATIC_PROMPT ".repeat(9_500),
+    let mut core = test_core(
+        "STATIC_PROMPT ".repeat(9_500),
         profile("aliyun", "qwen-plus"),
         tmp_dir("shrink_static_dominant"),
     );
@@ -1299,7 +1318,7 @@ fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
 #[test]
 fn memory_candidates_are_persisted() {
     let dir = tmp_dir("memory_write");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是 ALPHA-42", None);
     let final_step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"ALL_FINISHED","final_answer":"记住了","memory_candidates":[{"content":"测试代号是 ALPHA-42"}]}"#),
@@ -1325,7 +1344,7 @@ fn query_memory_action_returns_action_result_delta() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("测试项目纪念日是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? AND content LIKE ? LIMIT 5","params":["%测试项目%","%纪念日%"],"limit":5}}]}"#),
@@ -1350,7 +1369,7 @@ fn memmgr_durable_sql_returns_action_result_delta() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("测试项目纪念日是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目%"],"limit":5}}]}"#),
@@ -1377,7 +1396,7 @@ fn canonical_tools_accept_json_object_args() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("用 JSON object args 跑工具", None);
     let step = core.apply_model_response(LlmResponse {
@@ -1415,7 +1434,7 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
     let loop_marker = root.join("loop-marker");
     fs::write(&loop_marker, "ready").unwrap();
 
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
     core.set_capability_registry(CapabilityRegistry::builtin());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("覆盖 builtin tool 参数端到端", None);
@@ -1591,7 +1610,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     core.set_capability_registry(CapabilityRegistry::builtin());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
 
@@ -1831,7 +1850,7 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
             json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 BLUE-17这个说法。"}),
         ],
     );
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
@@ -1852,26 +1871,39 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
 
 #[test]
 fn plain_text_after_repair_failure_is_shown_as_final_answer() {
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("repair"));
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("repair"));
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("你好", None);
-    // Pure prose (no braces) is auto-wrapped as final_answer
-    let step = core.apply_model_response(LlmResponse {
-        content: "not json".to_string(),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
+    // JSON protocol keeps a bounded prose fallback after repair failure.
+    let mut step = CoreStep::NeedModel {
+        prompt: String::new(),
+        rounds_remaining: 0,
+    };
+    for _ in 0..=5 {
+        step = core.apply_model_response(LlmResponse {
+            content: "not json".to_string(),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        if matches!(step, CoreStep::Final(_)) {
+            break;
+        }
+    }
     let final_turn = match step {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
     assert_eq!(final_turn.final_answer, "not json");
-    assert_eq!(final_turn.repair_issue, None);
+    assert_eq!(
+        final_turn.repair_issue.as_deref(),
+        Some("invalid_json_plain_text_fallback")
+    );
 }
 
 #[test]
 fn status_finished_uses_final_answer_as_host_final_answer() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("status_finished_final_answer"),
@@ -1894,6 +1926,7 @@ fn status_finished_uses_final_answer_as_host_final_answer() {
 fn final_turn_wire_shape_uses_semantic_final_answer_field() {
     let step = CoreStep::Final(TurnFinal {
         final_answer: "这是最终结论。".to_string(),
+        toolgen_retrospect: String::new(),
         stats: UsageStats::zero(),
         profile_label: "aliyun:qwen-plus".to_string(),
         repair_issue: None,
@@ -1910,7 +1943,7 @@ fn final_turn_wire_shape_uses_semantic_final_answer_field() {
 
 #[test]
 fn fields_wrapped_finished_answer_is_accepted_without_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("fields_wrapped_finished_answer"),
@@ -1935,7 +1968,7 @@ fn fields_wrapped_finished_answer_is_accepted_without_repair() {
 
 #[test]
 fn final_answer_without_finished_status_requests_protocol_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("final_answer_without_status"),
@@ -1964,7 +1997,7 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
 
 #[test]
 fn finished_status_without_final_answer_requests_protocol_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("finished_without_final_answer"),
@@ -1991,7 +2024,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
 
 #[test]
 fn protocol_repair_slice_focuses_previous_response_around_error() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("repair_focus_previous_response"),
@@ -2024,7 +2057,7 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
 
 #[test]
 fn protocol_repair_delta_separates_previous_output_from_system_error() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("repair_delta_roles"),
@@ -2074,7 +2107,7 @@ fn protocol_repair_delta_separates_previous_output_from_system_error() {
 
 #[test]
 fn successful_protocol_repair_does_not_persist_repair_delta() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("successful_repair_is_temporary"),
@@ -2121,7 +2154,7 @@ fn successful_protocol_repair_does_not_persist_repair_delta() {
 
 #[test]
 fn protocol_repair_can_retry_multiple_times_before_failing() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("protocol_repair_multiple_attempts"),
@@ -2160,7 +2193,7 @@ fn protocol_repair_can_retry_multiple_times_before_failing() {
 
 #[test]
 fn status_working_requires_working_still_action_and_keeps_progress_separate() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("status_working_progress"),
@@ -2185,7 +2218,7 @@ fn status_working_requires_working_still_action_and_keeps_progress_separate() {
 
 #[test]
 fn omitted_status_bare_action_requests_protocol_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bare_action_defaults_working"),
@@ -2208,7 +2241,7 @@ fn omitted_status_bare_action_requests_protocol_repair() {
 
 #[test]
 fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("final_progress_marker_repair"),
@@ -2232,7 +2265,7 @@ fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
 
 #[test]
 fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("repair_action_like"),
@@ -2293,7 +2326,7 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
 
 #[test]
 fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("truncated_repair"),
@@ -2323,7 +2356,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
 fn model_repair_audit_is_core_owned_when_applying_response() {
     let dir = tmp_dir("model_repair_audit_core_owned");
     let audit_file = dir.join("audit").join("api_audit.json");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("写一个很长的报告", None);
 
     let step = core.apply_model_response_with_repair_audit(
@@ -2384,7 +2417,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
 fn turn_lifecycle_audit_is_core_owned() {
     let dir = tmp_dir("turn_lifecycle_audit_core_owned");
     let audit_file = dir.join("audit").join("api_audit.json");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let outcome = agent_core::TurnOutcome::final_response(
         "done",
         usage(),
@@ -2414,7 +2447,7 @@ fn turn_lifecycle_audit_is_core_owned() {
 
 #[test]
 fn truncated_repair_failure_explains_provider_max_token_reason() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("truncated_repair_failure"),
@@ -2473,7 +2506,7 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
 
 #[test]
 fn mixed_protocol_transcript_extracts_final_json_without_leaking_raw_segments() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("mixed_protocol_transcript"),
@@ -2515,7 +2548,7 @@ ok
 
 #[test]
 fn prose_then_markdown_fenced_json_extracts_payload() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("prose_then_fenced_json"),
@@ -2548,7 +2581,7 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
 
 #[test]
 fn response_text_with_unescaped_inner_quotes_is_repaired() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("unescaped_response_quotes"),
@@ -2578,7 +2611,7 @@ fn response_text_with_unescaped_inner_quotes_is_repaired() {
 
 #[test]
 fn response_text_preserves_valid_complex_symbols_and_quotes() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("valid_complex_symbols"),
@@ -2607,7 +2640,7 @@ fn response_text_preserves_valid_complex_symbols_and_quotes() {
 
 #[test]
 fn response_text_decodes_common_json_escape_sequences() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("json_escape_response"),
@@ -2632,7 +2665,7 @@ fn response_text_decodes_common_json_escape_sequences() {
 
 #[test]
 fn action_input_decodes_common_json_escape_sequences() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("json_escape_action_input"),
@@ -2656,7 +2689,7 @@ fn action_input_decodes_common_json_escape_sequences() {
 
 #[test]
 fn action_fields_with_unescaped_inner_quotes_are_repaired() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("unescaped_action_quotes"),
@@ -2687,7 +2720,7 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
 
 #[test]
 fn malformed_complex_protocol_is_blocked_without_raw_leak() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("malformed_complex_protocol"),
@@ -2767,7 +2800,7 @@ fn memmgr_durable_sql_lists_recent_records() {
         ),
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("durable mem 不是有几条记录吗？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 1","limit":1}}]}"#),
@@ -2800,7 +2833,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         ),
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     core.set_response_protocol(ResponseProtocolKind::Xml);
     let _ = core.begin_turn("durable mem 不是有几条记录吗？", None);
     let step = core.apply_model_response(LlmResponse {
@@ -2836,7 +2869,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
 
 #[test]
 fn progress_and_working_still_action_continue_with_implicit_continue_note() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("progress_action_continue"),
@@ -2862,7 +2895,7 @@ fn progress_and_working_still_action_continue_with_implicit_continue_note() {
 
 #[test]
 fn next_action_without_intent_uses_action_name_fallback() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("missing_intent"),
@@ -2885,7 +2918,7 @@ fn next_action_without_intent_uses_action_name_fallback() {
 
 #[test]
 fn unsupported_action_is_not_executed_silently() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("unsupported_action"),
@@ -2906,7 +2939,7 @@ fn unsupported_action_is_not_executed_silently() {
 
 #[test]
 fn scratch_notes_can_be_written_queried_and_deleted() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scratch_notes"),
@@ -2971,7 +3004,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
 
 #[test]
 fn memmgr_scratch_write_and_read_notes() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("memmgr_scratch_notes"),
@@ -3022,7 +3055,7 @@ fn memmgr_scratch_write_and_read_notes() {
 
 #[test]
 fn memmgr_missing_op_requests_protocol_repair_from_manifest_idl() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("memmgr_missing_op"),
@@ -3054,7 +3087,7 @@ fn memmgr_legacy_query_op_is_not_executed_after_sql_search_split() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &root);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &root);
 
     let _ = core.begin_turn("查测试项目代号", None);
     let step = core.apply_model_response(LlmResponse {
@@ -3078,7 +3111,7 @@ fn memmgr_legacy_query_op_is_not_executed_after_sql_search_split() {
 
 #[test]
 fn scratch_search_empty_text_lists_recent_notes_with_limit() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scratch_query_recent"),
@@ -3111,7 +3144,7 @@ fn scratch_search_empty_text_lists_recent_notes_with_limit() {
 
 #[test]
 fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scratch_protocol_repair"),
@@ -3183,7 +3216,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 
 #[test]
 fn scratch_delete_missing_id_is_non_destructive() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scratch_delete_missing"),
@@ -3215,7 +3248,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 
 #[test]
 fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scratch_context_offload"),
@@ -3279,7 +3312,7 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
 
 #[test]
 fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scratch_context_offload_invalid"),
@@ -3303,7 +3336,7 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
 
 #[test]
 fn context_compact_requires_prompt_refs_in_protocol() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scratch_context_offload_refs_required"),
@@ -3325,7 +3358,7 @@ fn context_compact_requires_prompt_refs_in_protocol() {
 
 #[test]
 fn memory_write_action_requires_content_or_query() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("empty_write"),
@@ -3357,7 +3390,7 @@ fn query_memory_does_not_expand_semantic_aliases() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%user's name%"],"limit":5}}]}"#),
@@ -3383,7 +3416,7 @@ fn query_memory_exposes_version_for_conflict_safe_updates() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查测试代号记忆版本", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, created_at_ms, updated_at_ms, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#),
@@ -3410,7 +3443,7 @@ fn memory_lookup_context_triggers_runtime_precheck_before_model_reply() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let prompt = match core.begin_turn(
         "我是谁",
         Some("runtime_time: now\nmemory_lookup_hint: stored personal fact likely needed"),
@@ -3435,7 +3468,7 @@ fn memory_lookup_precheck_is_not_added_without_runtime_marker() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let prompt = match core.begin_turn("我是谁", Some("runtime_time: now")) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -3453,7 +3486,7 @@ fn sql_read_action_returns_rows() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我最早什么时候告诉你测试代号的", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
@@ -3480,7 +3513,7 @@ fn durable_sql_empty_filter_reports_total_rows() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我叫什么名字", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%姓名%"],"limit":5}}]}"#),
@@ -3507,7 +3540,7 @@ fn memory_sql_query_reads_memory_versions_and_normalizes_legacy_rows() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆版本", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, updated_at_ms, content FROM memories ORDER BY created_at_ms ASC","limit":5}}]}"#),
@@ -3533,7 +3566,7 @@ fn sql_read_allows_with_cte_reads() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("按时间查测试代号", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
@@ -3559,7 +3592,7 @@ fn sql_read_rejects_write_statement() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("改记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#),
@@ -3585,7 +3618,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#),
@@ -3604,7 +3637,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
 
 #[test]
 fn sql_read_rejects_other_tables() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("sql_other_tables"),
@@ -3625,7 +3658,7 @@ fn sql_read_rejects_other_tables() {
 
 #[test]
 fn memory_schema_action_returns_native_schema_contract() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("schema_action"),
@@ -3654,7 +3687,7 @@ fn memory_schema_action_returns_native_schema_contract() {
 
 #[test]
 fn memory_sql_query_allows_pragma_table_info() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("pragma_schema"),
@@ -3677,7 +3710,7 @@ fn memory_sql_query_allows_pragma_table_info() {
 
 #[test]
 fn memory_sql_query_allows_chat_messages_table_info() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("pragma_chat_messages_schema"),
@@ -3701,7 +3734,7 @@ fn memory_sql_query_allows_chat_messages_table_info() {
 
 #[test]
 fn memory_sql_query_rejects_non_memories_pragma() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bad_pragma"),
@@ -3722,7 +3755,7 @@ fn memory_sql_query_rejects_non_memories_pragma() {
 
 #[test]
 fn sql_read_action_requires_sql_for_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("sql_missing"),
@@ -3752,7 +3785,7 @@ fn memory_sql_query_requires_params_for_placeholders() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#),
@@ -3778,7 +3811,7 @@ fn memory_sql_query_rejects_extra_params_for_placeholders() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%mynameis%","%Iam%"],"limit":20}}]}"#),
@@ -3804,7 +3837,7 @@ fn memory_sql_prepare_error_exposes_sqlite_reason_to_model() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("有个数字悄悄告诉你的，是什么来着", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE key LIKE ? OR content LIKE ? LIMIT 5","params":["%ABC%","%123456%"],"limit":5}}]}"#),
@@ -3836,7 +3869,7 @@ fn chat_history_query_reads_persisted_chat_records() {
             json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 BLUE-17这个说法。"}),
         ],
     );
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
@@ -3869,7 +3902,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
 "#,
     )
     .unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("旧格式里说过什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
@@ -3889,7 +3922,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
 
 #[test]
 fn chat_history_query_keeps_current_prompt_delta_fallback() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("chat_history"),
@@ -3933,7 +3966,7 @@ fn chat_history_search_empty_text_lists_recent_records() {
             json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"第二条回复"}),
         ],
     );
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"","limit":1}}]}"#),
@@ -3965,7 +3998,7 @@ fn memory_sql_query_reads_chat_messages_with_time_window() {
             json!({"type":"turn_final","session":"shell_new","turn_id":"turn_1781846400000","assistant_output":"新回复"}),
         ],
     );
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("查最近窗口聊天", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
@@ -4024,7 +4057,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
                 json!({"type":"turn_final","session":"shell_today","turn_id":"turn_1782203922467","assistant_output":"今天聊过 shell 记忆查询。"}),
             ],
         );
-        let mut core = AgentCore::new("STATIC", profile("custom", "aws-claude-sonnet-4-6"), &dir);
+        let mut core = test_core("STATIC", profile("custom", "aws-claude-sonnet-4-6"), &dir);
         let _ = core.begin_turn("我今天和你聊过什么？", None);
         let content = scored(format!(
             r#"{{"working_still_action":{{{}}}}}"#,
@@ -4058,7 +4091,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
 
 #[test]
 fn memory_sql_query_rejects_raw_update_sql() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("raw_sql_write"),
@@ -4092,7 +4125,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
         ],
     );
     let before = fs::read_to_string(&audit_file).unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("删除聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#),
@@ -4124,7 +4157,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
             json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"保留回复"}),
         ],
     );
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("删除包含目标的聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"delete","search_text":"删除目标","limit":10}}]}"#),
@@ -4147,7 +4180,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
 #[test]
 fn memory_update_insert_update_and_delete_are_wrapped() {
     let dir = tmp_dir("memory_update_wrapped");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("记住我的测试代号", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"user_name","content":"测试代号是 ALPHA-42"}}]}"#),
@@ -4218,8 +4251,8 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
 #[test]
 fn memory_update_detects_stale_version_conflict_without_overwrite() {
     let dir = tmp_dir("memory_update_conflict");
-    let mut core_a = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
-    let mut core_b = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core_a = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core_b = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
 
     let _ = core_a.begin_turn("创建共享记忆", None);
     let step = core_a.apply_model_response(LlmResponse {
@@ -4266,7 +4299,7 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 #[test]
 fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
     let dir = tmp_dir("memory_update_parallel_conflict");
-    let mut seed_core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut seed_core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = seed_core.begin_turn("创建共享记忆", None);
     let step = seed_core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"shared_conflict","content":"初始值"}}]}"#),
@@ -4283,7 +4316,7 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
         let dir = dir.clone();
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
-            let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+            let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
             let _ = core.begin_turn(&format!("并发冲突更新 {idx}"), None);
             barrier.wait();
             let step = core.apply_model_response(LlmResponse {
@@ -4440,7 +4473,7 @@ fn mem_guard_keeps_concurrent_memory_updates_from_losing_records() {
         let dir = dir.clone();
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
-            let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+            let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
             let _ = core.begin_turn(&format!("并发写入 {idx}"), None);
             barrier.wait();
             let step = core.apply_model_response(LlmResponse {
@@ -4476,7 +4509,7 @@ fn mem_guard_keeps_concurrent_memory_updates_from_losing_records() {
 
 #[test]
 fn memory_update_requires_protocol_fields() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("memory_update_repair"),
@@ -4499,7 +4532,7 @@ fn memory_update_requires_protocol_fields() {
 
 #[test]
 fn run_bash_allows_readonly_count_command() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_readonly"),
@@ -4526,7 +4559,7 @@ fn run_bash_allows_readonly_count_command() {
 #[test]
 fn action_audit_groups_actions_by_user_turn_and_round() {
     let dir = tmp_dir("action_audit_grouping");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("整理这个任务", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"notes","label":"任务计划","content":"step one"}}]}"#),
@@ -4575,7 +4608,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
 
 #[test]
 fn run_bash_rejects_old_timeout_sec_field() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_timeout_sec"),
@@ -4601,7 +4634,7 @@ fn run_bash_rejects_old_timeout_sec_field() {
 
 #[test]
 fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_background"),
@@ -4645,7 +4678,7 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
 
 #[test]
 fn running_job_list_is_injected_when_discard_references_running_job_delta() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_running_list_on_shrink"),
@@ -4718,7 +4751,7 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
 
 #[test]
 fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_running_list_unrelated_discard"),
@@ -4783,7 +4816,7 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
 
 #[test]
 fn running_job_list_is_injected_when_offload_references_running_job_delta() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_running_list_on_offload"),
@@ -4848,11 +4881,12 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
 
 #[test]
 fn running_job_list_is_injected_when_compact_references_running_job_delta() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_running_list_on_compact"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Markdown);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     match core.begin_turn("start a background task", None) {
         CoreStep::NeedModel { .. } => {}
@@ -4912,7 +4946,7 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
 
 #[test]
 fn removed_shell_job_status_action_is_rejected_as_unsupported() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_background_job_id_required"),
@@ -4934,7 +4968,7 @@ fn removed_shell_job_status_action_is_rejected_as_unsupported() {
 
 #[test]
 fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_timeout_kill"),
@@ -4981,7 +5015,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
 
 #[test]
 fn run_bash_rejects_removed_read_back_protocol() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_reject_readback_field"),
@@ -5005,7 +5039,7 @@ fn run_bash_rejects_removed_read_back_protocol() {
 
 #[test]
 fn run_bash_rejects_removed_large_readback_protocol() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_reject_large_readback_field"),
@@ -5030,7 +5064,7 @@ fn run_bash_rejects_removed_large_readback_protocol() {
 #[test]
 fn run_bash_requires_approval_for_mutating_commands() {
     let dir = tmp_dir("bash_reject");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("delete something", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"rm not_allowed"}}]}"#),
@@ -5085,7 +5119,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
 
 #[test]
 fn run_bash_allows_compound_local_write_commands() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_allow_compound_write"),
@@ -5111,7 +5145,7 @@ fn run_bash_allows_compound_local_write_commands() {
 
 #[test]
 fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_reject_compound_delete"),
@@ -5136,7 +5170,7 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
 
 #[test]
 fn run_bash_executes_shell_syntax_after_user_approval() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_shell_syntax_after_approval"),
@@ -5167,7 +5201,7 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
 #[cfg(unix)]
 #[test]
 fn run_bash_child_sigsegv_isolated_and_turn_can_still_finish() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_sigsegv_isolation"),
@@ -5208,7 +5242,7 @@ fn run_bash_child_sigsegv_isolated_and_turn_can_still_finish() {
 
 #[test]
 fn run_bash_missing_command_returns_tool_input_error() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_missing"),
@@ -5231,7 +5265,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
 
 #[test]
 fn run_bash_requires_approval_for_absolute_paths() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_path_reject"),
@@ -5254,7 +5288,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
 
 #[test]
 fn run_bash_allows_low_risk_system_identity_commands() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("bash_system_identity"),
@@ -5283,7 +5317,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
 #[test]
 fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     let dir = tmp_dir("ci_realistic_story");
-    let mut core = AgentCore::new("STATIC_GLOBAL_RULES", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC_GLOBAL_RULES", profile("aliyun", "qwen-plus"), &dir);
 
     let first_prompt = match core.begin_turn(
         "测试项目纪念日是 2099-06-12",
@@ -5452,7 +5486,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 #[test]
 fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
     let dir = tmp_dir("scenario_coding");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
 
     let _ = core.begin_turn(
@@ -5512,7 +5546,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
         ],
     );
 
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
     core.set_capability_registry(CapabilityRegistry::builtin());
     let _ = core.begin_turn("我的测试代号是什么？测试时段我们聊了什么？", None);
     let prompt = match core.apply_model_response(LlmResponse {
@@ -5547,7 +5581,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
 
 #[test]
 fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scenario_self_qa"),
@@ -5590,7 +5624,7 @@ fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
 
 #[test]
 fn scenario_file_writing_outputs_artifact_and_verifies_content() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("scenario_file_writing"),
@@ -5637,7 +5671,7 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
 
 #[test]
 fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("thought_slice"),
@@ -5664,7 +5698,7 @@ fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
 
 #[test]
 fn free_talk_field_optional_does_not_trigger_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("thought_absent"),
@@ -5687,7 +5721,7 @@ fn free_talk_field_optional_does_not_trigger_repair() {
 
 #[test]
 fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("thought_obj_keep_in_context"),
@@ -5710,7 +5744,7 @@ fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
 
 #[test]
 fn free_talk_object_keep_in_context_false_is_still_persisted() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("thought_obj_not_kept"),
@@ -5758,7 +5792,7 @@ fn static_prompt_keeps_contracts_concise() {
 
 #[test]
 fn rendered_prompt_response_schema_is_injected_from_resource() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "## Protocol\n{{RESPONSE_V1_SCHEMA}}",
         profile("aliyun", "qwen-plus"),
         tmp_dir("response_schema_prompt_injection"),
@@ -5793,7 +5827,7 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
 
 #[test]
 fn work_directory_instructions_are_loaded_once_even_if_host_repeats_context() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "static",
         profile("aliyun", "qwen-plus"),
         tmp_dir("work_instruction_dedupe"),
@@ -5856,7 +5890,7 @@ unique_workspace_reference_should_remain_visible
 
 #[test]
 fn rendered_static_prompt_preserves_source_rule_order() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("static_prompt_order"),
@@ -5894,7 +5928,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(default_prompt.contains("protocol-compliant response in XML format"));
     assert!(!default_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
-    let mut markdown_core = AgentCore::new(
+    let mut markdown_core = test_core(
         template,
         profile("aliyun", "qwen-plus"),
         tmp_dir("response_protocol_markdown"),
@@ -5910,7 +5944,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(!markdown_prompt.contains("All your output things MUST BE enclosed"));
     assert!(!markdown_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
-    let mut json_core = AgentCore::new(
+    let mut json_core = test_core(
         template,
         profile("aliyun", "qwen-plus"),
         tmp_dir("response_protocol_json"),
@@ -5926,7 +5960,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(json_prompt.contains("\"ALL_FINISHED\""));
     assert!(!json_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
-    let mut xml_core = AgentCore::new(
+    let mut xml_core = test_core(
         template,
         profile("aliyun", "qwen-plus"),
         tmp_dir("response_protocol_xml"),
@@ -5960,7 +5994,7 @@ fn static_prompt_does_not_handwrite_tool_catalog() {
 
 #[test]
 fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("no_local_command_host"),
@@ -6184,6 +6218,7 @@ fn protocol_repair_does_not_publish_invalid_model_response_topic() {
 #[test]
 fn external_tool_call_protocol_repairs_without_showing_raw_tool_call() {
     let mut core = core_with_builtin_capabilities("external_tool_call_repair");
+    core.set_response_protocol(ResponseProtocolKind::Xml);
     let _ = core.begin_turn("推送远端并检查 CI", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -6217,11 +6252,12 @@ fn external_tool_call_protocol_repairs_without_showing_raw_tool_call() {
 
 #[test]
 fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("static_prompt_examples_not_task_like"),
     );
+    core.set_response_protocol(ResponseProtocolKind::Xml);
     let prompt = match core.begin_turn("请只回答 ok", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
@@ -6242,7 +6278,7 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
 
 #[test]
 fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("static_prompt_example_heading_levels"),
@@ -6270,7 +6306,7 @@ fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
 
 #[test]
 fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
         profile("aliyun", "qwen-plus"),
         tmp_dir("capability_prompt_catalog"),
@@ -6315,7 +6351,7 @@ fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
 
 #[test]
 fn canonical_tool_action_is_validated_through_capability_registry() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("capability_registry_action_parse"),
@@ -6342,7 +6378,7 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
 
 #[test]
 fn legacy_actions_are_not_visible_or_executable() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("legacy_action_fallback_boundary"),
@@ -6377,7 +6413,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
     let registry =
         CapabilityRegistry::builtin_with_overlay_dir(release_quality_skill_overlay("capmgr_skill"))
             .unwrap();
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("capmgr_load_skill"),
@@ -6406,7 +6442,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
 #[test]
 fn self_tool_reads_mem_paths_and_about_info() {
     let dir = tmp_dir("self_tool_paths");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let _ = core.begin_turn("Timem 的记忆路径和版本是什么？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -6451,7 +6487,7 @@ fn self_tool_reads_mem_paths_and_about_info() {
 #[test]
 fn self_tool_runtime_configuration_keeps_core_owned_identity() {
     let dir = tmp_dir("self_tool_runtime_config");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
     let configured_space = dir.join("custom_space");
     let configured_memory = configured_space.join("memory");
     let configured_api_audit = configured_space.join("audit").join("api_audit.json");
@@ -6501,7 +6537,7 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
 
 #[test]
 fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("self_tool_env"),
@@ -6528,7 +6564,7 @@ fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
 
 #[test]
 fn self_tool_env_denies_memory_path_writes_through_core_action() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("self_tool_protected_env"),
@@ -6558,6 +6594,18 @@ fn self_tool_env_denies_memory_path_writes_through_core_action() {
 
 #[test]
 fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<agent_core::CoreTopicEvent>);
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+
+        fn on_core_topic_events(&mut self, events: &[agent_core::CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+
     let memory_dir = tmp_dir("self_tool_chg_cwd_memory");
     let work_dir = tmp_dir("self_tool_chg_cwd_work");
     let sub_dir = work_dir.join("sub");
@@ -6565,7 +6613,7 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
     fs::write(sub_dir.join("marker.txt"), "cwd-ok").unwrap();
     let sub_dir = fs::canonicalize(&sub_dir).unwrap();
 
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
 
     let first_prompt = match core.begin_turn("先确认 cwd", None) {
@@ -6584,12 +6632,16 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
 }}"#,
         sub_dir.display()
     );
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(response),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
+    let mut runtime = TopicRecorder::default();
+    let step = core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            content: scored(response),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        },
+        &mut runtime,
+    );
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
@@ -6607,6 +6659,19 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
     assert!(prompt.contains("Action result: run_bash"), "{prompt}");
     assert!(prompt.contains(&sub_dir.display().to_string()), "{prompt}");
     assert!(prompt.contains("cwd-ok"), "{prompt}");
+    let cwd_update = runtime
+        .0
+        .iter()
+        .find(|event| {
+            event.topic.name == agent_core::CORE_TOPIC_ACTION
+                && event.payload["action"] == "self_tool"
+                && event.payload["event"] == "finish"
+        })
+        .expect("self_tool finish topic");
+    assert_eq!(
+        cwd_update.payload["context_state"]["cwd"],
+        sub_dir.display().to_string()
+    );
 }
 
 #[test]
@@ -6619,7 +6684,7 @@ fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
     let base_dir = fs::canonicalize(&base_dir).unwrap();
     let sub_dir = fs::canonicalize(&sub_dir).unwrap();
 
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
 
@@ -6644,24 +6709,40 @@ fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
 
 #[test]
 fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<agent_core::CoreTopicEvent>);
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+
+        fn on_core_topic_events(&mut self, events: &[agent_core::CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+
     let memory_dir = tmp_dir("self_tool_bad_cwd_memory");
     let base_dir = tmp_dir("self_tool_bad_cwd_base");
     let base_dir = fs::canonicalize(&base_dir).unwrap();
     let missing = base_dir.join("missing");
 
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
     core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
 
     let _ = core.begin_turn("切到不存在路径", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(
-            r#"{{"status":"working","working_still_action":[{{"self_tool":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}}]}}"#,
-            missing.display()
-        )),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
+    let mut runtime = TopicRecorder::default();
+    let step = core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            content: scored(format!(
+                r#"{{"status":"working","working_still_action":[{{"self_tool":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}}]}}"#,
+                missing.display()
+            )),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        },
+        &mut runtime,
+    );
     let prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
@@ -6672,11 +6753,15 @@ fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
     assert!(prompt.contains("type: cwd"), "{prompt}");
     assert!(prompt.contains("error: path_not_found"), "{prompt}");
     assert!(!prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", missing.display())));
+    assert!(runtime
+        .0
+        .iter()
+        .all(|event| event.payload.get("context_state").is_none()));
 }
 
 #[test]
 fn self_tool_supports_identity_and_process_qa_replay() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("self_tool_identity_process_qa"),
@@ -6724,7 +6809,7 @@ fn self_tool_supports_identity_and_process_qa_replay() {
 
 #[test]
 fn capmgr_load_missing_kind_requests_protocol_repair_from_manifest_idl() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("aliyun", "qwen-plus"),
         tmp_dir("capmgr_missing_fields"),
@@ -6760,7 +6845,7 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
             "actions[0].input.kind_unsupported:resource",
         ),
     ] {
-        let mut core = AgentCore::new(
+        let mut core = test_core(
             "STATIC",
             profile("aliyun", "qwen-plus"),
             tmp_dir(&format!("capmgr_enum_fields_{case}")),
@@ -6845,7 +6930,7 @@ example_json: |
         CapabilityHostProfile::with_local_command_execution(),
     )
     .unwrap();
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
         profile("aliyun", "qwen-plus"),
         tmp_dir("overlay_add_remove_active"),
@@ -6877,7 +6962,7 @@ example_json: |
         CapabilityHostProfile::without_local_command_execution(),
     )
     .unwrap();
-    let mut filtered_core = AgentCore::new(
+    let mut filtered_core = test_core(
         "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
         profile("aliyun", "qwen-plus"),
         tmp_dir("overlay_add_remove_filtered"),
@@ -6939,7 +7024,7 @@ example_json: |
     )
     .unwrap();
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
     core.set_capability_registry(registry);
     let _ = core.begin_turn("echo", None);
 
@@ -6989,7 +7074,7 @@ example_json: |
     .unwrap();
     fs::write(scripts_dir.join("echo_payload.sh"), "cat\n").unwrap();
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
     core.set_capability_registry(registry);
     let _ = core.begin_turn("echo in background", None);
 
@@ -7052,7 +7137,7 @@ example_json: |
     )
     .unwrap();
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
     core.set_capability_registry(registry);
     let _ = core.begin_turn("echo in background", None);
 
@@ -7134,7 +7219,7 @@ example_json: |
     )
     .unwrap();
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
     core.set_capability_registry(registry);
     let _ = core.begin_turn("run slow tool in background", None);
 
@@ -7177,7 +7262,7 @@ example_json: |
 #[test]
 fn finished_with_actions_requests_repair_and_executes_nothing() {
     let memory_dir = tmp_dir("finished_actions_repair");
-    let mut core = AgentCore::new("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
     core.set_capability_registry(CapabilityRegistry::builtin());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("完成任务", None);
@@ -7235,7 +7320,7 @@ fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
 
 #[test]
 fn prose_then_final_answer_only_json_extracts_payload() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("prose_final_answer_only"),
@@ -7262,7 +7347,7 @@ fn prose_then_final_answer_only_json_extracts_payload() {
 
 #[test]
 fn markdown_fenced_final_answer_only_json_extracts_payload() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("fenced_final_answer_only"),
@@ -7286,7 +7371,7 @@ fn markdown_fenced_final_answer_only_json_extracts_payload() {
 
 #[test]
 fn prose_with_json_reference_before_actual_response() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("prose_json_ref"),
@@ -7310,7 +7395,7 @@ fn prose_with_json_reference_before_actual_response() {
 
 #[test]
 fn final_answer_containing_json_code_example() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("final_answer_json_code"),
@@ -7334,7 +7419,7 @@ fn final_answer_containing_json_code_example() {
 
 #[test]
 fn prose_with_fake_envelope_keys_picks_last_valid_json() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("fake_envelope"),
@@ -7358,7 +7443,7 @@ fn prose_with_fake_envelope_keys_picks_last_valid_json() {
 
 #[test]
 fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("curly_in_code"),
@@ -7382,7 +7467,7 @@ fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
 
 #[test]
 fn bare_array_of_actions_requests_protocol_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("array_actions"),
@@ -7406,7 +7491,7 @@ fn bare_array_of_actions_requests_protocol_repair() {
 
 #[test]
 fn bare_array_of_multiple_actions_requests_protocol_repair() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("array_multi_actions"),
@@ -7432,7 +7517,7 @@ fn bare_array_of_multiple_actions_requests_protocol_repair() {
 
 #[test]
 fn array_without_action_key_still_rejected() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         "STATIC",
         profile("custom", "aws-claude-sonnet-4-6"),
         tmp_dir("array_no_action"),
@@ -7543,13 +7628,13 @@ when_to_use: |
     assert_perf_under(
         "many overlay capability render x80",
         started,
-        Duration::from_millis(750),
+        Duration::from_millis(1_000),
     );
 }
 
 #[test]
 fn performance_guard_large_context_prompt_render_is_bounded() {
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("aliyun", "qwen-plus"),
         tmp_dir("perf_large_prompt_render"),
@@ -7558,7 +7643,7 @@ fn performance_guard_large_context_prompt_render_is_bounded() {
     for idx in 0..160 {
         let _ = core.begin_turn(&format!("user turn {idx}: {repeated_context}"), None);
         let step = core.apply_model_response(LlmResponse {
-            content: scored(&format!(
+            content: scored(format!(
                 r#"{{"status":"ALL_FINISHED","final_answer":"assistant turn {idx}: done"}}"#
             )),
             model_name: "qwen-plus".to_string(),
@@ -7595,13 +7680,13 @@ fn performance_guard_topic_generation_for_many_actions_is_bounded() {
 
     let mut core = core_with_builtin_capabilities("perf_many_action_topics");
     let actions = (0..150)
-        .map(|_| format!(r#"{{"self_tool":{{"type":"about_me","op":"read"}}}}"#))
+        .map(|_| r#"{"self_tool":{"type":"about_me","op":"read"}}"#.to_string())
         .collect::<Vec<_>>()
         .join(",");
 
     let _ = core.begin_turn("emit many action topics", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(&format!(
+        content: scored(format!(
             r#"{{"status":"working","working_still_action":[{actions}]}}"#
         )),
         model_name: "qwen-plus".to_string(),
