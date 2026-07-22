@@ -15,7 +15,8 @@ cargo run -p timem_web
 - Binds only to `127.0.0.1`.
 - Chooses a port in `12345..=23456`; `--port` selects a specific port.
 - Generates a per-process access token for HTTP/WebSocket requests.
-- Opens the authenticated local page in the default browser when possible.
+- Opens the authenticated local page when a local graphical session is detected;
+  SSH/headless sessions print the URL without launching a browser.
 - Keeps provider calls, prompt building, memory, tools, and response parsing in
   `agent_core`.
 
