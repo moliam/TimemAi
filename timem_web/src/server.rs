@@ -3448,7 +3448,8 @@ impl WorkerTemplate {
             Some(path) => {
                 std::fs::canonicalize(path).map_err(|_| "workspace_not_found".to_string())?
             }
-            None => self.current_dir.clone(),
+            None => std::fs::canonicalize(&self.current_dir)
+                .map_err(|_| "workspace_not_found".to_string())?,
         };
         if !selected.is_dir() {
             return Err("workspace_not_directory".to_string());
