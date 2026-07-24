@@ -1456,12 +1456,11 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 }
 
 function ToolActivity({ activity }: { activity: Activity }) {
-  const [open, setOpen] = useState(false);
   const status = activity.tool_status || "running";
   const running = status === "running" || status === "background_running";
+  const [open, setOpen] = useState(true);
   const invocationPreview = toolInvocationPreview(activity);
   const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
-  const collapse = () => setOpen(false);
   const toolName = toolDisplayName(activity.tool_name || activity.title);
   const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
   const summaryContent = <>
@@ -1469,7 +1468,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     <b>{toolName}</b>
     <span className="tool-activity-status">{humanizeToolStatus(status)}</span>
     {activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}
-    {invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}
+    {!hasExpandableDetail && invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}
   </>;
   if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`} aria-busy={running || undefined}>
     {summaryContent}
@@ -1480,10 +1479,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
       <ChevronRight className="tool-activity-chevron" size={14}/>
     </summary>
     <div className="tool-activity-body">
-      <button type="button" className="tool-activity-collapse top" title={`Collapse ${toolName} details`} aria-label={`Collapse ${toolName} details`} onClick={collapse}>收起详情</button>
       {activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}
-      {activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}
-      <button type="button" className="tool-activity-collapse" title={`Collapse ${toolName} details`} aria-label={`Collapse ${toolName} details`} onClick={collapse}>收起详情</button>
+      {activity.code && (
+        <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)} />
+      )}
     </div>
   </details>;
 }
