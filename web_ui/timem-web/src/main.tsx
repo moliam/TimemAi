@@ -1458,7 +1458,7 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 function ToolActivity({ activity }: { activity: Activity }) {
   const status = activity.tool_status || "running";
   const running = status === "running" || status === "background_running";
-  const [open, setOpen] = useState(running);
+  const [open, setOpen] = useState(true);
   const invocationPreview = toolInvocationPreview(activity);
   const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
   const toolName = toolDisplayName(activity.tool_name || activity.title);
