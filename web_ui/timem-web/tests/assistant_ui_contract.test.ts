@@ -614,7 +614,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("activity.detail?.split");
     expect(source).toContain("const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();");
     expect(source).toContain('const running = status === "running" || status === "background_running";');
-    expect(source).toContain("const [open, setOpen] = useState(running);");
+    expect(source).toContain("const [open, setOpen] = useState(true);");
     expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
     expect(source).toContain("const toolName = toolDisplayName(activity.tool_name || activity.title);");
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;');
