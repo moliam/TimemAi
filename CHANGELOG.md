@@ -6,6 +6,28 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-07-24
+
+### Fixed
+
+- Kept Web tool details open by default so active and completed Bash/tool
+  commands do not collapse themselves while a task is running.
+- Fixed Web session creation defaults so Runtime Settings changes are applied
+  to newly created sessions, and dialog-level runtime overrides are reflected
+  in the created Session's runtime profile.
+- Canonicalized the default Web workspace before validation to avoid registered
+  workspace mismatches on equivalent paths.
+
+## [1.0.1] - 2026-07-22
+
+### Fixed
+
+- Fixed Web Thought/Action tool rows so expandable Bash/tool entries no longer
+  render a blank chevron-only line or duplicate collapse controls before the
+  command detail.
+- Increased the live Web working/ToolGen heading size and blue activity pulse
+  so an active task is easier to notice than completed work stream rows.
+
 ### Fixed
 
 - Public Web startup now prints a directly usable host URL instead of the

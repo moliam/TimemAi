@@ -431,7 +431,15 @@ fn web_runtime_updates_only_accept_the_shared_runtime_config_keys() {
 
 #[test]
 fn runtime_update_refreshes_new_session_defaults_without_rewriting_existing_sessions() {
-    let state = routing_test_state();
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(format!("timem_web_runtime_update_{}", now_ms()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
     let existing_session_id = state
         .sessions
         .lock()
@@ -475,6 +483,21 @@ fn runtime_update_refreshes_new_session_defaults_without_rewriting_existing_sess
         state.sessions.lock().unwrap()[&existing_session_id].runtime_profile,
         existing_profile
     );
+
+    let created = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionCreate {
+            display_name: Some("Future defaults".to_string()),
+            workspace_dir: None,
+            env: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let Some(WireEvent::SessionCreated { session }) = created else {
+        panic!("runtime-updated defaults must be visible on the next created session")
+    };
+    assert_eq!(session.runtime_profile.model, "future-session-model");
 }
 
 #[test]
@@ -814,6 +837,61 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
         ))
     );
     assert!(!lifecycle_leaked_secret);
+}
+
+#[test]
+fn session_create_command_returns_session_with_runtime_overrides_applied() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(format!("timem_web_session_cmd_env_{}", now_ms()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionCreate {
+            display_name: Some("Override session".to_string()),
+            workspace_dir: Some(root.display().to_string()),
+            env: BTreeMap::from([
+                ("TIMEM_MODEL".to_string(), "model-from-dialog".to_string()),
+                (
+                    "TIMEM_RESPONSE_PROTOCOL".to_string(),
+                    "markdown".to_string(),
+                ),
+                ("TIMEM_MAX_LLM_INPUT".to_string(), "42K".to_string()),
+                ("TIMEM_BASH_APPROVAL".to_string(), "approve".to_string()),
+            ]),
+        },
+    )
+    .unwrap();
+
+    let session = match event {
+        Some(WireEvent::SessionCreated { session }) => session,
+        other => panic!("expected SessionCreated, got {other:?}"),
+    };
+    assert_eq!(session.display_name, "Override session");
+    assert_eq!(session.runtime_profile.model, "model-from-dialog");
+    assert_eq!(session.runtime_profile.response_protocol, "markdown");
+    assert_eq!(session.runtime_profile.max_llm_input_tokens, 42_000);
+    assert_eq!(session.runtime_profile.bash_approval, "approve");
+
+    let sessions = state.sessions.lock().unwrap();
+    let stored = sessions.get(&session.session_id).unwrap();
+    assert_eq!(stored.runtime.settings.config.model, "model-from-dialog");
+    assert_eq!(
+        stored.runtime.settings.config.response_protocol.name(),
+        "markdown"
+    );
+    assert_eq!(stored.runtime.settings.config.max_llm_input_tokens, 42_000);
+    assert_eq!(
+        stored.runtime.env.get("TIMEM_MODEL").map(String::as_str),
+        Some("model-from-dialog")
+    );
 }
 
 #[test]
