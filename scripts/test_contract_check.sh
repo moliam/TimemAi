@@ -121,6 +121,7 @@ ci_required=(
   "scripts/performance_guard.sh"
   "scripts/cross_host_resume_smoke.sh"
   "scripts/web_license_check.sh"
+  "scripts/version_consistency_check.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
