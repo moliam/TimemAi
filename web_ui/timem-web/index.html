@@ -11,11 +11,25 @@
         document.documentElement.dataset.theme = saved.theme === "dark" || saved.theme === "light"
           ? saved.theme
           : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-        document.documentElement.dataset.font = ["system", "serif", "mono"].includes(saved.font) ? saved.font : "system";
+        const legacyFont = ["system", "serif", "mono"].includes(saved.font) ? saved.font : "system";
+        const legacyChineseFont = saved.chineseFont === "sans" ? "heiti"
+          : saved.chineseFont === "serif" ? "songti"
+          : ["system", "heiti", "kaiti", "songti"].includes(saved.chineseFont) ? saved.chineseFont : "system";
+        document.documentElement.dataset.userFont = ["system", "serif", "mono"].includes(saved.userFont) ? saved.userFont : legacyFont;
+        document.documentElement.dataset.userChineseFont = ["system", "heiti", "kaiti", "songti"].includes(saved.userChineseFont) ? saved.userChineseFont : legacyChineseFont;
+        document.documentElement.dataset.userBold = String(typeof saved.userBold === "boolean" ? saved.userBold : false);
+        document.documentElement.dataset.agentFont = ["system", "serif", "mono"].includes(saved.agentFont) ? saved.agentFont : legacyFont;
+        document.documentElement.dataset.agentChineseFont = ["system", "heiti", "kaiti", "songti"].includes(saved.agentChineseFont) ? saved.agentChineseFont : legacyChineseFont;
+        document.documentElement.dataset.agentBold = String(typeof saved.agentBold === "boolean" ? saved.agentBold : false);
         document.documentElement.dataset.textSize = ["small", "medium", "large"].includes(saved.textSize) ? saved.textSize : "medium";
       } catch (_) {
         document.documentElement.dataset.theme = "dark";
-        document.documentElement.dataset.font = "system";
+        document.documentElement.dataset.userFont = "system";
+        document.documentElement.dataset.userChineseFont = "system";
+        document.documentElement.dataset.userBold = "false";
+        document.documentElement.dataset.agentFont = "system";
+        document.documentElement.dataset.agentChineseFont = "system";
+        document.documentElement.dataset.agentBold = "false";
         document.documentElement.dataset.textSize = "medium";
       }
     </script>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -65,6 +65,18 @@ const actionEvent = (
 });
 
 describe("web topic view model", () => {
+  it("defaults completed work to collapsed only when its process contains free talk alone", () => {
+    const freeTalk = activityFromTopic(topic("core.model.response", { free_talk: "Simple reasoning." }));
+    const action = activityFromTopic(topic("core.action", { action: "run_bash", status: "completed", input: { cmd: "pwd" } }));
+    const repair = activityFromTopic(topic("core.model.repair", { attempt: 1, max_attempts: 5, issue: "invalid_xml" }));
+
+    expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 0)).toBe(true);
+    expect(hasOnlyFreeTalkActivity([], 0)).toBe(false);
+    expect(hasOnlyFreeTalkActivity([freeTalk, action].filter((activity): activity is NonNullable<typeof activity> => activity !== null), 0)).toBe(false);
+    expect(hasOnlyFreeTalkActivity(repair ? [repair] : [], 0)).toBe(false);
+    expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 1)).toBe(false);
+  });
+
   it("renders ToolGen lifecycle as one compact system activity", () => {
     const started = activityFromTopic(topic("core.toolgen", { phase: "started", tool_count: 2 }));
     expect(started).toMatchObject({ tone: "notice", kind: "toolgen", title: "ToolGen: 正在评估…" });
@@ -116,6 +128,50 @@ describe("web topic view model", () => {
       { type: "turn_supplement", session_id: "session_1", text: "second correction" },
       { type: "turn_supplement", session_id: "session_1", text: "third correction" },
     ]);
+  });
+
+  it("retains several loaded history pages instead of discarding the page just requested", () => {
+    const current = session("session_1");
+    current.turns = Array.from({ length: 200 }, (_, index) => turn(`current_${index}`, "finished"));
+    const olderRecords: ChatHistoryRecord[] = Array.from({ length: 200 }, (_, index) => ({
+      type: "message",
+      role: "user",
+      turn_id: `older_${index}`,
+      created_at_ms: index,
+      content: `older task ${index}`,
+    }));
+
+    const restored = prependHistoryRecords(current, olderRecords);
+
+    expect(restored.turns).toHaveLength(400);
+    expect(restored.turns[0]?.turn_id).toBe("older_0");
+    expect(restored.turns.at(-1)?.turn_id).toBe("current_199");
+  });
+
+  it("keeps restored action history bounded without reducing the live turn event budget", () => {
+    const restored = {
+      ...turn("restored_turn", "restored"),
+      events: Array.from({ length: MAX_RESTORED_TURN_EVENTS + 30 }, (_, index) => ({
+        event_id: `restored_event_${index}`,
+        source: "worker_activity",
+        payload: { kind: "action", index },
+        created_at_ms: index,
+      })),
+    };
+    const live = {
+      ...turn("live_turn", "finished"),
+      events: Array.from({ length: MAX_RESTORED_TURN_EVENTS + 30 }, (_, index) => ({
+        event_id: `live_event_${index}`,
+        source: "worker_activity",
+        payload: { kind: "action", index },
+        created_at_ms: index,
+      })),
+    };
+
+    const bounded = boundSessionHistory({ ...session("session_1"), turns: [restored, live] });
+
+    expect(bounded.turns[0]?.events).toHaveLength(MAX_RESTORED_TURN_EVENTS);
+    expect(bounded.turns[1]?.events).toHaveLength(MAX_RESTORED_TURN_EVENTS + 30);
   });
 
   it("guards one browser draft submission while preserving text typed during the pending send", () => {
@@ -353,6 +409,12 @@ describe("web topic view model", () => {
     expect(rendered.startsWith("…")).toBe(true);
     expect(rendered.endsWith("project/packages/web-ui")).toBe(true);
     expect(rendered).toHaveLength(24);
+  });
+
+  it("keeps the complete workspace directory name in compact session labels", () => {
+    expect(workspacePathLabel("/Users/limo3/my_code/timem_shell")).toBe("…/timem_shell");
+    expect(workspacePathLabel("/Users/limo3/my_code/timem_shell/")).toBe("…/timem_shell");
+    expect(workspacePathLabel("timem_shell")).toBe("timem_shell");
   });
 
   it("replaces an action start with its terminal lifecycle event", () => {
@@ -685,7 +747,7 @@ describe("web topic view model", () => {
     });
   });
 
-  it("uses only the selected session's latest real provider usage for context", () => {
+  it("uses only the selected session's latest real model usage for context", () => {
     const current = session("session_1");
     const oldTurn = turn("old", "finished");
     oldTurn.completion = { latest_usage: { prompt_tokens: 2_000 } };
@@ -779,6 +841,17 @@ describe("web topic view model", () => {
     expect(activity).toMatchObject({ tone: "action", title: "Bash · running", tool_name: "run_bash", detail: "", code: "git status", code_language: "bash" });
   });
 
+  it("redacts credentials from displayed Bash commands without hiding command structure", () => {
+    const raw = "curl -H 'Authorization: Bearer top-secret' -H 'X-Example-GWToken: token-123' --api-key other-secret https://example.test?token=query-secret";
+    const activity = activityFromTopic(topic("core.action", { action: "run_bash", status: "running", input: { cmd: raw } }));
+    expect(activity?.code).toBe("curl -H 'Authorization: ****' -H 'X-Example-GWToken: ****' --api-key **** https://example.test?token=****");
+    expect(activity?.code).not.toContain("top-secret");
+    expect(activity?.code).not.toContain("token-123");
+    expect(activity?.code).not.toContain("other-secret");
+    expect(activity?.code).not.toContain("query-secret");
+    expect(redactSensitiveDisplayText("echo ordinary=value token_count=123")).toBe("echo ordinary=value token_count=123");
+  });
+
   it("keeps the Bash command visible when a finish topic only carries its action kind", () => {
     const activity = activityFromTopic(topic("core.action", {
       action: "run_bash",
@@ -827,6 +900,24 @@ describe("web topic view model", () => {
     });
   });
 
+  it("redacts nested sensitive builtin-tool arguments while retaining ordinary options", () => {
+    const activity = activityFromTopic(topic("core.action", {
+      action: "remote_tool",
+      status: "running",
+      input: {
+        endpoint: "https://example.test",
+        headers: { Authorization: "Bearer top-secret", Accept: "application/json" },
+        api_key: "other-secret",
+      },
+    }));
+    expect(activity?.detail).toContain('endpoint="https://example.test"');
+    expect(activity?.detail).toContain('"Authorization":"****"');
+    expect(activity?.detail).toContain('"Accept":"application/json"');
+    expect(activity?.detail).toContain('api_key="****"');
+    expect(activity?.detail).not.toContain("top-secret");
+    expect(activity?.detail).not.toContain("other-secret");
+  });
+
   it("applies a structured cwd update only to the matching session", () => {
     const cwdUpdate = topic("core.action", {
       action: "self_tool",
@@ -870,6 +961,23 @@ describe("web topic view model", () => {
     expect(queued).toHaveLength(2);
     expect(queued.map((decision) => decision.event.session_id)).toEqual(["session_1", "session_2"]);
     expect(clearDecisionsForSession(queued, "session_1")).toEqual([second]);
+  });
+
+  it("keeps same-named turns in separate sessions isolated in the decision queue", () => {
+    const first = requestDecision(topic("core.request", { request_id: "req_1" }, "waiting_user"))!;
+    const second = requestDecision({
+      ...topic("core.request", { request_id: "req_2" }, "waiting_user"),
+      session_id: "session_2",
+    })!;
+    const decisions = [
+      { ...first, turnId: "turn_shared" },
+      { ...second, turnId: "turn_shared" },
+    ];
+
+    const grouped = groupDecisionsBySessionTurn(decisions);
+
+    expect(grouped.get(sessionTurnKey("session_1", "turn_shared"))).toEqual([decisions[0]]);
+    expect(grouped.get(sessionTurnKey("session_2", "turn_shared"))).toEqual([decisions[1]]);
   });
 
   it("queues concurrent decisions from different workers in the same session", () => {
@@ -1203,6 +1311,7 @@ describe("web topic view model", () => {
     const once = appendTurnEvent(active, "turn_1", event);
     const replayed = appendTurnEvent(once, "turn_1", event);
     expect(replayed.turns[0].events).toEqual([event]);
+    expect(replayed).toBe(once);
   });
 
   it("builds a source-turn-bound manual ToolGen command without inventing user text", () => {
@@ -1220,7 +1329,12 @@ describe("web topic view model", () => {
   it("does not apply a turn event to another session or another turn", () => {
     const first = upsertTurn(session("session_1"), turn("turn_1"));
     const event = { event_id: "event_x", source: "worker_activity", payload: { kind: "model_retry" }, created_at_ms: 2 };
-    expect(appendTurnEvent(first, "turn_2", event)).toEqual(first);
+    expect(appendTurnEvent(first, "turn_2", event)).toBe(first);
     expect(appendTurnEvent(session("session_2"), "turn_1", event).turns).toEqual([]);
+  });
+
+  it("does not recreate a session when a worker repeats its current state", () => {
+    const current = updateSessionWorkerState(session("session_1"), "worker_session_1", "working");
+    expect(updateSessionWorkerState(current, "worker_session_1", "working")).toBe(current);
   });
 });

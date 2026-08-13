@@ -3,21 +3,53 @@ import { applyAppearance, defaultAppearance, parseAppearance } from "../src/appe
 
 describe("web appearance preferences", () => {
   it("uses the operating-system theme for a new browser profile", () => {
-    expect(defaultAppearance(true)).toEqual({ theme: "light", font: "system", textSize: "medium" });
+    expect(defaultAppearance(true)).toEqual({
+      theme: "light",
+      userFont: "system",
+      userChineseFont: "system",
+      userBold: false,
+      agentFont: "system",
+      agentChineseFont: "system",
+      agentBold: false,
+      textSize: "medium",
+    });
     expect(defaultAppearance(false).theme).toBe("dark");
   });
 
   it("restores valid persisted choices", () => {
-    expect(parseAppearance('{"theme":"light","font":"serif","textSize":"large"}', false)).toEqual({
+    expect(parseAppearance('{"theme":"light","userFont":"serif","userChineseFont":"kaiti","userBold":false,"agentFont":"mono","agentChineseFont":"songti","agentBold":true,"textSize":"large"}', false)).toEqual({
       theme: "light",
-      font: "serif",
+      userFont: "serif",
+      userChineseFont: "kaiti",
+      userBold: false,
+      agentFont: "mono",
+      agentChineseFont: "songti",
+      agentBold: true,
       textSize: "large",
     });
   });
 
+  it("migrates old generic Chinese font choices to named typefaces", () => {
+    expect(parseAppearance('{"font":"mono","chineseFont":"sans"}', false)).toMatchObject({ userFont: "mono", agentFont: "mono", userChineseFont: "heiti", agentChineseFont: "heiti" });
+    expect(parseAppearance('{"chineseFont":"serif"}', false)).toMatchObject({ userChineseFont: "songti", agentChineseFont: "songti" });
+  });
+
+  it("keeps old saved appearance preferences and defaults the new Chinese font", () => {
+    expect(parseAppearance('{"theme":"light","font":"mono","textSize":"small"}', false)).toEqual({
+      theme: "light",
+      userFont: "mono",
+      userChineseFont: "system",
+      userBold: false,
+      agentFont: "mono",
+      agentChineseFont: "system",
+      agentBold: false,
+      textSize: "small",
+    });
+  });
+
   it("bounds malformed and unknown persisted values", () => {
-    expect(parseAppearance("not-json", false)).toEqual({ theme: "dark", font: "system", textSize: "medium" });
-    expect(parseAppearance('{"theme":"neon","font":"comic","textSize":"huge"}', true)).toEqual({ theme: "light", font: "system", textSize: "medium" });
+    expect(parseAppearance("not-json", false)).toEqual(defaultAppearance(false));
+    expect(parseAppearance('{"theme":"neon","font":"comic","chineseFont":"handwriting","textSize":"huge"}', true)).toEqual(defaultAppearance(true));
   });
 
   it("keeps native controls aligned with the selected theme", () => {

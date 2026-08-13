@@ -10,13 +10,19 @@ It may contain:
 - Session selection and rename controls, composer behavior, file-picker UI,
   session-scoped inline decision queues, activity rendering, completion telemetry, and context
   compaction presentation.
+- MCP server management presentation: transport-specific forms, connection and
+  tool-count status, per-Session enable switches, reconnect/edit/delete
+  controls, responsive layout, and redacted secret placeholders.
 - Bounded client history and strict session-aware reducers for WebSocket
   events, plus progressive DOM mounting and UI-owned scroll anchoring for long
   conversations.
+- Frame-budgeted, order-preserving inbound event batching; memoized turn
+  subtrees; and browser layout/paint containment for completed offscreen turns.
+  These presentation optimizations must not drop or reorder semantic events.
 
 It must not contain:
 
-- Provider/model networking, prompt or response-protocol parsing, memory/tool
+- Model service/model networking, prompt or response-protocol parsing, memory/tool
   execution, command approval policy, or audit persistence.
 - Reinterpretation of core topic semantics from unstructured strings when a
   shared structured field exists.
