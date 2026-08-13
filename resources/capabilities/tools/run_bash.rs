@@ -593,12 +593,10 @@ fn validate_bash_safety(command: &str) -> Result<(), String> {
             continue;
         }
         i += 1;
-        while i < words.len() && is_assignment_word(&words[i]) {
-            i += 1;
-        }
-        if i >= words.len() || words[i] != "rm" {
+        let Some(rm_index) = rm_command_index(&words, i) else {
             continue;
-        }
+        };
+        i = rm_index;
 
         let mut recursive = false;
         let mut force = false;
@@ -734,6 +732,64 @@ fn is_assignment_word(word: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn rm_command_index(words: &[String], mut i: usize) -> Option<usize> {
+    while i < words.len() && !is_command_separator(&words[i]) {
+        if is_assignment_word(&words[i]) {
+            i += 1;
+            continue;
+        }
+        match words[i].as_str() {
+            "rm" => return Some(i),
+            "command" | "builtin" | "exec" | "nohup" => {
+                i += 1;
+            }
+            "sudo" => {
+                i += 1;
+                while i < words.len() && !is_command_separator(&words[i]) {
+                    let word = words[i].as_str();
+                    if word == "--" {
+                        i += 1;
+                        break;
+                    }
+                    if !word.starts_with('-') || word == "-" {
+                        break;
+                    }
+                    i += 1;
+                    if matches!(word, "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+                        i += 1;
+                    }
+                }
+            }
+            "env" => {
+                i += 1;
+                while i < words.len() && !is_command_separator(&words[i]) {
+                    let word = words[i].as_str();
+                    if is_assignment_word(word) {
+                        i += 1;
+                        continue;
+                    }
+                    if word == "--" {
+                        i += 1;
+                        break;
+                    }
+                    if !word.starts_with('-') || word == "-" {
+                        break;
+                    }
+                    i += 1;
+                    if matches!(
+                        word,
+                        "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string"
+                    ) {
+                        i += 1;
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn is_dangerous_rm_target(target: &str) -> bool {

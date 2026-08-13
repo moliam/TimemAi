@@ -9,8 +9,6 @@ fn test_core(name: &str) -> AgentCore {
     AgentCore::new(
         "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test".to_string(),
         },
         dir,
@@ -269,8 +267,8 @@ fn non_ascii_action_burst_uses_conservative_token_estimation() {
 }
 
 #[test]
-fn provider_overflow_recovery_removes_only_latest_action_results() {
-    let mut core = test_core("provider_overflow_recovery");
+fn model_input_overflow_recovery_removes_only_latest_action_results() {
+    let mut core = test_core("model_input_overflow_recovery");
     core.set_max_llm_input_tokens(20_000);
     core.append_delta(vec![
         (
@@ -284,7 +282,7 @@ fn provider_overflow_recovery_removes_only_latest_action_results() {
     ]);
 
     let recovery = core
-        .recover_from_model_input_too_large("provider_http_400: context_length_exceeded")
+        .recover_from_model_input_too_large("model_http_400: context_length_exceeded")
         .expect("latest action result should be recoverable");
     let step = recovery.step;
     let CoreStep::NeedModel { prompt, .. } = step else {
@@ -295,13 +293,13 @@ fn provider_overflow_recovery_removes_only_latest_action_results() {
     assert!(prompt.contains("Your action's output is too large:"));
     assert!(prompt.contains("context_length_exceeded"));
     assert!(core
-        .recover_from_model_input_too_large("provider_http_413")
+        .recover_from_model_input_too_large("model_http_413")
         .is_none());
 }
 
 #[test]
-fn provider_overflow_does_not_delete_older_action_history() {
-    let mut core = test_core("provider_overflow_keeps_old_history");
+fn model_input_overflow_does_not_delete_older_action_history() {
+    let mut core = test_core("model_input_overflow_keeps_old_history");
     core.append_delta(vec![(
         "result_of_llm_action".to_string(),
         "Action result: run_bash\nOLDER_RESULT".to_string(),
@@ -312,7 +310,7 @@ fn provider_overflow_does_not_delete_older_action_history() {
     )]);
 
     assert!(core
-        .recover_from_model_input_too_large("provider_http_413")
+        .recover_from_model_input_too_large("model_http_413")
         .is_none());
     let prompt = core.render_prompt();
     assert!(prompt.contains("OLDER_RESULT"));
@@ -323,4 +321,135 @@ fn provider_overflow_does_not_delete_older_action_history() {
 fn action_result_pid_extracts_timeout_pid_for_action_topic_metadata() {
     let result = "Action result: run_bash\npid=49189, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.\nCommand: sleep 18";
     assert_eq!(super::action_result_pid(result), Some(49189));
+}
+
+fn test_mcp_tool(action_name: &str, description: &str) -> mcp::McpTool {
+    mcp::McpTool {
+        server_id: "test_server".to_string(),
+        server_name: "Test MCP".to_string(),
+        name: action_name.to_string(),
+        action_name: action_name.to_string(),
+        description: description.to_string(),
+        input_schema: json!({ "type": "object", "properties": {} }),
+    }
+}
+
+#[test]
+fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
+    let mut core = test_core("mcp_deferred_update");
+    let original = test_mcp_tool("mcp.test.echo", "Original description");
+    core.configure_mcp(
+        CapabilityRegistry::builtin(),
+        mcp::McpRuntime::default(),
+        Vec::new(),
+        vec![original.clone()],
+    )
+    .unwrap();
+    assert!(core.pending_prompt_components.is_empty());
+
+    assert!(!core
+        .apply_mcp_update(
+            CapabilityRegistry::builtin(),
+            mcp::McpRuntime::default(),
+            Vec::new(),
+            vec![original],
+        )
+        .unwrap());
+    assert!(core.pending_prompt_components.is_empty());
+
+    assert!(core
+        .apply_mcp_update(
+            CapabilityRegistry::builtin(),
+            mcp::McpRuntime::default(),
+            Vec::new(),
+            vec![
+                test_mcp_tool("mcp.test.echo", "Updated description"),
+                test_mcp_tool("mcp.test.search", "Search description"),
+            ],
+        )
+        .unwrap());
+    assert_eq!(core.pending_prompt_components.len(), 1);
+    let prompt = core.build_next_prompt();
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("MCP capabilities changed for this user request."));
+    assert!(prompt.contains("Newly available actions: mcp.test.search."));
+    assert!(prompt.contains("Updated action definitions: mcp.test.echo."));
+
+    assert!(core
+        .apply_mcp_update(
+            CapabilityRegistry::builtin(),
+            mcp::McpRuntime::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap());
+    let prompt = core.build_next_prompt();
+    assert!(prompt.contains("Actions no longer available: mcp.test.echo, mcp.test.search."));
+}
+
+#[test]
+fn active_mcp_compact_note_is_deterministic_and_bounded() {
+    let mut core = test_core("bounded_mcp_compact_note");
+    let tools = (0..300)
+        .map(|index| {
+            test_mcp_tool(
+                &format!("mcp.large.action_{index:03}_{}", "x".repeat(80)),
+                "Large generated test action",
+            )
+        })
+        .collect::<Vec<_>>();
+    core.configure_mcp(
+        CapabilityRegistry::builtin(),
+        mcp::McpRuntime::default(),
+        Vec::new(),
+        tools,
+    )
+    .unwrap();
+
+    let first = core.active_mcp_compact_note().unwrap();
+    let second = core.active_mcp_compact_note().unwrap();
+    assert_eq!(first, second);
+    assert!(first.chars().count() <= MAX_MCP_COMPACT_NOTE_CHARS);
+    assert!(first.contains("additional active MCP actions are omitted"));
+    assert!(first.contains("current capability catalog"));
+}
+
+#[test]
+fn multiple_successful_compacts_reinject_active_mcp_only_once() {
+    let mut core = test_core("multiple_compacts_mcp_note");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.configure_mcp(
+        CapabilityRegistry::builtin(),
+        mcp::McpRuntime::default(),
+        Vec::new(),
+        vec![test_mcp_tool("mcp.test.echo", "Echo")],
+    )
+    .unwrap();
+    core.append_delta(vec![("user_question".to_string(), "old one".to_string())]);
+    core.append_delta(vec![("user_question".to_string(), "old two".to_string())]);
+    let first_id = core.deltas[0].delta_id.clone();
+    let second_id = core.deltas[1].delta_id.clone();
+
+    let step = core.apply_model_response(LlmResponse {
+        content: serde_json::json!({
+            "free_talk": "compact both",
+            "context_compact": [
+                { "discard": [first_id], "summary": "first summary" },
+                { "discard": [second_id], "summary": "second summary" }
+            ]
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("context compact should continue with a model request")
+    };
+    assert_eq!(
+        prompt
+            .matches("Active MCP capabilities after context compaction")
+            .count(),
+        1
+    );
 }

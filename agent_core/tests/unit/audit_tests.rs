@@ -26,14 +26,14 @@ fn model_input_overflow_recovery_event_keeps_delta_and_size_evidence() {
         "turn_1",
         "pd_7",
         131_072,
-        "provider_http_413: payload too large",
+        "model_http_413: payload too large",
     );
     assert_eq!(event["type"], "model_input_overflow_recovery");
     assert_eq!(event["session"], "session_1");
     assert_eq!(event["turn_id"], "turn_1");
     assert_eq!(event["removed_delta_id"], "pd_7");
     assert_eq!(event["removed_action_output_bytes"], 131_072);
-    assert_eq!(event["error"], "provider_http_413: payload too large");
+    assert_eq!(event["error"], "model_http_413: payload too large");
 }
 
 #[test]
@@ -118,7 +118,6 @@ fn turn_audit_event_builders_keep_runtime_schema_in_core() {
         "shell",
         "s",
         ".test_mem",
-        "aliyun",
         "https://example.test/v1",
         &crate::ApiProtocol::OpenAiCompatible,
         "qwen-plus",
@@ -126,8 +125,6 @@ fn turn_audit_event_builders_keep_runtime_schema_in_core() {
         crate::BashApprovalMode::Approve,
     );
     assert_eq!(host_start["type"], "shell_start");
-    assert_eq!(host_start["gateway_provider"], "aliyun");
-    assert_eq!(host_start["provider"], "aliyun");
     assert_eq!(host_start["api_protocol"], "openai-compatible");
     assert_eq!(host_start["bash_approval"], "approve");
 
@@ -164,8 +161,7 @@ fn action_related_audit_event_builders_are_structured() {
     assert_eq!(approval_event["approval_id"], "approval_1");
     assert_eq!(approval_event["approved"], true);
 
-    let retry =
-        model_retry_audit_event("s", "t", 1, 5, Duration::from_secs(10), "provider_http_500");
+    let retry = model_retry_audit_event("s", "t", 1, 5, Duration::from_secs(10), "model_http_500");
     assert_eq!(retry["type"], "model_retry");
     assert_eq!(retry["delay_ms"], 10_000);
 

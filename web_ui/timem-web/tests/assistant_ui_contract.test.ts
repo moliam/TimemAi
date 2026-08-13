@@ -47,10 +47,17 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toMatch(/\.composer-wrap\s*\{[^}]*z-index:\s*3;/);
     expect(source).toContain("ThreadPrimitive.ScrollToBottom");
     expect(source).toContain('title="Scroll to latest message" aria-label="Scroll to latest message"');
-    expect(source).toContain("scrollToBottomOnThreadSwitch");
+    expect(source).toContain("autoScroll={false}");
+    expect(source).toContain("scrollToBottomOnInitialize={false}");
+    expect(source).toContain("scrollToBottomOnRunStart={false}");
+    expect(source).toContain("scrollToBottomOnThreadSwitch={false}");
+    expect(styles).toMatch(/\.chat-scroll\s*\{[^}]*overflow-anchor:\s*none;/);
+    expect(source).toContain("sessionScrollPositionsRef");
+    expect(source).toContain('viewport.style.scrollBehavior = "auto";');
+    expect(source).toContain("restoreSessionScrollTop(position, viewport.scrollHeight)");
     expect(source).toContain("followThreadLatest.current = isNearScrollBottom");
     expect(source).toContain("viewport.scrollTop = viewport.scrollHeight");
-    expect(source).toContain("[latestTurn?.turn_id]");
+    expect(source).toContain("[activeSessionId, latestTurn?.turn_id]");
   });
 
   it("keeps the composer usable on narrow screens while stop and tool buttons are visible", () => {
@@ -67,13 +74,12 @@ describe("assistant-ui thread integration", () => {
   it("makes disabled high-frequency controls visibly non-interactive", () => {
     expect(styles).toContain("button:disabled { cursor: not-allowed; }");
     expect(styles).toContain(".composer textarea:disabled { opacity: .62; cursor: not-allowed; }");
-    expect(styles).toContain(".send-button:disabled, .stop-button:disabled, .attach-button:disabled, .toolrepo-toggle:disabled, .new-session:disabled, .load-history:disabled, .decision-actions button:disabled, .completion-toolgen:disabled");
+    expect(styles).toContain(".send-button:disabled, .stop-button:disabled, .attach-button:disabled, .new-session:disabled, .load-history:disabled, .decision-actions button:disabled, .completion-toolgen:disabled");
+    expect(styles).toContain(".mem-card:disabled");
     expect(styles).toContain(".send-button:disabled:hover");
     expect(styles).toContain(".attach-button:disabled:hover");
-    expect(styles).toContain(".toolrepo-toggle:disabled:hover");
     expect(styles).toContain(':root[data-theme="light"] .send-button:disabled:hover');
     expect(styles).toContain(':root[data-theme="light"] .attach-button:disabled:hover');
-    expect(styles).toContain(':root[data-theme="light"] .toolrepo-toggle:disabled:hover');
     expect(styles).toContain(':root[data-theme="light"] .load-history:disabled:hover');
   });
 
@@ -95,8 +101,8 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain("outline-color: #167669");
   });
 
-  it("labels working-turn input as a supplement instead of a fresh send", () => {
-    expect(source).toContain('const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Send supplement" : "Send message";');
+  it("queues working-turn input while keeping an explicit supplement escape hatch", () => {
+    expect(source).toContain('const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Queue message" : "Send message";');
     expect(source).toContain('const missingSessionHint = activeSession ? "" : "Create a session before using Timem";');
     expect(source).toContain('const uploadingAttachmentText = uploadingAttachmentFile ? `Uploading ${uploadingAttachmentFile.name}` : "Uploading file…";');
     expect(source).toContain('`${uploadingAttachmentText} · send is paused until it finishes`');
@@ -106,7 +112,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('placeholder={!activeSession ? "Create a session to start…"');
     expect(source).toContain('aria-describedby={composerHintId}');
     expect(source).toContain('title={composerHint}');
-    expect(source).toContain('<div className="composer-actions"><span id={composerHintId} role="status" aria-live="polite">{composerHint}</span>');
+    expect(source).toContain('<div className="composer-actions"><span className="composer-cwd-inline"');
+    expect(source).toContain('<span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span>');
+    expect(source).toContain('<b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span>');
     expect(source).toContain('title={effectiveSendLabel}');
     expect(source).toContain('aria-label={effectiveSendLabel}');
     expect(source).toContain('className={`send-button ${submittingDraft ? "sending" : ""}`}');
@@ -119,9 +127,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"}');
   });
 
-  it("progressively mounts long task history and preserves the reading position", () => {
-    expect(source).toContain("INITIAL_RENDERED_TURNS = 24");
-    expect(source).toContain("TURN_HISTORY_PAGE_SIZE = 24");
+  it("loads older stored history explicitly and preserves the reading position", () => {
     expect(source).toContain("STORED_HISTORY_PAGE_SIZE = 200");
     expect(source).toContain("previousScrollMetrics.current");
     expect(source).toContain("preservePrependScrollTop(previous, viewport.scrollHeight)");
@@ -138,6 +144,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".load-history");
     expect(styles).toContain(".load-history.loading svg");
     expect(styles).toContain(".load-history.loading svg, .send-button.sending svg");
+    expect(source).not.toContain("event.currentTarget.scrollTop <= 48");
   });
 
   it("keeps multi-session navigation reachable on mobile", () => {
@@ -162,71 +169,39 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".icon-button.mobile-session-button { display: grid;");
   });
 
-  it("defaults the diagnostic activity panel to hidden", () => {
-    expect(source).toContain("const [showActivity, setShowActivity] = useState(false);");
-    expect(source).toContain("if (!showActivity) return;");
-    expect(source).toContain("const sidePanelButtonRef = useRef<HTMLButtonElement | null>(null);");
-    expect(source).toContain("const closeSidePanel = useCallback(() => {");
-    expect(source).toContain("sidePanelButtonRef.current?.focus({ preventScroll: true });");
-    expect(source).toContain('if (event.key === "Escape") closeSidePanel()');
-  });
-
-  it("lets the session tools side panel collapse from the header, Escape key, and narrow-screen backdrop", () => {
-    expect(source).toContain('const sessionActivityCount = sessionActivities.length;');
-    expect(source).toContain('const sidePanelLabel = `${showActivity ? "Close" : "Open"} session tools and activity${sessionActivityCount ? `, ${sessionActivityCount} updates` : ""}`;');
-    expect(source).toContain('aria-expanded={showActivity}');
-    expect(source).toContain('aria-expanded={showActivity} aria-controls="session-side-panel"');
-    expect(source).toContain('title={sidePanelLabel} aria-label={sidePanelLabel}');
-    expect(source).toContain('className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`}');
-    expect(source).toContain('{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}');
-    expect(source).toContain('ref={sidePanelButtonRef} title={sidePanelLabel}');
-    expect(source).toContain('setShowAppearance(false); setShowRuntime(false); if (showActivity) closeSidePanel(); else setShowActivity(true);');
-    expect(source).toContain("const switchSidePanelTabFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>)");
-    expect(source).toContain('const tabButton = tab === "tools" ? toolsTabRef.current : activityTabRef.current;');
-    expect(source).toContain('tabButton?.focus({ preventScroll: true });');
-    expect(source).toContain('if (event.key === "ArrowLeft" || event.key === "Home")');
-    expect(source).toContain("toolsTabRef.current?.focus();");
-    expect(source).toContain('} else if (event.key === "ArrowRight" || event.key === "End")');
-    expect(source).toContain("activityTabRef.current?.focus();");
-    expect(source).toContain('role="tablist" aria-label="Session side panel sections" onKeyDown={switchSidePanelTabFromKeyboard}');
-    expect(source).toContain('ref={toolsTabRef} type="button" id="side-panel-tab-tools" role="tab" aria-label={`ToolRepo, ${session?.tools.length ?? 0} tools`} aria-controls="side-panel-tools"');
-    expect(source).toContain('ref={activityTabRef} type="button" id="side-panel-tab-activity" role="tab" aria-label={`Activity, ${activities.length} updates`} aria-controls="side-panel-activity"');
-    expect(source).toContain('const activityTabCount = activities.length > 99 ? "99+" : String(activities.length);');
-    expect(source).toContain('>Activity<small aria-hidden="true">{activityTabCount}</small></button>');
-    expect(source).toContain('ToolRepo{session && <> <small aria-hidden="true">{session.tools.length}</small></>}');
-    expect(source).toContain('tabIndex={tab === "tools" ? 0 : -1}');
-    expect(source).toContain('tabIndex={tab === "activity" ? 0 : -1}');
-    expect(source).toContain('onClearActivities={() => {');
-    expect(source).toContain('setActivities((current) => current.filter((activity) => activity.sessionId !== sessionId));');
-    expect(source).toContain('tab === "activity" && activities.length > 0 && <button type="button" className="side-panel-clear"');
-    expect(source).toContain('aria-label={`Clear ${activities.length} current session activity updates`}');
-    expect(source).toContain('type="button" className="icon-button" title="Close side panel"');
-    expect(source).toContain('id="side-panel-tools" className="toolrepo-panel" role="tabpanel" aria-labelledby="side-panel-tab-tools"');
-    expect(source).toContain('id="side-panel-activity" className="activity-list" role="tabpanel" aria-labelledby="side-panel-tab-activity"');
-    expect(source).toContain('<button type="button" className="side-panel-backdrop" aria-label="Close session tools and activity" onClick={closeSidePanel}');
-    expect(source).toContain('onClose={closeSidePanel}');
-    expect(source).toContain('aria-label="Close session tools and activity"');
-    expect(source).toContain('id="session-side-panel" ref={panelRef} className="activity-panel session-side-panel" aria-label="Session tools and activity panel" tabIndex={-1}');
-    expect(source).toContain('const sidePanelRef = useRef<HTMLElement | null>(null);');
-    expect(source).toContain('sidePanelRef.current?.focus({ preventScroll: true });');
-    expect(source).toContain('panelRef={sidePanelRef}');
-    expect(source).toContain('ref={panelRef} className="activity-panel session-side-panel" aria-label="Session tools and activity panel" tabIndex={-1}');
+  it("keeps ToolRepo as a dedicated panel without the diagnostic Activity feed", () => {
+    expect(source).toContain("const [showToolRepo, setShowToolRepo] = useState(false);");
+    expect(source).toContain("const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);");
+    expect(source).toContain("const toolRepoPanelRef = useRef<HTMLElement | null>(null);");
+    expect(source).toContain("const closeToolRepoPanel = useCallback(() => {");
+    expect(source).toContain("toolRepoButtonRef.current?.focus({ preventScroll: true });");
+    expect(source).toContain('if (event.key === "Escape") closeToolRepoPanel()');
+    expect(source).toContain('const activeToolCount = activeSession?.tools.length ?? 0;');
+    expect(source).toContain('const toolRepoLabel = showToolRepo ? "Close ToolRepo" : `Open ToolRepo · ${activeToolCount} reusable tools`;');
+    expect(source).toContain('aria-expanded={showToolRepo} aria-controls="toolrepo-panel"');
+    expect(source).toContain('ref={toolRepoButtonRef} title={toolRepoLabel} aria-label={toolRepoLabel}');
+    expect(source).toContain('<Wrench size={17}/><span className="toolrepo-header-count" aria-hidden="true">{activeToolCount}</span>');
+    expect(source).toContain('<button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}');
+    expect(source).toContain('function ToolRepoPanel');
+    expect(source).toContain('id="toolrepo-panel" ref={panelRef} className="toolrepo-side-panel session-side-panel" aria-label="ToolRepo" tabIndex={-1}');
+    expect(source).toContain('<strong>ToolRepo</strong>');
+    expect(source).toContain('<div className="side-panel-title"><Wrench size={15}/><strong>ToolRepo</strong></div>');
+    expect(source).not.toContain('<strong>ToolRepo</strong>{session && <small>');
+    expect(source).not.toContain('side-panel-tab-activity');
+    expect(source).not.toContain('>Activity<');
+    expect(source).not.toContain('function ActivityListItem');
+    expect(source).not.toContain('activity-count-badge');
     expect(styles).toContain(".side-panel-backdrop");
     expect(styles).toContain("z-index: 3");
-    expect(styles).toContain(".app-shell, .app-shell:has(.activity-panel)");
-    expect(styles).toContain(".activity-panel { position: fixed; z-index: 4;");
-    expect(styles).toContain(".side-panel-header-actions");
-    expect(styles).toContain(".side-panel-clear");
-    expect(styles).toContain(".side-panel-button { position: relative; }");
-    expect(styles).toContain(".activity-count-badge");
-    expect(styles).toContain(':root[data-theme="light"] .activity-count-badge');
+    expect(styles).toContain(".app-shell, .app-shell:has(.toolrepo-side-panel)");
+    expect(styles).toContain(".toolrepo-side-panel { position: fixed; z-index: 4;");
   });
 
   it("keeps narrow-screen panels as overlays so the chat and composer stay usable", () => {
-    expect(styles).toContain("@media (max-width: 1050px) { .app-shell, .app-shell:has(.activity-panel) { grid-template-columns: 214px minmax(0, 1fr); }");
-    expect(styles).toContain(".activity-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); }");
+    expect(styles).toContain("@media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 214px minmax(0, 1fr); }");
+    expect(styles).toContain(".toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); }");
     expect(styles).toContain(".side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0;");
-    expect(styles).toContain("@media (max-width: 720px) { .app-shell, .app-shell:has(.activity-panel) { grid-template-columns: 1fr; }");
+    expect(styles).toContain("@media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; }");
     expect(styles).toContain(".sidebar { display: flex; visibility: hidden; position: fixed; z-index: 12;");
     expect(styles).toContain(".mobile-sidebar-backdrop { display: block; position: fixed; z-index: 11;");
     expect(styles).toContain(".chat-scroll { padding: 24px 17px; }");
@@ -238,16 +213,16 @@ describe("assistant-ui thread integration", () => {
 
   it("labels the runtime settings control for assistive and contract testing", () => {
     expect(source).toContain('const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";');
-    expect(source).toContain('title={runtimeLabel} aria-label={runtimeLabel}');
+    expect(source).toContain('aria-label={`${runtimeLabel}: ${headerModelLabel}`}');
     expect(source).toContain('aria-expanded={showRuntime}');
     expect(source).toContain('aria-expanded={showRuntime} aria-controls="runtime-panel"');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card"');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings"');
-    expect(source).toContain('const inputLabel = `${option.key} current value`;');
-    expect(source).toContain('const applyLabel = pending ? `Applying ${option.key}` : dirty ? `Apply ${option.key}` : `${option.key} has no changes`;');
+    expect(source).toContain('const inputLabel = `${optionLabel} current value`;');
+    expect(source).toContain('const applyLabel = pending ? `Applying ${optionLabel}` : dirty ? `Apply ${optionLabel}` : `${optionLabel} has no changes`;');
     expect(source).toContain('title={inputLabel} aria-label={inputLabel}');
     expect(source).toContain('title={applyLabel} aria-label={applyLabel}');
-    expect(source).toContain('setShowAppearance(false); setShowActivity(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true);');
+    expect(source).toContain('setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true);');
   });
 
   it("shows the runtime bind host and public-token mode from the server snapshot", () => {
@@ -259,20 +234,19 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain("localhost:{server.port}");
   });
 
-  it("opens ToolRepo from the composer and keeps the tool count inside the control", () => {
-    expect(source).toContain('const [sidePanelTab, setSidePanelTab] = useState<"tools" | "activity">("tools")');
-    expect(source).toContain('const toolRepoTitle = missingSessionHint || lockedControlHint || `Open ToolRepo · ${toolCount} tools`;');
-    expect(source).toContain('const toolRepoLabel = missingSessionHint || lockedControlHint || `Open ToolRepo with ${toolCount} tools`;');
-    expect(source).toContain('title={toolRepoTitle}');
+  it("opens ToolRepo from the header and keeps the composer focused on message actions", () => {
+    expect(source).toContain('const [showToolRepo, setShowToolRepo] = useState(false);');
     expect(source).toContain('aria-label={toolRepoLabel}');
-    expect(source).toContain('onClick={onOpenToolRepo}');
-    expect(source).toContain('onOpenToolRepo={() => { setShowAppearance(false); setShowRuntime(false); setSidePanelTab("tools"); setShowActivity(true); }}');
+    expect(source).toContain('className={`icon-button toolrepo-header-button ${showToolRepo ? "selected" : ""} ${toolCountPulseSessionId === activeSession?.session_id ? "count-pulse" : ""}`}');
+    expect(source).not.toContain('className={`toolrepo-toggle');
+    expect(source).not.toContain('onOpenToolRepo: () => void;');
     expect(source).not.toContain('type: "toolgen_set"');
     expect(source).not.toContain('aria-pressed={toolgenEnabled}');
     expect(source).toContain('event.type === "tool_repo_updated"');
     expect(source).toContain('event.session_id !== activeSessionIdRef.current');
     expect(source).toContain('event.query !== toolSearchQueryRef.current');
-    expect(styles).toContain(".toolrepo-toggle");
+    expect(styles).toContain(".toolrepo-header-button");
+    expect(styles).toContain(".toolrepo-header-count");
     expect(styles).toContain("@keyframes tool-count-pulse");
   });
 
@@ -361,12 +335,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }}');
     expect(source).toContain('closeMemSwitchDialog();');
     expect(source).toContain("const validationText = pending");
-    expect(source).toContain("Use a simple mem space name without slashes or '..'.");
-    expect(source).toContain("This is the current mem space.");
+    expect(source).toContain("Enter an absolute mem directory path on the Timem host.");
+    expect(source).toContain("This is the current mem directory.");
     expect(source).toContain('const descriptionId = "mem-switch-dialog-description";');
     expect(source).toContain('const statusId = "mem-switch-dialog-status";');
     expect(source).toContain('const describedBy = validationText ? `${descriptionId} ${statusId}` : descriptionId;');
-    expect(source).toContain('aria-label="Switch memory space" aria-describedby={describedBy}');
+    expect(source).toContain('aria-label="Switch memory directory" aria-describedby={describedBy}');
     expect(source).toContain('<p id={descriptionId}>Switching mem stops current workers');
     expect(source).toContain('id={statusId} className="mem-validation" role="status" aria-live="polite"');
     expect(source).toContain('title={validationText || "Switch mem"}');
@@ -432,7 +406,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const pendingTool = pendingToolDetailId ? sortedTools.find((tool) => tool.tool_id === pendingToolDetailId) : undefined;");
     expect(source).toContain('const loadingDetail = pendingToolDetailId === tool.tool_id;');
     expect(source).toContain('const renamingTool = pendingToolRenameIds.has(tool.tool_id);');
-    expect(source).toContain('useEffect(() => {\n    setRenameToolId("");\n    setRenameValue("");\n    setContextMenu(null);\n  }, [session?.session_id, tab]);');
+    expect(source).toContain('useEffect(() => {\n    setRenameToolId("");\n    setRenameValue("");\n    setContextMenu(null);\n  }, [session?.session_id]);');
     expect(source).toContain('useEffect(() => {\n    setContextMenu(null);\n  }, [searchQuery, sort, selectedTool?.summary.tool_id, tools.length]);');
     expect(source).toContain('const pendingToolDetailLabel = pendingTool ? `Loading ${pendingTool.name} tool directory` : "";');
     expect(source).toContain('aria-busy={loadingDetail || renamingTool || undefined}');
@@ -501,10 +475,6 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('placeholder={session ? "Search names and code" : "Select a session first"}');
     expect(source).toContain("disabled={!session} onChange");
     expect(source).toContain("clear search to show all saved tools");
-    expect(source).toContain('const activityEmptyTitle = session ? "No activity yet" : "No active session";');
-    expect(source).toContain("Select or create a session to inspect runtime activity.");
-    expect(source).toContain('className="activity-empty" aria-label={`${activityEmptyTitle}. ${activityEmptyText}`}');
-    expect(source).toContain("<strong>{activityEmptyTitle}</strong><span>{activityEmptyText}</span>");
     expect(source).toContain('aria-label="Tool directory tree"');
     expect(source).toContain('aria-label="Collapse tool detail"');
     expect(source).toContain('if (event.key === "Escape") setContextMenu(null);');
@@ -571,34 +541,6 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".toolrepo-item:focus-visible");
   });
 
-  it("shows a quiet empty state for the activity tab", () => {
-    expect(source).toContain('const activityEmptyTitle = session ? "No activity yet" : "No active session";');
-    expect(source).toContain("Runtime updates will appear here while this session works.");
-    expect(source).toContain("Select or create a session to inspect runtime activity.");
-    expect(source).toContain('className="activity-empty" aria-label={`${activityEmptyTitle}. ${activityEmptyText}`}');
-    expect(source).toContain("<strong>{activityEmptyTitle}</strong><span>{activityEmptyText}</span>");
-    expect(source).toContain("activities.length === 0");
-    expect(styles).toContain(".activity-empty strong");
-    expect(styles).toContain(".activity > div, .activity summary > div, .activity-body, .activity-detail, .activity .message-content { min-width: 0; overflow-wrap: anywhere; }");
-    expect(styles).toContain(".activity-detail { max-height: min(320px, 45vh); overflow: auto;");
-  });
-
-  it("lets expanded activity details collapse again", () => {
-    expect(source).toContain("function ActivityListItem");
-    expect(source).toContain("const [open, setOpen] = useState(false);");
-    expect(source).toContain('return <details className={`activity ${activity.tone}`');
-    expect(source).toContain('onToggle={(event) => setOpen(event.currentTarget.open)}');
-    expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"} Activity 详情${activity.title ? `：${activity.title}` : ""}`;');
-    expect(source).toContain('aria-label={summaryLabel}');
-    expect(source).toContain('className="activity-expand-label">{open ? "收起" : "展开"}</span>');
-    expect(source).toContain('className="activity-collapse top" title="Collapse activity details" aria-label="Collapse activity details" onClick={collapse}>收起详情</button>');
-    expect(source).toContain('className="activity-collapse" title="Collapse activity details" aria-label="Collapse activity details" onClick={collapse}>收起详情</button>');
-    expect(styles).toContain(".activity:is(details) { display: block; }");
-    expect(styles).toContain(".activity summary { display: grid;");
-    expect(styles).toContain(".activity-collapse");
-    expect(styles).toContain(':root[data-theme="light"] .activity-collapse');
-  });
-
   it("provides a keyboard reachable ToolRepo terminal action on each tool row", () => {
     expect(source).toContain('className="toolrepo-open"');
     expect(source).toContain('title={`Open ${tool.name} directory in terminal`}');
@@ -615,7 +557,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();");
     expect(source).toContain('const running = status === "running" || status === "background_running";');
     expect(source).toContain("const [open, setOpen] = useState(true);");
-    expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
+    expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
     expect(source).toContain("const toolName = toolDisplayName(activity.tool_name || activity.title);");
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;');
     expect(source).toContain("const summaryContent = <>");
@@ -641,10 +583,27 @@ describe("assistant-ui thread integration", () => {
     expect(viewModelSource).toContain('if (name === "self_tool") return "Self tool";');
   });
 
-  it("makes the live working label larger than regular work stream text", () => {
+  it("carries the live working marker into the completed Thought Action chip", () => {
     expect(styles).toContain(".turn-assistant-frame.working .working-chip { font-size: 14px; font-weight: 720; color: #7ebce8; letter-spacing: 0; }");
     expect(styles).toContain(".turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; }");
-    expect(styles).toContain(".turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 2px; color: #aaa; font-size: 12px;");
+    expect(source).toContain("working-chip work-title-chip active-work-title");
+    expect(source).toContain("working-chip work-title-chip completed-work-title work-collapse-toggle");
+    expect(styles).toContain(".working-chip.work-title-chip { min-height: 24px; padding: 0 9px 0 7px; border: 1px solid #4b4b4b; border-radius: 999px; background: #303030; }");
+    expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 76px; color: #8fc9f1; font-size: 10px; font-weight: 700; letter-spacing: 0; }");
+    expect(styles).toContain(".turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 6px; color: #aaa; font-size: 12px;");
+  });
+
+  it("renders Thought Action as an independent trigger attached to a softly tinted process panel", () => {
+    expect(styles).toContain(".turn-assistant-frame { position: relative; overflow: visible; padding-left: 0; border: 0; border-radius: 0; background: transparent;");
+    expect(styles).toContain('.turn-user-frame { width: fit-content; max-width: min(86%, 680px); margin: 0 0 11px auto; }');
+    expect(styles).toContain('.turn-user-content::after { content: ""; position: absolute; z-index: 2; inset: 0 0 0 auto; width: 1.5px; border-radius: 0 18px 18px 0; background: rgb(109 122 130 / 60%);');
+    expect(styles).toContain('.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border-radius: 11px; background: #353535; }');
+    expect(styles).not.toContain('.turn-work-panel::before');
+    expect(styles).not.toContain('.turn-assistant-heading::after');
+    expect(styles).toContain('.turn-work-scroll { padding: 14px 10px 7px; }');
+    expect(styles).toContain(':root[data-theme="light"] .turn-work-panel { background: #fafbfb; }');
+    expect(styles).toContain(':root[data-theme="light"] .turn-user-content::after { background: rgb(145 160 168 / 60%); }');
+    expect(source).toContain('{showWorkStream && <div className="turn-work-panel">');
   });
 
   it("keeps ToolGen retrospective attached to its final delivery", () => {
@@ -686,6 +645,14 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("rehypePlugins={[rehypeHighlight]}");
     expect(source).toContain("fencedCode(activity.code_language ?? \"text\", activity.code)");
     expect(viteConfig).toContain('highlighting: ["highlight.js", "rehype-highlight"]');
+  });
+
+  it("renders Bash activity commands with the interface font at normal weight", () => {
+    expect(source).toContain('const bashActivity = activity.tool_name === "run_bash";');
+    expect(source).toContain('bashActivity ? "bash-activity" : ""');
+    expect(styles).toContain(".tool-activity.bash-activity .tool-activity-body .code-block code *");
+    expect(styles).toContain("font-family: var(--ui-font);");
+    expect(styles).toContain("font-weight: 400;");
   });
 
   it("renders completion telemetry below final answers", () => {
@@ -779,7 +746,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());");
     expect(source).toContain("reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession)");
     expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent)");
-    expect(source).toContain("const sent = onSend(reserved.text);");
+    expect(source).toContain("const sent = queueInstead || onSend(reserved.text);");
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
     expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
     expect(source).toContain("pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)");
@@ -822,7 +789,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked}');
     expect(source).toContain('aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined}');
     expect(source).toContain('disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id);');
-    expect(source).toContain('disabled={runtimeLocked || renamingSession} onClick={() => beginRename(session)}');
+    expect(source).toContain('onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}');
     expect(source).toContain("sessionRenameDecision(");
     expect(styles).toContain(".session:disabled, .session-expand:disabled");
     expect(styles).toContain(".session:disabled:hover, .session-expand:disabled:hover");
@@ -859,19 +826,24 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("renders live task usage and session context without replacing final telemetry", () => {
-    expect(source).toContain("<ContextUsageBar session={activeSession}");
+    expect(source).toContain("<HeaderContextUsage session={activeSession}");
     expect(source).toContain("<LiveTurnUsage turn={turn}");
     expect(source).toContain('aria-label="Current task token usage"');
     expect(source).toContain('const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";');
-    expect(source).toContain('className={`context-usage-bar ${level}`}');
-    expect(source).toContain('const contextUsageLabel = usage && limit');
-    expect(source).toContain('`Context usage ${ratio}% · ${formatTokens(usage.prompt_tokens)} / ${formatTokens(limit)} input tokens`');
+    expect(source).toContain('className={`header-context ${level}`}');
+    expect(source).toContain('const ratio = limit ? Math.min(100, Math.ceil((usage?.prompt_tokens ?? 0) * 100 / limit)) : 0;');
+    expect(source).toContain('const contextUsageLabel = limit');
+    expect(source).toContain('`Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens`');
     expect(source).toContain('title={contextUsageLabel} aria-label={contextUsageLabel}');
+    expect(source).toContain('className="header-context-meter"');
+    expect(source).toContain('style={{ width: `${ratio}%` }}');
+    expect(source).toContain('`${ratio}%/${formatTokens(limit)}`');
+    expect(source).toContain('{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}');
     expect(source).toContain('role="status" aria-live="polite"');
     expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
-    expect(source).toContain("const persistentToolGenEvents = visibleEvents.filter");
+    expect(source).toContain("const persistentToolGenEvents = useMemo(() => visibleEvents.filter");
     expect(source).toContain('activity.toolgen_phase === "published"');
-    expect(source).toContain("const scrollEvents = visibleEvents.filter");
+    expect(source).toContain("const scrollEvents = useMemo(() => visibleEvents.filter");
     expect(source).toContain('className="turn-persistent-toolgen" aria-label="ToolGen result"');
     expect(source).toContain("scrollEvents.map((event)");
     expect(styles).toContain(".turn-persistent-toolgen");
@@ -885,11 +857,12 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("!turn.final_answer && turn.completion");
     expect(viewModelSource).toContain("turnLiveUsage");
     expect(viewModelSource).toContain("sessionContextUsage");
-    expect(styles).toContain(".context-usage-bar");
-    expect(styles).toContain(".context-usage-bar.warning strong");
-    expect(styles).toContain(".context-usage-bar.critical strong");
-    expect(styles).toContain(':root[data-theme="light"] .context-usage-bar.warning strong');
-    expect(styles).toContain(':root[data-theme="light"] .context-usage-bar.critical strong');
+    expect(styles).toContain(".header-context-meter");
+    expect(styles).toContain(".header-context.warning .header-context-meter > span");
+    expect(styles).toContain(".header-context.critical .header-context-meter > span");
+    expect(styles).toContain(':root[data-theme="light"] .header-context.warning .header-context-meter > span');
+    expect(styles).toContain(':root[data-theme="light"] .header-context.critical .header-context-meter > span');
+    expect(styles).not.toContain(".context-usage-bar");
     expect(styles).toContain(".turn-work-scroll.has-pending-updates");
     expect(styles).toContain(".live-turn-usage");
   });
@@ -910,14 +883,27 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }');
     expect(source).toContain("const renamingSession = pendingRenameSessionIds.has(session.session_id);");
     expect(source).toContain('renamingSession ? "renaming-session" : ""');
-    expect(source).toContain("aria-busy={renamingSession || undefined}");
+    expect(source).toContain("aria-busy={renamingSession || deletingSession || undefined}");
     expect(source).toContain("Saving name...");
-    expect(source).toContain("disabled={runtimeLocked || renamingSession}");
+    expect(source).toContain('onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}');
     expect(styles).toContain("@keyframes session-working-glow");
     expect(styles).toContain(".session-row.renaming-session");
     expect(styles).toContain(".session-pending");
     expect(styles).toContain(':root[data-theme="light"] .session-row.renaming-session');
     expect(styles).toContain(".sr-only { position: absolute; width: 1px; height: 1px;");
+  });
+
+  it("requires confirmation before permanently deleting a session", () => {
+    expect(protocolSource).toContain('{ type: "session_delete"; session_id: string }');
+    expect(protocolSource).toContain('{ type: "session_deleted"; session_id: string }');
+    expect(source).toContain("SessionDeleteDialog");
+    expect(source).toContain('className={`session-delete ${deletingSession ? "deleting" : ""}`}');
+    expect(source).toContain('sendCommand({ type: "session_delete", session_id: sessionId })');
+    expect(source).toContain("This permanently deletes the session, its stored task history, settings, and session tools.");
+    expect(source).toContain("This cannot be undone.");
+    expect(source).toContain('event.type === "session_deleted"');
+    expect(styles).toContain(".session-delete-dialog");
+    expect(styles).toContain(".decision-actions .danger");
   });
 
   it("expands each session into its scoped worker status list", () => {
@@ -931,18 +917,23 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".worker-state-dot.working");
   });
 
-  it("shows the live session cwd in navigation and above the composer", () => {
+  it("shows the live session cwd in navigation and the composer footer", () => {
     expect(source).toContain('className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`}');
     expect(source).toContain('className="session-name" title={session.display_name}');
-    expect(source).toContain('className="session-cwd" title={session.current_dir}>{tailPath(session.current_dir)}');
-    expect(source).toContain('className="session-profile" title={`${session.runtime_profile.provider}:${session.runtime_profile.model}`}');
+    expect(source).toContain('className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span>');
+    expect(source).toContain('className="session-sub"><span className="session-detail session-cwd"');
+    expect(source).toContain('className="session-detail session-profile" title={session.runtime_profile.model}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{session.runtime_profile.model}</span></span>');
     expect(source).toContain('className="session-working-icon" size={15} aria-label="Session working"');
     expect(source).not.toContain('className="session-state">busy</span>');
     expect(styles).not.toContain(".session-state");
-    expect(source).toContain('className="composer-cwd" title={activeSession.current_dir} aria-label={`Current working directory: ${activeSession.current_dir}`}');
+    expect(source).toContain('className="composer-cwd-inline"');
+    expect(source).toContain('<b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span>');
+    expect(source.indexOf('className="queued-message-list"')).toBeLessThan(source.indexOf('<form className="composer"'));
+    expect(source.indexOf('aria-label="Message Timem"')).toBeLessThan(source.lastIndexOf('className="composer-cwd-inline"'));
+    expect(styles).toContain(".path-tail { direction: rtl; text-align: left; unicode-bidi: plaintext; }");
     expect(viewModelSource).toContain("context_state");
     expect(styles).toContain(".session-cwd");
-    expect(styles).toContain(".composer-cwd");
+    expect(styles).toContain(".composer-cwd-inline");
   });
 
   it("announces runtime connection state and explains mem switch availability", () => {
@@ -951,7 +942,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('setRuntimeEverConnected(true)');
     expect(source).toContain("const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);");
     expect(viewModelSource).toContain("export function runtimeConnectionLabel");
-    expect(source).toContain('const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";');
+    expect(source).toContain('const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem directory";');
     expect(source).toContain('setSnapshotReady(false)');
     expect(source).toContain('setSnapshotReady(true)');
     expect(source).toContain("const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);");
@@ -970,8 +961,16 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("<span>{runtimeDisconnectedDetail}</span>");
     expect(styles).toContain(".runtime-disconnect-banner");
     expect(styles).toContain(":root[data-theme=\"light\"] .runtime-disconnect-banner");
-    expect(source).toContain('ref={memSwitchButtonRef} className="mem-switch-button"');
-    expect(source).toContain('title={memSwitchTitle} aria-label={memSwitchTitle}');
+    expect(source).toContain('ref={memSwitchButtonRef} className="mem-card"');
+    expect(source).toContain('<span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span>');
+    expect(source).toContain('<span className="mem-card-copy"><strong>Memory</strong>');
+    expect(source).toContain('<small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small>');
+    expect(source).not.toContain('tailPath(server?.mem?.space_dir');
+    expect(styles).toContain(".mem-card-copy small { overflow: hidden; color: #858585; direction: rtl;");
+    expect(styles).toContain("text-align: left; text-overflow: ellipsis; unicode-bidi: plaintext; white-space: nowrap;");
+    expect(source).toContain('onClick={() => setShowMemSwitch(true)}');
+    expect(styles).toContain(".mem-card");
+    expect(styles).toContain(".mem-card-copy");
     expect(styles).toContain(".connection-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
     expect(styles).toContain(".connection.offline { background: #d77b75; box-shadow: 0 0 0 3px #d77b7522; animation: connection-retry 1.1s ease-in-out infinite; }");
     expect(styles).toContain("@keyframes connection-retry");
@@ -1000,7 +999,6 @@ describe("assistant-ui thread integration", () => {
 
   it("creates sessions with independent runtime environment overrides", () => {
     expect(source).toContain("SESSION_RUNTIME_FIELDS");
-    expect(source).toContain('TIMEM_GATEWAY_PROVIDER');
     expect(source).toContain('TIMEM_MODEL');
     expect(source).toContain('TIMEM_API_KEY');
     expect(source).toContain('TIMEM_ENABLE_THINKING');
@@ -1015,13 +1013,41 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label={`Reset ${label} to inherited value`}');
     expect(source).toContain('onClick={() => resetEnv(key)}>Reset</button>');
     expect(source).toContain('onCreate={(command) => {');
-    expect(source).toContain('session.runtime_profile.provider');
     expect(source).toContain('session.runtime_profile.model');
     expect(styles).toContain('.session-runtime-grid');
     expect(styles).toContain('.session-runtime-control');
     expect(styles).toContain('.session-runtime-reset');
     expect(styles).toContain(':root[data-theme="light"] .session-runtime-reset');
     expect(styles).toContain('.session-profile');
+  });
+
+  it("lets an existing session edit, reveal, and clear its API key without snapshot leakage", () => {
+    expect(source).toContain('Session API key');
+    expect(source).toContain('aria-label="API key for current session"');
+    expect(source).toContain('type={showApiKey ? "text" : "password"}');
+    expect(source).toContain('autoComplete="new-password"');
+    expect(source).toContain('session_api_key_update');
+    expect(source).toContain('session_api_key_reveal');
+    expect(source).toContain('event.type === "session_api_key_revealed"');
+    expect(source).toContain('setRevealedSessionApiKeys({});');
+    expect(source).toContain('showApiKey ? <EyeOff size={15}/> : <Eye size={15}/>');
+    expect(source).toContain('setShowApiKey(false);');
+    expect(source).toContain('shouldAutoRevealSessionApiKey({ sessionId, configured: keyConfigured');
+    expect(source).toContain('placeholder={credentialPending && keyConfigured ? "Loading API key…" : "Enter API key"}');
+    expect(source).toContain('<small>{session ? session.display_name : "Create or select a session first"}</small>');
+    expect(source).not.toContain('keyConfigured ? "configured" : "not configured"');
+    expect(source).not.toContain('placeholder={keyConfigured ? "API key configured"');
+    expect(source).toContain('event.type === "session_runtime_updated"');
+    expect(source).toContain('api_key_configured');
+    expect(source).toContain('previousCredentialPending.current && !credentialPending && revealedApiKey === undefined');
+    expect(source).not.toContain('onApiKeyUpdate("")}>Clear</button>');
+    expect(source).toContain('Finish or stop the active task before changing credentials.');
+    expect(styles).toContain('.session-credential-settings');
+    expect(styles).toContain('.session-credential-control');
+    expect(protocolSource).toContain('api_key_configured: boolean');
+    expect(protocolSource).toContain('{ type: "session_api_key_update"; session_id: string; api_key: string }');
+    expect(protocolSource).toContain('{ type: "session_api_key_reveal"; session_id: string }');
+    expect(protocolSource).not.toContain('runtime_profile: {\n    api_key: string');
   });
 
   it("dismisses the runtime configuration card on outside click or Escape", () => {
@@ -1034,29 +1060,50 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('closeRuntimePanel(false);');
     expect(source).toContain('if (event.key === "Escape") closeRuntimePanel()');
     expect(source).toContain('const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";');
-    expect(source).toContain('title={runtimeLabel} aria-label={runtimeLabel}');
+    expect(source).toContain('aria-label={`${runtimeLabel}: ${headerModelLabel}`}');
     expect(source).toContain('aria-expanded={showRuntime}');
     expect(source).toContain('if (showRuntime) closeRuntimePanel(); else setShowRuntime(true);');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card" tabIndex={-1}');
     expect(source).toContain('id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}');
   });
 
-  it("lets runtime setting drafts reset to the latest server snapshot value", () => {
-    expect(source).toContain("useEffect(() => setDrafts({}), [server?.runtime_options]);");
-    expect(source).toContain('const pendingRuntimeLabel = pendingKeys.size ? `Applying runtime setting${pendingKeys.size === 1 ? "" : "s"}: ${Array.from(pendingKeys).join(", ")}` : "";');
+  it("reconciles only applied runtime fields and preserves unrelated drafts", () => {
+    expect(source).toContain("setDrafts((current) => reconcileRuntimeDrafts(current, runtimeOptions))");
+    expect(source).toContain("sessionRuntimeOptions(session?.runtime_profile, server?.runtime_options ?? [])");
+    expect(source).toContain('useEffect(() => setDrafts({}), [session?.session_id]);');
+    expect(source).toContain('const pendingRuntimeLabel = pendingKeys.size ? `Applying runtime setting${pendingKeys.size === 1 ? "" : "s"}: ${Array.from(pendingKeys).map(runtimeOptionLabel).join(", ")}` : "";');
     expect(source).toContain("const dirty = value !== option.value;");
+    expect(source).toContain("const optionLabel = runtimeOptionLabel(option.key);");
+    expect(source).toContain("<span>{optionLabel}</span>");
     expect(source).toContain('className="secondary compact runtime-reset"');
-    expect(source).toContain('title={`Reset ${option.key} to current value`}');
-    expect(source).toContain('aria-label={`Reset ${option.key} to current value`}');
+    expect(source).toContain('title={`Reset ${optionLabel} to current value`}');
+    expect(source).toContain('aria-label={`Reset ${optionLabel} to current value`}');
     expect(source).toContain("const resetDraft = () => setDrafts((current) => { const { [option.key]: _removed, ...rest } = current; return rest; });");
-    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending) { event.preventDefault(); onUpdate(option.key, value); }');
+    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending && !sessionWorking) { event.preventDefault(); onUpdate(option.key, value); }');
     expect(source).toContain('if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); }');
     expect(source).toContain("onClick={resetDraft}");
-    expect(source).toContain('disabled={pending || !dirty}');
-    expect(source).toContain('pendingRuntimeLabel && <p className="runtime-pending-status" role="status" aria-live="polite">{pendingRuntimeLabel}</p>');
-    expect(styles).toContain(".runtime-options label > div input { flex: 1 1 auto; }");
+    expect(source).toContain('disabled={pending || !dirty || sessionWorking}');
+    expect(source).toContain('(pendingRuntimeLabel || credentialPending) && <p className="runtime-pending-status" role="status" aria-live="polite">');
+    expect(styles).toContain(".runtime-options label > div input, .runtime-options label > div select { flex: 1 1 auto; }");
     expect(styles).toContain(".runtime-reset { flex: none; }");
+    expect(styles).toContain(".runtime-settings { display: block; overflow: visible; padding: 14px; }");
+    expect(styles).not.toContain("max-height: 360px; overflow: auto;");
     expect(styles).toContain(".runtime-pending-status");
+  });
+
+  it("uses select controls for runtime settings with predefined values", () => {
+    expect(source).toContain("function runtimeSelectOptions(key: string): readonly string[] | null");
+    expect(source).toContain('case "TIMEM_BASH_APPROVAL":');
+    expect(source).toContain('return ["approve", "ask"];');
+    expect(source).toContain('case "TIMEM_WORK_INSTRUCTIONS":');
+    expect(source).toContain('return ["silent", "ask", "off"];');
+    expect(source).toContain('case "TIMEM_API_PROTOCOL":');
+    expect(source).toContain('return ["openai-compatible", "openai-responses", "anthropic"];');
+    expect(source).toContain('case "TIMEM_RESPONSE_PROTOCOL":');
+    expect(source).toContain('return ["xml", "json", "markdown"];');
+    expect(source).toContain("options ? <select value={value}");
+    expect(source).toContain("options.map((choice) => <option value={choice} key={choice}>{choice}</option>)");
+    expect(styles).toContain(".runtime-options input, .runtime-options select, .session-modal input, .session-modal select");
   });
 
   it("renders context compaction outside chat messages with a reduced-motion fallback", () => {
@@ -1074,7 +1121,12 @@ describe("assistant-ui thread integration", () => {
     expect(appearanceSource).toContain('root.dataset.theme = appearance.theme');
     expect(styles).toContain(':root[data-theme="light"] { color-scheme: light; }');
     expect(styles).toContain(':root[data-theme="dark"] { color-scheme: dark; }');
-    expect(appearanceSource).toContain('root.dataset.font = appearance.font');
+    expect(appearanceSource).toContain('root.dataset.userFont = appearance.userFont');
+    expect(appearanceSource).toContain('root.dataset.userChineseFont = appearance.userChineseFont');
+    expect(appearanceSource).toContain('root.dataset.userBold = String(appearance.userBold)');
+    expect(appearanceSource).toContain('root.dataset.agentFont = appearance.agentFont');
+    expect(appearanceSource).toContain('root.dataset.agentChineseFont = appearance.agentChineseFont');
+    expect(appearanceSource).toContain('root.dataset.agentBold = String(appearance.agentBold)');
     expect(appearanceSource).toContain('root.dataset.textSize = appearance.textSize');
     expect(source).toContain('const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";');
     expect(source).toContain("const appearanceButtonRef = useRef<HTMLButtonElement | null>(null);");
@@ -1082,12 +1134,20 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={appearanceLabel} aria-label={appearanceLabel}');
     expect(source).toContain('ref={appearanceButtonRef}');
     expect(source).toContain('aria-expanded={showAppearance} aria-controls="appearance-panel"');
-    expect(source).toContain('<AppearancePanel panelRef={appearancePanelRef} appearance={appearance}');
+    expect(source).toContain("<AppearancePanel");
+    expect(source).toContain("panelRef={appearancePanelRef}");
+    expect(source).toContain("appearance={appearance}");
     expect(source).toContain("aria-pressed={appearance.theme === theme}");
-    expect(source).toContain("aria-pressed={appearance.font === font}");
+    expect(source).toContain('value={appearance.userChineseFont} aria-label="User Chinese font"');
+    expect(source).toContain('value={appearance.userFont} aria-label="User other language font"');
+    expect(source).toContain('checked={appearance.userBold}');
+    expect(source).toContain('value={appearance.agentChineseFont} aria-label="Agent Chinese font"');
+    expect(source).toContain('value={appearance.agentFont} aria-label="Agent other language font"');
+    expect(source).toContain('checked={appearance.agentBold}');
     expect(source).toContain("aria-pressed={appearance.textSize === size}");
     expect(source).toContain('title={`Use ${theme} theme`}');
-    expect(source).toContain('title={`Use ${font} font for chat reading`}');
+    expect(source).toContain('<option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option>');
+    expect(source).toContain('<option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option>');
     expect(source).toContain('title={`Use ${size === "medium" ? "default" : size} text size`}');
     expect(source).toContain('if (!showAppearance) return;');
     expect(source).toContain('appearancePanelRef.current?.focus({ preventScroll: true });');
@@ -1099,21 +1159,31 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('if (event.key === "Escape") closeAppearancePanel()');
     expect(source).toContain('const descriptionId = "appearance-panel-description";');
     expect(source).toContain('id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}');
-    expect(source).toContain('<p id={descriptionId}>Adjust theme, font, and message text size for this browser.</p>');
-    expect(source).toContain('setShowRuntime(false); setShowActivity(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true);');
+    expect(source).toContain('<p id={descriptionId}>Adjust theme, language fonts, and message text size for this browser.</p>');
+    expect(source).toContain('setShowRuntime(false); setShowMcp(false); setShowToolRepo(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true);');
     expect(styles).toContain(".appearance-panel header p");
     expect(styles).toContain(':root[data-theme="light"]');
-    expect(styles).toContain(':root[data-font="serif"]');
+    expect(styles).toContain(':root[data-user-font="serif"]');
+    expect(styles).toContain(':root[data-agent-font="serif"]');
+    expect(styles).toContain(':root[data-user-chinese-font="heiti"]');
+    expect(styles).toContain(':root[data-agent-chinese-font="kaiti"]');
+    expect(styles).toContain(':root[data-user-bold="true"]');
+    expect(styles).toContain(':root[data-agent-bold="true"]');
+    expect(styles).toContain('.appearance-font-selects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }');
+    expect(styles).toContain('.turn-user-entry { font-family: var(--user-other-font), var(--user-chinese-font), sans-serif; font-weight: var(--user-font-weight); }');
+    expect(styles).toContain('.turn-assistant-frame, .turn-final-delivery { font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-weight: var(--agent-font-weight); }');
     expect(styles).toContain(':root[data-text-size="large"]');
     expect(html).toContain('localStorage.getItem("timem-web-appearance-v1")');
     expect(html).toContain('document.documentElement.dataset.theme');
+    expect(html).toContain('document.documentElement.dataset.userChineseFont');
+    expect(html).toContain('document.documentElement.dataset.agentChineseFont');
   });
 
   it("keeps the active session label readable in light theme after style overrides", () => {
     expect(styles).toContain(':root[data-theme="light"] .session-row.active { background: #e8e8e8; box-shadow: none; }');
     expect(styles).toContain(':root[data-theme="light"] .session-row.active .session.active { background: transparent; }');
     expect(styles).toContain(':root[data-theme="light"] .session-row.active .session { color: #202020; }');
-    expect(styles).toContain(':root[data-theme="light"] .session-row.active .session-cwd { color: #626262; }');
+    expect(styles).toContain(':root[data-theme="light"] .session-row.active .session-cwd { color: #666; }');
     expect(styles).toContain(':root[data-theme="light"] .session-row.active .session-profile { color: #747474; }');
   });
 
@@ -1131,12 +1201,19 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-label={copyLabel}');
     expect(styles).toContain('.markdown-body blockquote');
     expect(styles).toContain(".table-scroll");
+    expect(styles).toContain("scrollbar-gutter: auto;");
     expect(styles).toContain("scrollbar-gutter: stable;");
     expect(styles).toContain(".table-scroll:focus-visible");
     expect(styles).toContain(':root[data-theme="light"] .table-scroll');
     expect(styles).toContain('.code-block figcaption');
     expect(styles).toContain(".code-block figcaption > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
     expect(styles).toContain(".code-block figcaption button { flex: none;");
+    expect(styles).toContain(':root[data-theme="light"] .code-block { border-color: #cfddda; background: #f3f7f6; }');
+    expect(styles).toContain(':root[data-theme="light"] .code-block figcaption { border-color: #d5e1de; background: #eaf1ef; color: #657b79; }');
+    expect(styles).toContain(':root[data-theme="light"] .turn-final-delivery > .message-content .code-block pre,');
+    expect(styles).toContain(':root[data-theme="light"] .code-block .hljs-comment,');
+    expect(styles).toContain(':root[data-theme="light"] .code-block .hljs-keyword,');
+    expect(styles).toContain(':root[data-theme="light"] .code-block .hljs-punctuation,');
   });
 
   it("moves submitted files from the composer into a compact user attachment list", () => {
@@ -1200,7 +1277,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain("@keyframes upload-button-pulse");
     expect(styles).toContain("@keyframes upload-dot-pulse");
     expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
-    expect(styles).toContain(".toolrepo-toggle.count-pulse > span, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot");
+    expect(styles).toContain(".toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot");
     expect(styles).toContain(".send-button.sending svg");
     expect(styles).toContain(".completion-toolgen.sending svg");
     expect(styles).toContain(".worker-state-dot.working");
@@ -1211,9 +1288,55 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? sessionInteractionLockReason : activeSession.state === "working" ? "继续输入…"');
     expect(source).toContain('"Ask Timem to investigate, write, or work with you."');
     expect(source).not.toContain("Ask Timem anything about this workspace");
-    expect(source).toContain('activeSession?.state === "working" ? "Send supplement" : "Send message"');
+    expect(source).toContain('activeSession?.state === "working" ? "Queue message" : "Send message"');
+    expect(source).toContain('className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"}`}');
+    expect(source).toContain('className="queued-message-supplement"');
+    expect(source).toContain('claimed ? "发送中…" : "立即"');
     expect(source).toContain('title={effectiveSendLabel} aria-label={effectiveSendLabel}');
     expect(source).not.toContain('>Supplement</span>');
+  });
+
+  it("bounds, expands, collapses, and reorders the queued message list", () => {
+    expect(source).toContain("queuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT)");
+    expect(source).toContain('queueExpanded ? "expanded" : "collapsed"');
+    expect(source).toContain('aria-expanded={queueExpanded}');
+    expect(source).toContain('queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`');
+    expect(source).toContain('className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1}');
+    expect(source).toContain("reorderQueuedMessages(current[activeSessionId] ?? [], draggedQueueMessageId, targetId, queuedMessageClaimsRef.current, activeSessionId)");
+    expect(styles).toContain(".queued-message-list.collapsed .queued-message-items { max-height: 156px; overflow: hidden; }");
+    expect(styles).toContain(".queued-message-list.expanded .queued-message-items { max-height: min(50vh, 420px); overflow-y: auto;");
+  });
+
+  it("claims each queued message before immediate or automatic dispatch", () => {
+    expect(source).toContain("queuedMessageClaimsRef");
+    expect(source).toContain("claimQueuedMessage(queuedMessageClaimsRef.current");
+    expect(source).toContain("releaseQueuedMessageClaim(queuedMessageClaimsRef.current");
+    expect(source).toContain("queuedMessagesBySessionRef.current");
+    expect(source).toContain("removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current");
+    expect(source).toContain("disabled={claimed || activeSession.state !== \"working\"");
+    expect(source).toContain('aria-busy={claimed || undefined}');
+    expect(source).toContain('claimed ? "发送中…" : "立即"');
+    expect(styles).toContain(".queued-message.sending");
+  });
+
+  it("lets queued messages be re-edited without changing their queue position", () => {
+    expect(source).toContain('className="queued-message-edit"');
+    expect(source).toContain('className="queued-message-editor" autoFocus');
+    expect(source).toContain("message.id === edit.id ? { ...message, text } : message");
+    expect(source).toContain('editingQueuedMessage?.sessionId === activeSessionId');
+    expect(source).toContain(">保存</button>");
+    expect(source).toContain(">取消</button>");
+    expect(styles).toContain(".queued-message-editor");
+  });
+
+  it("keeps composer typing away from expensive turn history recomputation", () => {
+    expect(source).toContain("memo(function VisibleTurnList");
+    expect(source).toContain("memo(function TurnInteraction");
+    expect(source).toContain("const decisionsByTurn = useMemo");
+    expect(source).toContain("decisions={decisionsByTurn.get(sessionTurnKey(sessionId, turn.turn_id)) ?? EMPTY_DECISIONS}");
+    expect(source).toContain("<VisibleTurnList");
+    expect(source).not.toContain("decisions={decisions.filter");
+    expect(source).toContain("const lifecycleEvents = useMemo(() => coalesceActionLifecycle(turn.events), [turn.events]);");
   });
 
   it("releases a stuck send affordance from the authoritative turn completion", () => {
@@ -1226,10 +1349,14 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("shows long current directories by their tail while preserving the full path tooltip", () => {
-    expect(source).toContain('<span className="session-cwd" title={session.current_dir}>{tailPath(session.current_dir)}</span>');
-    expect(source).toContain('className="composer-cwd" title={activeSession.current_dir} aria-label={`Current working directory: ${activeSession.current_dir}`}');
-    expect(source).toContain('<FolderOpen size={13} aria-hidden="true"/>');
-    expect(source).toContain('<span>{tailPath(activeSession.current_dir, 64)}</span>');
+    expect(source).toContain('<span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>');
+    expect(styles).toContain('.session-cwd span { text-overflow: clip; }');
+    expect(styles).toContain('.session-detail::before');
+    expect(styles).toContain('.session-detail:not(:last-child)::after');
+    expect(styles).toContain('border-bottom-left-radius: 5px');
+    expect(styles).toContain('.session-profile { display: inline-flex; align-items: center; gap: 6px;');
+    expect(source).toContain('className="composer-cwd-inline"');
+    expect(source).toContain('<b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span>');
   });
 
   it("removes the access token from the visible URL while retaining the session credential", () => {
@@ -1274,13 +1401,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const params = new URLSearchParams({ session_id: activeSession.session_id });");
     expect(source).toContain('if (token) params.set("token", token);');
     expect(source).toContain("Runtime update failed");
-    expect(source).toContain("Reconnect to Timem Web before applying runtime configuration.");
+    expect(source).toContain("Reconnect to Timem Web before applying this Session configuration.");
     expect(source).toContain("Decision reply failed");
     expect(source).toContain("Reconnect to Timem Web before replying to this runtime request.");
     expect(source).toContain("Create session failed");
     expect(source).toContain("Reconnect to Timem Web before creating a new session.");
     expect(source).toContain("Mem switch failed");
-    expect(source).toContain("Reconnect to Timem Web before switching memory space.");
+    expect(source).toContain("Reconnect to Timem Web before switching the mem directory.");
     expect(source).toContain("ToolGen start failed");
     expect(source).toContain("Reconnect to Timem Web before generating a reusable tool.");
     const ordinaryActivityAppend = [...source.matchAll(/setActivities\(\(current\) => \[activity,/g)].map((match) => source.slice(Math.max(0, match.index - 80), match.index + 120));
@@ -1298,18 +1425,29 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain('<TurnEventView key={event.event_id} event={event} sessionId={turn.turn_id}/>');
     expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`}');
     expect(source).toContain('className="turn-final-delivery"');
-    expect(source).toContain("const [showCompletedWork, setShowCompletedWork] = useState(true);");
-    expect(source).toContain('const canCollapseCompletedWork = turn.state !== "working" && !!turn.final_answer;');
+    expect(source).toContain('const processActivities = useMemo(() => lifecycleEvents');
+    expect(source).toContain('const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);');
+    expect(source).toContain('hasOnlyFreeTalkActivity, manualToolGenCommand');
+    expect(source).toContain('const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";');
+    expect(source).toContain('const [showCompletedWork, setShowCompletedWork] = useState(() => !interruptedByUser && (turn.state === "working" || !hasOnlyFreeTalk));');
+    expect(source).toContain('if (wasWorking && turn.state !== "working" && (hasOnlyFreeTalk || interruptedByUser)) setShowCompletedWork(false);');
+    expect(source).toContain('const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);');
     expect(source).toContain('const showWorkStream = !canCollapseCompletedWork || showCompletedWork;');
-    expect(source).toContain('className="work-collapse-toggle"');
+    expect(source).toContain('className={`working-chip work-title-chip completed-work-title work-collapse-toggle');
+    expect(source).toContain('className="work-collapse-arrow"');
     expect(source).toContain('aria-expanded={showCompletedWork}');
     expect(source).toContain('onClick={() => setShowCompletedWork((visible) => !visible)}');
-    expect(source).toContain('{showWorkStream && <div className={`turn-work-scroll');
-    expect(source).toContain('showWorkStream && pendingUpdates > 0');
+    expect(source).toContain('<span className="work-title-status">(Interrupted)</span>');
+    expect(styles).toContain('.working-chip.interrupted-work-title');
+    expect(source).toContain('{showWorkStream && <div className="turn-work-panel">');
+    expect(source).toContain('{showWorkStream && <div className="turn-work-panel">');
+    expect(source).toContain('<div className={`turn-work-scroll');
+    expect(source).toContain('{pendingUpdates > 0 && <button type="button" className="turn-new-updates"');
     expect(styles).toContain(".turn-work-scroll { max-height:");
     expect(styles).toContain(".turn-work-scroll.empty { min-height: 52px; }");
     expect(styles).toContain(".turn-work-scroll.has-pending-updates");
     expect(styles).toContain(".work-collapse-toggle");
+    expect(styles).toContain('.work-collapse-toggle[aria-expanded="true"] .work-collapse-arrow { transform: rotate(90deg); }');
     expect(styles).toContain(".turn-assistant-frame.collapsed-work");
     expect(styles).toContain("overflow-y: auto;");
     expect(source).toContain("followLatest.current = remaining < 36");
@@ -1322,10 +1460,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain("assistantName={activeSession?.display_name");
     expect(source).not.toContain('<span className="eyebrow">SESSION');
     expect(source).not.toContain('activeSession?.display_name ?? "Starting Timem…"');
-    expect(source).toContain('const headerModelLabel = activeSession?.runtime_profile ? `${activeSession.runtime_profile.provider}:${activeSession.runtime_profile.model}` : "";');
-    expect(source).toContain('className="header-model" title={headerModelLabel}>{headerModelLabel}</span>');
+    expect(source).toContain('const headerModelLabel = activeSession?.runtime_profile?.model ?? "";');
+    expect(source).toContain('className={`header-model ${showRuntime ? "selected" : ""}`}');
+    expect(source).toContain('<span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown');
+    expect(source).not.toContain('<Settings size={17}/>');
     expect(styles).toContain(".chat-header { flex: none; min-width: 0;");
-    expect(styles).toContain(".header-model { min-width: 0; overflow: hidden;");
+    expect(styles).toContain(".header-model { min-width: 0; max-width: min(42vw, 260px); flex: 0 1 auto;");
+    expect(styles).toContain(".header-model { font-size: 14px; }");
     expect(styles).toContain("text-overflow: ellipsis; white-space: nowrap;");
     expect(styles).toContain(".header-actions { flex: none;");
   });
@@ -1349,10 +1490,13 @@ describe("assistant-ui thread integration", () => {
   it("shows inline decision submission state instead of silently disabling controls", () => {
     expect(source).toContain('const status = pending ? "Sending decision…" : locked ? "Session interaction is temporarily locked." : "";');
     expect(source).toContain('aria-busy={pending}');
+    expect(source).toContain('const canAlwaysAllow = decision.event.topic.name === "core.user.approval.request";');
     expect(source).toContain('className="inline-decision-status" role="status" aria-live="polite"');
-    expect(source).toContain('title={declineLabel} aria-label={declineLabel} disabled={disabled}');
-    expect(source).toContain('className={`primary ${pending ? "sending" : ""}`} title={acceptLabel} aria-label={acceptLabel} disabled={disabled}');
-    expect(source).toContain('{pending ? <LoaderCircle size={16}/> : <Check size={16}/>} {pending ? "Sending…" : "Continue"}');
+    expect(source).toContain('title={denyLabel} aria-label={denyLabel} disabled={disabled}');
+    expect(source).toContain('title={allowLabel} aria-label={allowLabel} disabled={disabled}');
+    expect(source).toContain('title={alwaysAllowLabel} aria-label={alwaysAllowLabel} disabled={disabled}');
+    expect(source).toContain('{canAlwaysAllow && <button type="button" className="primary always-allow"');
+    expect(source).toContain('onClick={() => onReply("always_allow")}>Always Allow</button>');
     expect(styles).toContain(".inline-decision-status");
     expect(styles).toContain(".inline-decision pre { max-height: min(240px, 34vh); overflow: auto;");
     expect(styles).toContain(".decision-actions .primary.sending svg");
@@ -1365,6 +1509,26 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("current.filter((candidate) => candidate !== decision)");
     expect(source).toContain('onCreate={(command) => {');
     expect(source).toContain("if (sendCommand(command))");
+  });
+
+  it("keeps long-session scrolling stable and draft typing away from turn reconciliation", () => {
+    expect(source).toContain("const VisibleTurnList = memo(function VisibleTurnList");
+    expect(source).toContain("const TurnInteraction = memo(function TurnInteraction");
+    expect(source).toContain("turns={turns}");
+    expect(source).not.toContain("content-visibility");
+    expect(styles).toContain(".turn-interaction.completed { contain: layout style; }");
+    expect(styles).toContain("scroll-behavior: auto;");
+  });
+
+  it("keeps compact mobile controls and long content inside the viewport", () => {
+    expect(styles).toContain(".chat-scroll { overflow-x: hidden; }");
+    expect(styles).toContain(".turn-work-scroll { overflow-x: hidden; }");
+    expect(styles).toContain("overscroll-behavior-y: auto;");
+    expect(styles).toContain(".markdown-body .table-scroll { max-width: 100%; overflow-x: auto;");
+    expect(styles).toContain(".header-context > span:first-child { display: none; }");
+    expect(styles).toContain(".composer-buttons { flex: none; width: auto; flex-wrap: nowrap; }");
+    expect(styles).toContain(".stop-button { width: 34px; height: 32px;");
+    expect(styles).toContain(".session-cwd, .session-profile { font-size: 11px; }");
   });
 
   it("uses the shared worker-aware decision key for inline request pending state", () => {
@@ -1387,13 +1551,51 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("Timem Web lost its runtime connection. If timem-web has exited, restart it and reopen the authenticated URL.");
   });
 
-  it("shows host and session errors outside the default-hidden diagnostic panel", () => {
+  it("manages session-scoped MCP servers with accessible and responsive controls", () => {
+    expect(source).toContain('aria-label="Manage MCP servers"');
+    expect(source).toContain('aria-label="MCP servers" tabIndex={-1}');
+    expect(source).toContain('<h2><strong className="mcp-session-name">{session?.display_name ?? "Current session"}</strong> \'s Capabilities</h2>');
+    expect(source).not.toContain('Capabilities of current session');
+    expect(source).not.toContain('are injected into its model and executor');
+    expect(source).toContain('mcpButtonRef.current?.contains(target) || mcpPanelRef.current?.contains(target)');
+    expect(source).toContain('if (event.key === "Escape") closeMcpPanel();');
+    expect(source).toContain('type: "mcp_session_toggle"');
+    expect(source).toContain('type: "mcp_server_reconnect"');
+    expect(source).toContain('type: "mcp_server_upsert"');
+    expect(source).toContain('window.confirm(`Delete MCP server');
+    expect(source).toContain('(["stdio", "streamable_http", "sse"] as const)');
+    expect(source).toContain('const [transportDrafts, setTransportDrafts] = useState(() => createMcpTransportDrafts(config.transport));');
+    expect(source).toContain('onClick={() => setTransportType(type)}');
+    expect(source).toContain('One MCP endpoint may return JSON or an SSE stream.');
+    expect(source).toContain('role="switch" aria-checked={active}');
+    expect(source).toContain('const connectionState = !active ? "disabled" : server.state === "connected" ? "connected" : server.state === "error" || !!server.error ? "failed" : "connecting";');
+    expect(source).toContain('className={`mcp-session-toggle ${connectionState}`}');
+    expect(source).toContain('className="mcp-port-glyph"');
+    expect(source).toContain('className="mcp-port-node left"');
+    expect(source).toContain('connectionState === "failed" && <X className="mcp-port-failure"');
+    expect(source).not.toContain('className="mcp-toggle-label"');
+    expect(source).toContain('const pendingMcpKeysRef = useRef<Set<string>>(new Set());');
+    expect(source).toContain('!addPendingKey(pendingMcpKeysRef, setPendingMcpKeys, key)');
+    expect(source).toContain('removePendingKey(pendingMcpKeysRef, setPendingMcpKeys, key)');
+    expect(source).toContain('pendingMcpKeysRef.current.clear();');
+    expect(source).toContain("One argument per line. Spaces stay inside that argument.");
+    expect(protocolSource).toContain('type: "mcp_updated"');
+    expect(protocolSource).toContain('| { type: "sse"; url: string; headers: Record<string, string> };');
+    expect(protocolSource).toContain('mcp_server_ids: string[]');
+    expect(styles).toContain(':root[data-theme="light"] .mcp-panel');
+    expect(styles).toContain('.mcp-panel { position: fixed; inset: 58px 8px 8px;');
+    expect(styles).toContain('.mcp-button > svg { transform: rotate(90deg); }');
+    expect(styles).toContain('.mcp-port-node { position: absolute; z-index: 2; top: 2px; width: 12px; height: 12px;');
+    expect(styles).toContain('.mcp-session-toggle.connected .mcp-port-node { background: #63b5f2;');
+    expect(styles).toContain('.mcp-session-toggle.failed .mcp-port-link { border-color: #bd6e68; }');
+    expect(styles).toContain('grid-template-columns: repeat(3, minmax(0, 1fr))');
+  });
+
+  it("shows host and session errors directly without an Activity panel", () => {
     expect(source).toContain("const visibleErrors = activities.filter");
-    expect(source).toContain('const sessionActivities = activities.filter((activity) => activity.sessionId === activeSession?.session_id || activity.sessionId === "system");');
     expect(source).toContain("const visibleErrorText = visibleError ? `${visibleError.title}${visibleError.detail ? ` · ${visibleError.detail}` : \"\"}` : \"\";");
     expect(source).toContain("const visibleErrorCount = visibleErrors.length;");
     expect(source).toContain("const hiddenErrorCount = Math.max(0, visibleErrorCount - 1)");
-    expect(source).toContain('const errorDetailsLabel = visibleErrorCount === 1 ? "Show this error in Activity" : `Show ${visibleErrorCount} errors in Activity`;');
     expect(source).toContain('const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";');
     expect(source).toContain('className="host-error-banner" role="alert"');
     expect(source).toContain('className="host-error-text" title={visibleErrorText}');
@@ -1402,12 +1604,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={dismissErrorLabel}');
     expect(source).toContain('aria-label={dismissErrorLabel}');
     expect(source).toContain('className="host-error-actions"');
-    expect(source).toContain('className="host-error-details"');
-    expect(source).toContain('onClick={() => { setShowAppearance(false); setShowRuntime(false); setSidePanelTab("activity"); setShowActivity(true); }}');
-    expect(source).toContain('title={errorDetailsLabel}');
-    expect(source).toContain('aria-label={errorDetailsLabel}');
-    expect(source).toContain('aria-controls="session-side-panel" aria-expanded={showActivity && sidePanelTab === "activity"}');
-    expect(source).toContain('setSidePanelTab("activity"); setShowActivity(true);');
+    expect(source).not.toContain('className="host-error-details"');
+    expect(source).not.toContain("errorDetailsLabel");
     expect(source).toContain('className="host-error-dismiss-all"');
     expect(source).toContain('aria-label="Dismiss all visible errors"');
     expect(source).toContain('activity.tone !== "error" || (activity.sessionId !== activeSession?.session_id && activity.sessionId !== "system")');
@@ -1419,11 +1617,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".host-error-actions");
     expect(styles).toContain(".host-error-actions { flex: none; display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap;");
     expect(styles).toContain(".host-error-actions .icon-button { flex: none; }");
-    expect(styles).toContain(".host-error-details");
     expect(styles).toContain(".host-error-dismiss-all");
     expect(styles).toContain(':root[data-theme="light"] .host-error-banner em');
     expect(styles).toContain(':root[data-theme="light"] .host-error-dismiss-all');
-    expect(styles).toContain(':root[data-theme="light"] .host-error-details');
     expect(styles).toContain("@media (max-width: 720px) { .host-error-banner, .runtime-disconnect-banner { align-items: flex-start; flex-wrap: wrap;");
     expect(styles).toContain(".host-error-actions { width: 100%; justify-content: flex-end;");
   });

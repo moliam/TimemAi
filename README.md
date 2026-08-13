@@ -6,7 +6,7 @@ TimemAi is a local-first AI agent with two interfaces:
 - `timem-web`: browser UI for sessions, chat history, tools, and live work status.
 
 Both interfaces use the same local runtime, memory, session history, tools, and
-provider configuration.
+model service configuration.
 
 ## Install
 
@@ -33,9 +33,10 @@ source ./env
 Minimum Aliyun-compatible configuration:
 
 ```bash
-export TIMEM_GATEWAY_PROVIDER=aliyun
 export TIMEM_API_KEY=your_api_key_here
 export TIMEM_MODEL=qwen-plus
+export TIMEM_API_PROTOCOL=openai-compatible
+export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 export TIMEM_SPACE=.test_mem
 ```
 
@@ -46,14 +47,20 @@ source /path/to/your/env
 ```
 
 Use `timem --help` or `timem-web --help` to inspect available startup
-options. Command-line options override environment variables.
+options. After the first successful configuration, Timem caches the effective
+runtime environment with the local Session, so later starts can resume without
+re-entering it. Runtime configuration changes update that cache. Command-line
+options always override cached values.
 
 ## Run Shell
 
 ```bash
-source ./env
 timem
 ```
+
+The `source ./env` step is needed for the initial configuration or when you
+intentionally select a different data root/mem space. The selected Session
+restores its cached model service settings on later starts.
 
 Example terminal session:
 
@@ -81,7 +88,13 @@ send it as a supplement to the current task.
 ## Run Web
 
 The Web UI provides session switching, Markdown rendering, live work updates,
-attachments, runtime status, and context usage in the browser:
+attachments, runtime status, context usage, and per-session MCP tools in the
+browser. Open the plug control in the header to add a local stdio, remote
+Streamable HTTP, or legacy SSE MCP server and choose which Sessions may use it.
+Timem Web can start without a model API key so configuration remains
+available in the browser. A Session must have a valid API key before Send can
+start model work; the New Session dialog accepts Session-specific model service
+settings and caches them for later starts.
 
 ![Timem Web UI](docs/assets/timem-web.png)
 

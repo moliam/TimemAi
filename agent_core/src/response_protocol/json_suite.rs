@@ -18,6 +18,9 @@ impl ResponseProtocolSuite for JsonSuiteV1 {
     fn lang_format(&self) -> &str {
         "JSON"
     }
+    fn response_shape_hint(&self) -> &str {
+        "one JSON object {...}"
+    }
     fn protocol_schema(&self) -> &str {
         ""
     }
@@ -394,7 +397,7 @@ pub fn protocol_repair_reason(issue: &str) -> &'static str {
     }
     match issue {
         "truncated_model_output" => {
-            "The provider stopped the model output before a complete response_v1 JSON object was produced."
+            "The model output stopped before a complete response_v1 JSON object was produced."
         }
         "invalid_json" => "The previous model response could not be parsed as one JSON object.",
         "root_must_be_json_object" => {

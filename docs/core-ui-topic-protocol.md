@@ -107,7 +107,7 @@ payload:
   version: string
   profile:
     name: string
-    provider: string
+    model service: string
     model: string
   response_protocol: string
   max_llm_input_tokens: number

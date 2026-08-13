@@ -13,7 +13,7 @@ The UI owns:
 - final answer Markdown rendering, code highlighting, token/time telemetry,
   themes, fonts, and responsive layout
 
-The UI must not implement provider calls, prompt parsing, memory/tool execution,
+The UI must not implement model calls, prompt parsing, memory/tool execution,
 or command approval policy. Those are core/host responsibilities.
 
 ## Development

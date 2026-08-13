@@ -9,16 +9,9 @@
 #
 # Keep the copied env file private. Do not commit API keys.
 
-# Traffic platform. It selects the default base URL and vendor fallback keys.
-# Known values: aliyun, dashscope, openai, anthropic.
-# Use custom only when you also set TIMEM_BASE_URL explicitly.
-# export TIMEM_GATEWAY_PROVIDER=aliyun
-
 # Wire protocol / request payload format.
 # Known values: openai-compatible, openai-responses, anthropic.
-# If omitted, openai defaults to openai-responses, anthropic defaults to
-# anthropic, and other providers default to openai-compatible. For custom
-# gateways, set this explicitly.
+# Default: openai-compatible.
 # export TIMEM_API_PROTOCOL=openai-compatible
 # export TIMEM_RESPONSE_PROTOCOL=xml
 
@@ -26,8 +19,9 @@
 # land in shell history.
 # export TIMEM_API_KEY=
 
-# Optional base URL override. Leave commented to use provider defaults.
-# export TIMEM_BASE_URL=
+# Model API base URL. The default follows TIMEM_API_PROTOCOL; set this explicitly
+# for any compatible or self-hosted service.
+# export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
 # Model name.
 # export TIMEM_MODEL=qwen-plus
@@ -36,16 +30,17 @@
 # export TIMEM_SPACE=.test_mem
 
 # Runtime data root for memory, audit logs, and shell history.
-# export TIMEM_DATA_DIR=data
+# Default for a new environment: .timem_data
+# export TIMEM_DATA_DIR=.timem_data
 
-# Provider HTTP timeout in seconds.
+# Model API request timeout in seconds.
 # export TIMEM_TIMEOUT=120
 
 # Maximum response tokens.
-# export TIMEM_MAX_LLM_OUTPUT=10K
+# export TIMEM_MAX_LLM_OUTPUT=20K
 
 # Optional OpenAI-compatible reasoning/streaming extensions. Enable only when
-# the selected gateway/model documents these fields.
+# the selected model service documents these fields.
 # export TIMEM_ENABLE_THINKING=true
 # export TIMEM_REASONING_EFFORT=max
 # export TIMEM_STREAM=true
@@ -61,7 +56,7 @@
 # Bash approval policy.
 # ask: prompt before bash execution.
 # approve: execute requested bash actions directly.
-# export TIMEM_BASH_APPROVAL=ask
+# export TIMEM_BASH_APPROVAL=approve
 
 # Work directory instruction files.
 # silent: automatically load AGENTS.md/CLAUDE.md from the current working directory and notify.
@@ -75,8 +70,7 @@
 # export ANTHROPIC_API_KEY=
 # export ANTHROPIC_AUTH_TOKEN=
 
-# Provider default URLs:
-# aliyun/dashscope: https://dashscope.aliyuncs.com/compatible-mode/v1
-# openai: https://api.openai.com/v1
+# Protocol default URLs:
+# openai-compatible: https://dashscope.aliyuncs.com/compatible-mode/v1
+# openai-responses: https://api.openai.com/v1
 # anthropic: https://api.anthropic.com
-# custom: set TIMEM_BASE_URL to your own gateway URL.

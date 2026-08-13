@@ -1,46 +1,24 @@
-XML response tags. The top-level response is XML. Tool actions are JSON objects
-inside `<action_json><![CDATA[...]]></action_json>` blocks so the runtime can
-parse tool parameters exactly.
+Return exactly one XML `<response>` root with no outer Markdown fence or extra
+text. Inside it, write optional `<free_talk>` first, followed by exactly one of:
 
-Required output shape:
+- `<actions>` when runtime tools are needed.
+- `<context_compact>` for dynamic-context maintenance.
+- `<final_answer>` when the current request is complete.
 
-1. `<response>` root.
-2. Optional `<free_talk>` visible working note.
-3. Exactly one state branch:
-   - `<working_still_action>` when more tools are needed.
-   - `<context_compact>` when context must be compacted.
-   - `<final_answer>` when all active/pending user prompts are complete.
+`<actions>` is XML-native. Direct child tool elements execute sequentially in
+document order. Tool elements inside one `<parallel>` execute concurrently;
+`<parallel>` cannot be nested. The tool element name is the exact capability id.
 
-Context compact:
+Arguments may be short scalar attributes or child elements. Arrays contain
+`<item>` children; objects contain children named after their fields. Types shown
+beside tool options determine scalar and nested values. Never encode actions or
+arguments as JSON. Never duplicate an argument between an attribute and child.
+For a nullable option, a self-closing argument element means null.
+Leaf string elements may use CDATA for commands or text containing XML-special
+characters; CDATA content is literal. XML declarations, DTDs, custom entities,
+and comments are not part of this protocol.
 
-- `<context_compact>` contains `<discard>` and/or `<offload>`, plus `<summary>`.
-- `discard` is a comma-separated list of prompt delta ids to drop from active
-  context.
-- `offload` is a comma-separated list of prompt delta ids to write into scratch
-  before dropping from active context. Runtime reports the scratch id in the next
-  SYSTEM prompt delta.
-- `summary` is the compacted replacement state. Keep active task description,
-  working environment facts, progress, todo/next steps, and only still-relevant
-  high-level work principles.
-- Runtime hides the referenced dynamic prompt deltas, stores offloaded deltas in
-  scratch, and appends the summary as a new dynamic prompt delta.
-- Do not use `memmgr` for context discard/offload.
-
-Text fields:
-
-- `<free_talk>`, `<final_answer>`, and context compact `<summary>`
-  are raw text fields. Extract them as text, not as nested protocol.
-- `<final_answer>` contains the final Markdown response to the user.
-
-Actions:
-
-- `<working_still_action>` contains one or more `<action_json>` blocks.
-- Each `<action_json>` block contains the JSON payload directly. CDATA is
-  recommended so string values can safely contain punctuation, Markdown, or XML-
-  looking text.
-- The JSON payload must be a top-level array.
-- A single action object inside the array is `{ "tool_name": { ...tool parameters... } }`.
-- A direct array of action objects inside the outer array is one parallel group.
-- Entries execute in array order; inner arrays execute in parallel.
-- Do not use `action`/`args` fields or `{ "order": "...", "actions": [...] }`
-  group objects.
+`<context_compact>` contains `<discard>` and/or `<offload>`, plus `<summary>`.
+Ids are comma-separated dynamic delta ids. `<final_answer>` is raw user-facing
+Markdown. `<free_talk>`, `<summary>`, and `<final_answer>` are text, not nested
+response protocol.

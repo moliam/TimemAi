@@ -1,10 +1,12 @@
 use agent_core::capability::{CapabilityHostProfile, CapabilityRegistry};
+use agent_core::mcp::{McpRuntime, McpServerConfig, McpTool, McpTransportConfig};
 use agent_core::self_tool::SelfToolPaths;
 use agent_core::{
     read_audit_doc, ActionRuntime, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile,
-    CoreStep, LlmResponse, MemGuard, OutputExpansionRequest, OutputExpansionResolution,
-    ProviderConfig, ResponseProtocolKind, RoundLimitDecisionRequest, RoundLimitResolution,
-    RuntimeConfigField, TurnFinal, TurnStopDetail, TurnStopReason, UsageStats,
+    CoreStep, LlmResponse, MemGuard, ModelServiceConfig, OutputExpansionRequest,
+    OutputExpansionResolution, ResponseProtocolKind, RoundLimitDecisionRequest,
+    RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail, TurnStopReason,
+    UsageStats,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -65,10 +67,8 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-fn profile(provider: &str, model: &str) -> CoreProfile {
+fn profile(model: &str) -> CoreProfile {
     CoreProfile {
-        name: provider.to_string(),
-        provider: provider.to_string(),
         model: model.to_string(),
     }
 }
@@ -94,6 +94,154 @@ fn usage() -> UsageStats {
     }
 }
 
+#[test]
+fn mcp_action_runs_through_protocol_registry_and_executor() {
+    let config = McpServerConfig {
+        id: "demo".to_string(),
+        name: "Demo MCP".to_string(),
+        enabled: true,
+        transport: McpTransportConfig::Stdio {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"while IFS= read -r line; do case "$line" in *\"method\":\"initialize\"*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}';; *\"method\":\"tools/list\"*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]}}';; *\"method\":\"tools/call\"*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"MCP execution reached"}]}}';; esac; done"#.to_string(),
+            ],
+            env: BTreeMap::new(),
+        },
+        request_timeout_ms: 2_000,
+    };
+    let runtime = McpRuntime::default();
+    let tools: Vec<McpTool> = runtime.connect(&config).unwrap();
+    let memory_dir = tmp_dir("mcp_full_path");
+    let mut core = test_core(
+        "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+        profile("model"),
+        &memory_dir,
+    );
+    core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
+        .unwrap();
+    let prompt = match core.begin_turn("Use the MCP echo tool", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("mcp.demo.echo"), "{prompt}");
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"working_still_action":[{"mcp.demo.echo":{"value":"hello"}}]}"#),
+        model_name: "model".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let next_prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(next_prompt.contains("MCP execution reached"));
+}
+
+#[test]
+fn mcp_server_error_becomes_action_evidence_instead_of_protocol_repair() {
+    let config = McpServerConfig {
+        id: "failing".to_string(),
+        name: "Failing MCP".to_string(),
+        enabled: true,
+        transport: McpTransportConfig::Stdio {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"while IFS= read -r line; do case "$line" in *\"method\":\"initialize\"*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}';; *\"method\":\"tools/list\"*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fail","description":"Fail","inputSchema":{"type":"object"}}]}}';; *\"method\":\"tools/call\"*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"remote tool refused the request"}}';; esac; done"#.to_string(),
+            ],
+            env: BTreeMap::new(),
+        },
+        request_timeout_ms: 2_000,
+    };
+    let runtime = McpRuntime::default();
+    let tools = runtime.connect(&config).unwrap();
+    let memory_dir = tmp_dir("mcp_server_error");
+    let mut core = test_core(
+        "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+        profile("model"),
+        &memory_dir,
+    );
+    core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
+        .unwrap();
+    assert!(matches!(
+        core.begin_turn("Call the failing MCP tool", None),
+        CoreStep::NeedModel { .. }
+    ));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"working_still_action":[{"mcp.failing.fail":{}}]}"#),
+        model_name: "model".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let next_prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(next_prompt.contains("status: failed"), "{next_prompt}");
+    assert!(
+        next_prompt.contains("mcp_server_error:-32001:remote tool refused the request"),
+        "{next_prompt}"
+    );
+    assert!(
+        !next_prompt.contains("not protocol compliant"),
+        "{next_prompt}"
+    );
+}
+
+#[test]
+fn unresponsive_mcp_tool_times_out_as_action_evidence_and_agent_continues() {
+    let config = McpServerConfig {
+        id: "unresponsive".to_string(),
+        name: "Unresponsive MCP".to_string(),
+        enabled: true,
+        transport: McpTransportConfig::Stdio {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"while IFS= read -r line; do case "$line" in *\"method\":\"initialize\"*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}';; *\"method\":\"tools/list\"*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"wait","description":"Wait forever","inputSchema":{"type":"object"}}]}}';; *\"method\":\"tools/call\"*) :;; esac; done"#.to_string(),
+            ],
+            env: BTreeMap::new(),
+        },
+        request_timeout_ms: 50,
+    };
+    let runtime = McpRuntime::default();
+    let tools = runtime.connect(&config).unwrap();
+    let memory_dir = tmp_dir("mcp_timeout_evidence");
+    let mut core = test_core(
+        "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+        profile("model"),
+        &memory_dir,
+    );
+    core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
+        .unwrap();
+    assert!(matches!(
+        core.begin_turn("Call the unresponsive MCP tool", None),
+        CoreStep::NeedModel { .. }
+    ));
+
+    let started = Instant::now();
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(r#"{"working_still_action":[{"mcp.unresponsive.wait":{}}]}"#),
+        model_name: "model".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(started.elapsed() < Duration::from_millis(250));
+    let next_prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(next_prompt.contains("status: failed"), "{next_prompt}");
+    assert!(next_prompt.contains("mcp_request_timeout"), "{next_prompt}");
+    assert!(
+        !next_prompt.contains("not protocol compliant"),
+        "{next_prompt}"
+    );
+}
+
 fn audit_doc(events: Vec<Value>) -> String {
     format!(
         "{}\n",
@@ -109,7 +257,7 @@ fn write_audit_doc(path: &std::path::Path, events: Vec<Value>) {
 }
 
 fn core_with_builtin_capabilities(name: &str) -> AgentCore {
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), tmp_dir(name));
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir(name));
     core.set_capability_registry(CapabilityRegistry::builtin());
     core
 }
@@ -146,7 +294,7 @@ fn field_values(prompt: &str, field: &str) -> Vec<String> {
 
 #[test]
 fn prompt_is_append_only_and_segmented() {
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("append"));
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("append"));
     let first = match core.begin_turn("你好", Some("runtime_time: now")) {
         CoreStep::NeedModel {
             prompt,
@@ -189,7 +337,7 @@ fn prompt_is_append_only_and_segmented() {
 fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("assistant_replay_extracted"),
     );
     core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
@@ -225,7 +373,7 @@ fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape
 fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("assistant_replay_raw_working"),
     );
     assert_eq!(core.assistant_replay_mode(), AssistantReplayMode::RawOutput);
@@ -256,11 +404,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
 
 #[test]
 fn assistant_prompt_heading_uses_current_worker_speaker_name() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("assistant_heading"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("assistant_heading"));
     core.set_assistant_speaker_name("ID2\nignored");
     assert_eq!(core.assistant_speaker_name(), "ID2 ignored");
 
@@ -285,7 +429,7 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
 fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("assistant_name_placeholder"),
     );
     core.set_assistant_speaker_name("Ai4");
@@ -324,7 +468,7 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
 fn runtime_info_is_dynamic_context_not_static_prompt() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("runtime_info_dynamic_context"),
     );
     let runtime_info = agent_core::runtime_info_context(&[
@@ -347,11 +491,7 @@ fn runtime_info_is_dynamic_context_not_static_prompt() {
 
 #[test]
 fn default_max_rounds_is_fifty() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("default_rounds"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("default_rounds"));
     let step = core.begin_turn("你好", None);
     let CoreStep::NeedModel {
         prompt,
@@ -368,7 +508,7 @@ fn default_max_rounds_is_fifty() {
 fn round_limit_can_be_continued_without_model_visible_task_reset() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("round_limit_continue"),
     );
     core.set_max_rounds(1);
@@ -439,7 +579,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
 fn round_limit_stop_resolution_is_core_owned() {
     let dir = tmp_dir("round_limit_stop_resolution");
     let audit_file = dir.join("audit.json");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     core.set_max_rounds(1);
     let _ = core.begin_turn("需要两步完成", None);
     let step = core.apply_model_response(LlmResponse {
@@ -485,9 +625,8 @@ fn round_limit_stop_resolution_is_core_owned() {
 fn output_expansion_resolution_is_core_owned() {
     let dir = tmp_dir("output_expansion_resolution");
     let audit_file = dir.join("audit.json");
-    let core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
-    let mut config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let mut config = ModelServiceConfig {
         model: "qwen-plus".to_string(),
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
@@ -527,9 +666,8 @@ fn output_expansion_resolution_is_core_owned() {
 #[test]
 fn output_expansion_decline_returns_core_stop_summary() {
     let dir = tmp_dir("output_expansion_decline");
-    let core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
-    let mut config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let mut config = ModelServiceConfig {
         model: "qwen-plus".to_string(),
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
@@ -573,9 +711,8 @@ fn output_expansion_decline_returns_core_stop_summary() {
 #[test]
 fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
     let dir = tmp_dir("runtime_config_update_core_owned");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
-    let mut config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let mut config = ModelServiceConfig {
         model: "qwen-plus".to_string(),
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
@@ -649,9 +786,8 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
 #[test]
 fn runtime_host_configuration_sync_is_core_owned() {
     let dir = tmp_dir("runtime_host_configuration_sync");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
-    let config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let config = ModelServiceConfig {
         model: "qwen-plus".to_string(),
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
@@ -695,11 +831,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
 
 #[test]
 fn one_prompt_delta_can_render_to_multiple_slices() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("multi_slice_delta"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("multi_slice_delta"));
     let long_input = "你好".repeat(7000);
     let prompt = match core.begin_turn(&long_input, Some("runtime_time: now")) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -718,7 +850,7 @@ fn one_prompt_delta_can_render_to_multiple_slices() {
 fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("multi_slice_runtime_delta"),
     );
     core.set_response_protocol(ResponseProtocolKind::Xml);
@@ -738,7 +870,9 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids, vec!["pd_1"]);
     assert!(!prompt.contains("先分析"));
     assert!(!prompt.contains("Final Answer:\n结论"));
-    assert!(prompt.ends_with("Now please continue your ID's response part in XML as required in protocol:\n## TIMEM_ASSISTANT"));
+    assert!(prompt.ends_with(
+        "Now please fulfill your response part like one-root label <response>...</response>:"
+    ));
     let prompt = match core.begin_turn("继续", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -753,10 +887,10 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
 }
 
 #[test]
-fn user_supplement_appends_to_latest_delta_as_slice() {
+fn user_supplement_builds_the_next_delta() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("user_supplement_slice"),
     );
     let first_prompt = match core.begin_turn("先分析这个问题", None) {
@@ -775,7 +909,8 @@ fn user_supplement_appends_to_latest_delta_as_slice() {
     };
     let delta_ids = field_values(&prompt, "delta_id");
 
-    assert_eq!(delta_ids, vec![original_delta]);
+    assert_eq!(delta_ids.len(), 2);
+    assert_eq!(delta_ids[0], original_delta);
     assert!(prompt.contains("## USER"));
     assert!(!prompt.contains("User supplement during current turn:"));
     assert!(prompt.contains("补充：优先考虑跨平台实现"));
@@ -785,7 +920,7 @@ fn user_supplement_appends_to_latest_delta_as_slice() {
 fn user_supplements_with_audit_are_core_owned_turn_updates() {
     let dir = tmp_dir("user_supplement_with_audit");
     let audit_file = dir.join("audit/action_audit.json");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("先分析这个问题", None);
 
     let step = core
@@ -807,6 +942,10 @@ fn user_supplements_with_audit_are_core_owned_turn_updates() {
 
     assert!(prompt.contains("补充：优先考虑跨平台实现"));
     assert!(prompt.contains("补充：保持 UI 无关的数据结构"));
+    assert_eq!(field_values(&prompt, "delta_id").len(), 2);
+    let first_supplement = prompt.find("补充：优先考虑跨平台实现").unwrap();
+    let second_supplement = prompt.find("补充：保持 UI 无关的数据结构").unwrap();
+    assert!(first_supplement < second_supplement);
     let audit = read_audit_doc(&audit_file).unwrap();
     let events = audit["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
@@ -826,7 +965,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么？", None);
 
     let step = core.apply_model_response(LlmResponse {
@@ -848,7 +987,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
 fn prompt_rendering_does_not_expose_durable_ctx_score() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("durable_ctx_not_rendered"),
     );
     let prompt = match core.begin_turn("不要记住：纪念日这个词只是测试", None) {
@@ -861,11 +1000,7 @@ fn prompt_rendering_does_not_expose_durable_ctx_score() {
 
 #[test]
 fn prompt_discard_can_remove_whole_delta_by_delta_id() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("shrink_delta_id"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("shrink_delta_id"));
     let prompt = match core.begin_turn("REMOVE_THIS_DELTA", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -910,7 +1045,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
 fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("delta_id_global_sequence"),
     );
     let prompt = match core.begin_turn("first delta", None) {
@@ -950,7 +1085,7 @@ fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
 fn memmgr_context_discard_is_not_executable() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("memmgr_context_discard"),
     );
     let _prompt = match core.begin_turn("REMOVE_THIS_MEMMGR_DELTA", None) {
@@ -979,7 +1114,7 @@ fn memmgr_context_discard_is_not_executable() {
 fn response_context_compact_hides_refs_and_appends_summary_slice() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("response_context_compact"),
     );
     core.set_response_protocol(ResponseProtocolKind::Markdown);
@@ -1008,15 +1143,60 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
     assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("removed_delta_count: 1"));
     assert!(!prompt.contains("OLD_DYNAMIC_CONTEXT_TO_COMPACT"));
+    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
+}
+
+#[test]
+fn response_context_compact_reinjects_current_applied_mcp_capabilities() {
+    let mut core = test_core(
+        "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+        profile("qwen-plus"),
+        tmp_dir("response_context_compact_mcp"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Markdown);
+    core.configure_mcp(
+        CapabilityRegistry::builtin(),
+        McpRuntime::default(),
+        Vec::new(),
+        vec![McpTool {
+            server_id: "demo".to_string(),
+            server_name: "Demo MCP".to_string(),
+            name: "echo".to_string(),
+            action_name: "mcp.demo.echo".to_string(),
+            description: "Echo input".to_string(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        }],
+    )
+    .unwrap();
+    let prompt = match core.begin_turn("MCP_CONTEXT_TO_COMPACT", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_id = first_field_value(&prompt, "delta_id");
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndiscard: {delta_id}\nsummary:\n保留当前任务状态。"
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("Active MCP capabilities after context compaction (1 actions):"));
+    assert!(prompt.contains("- mcp.demo.echo (Demo MCP)"));
+    assert!(prompt.contains("Refer to the current capability catalog"));
+    assert!(!prompt.contains("MCP_CONTEXT_TO_COMPACT"));
 }
 
 #[test]
 fn prompt_discard_can_remove_visible_delta_by_delta_id() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("shrink_slice_id"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("shrink_slice_id"));
     core.set_response_protocol(ResponseProtocolKind::Json);
     let long_input = format!("SLICE_ONE_ONLY{}", "a".repeat(13_000));
     let prompt = match core.begin_turn(&long_input, None) {
@@ -1065,7 +1245,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
 fn prompt0_is_static_global_only() {
     let mut core = test_core(
         "STATIC_GLOBAL",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("prompt0_static"),
     );
     let prompt = match core.begin_turn("secret user question", Some("runtime_time: now")) {
@@ -1085,7 +1265,7 @@ fn prompt0_is_static_global_only() {
 fn dynamic_context_can_be_estimated_and_cleared_without_touching_static_prompt() {
     let mut core = test_core(
         "STATIC_GLOBAL",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("clear_dynamic_context"),
     );
     assert_eq!(core.dynamic_context_estimated_tokens(), 0);
@@ -1106,7 +1286,7 @@ fn dynamic_context_can_be_estimated_and_cleared_without_touching_static_prompt()
 fn stale_context_decision_resolution_is_core_owned() {
     let dir = tmp_dir("stale_context_resolution");
     let audit_file = dir.join("audit.json");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("seed stale context", None);
     assert!(core.dynamic_context_estimated_tokens() > 0);
     let request = agent_core::StaleContextDecisionRequest {
@@ -1131,7 +1311,7 @@ fn stale_context_decision_resolution_is_core_owned() {
 fn stale_context_continue_keeps_dynamic_context() {
     let dir = tmp_dir("stale_context_continue");
     let audit_file = dir.join("audit.json");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("seed stale context", None);
     let before = core.dynamic_context_estimated_tokens();
     assert!(before > 0);
@@ -1152,7 +1332,7 @@ fn stale_context_continue_keeps_dynamic_context() {
 fn long_context_does_not_inject_shrink_review_below_ninety_percent_window() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("shrink_below_force_threshold"),
     );
     core.set_max_llm_input_tokens(3_000);
@@ -1173,10 +1353,10 @@ fn long_context_does_not_inject_shrink_review_below_ninety_percent_window() {
 }
 
 #[test]
-fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
+fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("shrink_observed_tokens"),
     );
     core.set_max_llm_input_tokens(3_000);
@@ -1201,11 +1381,7 @@ fn long_context_uses_observed_provider_prompt_tokens_plus_new_delta_estimate() {
 
 #[test]
 fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instruction() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("shrink_force"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("shrink_force"));
     core.set_max_llm_input_tokens(3_000);
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
@@ -1244,7 +1420,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
 fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("shrink_invalidates_observed_tokens"),
     );
     core.set_max_llm_input_tokens(10_000);
@@ -1303,7 +1479,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
 fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
     let mut core = test_core(
         "STATIC_PROMPT ".repeat(9_500),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("shrink_static_dominant"),
     );
     core.set_max_llm_input_tokens(3_000);
@@ -1318,7 +1494,7 @@ fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
 #[test]
 fn memory_candidates_are_persisted() {
     let dir = tmp_dir("memory_write");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是 ALPHA-42", None);
     let final_step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"ALL_FINISHED","final_answer":"记住了","memory_candidates":[{"content":"测试代号是 ALPHA-42"}]}"#),
@@ -1344,7 +1520,7 @@ fn query_memory_action_returns_action_result_delta() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("测试项目纪念日是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? AND content LIKE ? LIMIT 5","params":["%测试项目%","%纪念日%"],"limit":5}}]}"#),
@@ -1369,7 +1545,7 @@ fn memmgr_durable_sql_returns_action_result_delta() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("测试项目纪念日是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目%"],"limit":5}}]}"#),
@@ -1396,7 +1572,7 @@ fn canonical_tools_accept_json_object_args() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("用 JSON object args 跑工具", None);
     let step = core.apply_model_response(LlmResponse {
@@ -1434,7 +1610,7 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
     let loop_marker = root.join("loop-marker");
     fs::write(&loop_marker, "ready").unwrap();
 
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(CapabilityRegistry::builtin());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("覆盖 builtin tool 参数端到端", None);
@@ -1610,7 +1786,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     core.set_capability_registry(CapabilityRegistry::builtin());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
 
@@ -1850,7 +2026,7 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
             json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 BLUE-17这个说法。"}),
         ],
     );
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
@@ -1871,7 +2047,7 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
 
 #[test]
 fn plain_text_after_repair_failure_is_shown_as_final_answer() {
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), tmp_dir("repair"));
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("repair"));
     core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("你好", None);
     // JSON protocol keeps a bounded prose fallback after repair failure.
@@ -1905,7 +2081,7 @@ fn plain_text_after_repair_failure_is_shown_as_final_answer() {
 fn status_finished_uses_final_answer_as_host_final_answer() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("status_finished_final_answer"),
     );
     let _ = core.begin_turn("总结", None);
@@ -1945,7 +2121,7 @@ fn final_turn_wire_shape_uses_semantic_final_answer_field() {
 fn fields_wrapped_finished_answer_is_accepted_without_repair() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("fields_wrapped_finished_answer"),
     );
     let _ = core.begin_turn("hello", None);
@@ -1970,7 +2146,7 @@ fn fields_wrapped_finished_answer_is_accepted_without_repair() {
 fn final_answer_without_finished_status_requests_protocol_repair() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("final_answer_without_status"),
     );
     core.set_response_protocol(ResponseProtocolKind::Markdown);
@@ -1999,7 +2175,7 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
 fn finished_status_without_final_answer_requests_protocol_repair() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("finished_without_final_answer"),
     );
     core.set_response_protocol(ResponseProtocolKind::Markdown);
@@ -2026,7 +2202,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
 fn protocol_repair_slice_focuses_previous_response_around_error() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("repair_focus_previous_response"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -2059,7 +2235,7 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
 fn protocol_repair_delta_separates_previous_output_from_system_error() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("repair_delta_roles"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -2109,7 +2285,7 @@ fn protocol_repair_delta_separates_previous_output_from_system_error() {
 fn successful_protocol_repair_does_not_persist_repair_delta() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("successful_repair_is_temporary"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -2156,7 +2332,7 @@ fn successful_protocol_repair_does_not_persist_repair_delta() {
 fn protocol_repair_can_retry_multiple_times_before_failing() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("protocol_repair_multiple_attempts"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -2195,7 +2371,7 @@ fn protocol_repair_can_retry_multiple_times_before_failing() {
 fn status_working_requires_working_still_action_and_keeps_progress_separate() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("status_working_progress"),
     );
     core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
@@ -2220,7 +2396,7 @@ fn status_working_requires_working_still_action_and_keeps_progress_separate() {
 fn omitted_status_bare_action_requests_protocol_repair() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bare_action_defaults_working"),
     );
     let _ = core.begin_turn("继续修复", None);
@@ -2243,7 +2419,7 @@ fn omitted_status_bare_action_requests_protocol_repair() {
 fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("final_progress_marker_repair"),
     );
     let _ = core.begin_turn("继续汇报", None);
@@ -2267,7 +2443,7 @@ fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
 fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("repair_action_like"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -2326,11 +2502,7 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
 
 #[test]
 fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("truncated_repair"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("truncated_repair"));
     core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("写一个很长的报告", None);
     let step = core.apply_model_response(LlmResponse {
@@ -2356,7 +2528,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
 fn model_repair_audit_is_core_owned_when_applying_response() {
     let dir = tmp_dir("model_repair_audit_core_owned");
     let audit_file = dir.join("audit").join("api_audit.json");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("写一个很长的报告", None);
 
     let step = core.apply_model_response_with_repair_audit(
@@ -2417,7 +2589,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
 fn turn_lifecycle_audit_is_core_owned() {
     let dir = tmp_dir("turn_lifecycle_audit_core_owned");
     let audit_file = dir.join("audit").join("api_audit.json");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let outcome = agent_core::TurnOutcome::final_response(
         "done",
         usage(),
@@ -2427,7 +2599,7 @@ fn turn_lifecycle_audit_is_core_owned() {
     );
 
     core.record_turn_start_audit(&audit_file, "session_1", "turn_1", "hello");
-    core.record_turn_error_audit(&audit_file, "session_1", "turn_1", "provider_network_error");
+    core.record_turn_error_audit(&audit_file, "session_1", "turn_1", "model_network_error");
     core.record_turn_final_audit(&audit_file, "session_1", "turn_1", &outcome);
 
     let audit = read_audit_doc(&audit_file).unwrap();
@@ -2436,7 +2608,7 @@ fn turn_lifecycle_audit_is_core_owned() {
     assert_eq!(events[0]["type"], "turn_start");
     assert_eq!(events[0]["user_input"], "hello");
     assert_eq!(events[1]["type"], "turn_error");
-    assert_eq!(events[1]["error"], "provider_network_error");
+    assert_eq!(events[1]["error"], "model_network_error");
     assert_eq!(events[2]["type"], "turn_final");
     assert_eq!(events[2]["assistant_output"], "done");
     assert_eq!(events[2]["repair_issue"], "invalid_json");
@@ -2446,10 +2618,10 @@ fn turn_lifecycle_audit_is_core_owned() {
 }
 
 #[test]
-fn truncated_repair_failure_explains_provider_max_token_reason() {
+fn truncated_repair_failure_explains_model_max_token_reason() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("truncated_repair_failure"),
     );
     let _ = core.begin_turn("写一个很长的报告", None);
@@ -2508,7 +2680,7 @@ fn truncated_repair_failure_explains_provider_max_token_reason() {
 fn mixed_protocol_transcript_extracts_final_json_without_leaking_raw_segments() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("mixed_protocol_transcript"),
     );
     let _ = core.begin_turn("展示一个耗尽 8 步交互的操作", None);
@@ -2550,7 +2722,7 @@ ok
 fn prose_then_markdown_fenced_json_extracts_payload() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("prose_then_fenced_json"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -2583,7 +2755,7 @@ fn prose_then_markdown_fenced_json_extracts_payload() {
 fn response_text_with_unescaped_inner_quotes_is_repaired() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("unescaped_response_quotes"),
     );
     let _ = core.begin_turn(
@@ -2613,7 +2785,7 @@ fn response_text_with_unescaped_inner_quotes_is_repaired() {
 fn response_text_preserves_valid_complex_symbols_and_quotes() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("valid_complex_symbols"),
     );
     let _ = core.begin_turn("展示各种符号", None);
@@ -2642,7 +2814,7 @@ fn response_text_preserves_valid_complex_symbols_and_quotes() {
 fn response_text_decodes_common_json_escape_sequences() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("json_escape_response"),
     );
     let _ = core.begin_turn("展示 escape 符号", None);
@@ -2667,7 +2839,7 @@ fn response_text_decodes_common_json_escape_sequences() {
 fn action_input_decodes_common_json_escape_sequences() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("json_escape_action_input"),
     );
     let _ = core.begin_turn("记住一段 escape 文本", None);
@@ -2691,7 +2863,7 @@ fn action_input_decodes_common_json_escape_sequences() {
 fn action_fields_with_unescaped_inner_quotes_are_repaired() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("unescaped_action_quotes"),
     );
     let _ = core.begin_turn("查刚才那句话", None);
@@ -2722,7 +2894,7 @@ fn action_fields_with_unescaped_inner_quotes_are_repaired() {
 fn malformed_complex_protocol_is_blocked_without_raw_leak() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("malformed_complex_protocol"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -2780,11 +2952,9 @@ fn malformed_complex_protocol_is_blocked_without_raw_leak() {
 }
 
 #[test]
-fn profile_label_keeps_provider_and_model_distinct() {
-    let qwen_openai = profile("openai", "qwen-plus");
-    let qwen_aliyun = profile("aliyun", "qwen-plus");
-    assert_ne!(qwen_openai.label(), qwen_aliyun.label());
-    assert!(qwen_aliyun.label().contains("aliyun:qwen-plus"));
+fn profile_label_is_the_model_name() {
+    let qwen = profile("qwen-plus");
+    assert_eq!(qwen.label(), "qwen-plus");
 }
 
 #[test]
@@ -2800,7 +2970,7 @@ fn memmgr_durable_sql_lists_recent_records() {
         ),
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("durable mem 不是有几条记录吗？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 1","limit":1}}]}"#),
@@ -2833,7 +3003,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         ),
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     core.set_response_protocol(ResponseProtocolKind::Xml);
     let _ = core.begin_turn("durable mem 不是有几条记录吗？", None);
     let step = core.apply_model_response(LlmResponse {
@@ -2871,7 +3041,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
 fn progress_and_working_still_action_continue_with_implicit_continue_note() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("progress_action_continue"),
     );
     core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
@@ -2895,11 +3065,7 @@ fn progress_and_working_still_action_continue_with_implicit_continue_note() {
 
 #[test]
 fn next_action_without_intent_uses_action_name_fallback() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("missing_intent"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("missing_intent"));
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#),
@@ -2920,7 +3086,7 @@ fn next_action_without_intent_uses_action_name_fallback() {
 fn unsupported_action_is_not_executed_silently() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("unsupported_action"),
     );
     let _ = core.begin_turn("打开文件", None);
@@ -2939,11 +3105,7 @@ fn unsupported_action_is_not_executed_silently() {
 
 #[test]
 fn scratch_notes_can_be_written_queried_and_deleted() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("scratch_notes"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("scratch_notes"));
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"notes","label":"release checkpoint","content":"continue this task later"}}]}"#),
@@ -3006,7 +3168,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
 fn memmgr_scratch_write_and_read_notes() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("memmgr_scratch_notes"),
     );
     let _ = core.begin_turn("先把这个长期任务记到草稿区", None);
@@ -3055,11 +3217,7 @@ fn memmgr_scratch_write_and_read_notes() {
 
 #[test]
 fn memmgr_missing_op_requests_protocol_repair_from_manifest_idl() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("memmgr_missing_op"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("memmgr_missing_op"));
     let _ = core.begin_turn("查一下记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -3087,7 +3245,7 @@ fn memmgr_legacy_query_op_is_not_executed_after_sql_search_split() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &root);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &root);
 
     let _ = core.begin_turn("查测试项目代号", None);
     let step = core.apply_model_response(LlmResponse {
@@ -3113,7 +3271,7 @@ fn memmgr_legacy_query_op_is_not_executed_after_sql_search_split() {
 fn scratch_search_empty_text_lists_recent_notes_with_limit() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("scratch_query_recent"),
     );
     fs::write(
@@ -3146,7 +3304,7 @@ fn scratch_search_empty_text_lists_recent_notes_with_limit() {
 fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("scratch_protocol_repair"),
     );
 
@@ -3218,7 +3376,7 @@ fn scratch_actions_request_protocol_repair_for_missing_required_fields() {
 fn scratch_delete_missing_id_is_non_destructive() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("scratch_delete_missing"),
     );
     fs::write(
@@ -3250,7 +3408,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("scratch_context_offload"),
     );
     let prompt = match core.begin_turn(
@@ -3314,7 +3472,7 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
 fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("scratch_context_offload_invalid"),
     );
     let _ = core.begin_turn("seed context", None);
@@ -3338,7 +3496,7 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
 fn context_compact_requires_prompt_refs_in_protocol() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("scratch_context_offload_refs_required"),
     );
     let _ = core.begin_turn("seed context", None);
@@ -3358,11 +3516,7 @@ fn context_compact_requires_prompt_refs_in_protocol() {
 
 #[test]
 fn memory_write_action_requires_content_or_query() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("empty_write"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("empty_write"));
     let _ = core.begin_turn("记住", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -3390,7 +3544,7 @@ fn query_memory_does_not_expand_semantic_aliases() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%user's name%"],"limit":5}}]}"#),
@@ -3416,7 +3570,7 @@ fn query_memory_exposes_version_for_conflict_safe_updates() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("查测试代号记忆版本", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, created_at_ms, updated_at_ms, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}}]}"#),
@@ -3443,7 +3597,7 @@ fn memory_lookup_context_triggers_runtime_precheck_before_model_reply() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let prompt = match core.begin_turn(
         "我是谁",
         Some("runtime_time: now\nmemory_lookup_hint: stored personal fact likely needed"),
@@ -3468,7 +3622,7 @@ fn memory_lookup_precheck_is_not_added_without_runtime_marker() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let prompt = match core.begin_turn("我是谁", Some("runtime_time: now")) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -3486,7 +3640,7 @@ fn sql_read_action_returns_rows() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我最早什么时候告诉你测试代号的", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content, created_at_ms FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
@@ -3513,7 +3667,7 @@ fn durable_sql_empty_filter_reports_total_rows() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我叫什么名字", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%姓名%"],"limit":5}}]}"#),
@@ -3540,7 +3694,7 @@ fn memory_sql_query_reads_memory_versions_and_normalizes_legacy_rows() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆版本", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, updated_at_ms, content FROM memories ORDER BY created_at_ms ASC","limit":5}}]}"#),
@@ -3566,7 +3720,7 @@ fn sql_read_allows_with_cte_reads() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("按时间查测试代号", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"WITH\nmatched AS (SELECT content, created_at_ms FROM memories WHERE content LIKE ?) SELECT content, created_at_ms FROM matched ORDER BY created_at_ms ASC LIMIT 5","params":["%测试代号%"]}}]}"#),
@@ -3592,7 +3746,7 @@ fn sql_read_rejects_write_statement() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("改记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='x' LIMIT 1"}}]}"#),
@@ -3618,7 +3772,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories ORDER BY created_at_ms ASC","limit":1}}]}"#),
@@ -3637,11 +3791,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
 
 #[test]
 fn sql_read_rejects_other_tables() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("sql_other_tables"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("sql_other_tables"));
     let _ = core.begin_turn("列出表", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT name FROM sqlite_master LIMIT 5"}}]}"#),
@@ -3658,11 +3808,7 @@ fn sql_read_rejects_other_tables() {
 
 #[test]
 fn memory_schema_action_returns_native_schema_contract() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("schema_action"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("schema_action"));
     let _ = core.begin_turn("有哪些记忆表", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -3687,11 +3833,7 @@ fn memory_schema_action_returns_native_schema_contract() {
 
 #[test]
 fn memory_sql_query_allows_pragma_table_info() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("pragma_schema"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("pragma_schema"));
     let _ = core.begin_turn("查看 schema", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"PRAGMA table_info(memories)","limit":20}}]}"#),
@@ -3712,7 +3854,7 @@ fn memory_sql_query_allows_pragma_table_info() {
 fn memory_sql_query_allows_chat_messages_table_info() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("pragma_chat_messages_schema"),
     );
     let _ = core.begin_turn("查看聊天 schema", None);
@@ -3734,11 +3876,7 @@ fn memory_sql_query_allows_chat_messages_table_info() {
 
 #[test]
 fn memory_sql_query_rejects_non_memories_pragma() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bad_pragma"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bad_pragma"));
     let _ = core.begin_turn("查看 schema", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"PRAGMA table_info(sqlite_master)","limit":20}}]}"#),
@@ -3755,11 +3893,7 @@ fn memory_sql_query_rejects_non_memories_pragma() {
 
 #[test]
 fn sql_read_action_requires_sql_for_repair() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("sql_missing"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("sql_missing"));
     let _ = core.begin_turn("查记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql"}}]}"#),
@@ -3785,7 +3919,7 @@ fn memory_sql_query_requires_params_for_placeholders() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","limit":20}}]}"#),
@@ -3811,7 +3945,7 @@ fn memory_sql_query_rejects_extra_params_for_placeholders() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我的测试代号是什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM memories WHERE content LIKE ? ORDER BY created_at_ms ASC","params":["%name:%","%mynameis%","%Iam%"],"limit":20}}]}"#),
@@ -3837,7 +3971,7 @@ fn memory_sql_prepare_error_exposes_sqlite_reason_to_model() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("有个数字悄悄告诉你的，是什么来着", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE key LIKE ? OR content LIKE ? LIMIT 5","params":["%ABC%","%123456%"],"limit":5}}]}"#),
@@ -3869,7 +4003,7 @@ fn chat_history_query_reads_persisted_chat_records() {
             json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 BLUE-17这个说法。"}),
         ],
     );
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
@@ -3902,7 +4036,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
 "#,
     )
     .unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("旧格式里说过什么", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
@@ -3922,11 +4056,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
 
 #[test]
 fn chat_history_query_keeps_current_prompt_delta_fallback() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("chat_history"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("chat_history"));
     let _ = core.begin_turn("第一轮我说了测试物品 BLUE-17", None);
     let _ = core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"ALL_FINISHED","final_answer":"收到"}"#),
@@ -3966,7 +4096,7 @@ fn chat_history_search_empty_text_lists_recent_records() {
             json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"第二条回复"}),
         ],
     );
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"","limit":1}}]}"#),
@@ -3998,7 +4128,7 @@ fn memory_sql_query_reads_chat_messages_with_time_window() {
             json!({"type":"turn_final","session":"shell_new","turn_id":"turn_1781846400000","assistant_output":"新回复"}),
         ],
     );
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("查最近窗口聊天", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
@@ -4057,7 +4187,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
                 json!({"type":"turn_final","session":"shell_today","turn_id":"turn_1782203922467","assistant_output":"今天聊过 shell 记忆查询。"}),
             ],
         );
-        let mut core = test_core("STATIC", profile("custom", "aws-claude-sonnet-4-6"), &dir);
+        let mut core = test_core("STATIC", profile("aws-claude-sonnet-4-6"), &dir);
         let _ = core.begin_turn("我今天和你聊过什么？", None);
         let content = scored(format!(
             r#"{{"working_still_action":{{{}}}}}"#,
@@ -4091,11 +4221,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
 
 #[test]
 fn memory_sql_query_rejects_raw_update_sql() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("raw_sql_write"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("raw_sql_write"));
     let _ = core.begin_turn("更新记忆", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"UPDATE memories SET content='bad'","limit":5}}]}"#),
@@ -4125,7 +4251,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
         ],
     );
     let before = fs::read_to_string(&audit_file).unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("删除聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"DELETE FROM chat_messages WHERE content LIKE '%保留%'","limit":5}}]}"#),
@@ -4157,7 +4283,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
             json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"保留回复"}),
         ],
     );
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("删除包含目标的聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"delete","search_text":"删除目标","limit":10}}]}"#),
@@ -4180,7 +4306,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
 #[test]
 fn memory_update_insert_update_and_delete_are_wrapped() {
     let dir = tmp_dir("memory_update_wrapped");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("记住我的测试代号", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"user_name","content":"测试代号是 ALPHA-42"}}]}"#),
@@ -4251,8 +4377,8 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
 #[test]
 fn memory_update_detects_stale_version_conflict_without_overwrite() {
     let dir = tmp_dir("memory_update_conflict");
-    let mut core_a = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
-    let mut core_b = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core_a = test_core("STATIC", profile("qwen-plus"), &dir);
+    let mut core_b = test_core("STATIC", profile("qwen-plus"), &dir);
 
     let _ = core_a.begin_turn("创建共享记忆", None);
     let step = core_a.apply_model_response(LlmResponse {
@@ -4299,7 +4425,7 @@ fn memory_update_detects_stale_version_conflict_without_overwrite() {
 #[test]
 fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
     let dir = tmp_dir("memory_update_parallel_conflict");
-    let mut seed_core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut seed_core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = seed_core.begin_turn("创建共享记忆", None);
     let step = seed_core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"shared_conflict","content":"初始值"}}]}"#),
@@ -4316,7 +4442,7 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
         let dir = dir.clone();
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
-            let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+            let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
             let _ = core.begin_turn(&format!("并发冲突更新 {idx}"), None);
             barrier.wait();
             let step = core.apply_model_response(LlmResponse {
@@ -4473,7 +4599,7 @@ fn mem_guard_keeps_concurrent_memory_updates_from_losing_records() {
         let dir = dir.clone();
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
-            let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+            let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
             let _ = core.begin_turn(&format!("并发写入 {idx}"), None);
             barrier.wait();
             let step = core.apply_model_response(LlmResponse {
@@ -4511,7 +4637,7 @@ fn mem_guard_keeps_concurrent_memory_updates_from_losing_records() {
 fn memory_update_requires_protocol_fields() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("memory_update_repair"),
     );
     let _ = core.begin_turn("更新记忆", None);
@@ -4532,11 +4658,7 @@ fn memory_update_requires_protocol_fields() {
 
 #[test]
 fn run_bash_allows_readonly_count_command() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_readonly"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_readonly"));
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
@@ -4559,7 +4681,7 @@ fn run_bash_allows_readonly_count_command() {
 #[test]
 fn action_audit_groups_actions_by_user_turn_and_round() {
     let dir = tmp_dir("action_audit_grouping");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("整理这个任务", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"scratch","op":"write","kind":"notes","label":"任务计划","content":"step one"}}]}"#),
@@ -4608,11 +4730,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
 
 #[test]
 fn run_bash_rejects_old_timeout_sec_field() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_timeout_sec"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_timeout_sec"));
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("count cwd lines", None);
     let step = core.apply_model_response(LlmResponse {
@@ -4634,11 +4752,7 @@ fn run_bash_rejects_old_timeout_sec_field() {
 
 #[test]
 fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_background"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_background"));
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("run a long task", None);
     let step = core.apply_model_response(LlmResponse {
@@ -4680,7 +4794,7 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
 fn running_job_list_is_injected_when_discard_references_running_job_delta() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_running_list_on_shrink"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -4753,7 +4867,7 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
 fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_running_list_unrelated_discard"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -4818,7 +4932,7 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
 fn running_job_list_is_injected_when_offload_references_running_job_delta() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_running_list_on_offload"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -4883,7 +4997,7 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
 fn running_job_list_is_injected_when_compact_references_running_job_delta() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_running_list_on_compact"),
     );
     core.set_response_protocol(ResponseProtocolKind::Markdown);
@@ -4948,7 +5062,7 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
 fn removed_shell_job_status_action_is_rejected_as_unsupported() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_background_job_id_required"),
     );
     let _ = core.begin_turn("poll a long task", None);
@@ -4968,11 +5082,7 @@ fn removed_shell_job_status_action_is_rejected_as_unsupported() {
 
 #[test]
 fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_timeout_kill"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_timeout_kill"));
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("poll a long task", None);
     let step = core.apply_model_response(LlmResponse {
@@ -5017,7 +5127,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
 fn run_bash_rejects_removed_read_back_protocol() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_reject_readback_field"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -5041,7 +5151,7 @@ fn run_bash_rejects_removed_read_back_protocol() {
 fn run_bash_rejects_removed_large_readback_protocol() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_reject_large_readback_field"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -5064,7 +5174,8 @@ fn run_bash_rejects_removed_large_readback_protocol() {
 #[test]
 fn run_bash_requires_approval_for_mutating_commands() {
     let dir = tmp_dir("bash_reject");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("delete something", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"rm not_allowed"}}]}"#),
@@ -5118,10 +5229,70 @@ fn run_bash_requires_approval_for_mutating_commands() {
 }
 
 #[test]
+fn run_bash_always_allow_promotes_remaining_parallel_approvals() {
+    struct AlwaysAllowRuntime {
+        consumed: bool,
+    }
+
+    impl ActionRuntime for AlwaysAllowRuntime {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+
+        fn take_bash_always_allow(&mut self) -> bool {
+            if self.consumed {
+                false
+            } else {
+                self.consumed = true;
+                true
+            }
+        }
+    }
+
+    let dir = tmp_dir("bash_always_allow_parallel");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
+    let _ = core.begin_turn("delete two files", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"working_still_action":[[{"run_bash":{"cmd":"rm missing_one","timeout_ms":5000}},{"run_bash":{"cmd":"rm missing_two","timeout_ms":5000}}]]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let request = match step {
+        CoreStep::NeedsUserApproval { request } => request,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(request.command, "rm missing_one");
+
+    let mut runtime = AlwaysAllowRuntime { consumed: false };
+    let step = core.resolve_user_approval_with_audit_and_runtime(
+        &request,
+        true,
+        &dir.join("audit/turn_audit.json"),
+        "session_1",
+        "turn_1",
+        &mut runtime,
+    );
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        CoreStep::NeedsUserApproval { request } => {
+            panic!("always_allow should prevent repeated approval, got {request:?}")
+        }
+        other => panic!("unexpected step after approval: {other:?}"),
+    };
+    assert!(prompt.contains("rm missing_one"));
+    assert!(prompt.contains("rm missing_two"));
+    assert!(prompt.contains("approved_by_user"));
+}
+
+#[test]
 fn run_bash_allows_compound_local_write_commands() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_allow_compound_write"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -5147,9 +5318,10 @@ fn run_bash_allows_compound_local_write_commands() {
 fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_reject_compound_delete"),
     );
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -5172,9 +5344,10 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
 fn run_bash_executes_shell_syntax_after_user_approval() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_shell_syntax_after_approval"),
     );
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("test shell syntax", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"x=ok; printf $x | tr o O","timeout_ms":5000}}]}"#),
@@ -5203,7 +5376,7 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
 fn run_bash_child_sigsegv_isolated_and_turn_can_still_finish() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_sigsegv_isolation"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -5242,11 +5415,7 @@ fn run_bash_child_sigsegv_isolated_and_turn_can_still_finish() {
 
 #[test]
 fn run_bash_missing_command_returns_tool_input_error() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_missing"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_missing"));
     let _ = core.begin_turn("inspect files", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"run_bash":{}}]}"#),
@@ -5265,11 +5434,8 @@ fn run_bash_missing_command_returns_tool_input_error() {
 
 #[test]
 fn run_bash_requires_approval_for_absolute_paths() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("bash_path_reject"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_path_reject"));
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("read passwd", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"cat /etc/passwd"}}]}"#),
@@ -5290,7 +5456,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
 fn run_bash_allows_low_risk_system_identity_commands() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("bash_system_identity"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -5317,7 +5483,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
 #[test]
 fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     let dir = tmp_dir("ci_realistic_story");
-    let mut core = test_core("STATIC_GLOBAL_RULES", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC_GLOBAL_RULES", profile("qwen-plus"), &dir);
 
     let first_prompt = match core.begin_turn(
         "测试项目纪念日是 2099-06-12",
@@ -5486,7 +5652,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
 #[test]
 fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
     let dir = tmp_dir("scenario_coding");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
 
     let _ = core.begin_turn(
@@ -5546,7 +5712,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
         ],
     );
 
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(CapabilityRegistry::builtin());
     let _ = core.begin_turn("我的测试代号是什么？测试时段我们聊了什么？", None);
     let prompt = match core.apply_model_response(LlmResponse {
@@ -5581,11 +5747,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
 
 #[test]
 fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("scenario_self_qa"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("scenario_self_qa"));
     let _ = core.begin_turn("你是谁？把本轮调试标记设成 enabled，再确认你的路径。", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
@@ -5626,7 +5788,7 @@ fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
 fn scenario_file_writing_outputs_artifact_and_verifies_content() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("scenario_file_writing"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -5671,11 +5833,7 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
 
 #[test]
 fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("thought_slice"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("thought_slice"));
     let _ = core.begin_turn("需要推理一下", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -5698,11 +5856,7 @@ fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
 
 #[test]
 fn free_talk_field_optional_does_not_trigger_repair() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("thought_absent"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("thought_absent"));
     let _ = core.begin_turn("简单问答", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"ALL_FINISHED","final_answer":"好的"}"#),
@@ -5723,7 +5877,7 @@ fn free_talk_field_optional_does_not_trigger_repair() {
 fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("thought_obj_keep_in_context"),
     );
     let _ = core.begin_turn("需要推理", None);
@@ -5746,7 +5900,7 @@ fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
 fn free_talk_object_keep_in_context_false_is_still_persisted() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("thought_obj_not_kept"),
     );
     let _ = core.begin_turn("需要推理", None);
@@ -5773,6 +5927,10 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(template.contains("# Timem System Prompt"));
     assert!(template.contains("exactly protocol-compliant response"));
     assert!(template.contains("Answer based on collected evidence"));
+    assert!(template.contains("Use emoji sparingly"));
+    assert!(template.contains("your response in this round"));
+    assert!(!template.contains("replay of your response"));
+    assert!(template.contains("Do not decorate ordinary headings, status updates, test results"));
     assert!(template.contains("Context maintenance"));
     assert!(template.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     assert!(template.contains("{{CURRENT_PROTOCOL_LANG}}"));
@@ -5783,6 +5941,12 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(template.contains("tool/capability catalog"));
     assert!(!template.contains("runtime implementation details"));
     assert!(!template.contains("resources/response_v1_summary.json"));
+    let xml_protocol = include_str!("../../resources/protocol/xml/response_protocol.md");
+    assert!(xml_protocol.contains("## XML-native actions"));
+    assert!(xml_protocol.contains("<actions>"));
+    assert!(xml_protocol.contains("<parallel>"));
+    assert!(!xml_protocol.contains("<action_json>"));
+    assert!(!xml_protocol.contains("JSON_LITERAL_TEXT"));
     // Protocol section content checks
     assert!(protocol_section.contains("## Response Protocol"));
     assert!(protocol_section.contains("final_answer"));
@@ -5794,7 +5958,7 @@ fn static_prompt_keeps_contracts_concise() {
 fn rendered_prompt_response_schema_is_injected_from_resource() {
     let mut core = test_core(
         "## Protocol\n{{RESPONSE_V1_SCHEMA}}",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("response_schema_prompt_injection"),
     );
     core.set_response_protocol(ResponseProtocolKind::Markdown);
@@ -5829,7 +5993,7 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
 fn work_directory_instructions_are_loaded_once_even_if_host_repeats_context() {
     let mut core = test_core(
         "static",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("work_instruction_dedupe"),
     );
     let supporting_context = r#"work_directory_instructions:
@@ -5892,7 +6056,7 @@ unique_workspace_reference_should_remain_visible
 fn rendered_static_prompt_preserves_source_rule_order() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("static_prompt_order"),
     );
     let prompt = match core.begin_turn("hello", None) {
@@ -5917,7 +6081,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     let template = include_str!("../../resources/system_prompt/system_prompt.md");
     let mut default_core = AgentCore::new(
         template,
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("response_protocol_default"),
     );
     let default_prompt = match default_core.begin_turn("hello", None) {
@@ -5930,7 +6094,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
 
     let mut markdown_core = test_core(
         template,
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("response_protocol_markdown"),
     );
     markdown_core.set_response_protocol(ResponseProtocolKind::Markdown);
@@ -5946,7 +6110,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
 
     let mut json_core = test_core(
         template,
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("response_protocol_json"),
     );
     json_core.set_response_protocol(ResponseProtocolKind::Json);
@@ -5962,7 +6126,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
 
     let mut xml_core = test_core(
         template,
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("response_protocol_xml"),
     );
     xml_core.set_response_protocol(ResponseProtocolKind::Xml);
@@ -5972,13 +6136,16 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     };
     assert!(xml_prompt.contains("# System Response Protocol"));
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
-    assert!(xml_prompt.contains("<working_still_action>"));
+    assert!(xml_prompt.contains("## XML-native actions"));
+    assert!(xml_prompt.contains("<actions>"));
+    assert!(xml_prompt.contains("<parallel>"));
+    assert!(!xml_prompt.contains("<action_json>"));
     assert!(xml_prompt.contains("<context_compact>"));
     assert!(xml_prompt.contains("<discard>"));
     assert!(xml_prompt.contains("<offload>"));
     assert!(xml_prompt.contains("<summary>"));
-    assert!(xml_prompt.contains("Runtime discards discarded deltas"));
-    assert!(xml_prompt.contains("Example 4: Compact Context Response Output"));
+    assert!(xml_prompt.contains("Runtime writes offloaded content to scratch"));
+    assert!(xml_prompt.contains("## Format examples — EXAMPLES ONLY"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }
 
@@ -5996,7 +6163,7 @@ fn static_prompt_does_not_handwrite_tool_catalog() {
 fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("no_local_command_host"),
     );
     core.set_capability_registry(CapabilityRegistry::builtin_for_host(
@@ -6130,6 +6297,7 @@ fn architecture_docs_do_not_bind_bash_capability_to_shell_ui() {
 #[test]
 fn agent_core_dispatches_owned_structured_topic_events_to_host_sink() {
     let mut core = core_with_builtin_capabilities("notification_sink");
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("检查项目", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -6235,7 +6403,7 @@ fn external_tool_call_protocol_repairs_without_showing_raw_tool_call() {
         other => panic!("expected repair NeedModel, got {other:?}"),
     };
     assert!(prompt.contains("external_tool_call_protocol"));
-    assert!(prompt.contains("Timem 不能执行这种格式"));
+    assert!(prompt.contains("请使用 XML-native actions"));
 
     let mut received = Vec::new();
     core.notify_last_topic_events(
@@ -6254,7 +6422,7 @@ fn external_tool_call_protocol_repairs_without_showing_raw_tool_call() {
 fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("static_prompt_examples_not_task_like"),
     );
     core.set_response_protocol(ResponseProtocolKind::Xml);
@@ -6280,7 +6448,7 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
 fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("static_prompt_example_heading_levels"),
     );
     core.set_response_protocol(ResponseProtocolKind::Markdown);
@@ -6308,7 +6476,7 @@ fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
 fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
     let mut core = test_core(
         "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("capability_prompt_catalog"),
     );
     let prompt = match core.begin_turn("hello", None) {
@@ -6353,7 +6521,7 @@ fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
 fn canonical_tool_action_is_validated_through_capability_registry() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("capability_registry_action_parse"),
     );
     let _ = core.begin_turn("查记忆", None);
@@ -6380,7 +6548,7 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
 fn legacy_actions_are_not_visible_or_executable() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("legacy_action_fallback_boundary"),
     );
     let prompt = match core.begin_turn("查旧动作", None) {
@@ -6413,11 +6581,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
     let registry =
         CapabilityRegistry::builtin_with_overlay_dir(release_quality_skill_overlay("capmgr_skill"))
             .unwrap();
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("capmgr_load_skill"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("capmgr_load_skill"));
     core.set_capability_registry(registry);
     let _ = core.begin_turn("准备发布", None);
     let step = core.apply_model_response(LlmResponse {
@@ -6442,7 +6606,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
 #[test]
 fn self_tool_reads_mem_paths_and_about_info() {
     let dir = tmp_dir("self_tool_paths");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("Timem 的记忆路径和版本是什么？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -6487,7 +6651,7 @@ fn self_tool_reads_mem_paths_and_about_info() {
 #[test]
 fn self_tool_runtime_configuration_keeps_core_owned_identity() {
     let dir = tmp_dir("self_tool_runtime_config");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let configured_space = dir.join("custom_space");
     let configured_memory = configured_space.join("memory");
     let configured_api_audit = configured_space.join("audit").join("api_audit.json");
@@ -6537,11 +6701,7 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
 
 #[test]
 fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aliyun", "qwen-plus"),
-        tmp_dir("self_tool_env"),
-    );
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("self_tool_env"));
     let _ = core.begin_turn("调整 Timem 的运行期环境。", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
@@ -6566,7 +6726,7 @@ fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
 fn self_tool_env_denies_memory_path_writes_through_core_action() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("self_tool_protected_env"),
     );
     core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
@@ -6613,7 +6773,7 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
     fs::write(sub_dir.join("marker.txt"), "cwd-ok").unwrap();
     let sub_dir = fs::canonicalize(&sub_dir).unwrap();
 
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), memory_dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
 
     let first_prompt = match core.begin_turn("先确认 cwd", None) {
@@ -6684,7 +6844,7 @@ fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
     let base_dir = fs::canonicalize(&base_dir).unwrap();
     let sub_dir = fs::canonicalize(&sub_dir).unwrap();
 
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), memory_dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
 
@@ -6726,7 +6886,7 @@ fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
     let base_dir = fs::canonicalize(&base_dir).unwrap();
     let missing = base_dir.join("missing");
 
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), memory_dir);
     core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
 
     let _ = core.begin_turn("切到不存在路径", None);
@@ -6763,7 +6923,7 @@ fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
 fn self_tool_supports_identity_and_process_qa_replay() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("self_tool_identity_process_qa"),
     );
     let _ = core.begin_turn("你是谁？你这个 Timem 进程是什么？", None);
@@ -6811,7 +6971,7 @@ fn self_tool_supports_identity_and_process_qa_replay() {
 fn capmgr_load_missing_kind_requests_protocol_repair_from_manifest_idl() {
     let mut core = test_core(
         "STATIC",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("capmgr_missing_fields"),
     );
     let _ = core.begin_turn("准备发布", None);
@@ -6847,7 +7007,7 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
     ] {
         let mut core = test_core(
             "STATIC",
-            profile("aliyun", "qwen-plus"),
+            profile("qwen-plus"),
             tmp_dir(&format!("capmgr_enum_fields_{case}")),
         );
         let _ = core.begin_turn("检查能力", None);
@@ -6932,7 +7092,7 @@ example_json: |
     .unwrap();
     let mut core = test_core(
         "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("overlay_add_remove_active"),
     );
     core.set_capability_registry(registry);
@@ -6964,7 +7124,7 @@ example_json: |
     .unwrap();
     let mut filtered_core = test_core(
         "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("overlay_add_remove_filtered"),
     );
     filtered_core.set_capability_registry(filtered_registry);
@@ -7024,7 +7184,7 @@ example_json: |
     )
     .unwrap();
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(registry);
     let _ = core.begin_turn("echo", None);
 
@@ -7074,7 +7234,7 @@ example_json: |
     .unwrap();
     fs::write(scripts_dir.join("echo_payload.sh"), "cat\n").unwrap();
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(registry);
     let _ = core.begin_turn("echo in background", None);
 
@@ -7137,7 +7297,7 @@ example_json: |
     )
     .unwrap();
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(registry);
     let _ = core.begin_turn("echo in background", None);
 
@@ -7219,7 +7379,7 @@ example_json: |
     )
     .unwrap();
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&overlay_dir).unwrap();
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(registry);
     let _ = core.begin_turn("run slow tool in background", None);
 
@@ -7262,7 +7422,7 @@ example_json: |
 #[test]
 fn finished_with_actions_requests_repair_and_executes_nothing() {
     let memory_dir = tmp_dir("finished_actions_repair");
-    let mut core = test_core("STATIC", profile("aliyun", "qwen-plus"), &memory_dir);
+    let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(CapabilityRegistry::builtin());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("完成任务", None);
@@ -7322,7 +7482,7 @@ fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
 fn prose_then_final_answer_only_json_extracts_payload() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("prose_final_answer_only"),
     );
     let _ = core.begin_turn("你叫什么", None);
@@ -7349,7 +7509,7 @@ fn prose_then_final_answer_only_json_extracts_payload() {
 fn markdown_fenced_final_answer_only_json_extracts_payload() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("fenced_final_answer_only"),
     );
     let _ = core.begin_turn("秘密是什么", None);
@@ -7373,7 +7533,7 @@ fn markdown_fenced_final_answer_only_json_extracts_payload() {
 fn prose_with_json_reference_before_actual_response() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("prose_json_ref"),
     );
     let _ = core.begin_turn("explain json", None);
@@ -7397,7 +7557,7 @@ fn prose_with_json_reference_before_actual_response() {
 fn final_answer_containing_json_code_example() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("final_answer_json_code"),
     );
     let _ = core.begin_turn("show json example", None);
@@ -7421,7 +7581,7 @@ fn final_answer_containing_json_code_example() {
 fn prose_with_fake_envelope_keys_picks_last_valid_json() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("fake_envelope"),
     );
     let _ = core.begin_turn("test", None);
@@ -7445,7 +7605,7 @@ fn prose_with_fake_envelope_keys_picks_last_valid_json() {
 fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("curly_in_code"),
     );
     let _ = core.begin_turn("rust code", None);
@@ -7469,7 +7629,7 @@ fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
 fn bare_array_of_actions_requests_protocol_repair() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("array_actions"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -7493,7 +7653,7 @@ fn bare_array_of_actions_requests_protocol_repair() {
 fn bare_array_of_multiple_actions_requests_protocol_repair() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("array_multi_actions"),
     );
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -7519,7 +7679,7 @@ fn bare_array_of_multiple_actions_requests_protocol_repair() {
 fn array_without_action_key_still_rejected() {
     let mut core = test_core(
         "STATIC",
-        profile("custom", "aws-claude-sonnet-4-6"),
+        profile("aws-claude-sonnet-4-6"),
         tmp_dir("array_no_action"),
     );
     let _ = core.begin_turn("bad", None);
@@ -7636,7 +7796,7 @@ when_to_use: |
 fn performance_guard_large_context_prompt_render_is_bounded() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("aliyun", "qwen-plus"),
+        profile("qwen-plus"),
         tmp_dir("perf_large_prompt_render"),
     );
     let repeated_context = "local evidence ".repeat(120);

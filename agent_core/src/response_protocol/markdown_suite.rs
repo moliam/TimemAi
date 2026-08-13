@@ -17,6 +17,9 @@ impl ResponseProtocolSuite for MarkdownSuiteV1 {
     fn lang_format(&self) -> &str {
         "Markdown"
     }
+    fn response_shape_hint(&self) -> &str {
+        "one Markdown response with one state branch"
+    }
     fn protocol_schema(&self) -> &str {
         ""
     }

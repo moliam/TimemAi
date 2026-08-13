@@ -1,8 +1,12 @@
 import { Activity, ChatHistoryRecord, ChatMessage, ClientCommand, clientId, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
 
 export const MAX_RENDERED_MESSAGES = 1000;
-export const MAX_CLIENT_TURNS = 200;
+// The host delivers restored history in 200-turn pages.  Keep several pages in
+// the browser so scrolling upward actually reveals the page just requested,
+// while the thread component still renders only its visible window.
+export const MAX_CLIENT_TURNS = 1200;
 export const MAX_CLIENT_TURN_EVENTS = 500;
+export const MAX_RESTORED_TURN_EVENTS = 80;
 
 const USAGE_FIELDS = ["llm_calls", "repair_calls", "tool_calls", "mem_reads", "mem_writes", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_created_tokens", "shrunk_tokens"] as const;
 
@@ -14,6 +18,10 @@ export function trimTurnEvents<T>(events: T[]) {
   return events.length > MAX_CLIENT_TURN_EVENTS ? events.slice(-MAX_CLIENT_TURN_EVENTS) : events;
 }
 
+function trimRestoredTurnEvents<T>(events: T[]) {
+  return events.length > MAX_RESTORED_TURN_EVENTS ? events.slice(-MAX_RESTORED_TURN_EVENTS) : events;
+}
+
 export function trimTurns<T>(turns: T[]) {
   return turns.length > MAX_CLIENT_TURNS ? turns.slice(-MAX_CLIENT_TURNS) : turns;
 }
@@ -21,6 +29,12 @@ export function trimTurns<T>(turns: T[]) {
 export function tailPath(path: string, maxChars = 28) {
   if (path.length <= maxChars) return path;
   return `…${path.slice(-(Math.max(2, maxChars) - 1))}`;
+}
+
+export function workspacePathLabel(path: string) {
+  const normalized = path.replace(/[\\/]+$/, "");
+  const leaf = normalized.split(/[\\/]/).at(-1) || normalized;
+  return normalized === leaf ? leaf : `…/${leaf}`;
 }
 
 export function runtimeConnectionLabel(connected: boolean, snapshotReady: boolean, runtimeEverConnected: boolean, reconnectAttempt = 0) {
@@ -333,7 +347,10 @@ export function boundSessionHistory(session: Session): Session {
   return {
     ...session,
     messages: trimMessages(session.messages),
-    turns: trimTurns(session.turns).map((turn) => ({ ...turn, events: trimTurnEvents(turn.events) })),
+    turns: trimTurns(session.turns).map((turn) => ({
+      ...turn,
+      events: turn.state === "restored" ? trimRestoredTurnEvents(turn.events) : trimTurnEvents(turn.events),
+    })),
   };
 }
 
@@ -365,7 +382,10 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
 }
 
 export function prependHistoryRecords(session: Session, records: ChatHistoryRecord[]): Session {
-  const historicalTurns = turnsFromHistoryRecords(records);
+  const historicalTurns = turnsFromHistoryRecords(records).map((turn) => ({
+    ...turn,
+    events: trimRestoredTurnEvents(turn.events),
+  }));
   if (historicalTurns.length === 0) return session;
   const existing = new Set(session.turns.map((turn) => turn.turn_id));
   const earlier = historicalTurns.filter((turn) => !existing.has(turn.turn_id));
@@ -445,17 +465,19 @@ function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[]
 export function appendTurnEvent(session: Session, turnId: string | null | undefined, event: WebTurnEvent): Session {
   if (!turnId) return session;
   if (!turnEventBelongsToSession(session, event)) return session;
+  const turnIndex = session.turns.findIndex((turn) => turn.turn_id === turnId);
+  if (turnIndex < 0) return session;
+  const target = session.turns[turnIndex];
+  if (target.events.some((existing) => existing.event_id === event.event_id)) return session;
+  const turns = [...session.turns];
+  turns[turnIndex] = {
+    ...target,
+    final_answer: finalAnswerFromTurnEvent(session, event) ?? target.final_answer,
+    events: trimTurnEvents([...target.events, event]),
+  };
   return {
     ...session,
-    turns: session.turns.map((turn) => turn.turn_id === turnId
-      ? {
-          ...turn,
-          final_answer: finalAnswerFromTurnEvent(session, event) ?? turn.final_answer,
-          events: turn.events.some((existing) => existing.event_id === event.event_id)
-            ? turn.events
-            : trimTurnEvents([...turn.events, event]),
-        }
-      : turn),
+    turns,
   };
 }
 
@@ -510,12 +532,15 @@ export function finishTurn(session: Session, turnId: string | null | undefined, 
 
 export function updateSessionWorkerState(session: Session, workerId: string, state: string): Session {
   let found = false;
+  let changed = false;
   const workers = session.workers.map((worker) => {
     if (worker.worker_id !== workerId) return worker;
     found = true;
+    if (worker.state === state) return worker;
+    changed = true;
     return { ...worker, state };
   });
-  return found ? { ...session, workers, state: aggregateSessionState(workers, session.state) } : session;
+  return found && changed ? { ...session, workers, state: aggregateSessionState(workers, session.state) } : session;
 }
 
 function aggregateSessionState(workers: Session["workers"], fallback: string) {
@@ -572,6 +597,22 @@ export function enqueueDecision(decisions: Decision[], incoming: Decision) {
     return decisionKey(decision) === incomingKey;
   });
   return exists ? decisions : [...decisions, incoming];
+}
+
+export function sessionTurnKey(sessionId: string, turnId: string) {
+  return `${sessionId}\u0000${turnId}`;
+}
+
+export function groupDecisionsBySessionTurn(decisions: Decision[]) {
+  const grouped = new Map<string, Decision[]>();
+  for (const decision of decisions) {
+    if (!decision.turnId) continue;
+    const key = sessionTurnKey(decision.event.session_id, decision.turnId);
+    const current = grouped.get(key);
+    if (current) current.push(decision);
+    else grouped.set(key, [decision]);
+  }
+  return grouped;
 }
 
 export function clearDecisionsForSession(decisions: Decision[], sessionId: string) {
@@ -716,7 +757,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         tool_status: status,
         elapsed_ms: typeof payload.elapsed_ms === "number" ? payload.elapsed_ms : undefined,
         detail,
-        code: command,
+        code: command ? redactSensitiveDisplayText(command) : undefined,
         code_language: command ? "bash" : undefined,
         createdAt: Date.now(),
       };
@@ -765,6 +806,12 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
   }
 }
 
+export function hasOnlyFreeTalkActivity(activities: Activity[], decisionCount: number) {
+  return activities.length > 0
+    && activities.every((activity) => activity.tone === "thinking")
+    && decisionCount === 0;
+}
+
 export function toolDisplayName(name: string) {
   if (name === "run_bash") return "Bash";
   if (name === "memmgr") return "MemMgr";
@@ -782,8 +829,35 @@ function displayToolStatus(status: string) {
 function formatToolArguments(input: Record<string, unknown> | undefined) {
   if (!input) return "";
   return Object.entries(input)
-    .map(([key, value]) => `${key}=${formatToolValue(value)}`)
+    .map(([key, value]) => `${key}=${formatToolValue(redactSensitiveToolValue(key, value))}`)
     .join(" ");
+}
+
+function isSensitiveToolKey(key: string) {
+  return /^(?:authorization|x-[\w-]*(?:token|key)|(?:[\w-]+[-_])?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|token|secret|password|credential|gwtoken))$/i.test(key);
+}
+
+function redactSensitiveToolValue(key: string, value: unknown): unknown {
+  if (isSensitiveToolKey(key)) return "****";
+  if (Array.isArray(value)) return value.map((item) => redactSensitiveToolValue("", item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .map(([nestedKey, nestedValue]) => [nestedKey, redactSensitiveToolValue(nestedKey, nestedValue)]));
+  }
+  return typeof value === "string" ? redactSensitiveDisplayText(value) : value;
+}
+
+export function redactSensitiveDisplayText(text: string) {
+  const sensitiveName = "authorization|x-[\\w-]*(?:token|key)|(?:[\\w-]+[-_])?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|token|secret|password|credential|gwtoken)";
+  const quotedHeader = new RegExp(`(["'])(${sensitiveName})(\\s*[:=]\\s*)(?:bearer\\s+)?[^"']+\\1`, "gi");
+  const quotedAssignment = new RegExp(`\\b(${sensitiveName})\\b(\\s*[:=]\\s*)(["'])(?:bearer\\s+)?[^"']+\\3`, "gi");
+  const sensitiveAssignment = new RegExp(`\\b(${sensitiveName})\\b(\\s*[:=]\\s*)(?:bearer\\s+)?([^\\s"'\`;|&]+)`, "gi");
+  const sensitiveFlag = /(--(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|credential)\s+)(["']?)([^\s"'`;|&]+)(["']?)/gi;
+  return text
+    .replace(quotedHeader, (_match, quote: string, key: string, separator: string) => `${quote}${key}${separator}****${quote}`)
+    .replace(quotedAssignment, (_match, key: string, separator: string, quote: string) => `${key}${separator}${quote}****${quote}`)
+    .replace(sensitiveAssignment, (_match, key: string, separator: string) => `${key}${separator}****`)
+    .replace(sensitiveFlag, (_match, flag: string, quote: string) => `${flag}${quote}****${quote}`);
 }
 
 function formatToolValue(value: unknown): string {
