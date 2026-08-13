@@ -358,7 +358,7 @@ def simulate(
             raise ValueError(strategy)
 
         store_key = (
-            str(event.get("provider") or "?"),
+            str(event.get("endpoint") or "?"),
             str(event.get("model") or event.get("body", {}).get("model") or "?"),
         )
         store = stores[store_key]
