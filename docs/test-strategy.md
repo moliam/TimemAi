@@ -19,7 +19,7 @@ Every feature test must be reviewed against these product-facing axes:
 
    The runtime/model loop must advance correctly. These tests prove protocol
    parsing, model repair, action execution, memory/scratch/chat behavior,
-   prompt shrink, cache planning, provider errors, audit, cancellation, and
+   prompt shrink, cache planning, model service errors, audit, cancellation, and
    multi-round state transitions. Prefer `agent_core` unit/integration tests
    and `agent_core::session_runtime` fake-model tests for this axis.
 
@@ -50,7 +50,7 @@ checks. If a dimension is not applicable, record that residual decision in
 1. Normal path: the expected user flow works end to end.
 2. Boundary path: limits, empty values, long values, wrapping, id ranges,
    thresholds, or narrow terminal widths behave correctly.
-3. Error path: malformed model output, provider errors, cancellation, permission
+3. Error path: malformed model output, model service errors, cancellation, permission
    denial, missing fields, or invalid input fails safely.
 4. Stress / repetition path: multi-turn sessions, repeated edge regression,
    concurrent state, pseudo-TTY smoke/stress, per-session worker paths, or
@@ -58,7 +58,7 @@ checks. If a dimension is not applicable, record that residual decision in
 
 ## Required Layers
 
-- Function tests: pure parsing, formatting, prompt cache planning, provider
+- Function tests: pure parsing, formatting, prompt cache planning, model service
   payload shaping, token/status rendering, path normalization, and redaction.
 - Unit tests: `agent_core` actions and storage behavior with real temp files.
 - Integration tests: complete `agent_core::session_runtime` turns with a fake model client,
@@ -70,13 +70,13 @@ checks. If a dimension is not applicable, record that residual decision in
 - Real TTY smoke: compiled release binary driven through a pseudo terminal for
   input/editor/menu behavior.
 - Real TTY stress: compiled release binary driven through a pseudo terminal
-  while a fake provider causes repeated model/action redraws, long
+  while a fake model service causes repeated model/action redraws, long
   Thought/Action rows, and mid-turn user supplements.
 - Web host integration: real `CoreSessionWorker` instances publish concurrent
   topics through `timem_web`, proving session isolation, request correlation,
   completion telemetry, work-instruction decisions, bounded host state, and
   independent per-session runtime profiles. Profile tests use two real workers,
-  verify lifecycle provider/model/protocol/context values, ensure global
+  verify lifecycle model service/protocol/context values, ensure global
   defaults are not mutated, and assert that API keys never enter snapshots or
   topics.
   Same-Session tests also create separate Context/Worker identities, verify the
@@ -112,9 +112,9 @@ checks. If a dimension is not applicable, record that residual decision in
 
 | Feature area | Function / unit coverage | Integration / E2E coverage | Repeated edge coverage |
 |---|---|---|---|
-| Provider config, protocol, URL, output/input limits | `provider_config_from_env`, `parse_cli_args`, provider switch default-reset tests, protocol adapter tests | startup banner and `/config` real TTY smoke including provider switch/default URL validation | full CI |
-| Provider response parsing and errors | OpenAI-compatible, OpenAI Responses, Anthropic usage/error tests | truncated output expansion session test; transient provider error retry session test; protocol repair session test with audit assertions | edge regression session group |
-| Prompt cache planning | `prompt_cache_strategy_*`, prefix-cache simulator tests with bounded lookback, provider request cache-control tests, Anthropic cache read/create usage tests, `scripts/kvc_replay_test.sh`, `scripts/kvc_replay.py` local audit replay | `session_turn_preserves_incremental_prompt_cache_plan_across_rounds`, `session_turn_preserves_cache_plan_with_json_response_protocol`, `session_turn_preserves_cache_plan_with_markdown_response_protocol`, `session_turn_preserves_cache_plan_with_xml_response_protocol`, request audit redaction/hash tests | full CI runs JSON/Markdown/XML replay fixture coverage; run local audit replay before cache-strategy releases |
+| Model service config, protocol, URL, output/input limits | `model_service_config_from_sources`, `parse_cli_args_reads_model_service_and_limits`, protocol endpoint-default tests, protocol adapter tests | startup banner and `/config` real TTY smoke including protocol switching and explicit endpoint preservation | full CI |
+| Model response parsing and errors | OpenAI-compatible, OpenAI Responses, Anthropic usage/error tests | truncated output expansion session test; transient model service error retry session test; protocol repair session test with audit assertions | edge regression session group |
+| Prompt cache planning | `prompt_cache_strategy_*`, prefix-cache simulator tests with bounded lookback, model request cache-control tests, Anthropic cache read/create usage tests, `scripts/kvc_replay_test.sh`, `scripts/kvc_replay.py` local audit replay | `session_turn_preserves_incremental_prompt_cache_plan_across_rounds`, `session_turn_preserves_cache_plan_with_json_response_protocol`, `session_turn_preserves_cache_plan_with_markdown_response_protocol`, `session_turn_preserves_cache_plan_with_xml_response_protocol`, request audit redaction/hash tests | full CI runs JSON/Markdown/XML replay fixture coverage; run local audit replay before cache-strategy releases |
 | Prompt delta/slice rendering | prompt segmentation, multi-slice core tests, focused response-repair slice tests | shrink session E2E | edge regression shrink group |
 | Forced shrink | core shrink threshold, stale observed-token invalidation, static-dominant guard | `session_turn_forced_shrink_runs_to_final_without_repeated_shrink` | edge regression shrink + session groups |
 | Scratch notes and context compact offload | scratch write/read/query/delete, context_compact discard/offload refs, invalid refs, missing fields | `session_turn_scratch_context_offload_records_id_and_continues` | session group |
@@ -128,11 +128,11 @@ checks. If a dimension is not applicable, record that residual decision in
 | Multi-turn replay story | protocol parsing, memory/scratch/shrink primitives | `session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering` | full CI |
 | Session worker lifecycle | lifecycle topic/accessor, worker channel tests | `session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement`, `session_worker_rename_emits_updated_identity_topic`, `session_worker_shutdown_cancels_pending_host_decision`, `core_lifecycle_topic_round_trips_worker_identity_workspace_and_context` | full CI |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |
-| Cancellation | cancel before provider call, command cancellation tests | real TTY Ctrl+C smoke | real TTY smoke |
-| Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time user supplement capture | real TTY multiline/paste/config/workspace smokes plus local fake-provider supplement smoke and stress smoke | real TTY smoke/stress in CI |
+| Cancellation | cancel before model call, command cancellation tests | real TTY Ctrl+C smoke | real TTY smoke |
+| Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time user supplement capture | real TTY multiline/paste/config/workspace smokes plus local fake-model-server supplement smoke and stress smoke | real TTY smoke/stress in CI |
 | Observation panel | observation event/rendering tests | thinking view tests including retry, repair-count status, model-response topics, and global working-worker count | full CI |
 | Profiling | profiler aggregation and storage tests | `session_turn_records_cached_tokens_in_profiler_and_latest_usage`, `/prof` real TTY smoke | real TTY smoke |
-| Runtime performance | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_many_overlay_capabilities_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded` | real TTY stress covers redraw under fake-provider delay and mid-turn supplement | `scripts/performance_guard.sh` in full CI |
+| Runtime performance | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_many_overlay_capabilities_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded` | real TTY stress covers redraw under fake-model-server delay and mid-turn supplement | `scripts/performance_guard.sh` in full CI |
 | Audit and secrets | append audit, action grouping, redaction tests, sensitive scan | session tests assert turn/action/retry/repair audit records | sensitive scan + full CI |
 | Install/update scripts | install logic tests, install run-hint contract | CI script syntax and install logic | full CI |
 | Local Web host and UI | host auth/path/config/session tests, frontend session reducers and rendering contracts | real concurrent core workers, work-instruction decision flow, structured cwd updates, production Vite build, real browser smoke | Linux/macOS full CI plus release browser review |
@@ -166,5 +166,5 @@ TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
 
 When adding a new feature, add it to the matrix and include at least one test in
 the lowest practical layer plus an end-to-end or repeated edge test when the
-feature crosses runtime state, model actions, UI, storage, shell, or provider
+feature crosses runtime state, model actions, UI, storage, shell, or model service
 boundaries.

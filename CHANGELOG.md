@@ -6,6 +6,67 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+- New environments now store runtime data under hidden `.timem_data/` by
+  default, while unconfigured installations with an existing legacy `data/`
+  directory continue using it for upgrade compatibility.
+
+- Stabilized long-session scrolling by removing competing viewport auto-scroll controllers and disabling native anchoring on the managed conversation viewport.
+
+- Improved final-answer Markdown readability with theme-specific semantic colors for inline code and syntax highlighting; key formatted-text color pairs are now guarded by WCAG AA contrast tests.
+### Added
+
+- Added Session-scoped MCP tool management for local stdio, Streamable HTTP,
+  and legacy SSE servers. Enabled tools enter the same prompt, validation,
+  execution, topic, and audit pipeline as built-in capabilities.
+- Added Web configuration for replacing or clearing an idle Session's API key.
+  Opening settings loads an existing value through an authenticated,
+  request-scoped reply and displays it masked by default; the eye control
+  toggles visibility without putting credentials in snapshots, broadcasts,
+  prompts, or audit.
+
+### Changed
+
+- Replaced model-facing XML action JSON/CDATA payloads with XML-native
+  `<actions>`, explicit `<parallel>` groups, tool-id elements, and
+  schema-typed argument attributes/children. Tool prompts now expose concise
+  nested types without JSON-specific wording; runtime conversion covers
+  nullable/union values, tuples, dynamic object fields, large integers, XML
+  entities, and literal CDATA. Invalid batches execute nothing, unsafe XML
+  constructs are rejected, and action trees have explicit depth/size bounds.
+  The runtime retains legacy parsing for existing Session context while new
+  prompts teach only the native form.
+- Reduced decorative emoji in ordinary model headings, status updates, test
+  results, and confirmations while retaining semantically useful emoji.
+- Kept Web startup, Session restore, and unrelated agent work independent from
+  unavailable MCP servers by moving discovery to bounded background work.
+- Kept long conversations and event bursts responsive with an ordered bounded
+  browser-command queue, frame-budgeted event delivery, and bounded visible
+  turn rendering.
+- Cached effective runtime settings with each Session while preserving explicit
+  command-line overrides.
+- Simplified model-service settings around model, API protocol, and base URL;
+  raised the default output budget from `10K` to `20K`; and kept unrelated
+  unsaved field drafts intact when one setting is applied.
+- Refined the Web settings, cwd, and MCP controls with standard settings and
+  secret-visibility icons, quieter workspace context, and clearer action spacing.
+- Moved context usage beside the active model as a short progress meter with
+  compact `percent/limit` text, and removed the separate diagnostic Activity
+  panel while retaining semantic task events and visible host errors.
+- Removed the separate service identity/configuration dimension. Web, Shell,
+  Session persistence, topics, audit, and profiling now identify model calls
+  directly by model, API protocol, and endpoint, and display the model name
+  without internal routing prefixes in Web
+  headers, Session navigation, and Shell startup/thinking/final status lines.
+
+### Security
+
+- Restricted persisted Session credentials to owner-only storage and kept API
+  keys, MCP headers, and MCP environment secrets out of browser projections,
+  prompts, topics, and audit output.
+- Kept API-key and MCP-secret reveal replies scoped to the requesting
+  authenticated WebSocket and cleared browser-held plaintext on panel close,
+  Session change, reconnect, mem switch, or save.
+
 ## [1.0.2] - 2026-07-24
 
 ### Fixed
@@ -60,7 +121,7 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   and latest-call token usage inside the working frame, and authoritative final
   task token/time telemetry for both successful and non-answer turn endings.
 - Added per-session runtime profiles for Web sessions. A new session can select
-  its provider, model, API/response protocol, endpoint, token limits, approval
+  its model, API/response protocol, endpoint, token limits, approval
   policy, and process-local API key without changing existing sessions or
   exposing API keys in browser snapshots and topics.
 - Added explicit Session/Context/Worker ownership for the Web host. Sessions
@@ -116,7 +177,7 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
   is already visible, and appears only on mobile layouts where it opens the
   off-canvas navigation.
 - The chat header no longer repeats the `SESSION` label and active Session name;
-  it retains only a subdued provider/model identifier.
+  it retains only a subdued model identifier.
 - Uploaded files now behave as pending composer attachments: they can be removed
   before sending, long names remain inspectable without breaking the composer,
   the next submitted task consumes them into a compact user-message file row,
@@ -126,13 +187,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 Timem 1.0 is the first release with the browser host treated as a first-class
 product surface. The terminal and browser hosts share one local-first agent
-core, memory/session store, capability system, provider layer, and structured
+core, memory/session store, capability system, model transport, and structured
 topic protocol.
 
 ### Highlights
 
 - Added the authenticated `timem-web` browser workspace built on assistant-ui.
-- Added isolated multi-session Web use with per-session provider/model profiles,
+- Added isolated multi-session Web use with per-session model service profiles,
   persistent history, paged restore, mem switching, and cross-host resume.
 - Added live Web rendering for Thought/Action work, tool lifecycle, inline
   decisions, supplements, cancellation, runtime disconnects, context compact,
@@ -149,7 +210,7 @@ topic protocol.
 - CI covers Linux/macOS builds, Web tests/build, capability/protocol checks,
   session isolation, resume, cancellation pressure, and performance guards.
 - Manual release smoke remains required for Safari, Firefox, iTerm2,
-  Terminal.app, tmux, SSH, clean-machine installation, and live-provider use.
+  Terminal.app, tmux, SSH, clean-machine installation, and live-model use.
 
 ## [0.9.10] - 2026-07-12
 
@@ -176,15 +237,15 @@ topic protocol.
   sudden result would push estimated input beyond 95% of
   `TIMEM_MAX_LLM_INPUT`, the large output is omitted and a bounded SYSTEM note
   asks the model to narrow the action or compact context.
-- Explicit local `E2BIG` and provider input/context-too-large failures now
+- Explicit local `E2BIG` and model service input/context-too-large failures now
   remove the most recent action-result Delta once, append a compact SYSTEM
   recovery note, and continue the same turn instead of immediately stopping or
   retrying forever. The recovery is recorded in the API audit.
-- Provider request JSON is streamed to `curl` through stdin instead of being
+- Model request JSON is streamed to `curl` through stdin instead of being
   placed in the process argument list, preventing large prompts from failing
   locally with `Argument list too long (os error 7)` before any HTTP request.
-- Provider transport now drains stdout and stderr concurrently while retaining
-  cancellation polling, avoiding pipe backpressure on unusually large provider
+- Model transport now drains stdout and stderr concurrently while retaining
+  cancellation polling, avoiding pipe backpressure on unusually large model API
   responses or error bodies.
 - SIGINT handler registration now uses an explicit function-pointer conversion,
   eliminating the newer Rust `function_casts_as_integer` warning on Linux while
@@ -304,7 +365,7 @@ topic protocol.
 ### Added
 
 - Added tail-aware KV-cache planning for growing prompt deltas, with replay
-  tests that simulate provider-side cache matching and guard against the old
+  tests that simulate service-side cache matching and guard against the old
   low-hit-rate strategy.
 - Added CI coverage for KV-cache replay quality gates and openai-compatible
   cache marker generation.
@@ -374,7 +435,7 @@ topic protocol.
   bridged.
 - Host-adapter boundaries are documented and tested: `agent_core` stays free of
   terminal UI dependencies and keeps C ABI entry points for future iOS/Web
-  integrations, while `timem_shell` owns terminal/provider adapter behavior.
+  integrations, while `agent_core` owns model transport behavior.
 - Prompt segment rendering now lives in `agent_core::prompt_render`, keeping
   static prompt enrichment and visible delta/slice rendering behind a single
   module boundary.
@@ -407,7 +468,7 @@ topic protocol.
 - Clarified `status:"finished"` protocol semantics in the model prompt and
   schema summary: a finished response closes the current model/action loop, so
   models should use it only with a complete final answer.
-- Transient provider/network failures now retry up to five times with a
+- Transient model-service/network failures now retry up to five times with a
   user-visible status line before failing the turn.
 - Protocol repair slices now include a focused window around the malformed
   model output, so the model can repair the concrete error without copying an
@@ -520,7 +581,7 @@ topic protocol.
 
 - Reedline-based shell input editor with Shift+Enter multiline input, paste
   marker handling, recovery prompts, and real TTY smoke coverage.
-- Token/status rendering for context size, provider/model, cache hits, and
+- Token/status rendering for context size, model, cache hits, and
   current request token deltas.
 - `/prof` runtime profiling for token totals, wait time, local execution time,
   and memory/audit storage size.
@@ -540,7 +601,7 @@ topic protocol.
 
 - Repeated shell disconnect and timeout handling problems from earlier shell
   bridge iterations.
-- Provider truncation handling now explains output-token limits and can retry
+- Model-service truncation handling now explains output-token limits and can retry
   with a larger limit during the running shell process.
 - Terminal input, cancellation, and paste paths received broad regression
   coverage and real pseudo-TTY smoke.
@@ -550,5 +611,5 @@ topic protocol.
 ### Added
 
 - Initial public Timem Shell Agent release with local Bash action support,
-  local structured memory, provider adapters, audit logs, install scripts, and
+  local structured memory, model transports, audit logs, install scripts, and
   README run instructions.

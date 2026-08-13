@@ -240,7 +240,7 @@ manifest and executor path as other builtin tools. It is intentionally narrow:
   `run_bash` actions in that same prompt context execute from this cwd.
 
 Do not use `self_tool` for user memory, shell commands, project file edits, or
-provider model calls. Those remain owned by `memmgr`, `run_bash`, and the
+model service model calls. Those remain owned by `memmgr`, `run_bash`, and the
 session runtime respectively. Future additions should stay within Timem runtime
 self-state, such as config inspection, workspace references, capability overlay
 status, or recent diagnostics.

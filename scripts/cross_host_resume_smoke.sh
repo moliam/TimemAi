@@ -12,11 +12,11 @@ if [ ! -x "$binary" ]; then
 fi
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/timem_cross_host_resume.XXXXXX")"
-provider_pid=""
+model_server_pid=""
 cleanup() {
-  if [ -n "$provider_pid" ]; then
-    kill "$provider_pid" >/dev/null 2>&1 || true
-    wait "$provider_pid" >/dev/null 2>&1 || true
+  if [ -n "$model_server_pid" ]; then
+    kill "$model_server_pid" >/dev/null 2>&1 || true
+    wait "$model_server_pid" >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp_dir"
 }
@@ -27,8 +27,8 @@ workspace="$tmp_dir/workspace"
 space=".cross_host_resume"
 session_id="web_session_handoff"
 history_path="$data_dir/$space/memory/sessions/$session_id/raw_chat_history.jsonl"
-prompt_capture="$tmp_dir/provider_prompt.txt"
-provider_log="$tmp_dir/fake_provider.log"
+prompt_capture="$tmp_dir/model_prompt.txt"
+model_server_log="$tmp_dir/fake_model_server.log"
 shell_output="$tmp_dir/shell_once.json"
 
 mkdir -p "$workspace"
@@ -59,13 +59,11 @@ session = {
     "updated_at_ms": 4,
     "current_dir": str(workspace),
     "profile": {
-        "provider": "local",
         "model": "fake-cross-host-model",
         "api_protocol": "openai-compatible",
         "response_protocol": "xml",
     },
     "env": {
-        "TIMEM_GATEWAY_PROVIDER": "local",
         "TIMEM_MODEL": "fake-cross-host-model",
         "TIMEM_API_PROTOCOL": "openai-compatible",
         "TIMEM_RESPONSE_PROTOCOL": "xml",
@@ -108,34 +106,33 @@ with history_path.open("w", encoding="utf-8") as history:
         history.write(json.dumps(record, ensure_ascii=False) + "\n")
 PY
 
-python3 scripts/fake_openai_provider.py \
+python3 scripts/fake_openai_server.py \
   --port 0 \
   --delay 0 \
   --capture-prompt-file "$prompt_capture" \
-  >"$provider_log" 2>&1 &
-provider_pid="$!"
+  >"$model_server_log" 2>&1 &
+model_server_pid="$!"
 
 for _ in $(seq 1 200); do
-  if grep -q 'fake_provider_ready:' "$provider_log"; then
+  if grep -q 'fake_model_server_ready:' "$model_server_log"; then
     break
   fi
-  if ! kill -0 "$provider_pid" >/dev/null 2>&1; then
-    echo "fake provider exited before ready" >&2
-    cat "$provider_log" >&2 || true
+  if ! kill -0 "$model_server_pid" >/dev/null 2>&1; then
+    echo "fake model server exited before ready" >&2
+    cat "$model_server_log" >&2 || true
     exit 1
   fi
   sleep 0.1
 done
-if ! grep -q 'fake_provider_ready:' "$provider_log"; then
-  echo "fake provider did not start within 20s" >&2
-  cat "$provider_log" >&2 || true
+if ! grep -q 'fake_model_server_ready:' "$model_server_log"; then
+  echo "fake model server did not start within 20s" >&2
+  cat "$model_server_log" >&2 || true
   exit 1
 fi
-port="$(sed -n 's/^fake_provider_ready://p' "$provider_log" | tail -n 1)"
+port="$(sed -n 's/^fake_model_server_ready://p' "$model_server_log" | tail -n 1)"
 
 TIMEM_DATA_DIR="$data_dir" \
 TIMEM_API_KEY=dummy \
-TIMEM_GATEWAY_PROVIDER=local \
 TIMEM_API_PROTOCOL=openai-compatible \
 TIMEM_RESPONSE_PROTOCOL=xml \
 TIMEM_BASE_URL="http://127.0.0.1:$port/v1" \

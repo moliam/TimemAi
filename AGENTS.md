@@ -31,10 +31,10 @@ making changes. Keep it short, concrete, and enforceable.
 ## Architecture boundaries
 
 - The intended runtime chain is:
-  `host UI -> agent_core -> provider -> LLM`.
+  `host UI -> agent_core -> model transport -> LLM`.
 - `timem_shell` is a terminal host/UI. It owns terminal input, menus, rendering,
   shell-only slash commands, and local process startup.
-- `timem_shell` must not implement provider HTTP, model transport, provider
+- `timem_shell` must not implement model HTTP, model transport, model
   response interpretation, cache-control protocol, or model response protocol
   parsing.
 - `timem_shell` must not execute model-requested tools such as `run_bash`.
@@ -43,10 +43,10 @@ making changes. Keep it short, concrete, and enforceable.
   collects user decisions, and signals cancellation.
 - `agent_core` owns reusable agent state, turn execution, prompt/context
   management, model response protocol parsing, capability execution,
-  provider/cache planning, provider transport, audit semantics, and structured
+  model cache planning, model transport, audit semantics, and structured
   topic/request output.
-- Provider-specific HTTP/payload logic may live inside `agent_core` for now. It
-  can later move to a provider crate, but it must not move into shell UI code.
+- Model API HTTP/payload logic lives inside `agent_core` for now. It may later
+  move to a model transport crate, but it must not move into shell UI code.
 - Core/UI communication is structured. Core provides semantic structures,
   reports, topic events, request topics, and outcomes. UI renders those
   structures in its own style.
@@ -57,7 +57,7 @@ making changes. Keep it short, concrete, and enforceable.
   meanings such as final answer, job progress, action intent, command evidence,
   diagnostic reason, and status metadata.
 - Core may return strings when the string itself is data, such as model
-  `final_answer`, provider message, path, id, or diagnostic reason. Core should
+  `final_answer`, model service message, path, id, or diagnostic reason. Core should
   not embed terminal-specific localized copy, ANSI styling, or UI layout.
 - Topic events are owned by core while callbacks run. If a host wants to render
   later, cross a thread/process boundary, or store events for tests/logs, it

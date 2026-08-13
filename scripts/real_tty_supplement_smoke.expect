@@ -1,13 +1,13 @@
 #!/usr/bin/env expect
 #
 # Real PTY smoke for active-turn user supplements. It uses a local fake
-# OpenAI-compatible provider, so it does not need network or a real API key.
+# OpenAI-compatible model server, so it does not need network or a real API key.
 
 set timeout 60
 
 set repo_root [file normalize [file join [file dirname [info script]] ".."]]
 set binary [file join $repo_root "target" "release" "timem-native-rs"]
-set provider_script [file join $repo_root "scripts" "fake_openai_provider.py"]
+set model_server_script [file join $repo_root "scripts" "fake_openai_server.py"]
 set data_dir [file join "/private/tmp" "timem_tty_supplement_smoke_[pid]"]
 set port 0
 
@@ -83,23 +83,22 @@ proc wait_active_turn_cancelled {} {
     }
 }
 
-spawn -noecho python3 -u $provider_script --port $port --delay 2.5
-set provider_spawn_id $spawn_id
+spawn -noecho python3 -u $model_server_script --port $port --delay 2.5
+set model_server_spawn_id $spawn_id
 expect {
-    -re {fake_provider_ready:([0-9]+)} {
+    -re {fake_model_server_ready:([0-9]+)} {
         set port $expect_out(1,string)
     }
     timeout {
-        error "timeout waiting for fake provider"
+        error "timeout waiting for fake model server"
     }
     eof {
-        error "fake provider exited before ready"
+        error "fake model server exited before ready"
     }
 }
 
 spawn env \
     TIMEM_API_KEY=dummy \
-    TIMEM_GATEWAY_PROVIDER=local \
     TIMEM_API_PROTOCOL=openai-compatible \
     TIMEM_BASE_URL=http://127.0.0.1:$port/v1 \
     TIMEM_MODEL=fake-supplement-model \
@@ -198,7 +197,7 @@ expect {
     eof {}
     timeout {}
 }
-set spawn_id $provider_spawn_id
+set spawn_id $model_server_spawn_id
 catch {close}
 catch {wait}
 puts "real_tty_supplement_smoke: ok"

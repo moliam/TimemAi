@@ -60,47 +60,48 @@ timem --help
 timem-web --help
 ```
 
-## Provider Examples
+## Model Service Examples
 
 Aliyun DashScope compatible mode:
 
 ```bash
-export TIMEM_GATEWAY_PROVIDER=aliyun
 export TIMEM_API_KEY=...
 export TIMEM_API_PROTOCOL=openai-compatible
+export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+export TIMEM_MODEL=qwen-plus
 export TIMEM_RESPONSE_PROTOCOL=xml
 export TIMEM_MAX_LLM_INPUT=100K
-export TIMEM_MAX_LLM_OUTPUT=10K
+export TIMEM_MAX_LLM_OUTPUT=20K
 ```
 
 OpenAI:
 
 ```bash
-export TIMEM_GATEWAY_PROVIDER=openai
 export TIMEM_API_KEY=...
 export TIMEM_API_PROTOCOL=openai-responses
+export TIMEM_BASE_URL=https://api.openai.com/v1
+export TIMEM_MODEL=...
 ```
 
 Anthropic:
 
 ```bash
-export TIMEM_GATEWAY_PROVIDER=anthropic
 export TIMEM_API_KEY=...
 export TIMEM_API_PROTOCOL=anthropic
+export TIMEM_BASE_URL=https://api.anthropic.com
+export TIMEM_MODEL=...
 ```
 
-Custom gateway:
+Compatible or self-hosted service:
 
 ```bash
-export TIMEM_GATEWAY_PROVIDER=custom
 export TIMEM_API_PROTOCOL=openai-compatible
 export TIMEM_BASE_URL=https://your-gateway.example/v1
 export TIMEM_API_KEY=...
 export TIMEM_MODEL=...
 ```
 
-`TIMEM_GATEWAY_PROVIDER` chooses provider defaults. `TIMEM_API_PROTOCOL`
-chooses provider wire format:
+`TIMEM_API_PROTOCOL` chooses the model API wire format:
 
 - `openai-compatible`
 - `openai-responses`
@@ -116,7 +117,7 @@ Common values:
 ```bash
 export TIMEM_SPACE=.test_mem
 export TIMEM_DATA_DIR=/path/to/data
-export TIMEM_BASH_APPROVAL=ask
+export TIMEM_BASH_APPROVAL=approve
 export TIMEM_WORK_INSTRUCTIONS=silent
 ```
 
@@ -129,20 +130,26 @@ export TIMEM_WORK_INSTRUCTIONS=silent
 `TIMEM_BASH_APPROVAL` controls model-requested command approval:
 
 - `ask`: prompt before risky/local command execution
-- `approve`: approve by policy for the current host
+- `approve`: approve by policy for the current host; this is the default when unset
 
 ## Runtime Data
 
-Default layout:
+New environments use a hidden data root by default:
 
 ```text
-data/<space>/
+.timem_data/<space>/
   audit/api_audit.json
   audit/action_audit.json
   memory/
   sessions/
   shell_history.txt
 ```
+
+If an unconfigured existing environment already has a recognizable Timem
+layout under `data/` (Timem workspace, Session index, or audit files) and does
+not yet have `.timem_data/`, Timem continues using it so upgrades do not hide
+or split existing Sessions. An unrelated directory merely named `data` is not
+treated as Timem storage. `TIMEM_DATA_DIR` always takes precedence.
 
 Use a fixed data root if you do not want data under the current directory:
 
@@ -169,7 +176,7 @@ Shell:
 
 Web:
 
-- Sessions can use different provider/model/runtime settings.
+- Sessions can use different model/API/runtime settings.
 - Attachments are stored under the active data space and passed to the active
   turn.
 - Stop cancels all workers in the active Session; the next send starts from the

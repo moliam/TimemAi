@@ -8,7 +8,7 @@ Scope: `kvc_optimize` branch after rebasing onto `v0.7.1`.
 
 Improve prompt KV-cache reuse for growing Timem conversations without returning
 to the old "cache all old deltas as one block" behavior. The old block changes
-every round, so provider prefix caches tend to create new cache entries instead
+every round, so model service prefix caches tend to create new cache entries instead
 of reading existing ones.
 
 ## Simulator
@@ -28,7 +28,7 @@ models Claude/Anthropic-style cache control as a prefix cache:
 - Character counts are used as a stable local proxy for token counts.
 
 This is intentionally stricter than the earlier block-hash test. It catches the
-important provider behavior: cache boundaries must remain stable as the prompt
+important model service behavior: cache boundaries must remain stable as the prompt
 grows. It also avoids the earlier overly pessimistic creation estimate that
 counted a whole marked prefix as newly created.
 
@@ -54,9 +54,9 @@ The replay compares these strategy families:
 - `user_tail`: cache static prompt plus latest N `user_question` slices.
 - `action_tail`: cache static prompt plus latest N `result_of_llm_action` slices.
 
-The `tail` family is closest to provider automatic caching semantics for
+The `tail` family is closest to model service automatic caching semantics for
 append-only conversations: keep the cache breakpoint close to the newest prompt
-tail and rely on provider lookback to find the previous cached prefix.
+tail and rely on model service lookback to find the previous cached prefix.
 
 ## Results
 
@@ -76,7 +76,7 @@ Summary table from the current local audit replay:
 
 `tail=3` and `tail=4` tie on hit/create score, but `tail=3` is selected because
 it uses fewer cache marks and keeps the total explicit breakpoints to
-`1 static + 3 dynamic = 4`. This fits common provider breakpoint limits while
+`1 static + 3 dynamic = 4`. This fits common model service breakpoint limits while
 capturing almost all benefit in the local replay.
 
 Compared with the previous best stable-checkpoint strategy, `tail=3` improves
@@ -100,16 +100,16 @@ Runtime cache planning:
 
 This intentionally allows the newest prompt delta to be cacheable. In an
 append-only prompt, the previous tail remains present in the next request, so
-provider lookback can reuse the previous cached prefix while the newest tail
+model service lookback can reuse the previous cached prefix while the newest tail
 writes the next cache boundary.
 
 ## Known Limits
 
-- The replay uses local audit data, not live provider billing data.
+- The replay uses local audit data, not live model service billing data.
 - Character counts approximate token counts.
-- Provider TTL behavior is not modeled because current audit records do not
+- Model service TTL behavior is not modeled because current audit records do not
   reliably include enough wall-clock timing metadata for cache expiry.
-- Real provider cache behavior should still be monitored through `⌁` read and
+- Real model service cache behavior should still be monitored through `⌁` read and
   `✚` creation counters after release.
 
 ## Verification
