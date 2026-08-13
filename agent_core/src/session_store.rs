@@ -3,8 +3,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_HISTORY_PAGE_LIMIT: usize = 200;
@@ -21,6 +22,8 @@ pub struct StoredSession {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_overrides: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub mcp_server_ids: Vec<String>,
     pub state: StoredSessionState,
     pub last_turn_id: Option<String>,
     pub raw_chat_history_path: String,
@@ -28,7 +31,6 @@ pub struct StoredSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StoredSessionProfile {
-    pub provider: String,
     pub model: String,
     pub api_protocol: String,
     pub response_protocol: String,
@@ -128,12 +130,28 @@ impl SessionResumeNotice {
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
+    history_indexes: Arc<Mutex<BTreeMap<PathBuf, HistoryIndex>>>,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryIndex {
+    file_len: u64,
+    modified_at_ms: Option<u128>,
+    entries: Vec<HistoryIndexEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryIndexEntry {
+    byte_offset: u64,
+    byte_len: u64,
+    turn_id: String,
 }
 
 impl SessionStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            history_indexes: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -157,6 +175,7 @@ impl SessionStore {
 
     pub fn upsert_session(&self, session: &StoredSession) -> Result<(), String> {
         fs::create_dir_all(self.sessions_dir()).map_err(|_| "session_dir_create_failed")?;
+        restrict_session_path_permissions(&self.sessions_dir(), true)?;
         let mut sessions = self.list_sessions()?;
         if let Some(existing) = sessions
             .iter_mut()
@@ -173,6 +192,7 @@ impl SessionStore {
             .truncate(true)
             .open(self.index_path())
             .map_err(|_| "session_index_open_failed")?;
+        restrict_session_path_permissions(&self.index_path(), false)?;
         for session in sessions {
             let line =
                 serde_json::to_string(&session).map_err(|_| "session_record_serialize_failed")?;
@@ -214,6 +234,39 @@ impl SessionStore {
             .find(|session| session.session_id == session_id))
     }
 
+    pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        let mut sessions = self.list_sessions()?;
+        let original_len = sessions.len();
+        sessions.retain(|session| session.session_id != session_id);
+        if sessions.len() == original_len {
+            return Err("session_not_found".to_string());
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(self.index_path())
+            .map_err(|_| "session_index_open_failed")?;
+        restrict_session_path_permissions(&self.index_path(), false)?;
+        for session in sessions {
+            let line =
+                serde_json::to_string(&session).map_err(|_| "session_record_serialize_failed")?;
+            writeln!(file, "{line}").map_err(|_| "session_index_write_failed")?;
+        }
+        let history_path = self.history_path_for_session(session_id);
+        self.history_indexes
+            .lock()
+            .map_err(|_| "chat_history_index_poisoned")?
+            .remove(&history_path);
+        let session_dir = history_path
+            .parent()
+            .ok_or_else(|| "session_data_path_invalid".to_string())?;
+        if session_dir.exists() {
+            fs::remove_dir_all(session_dir).map_err(|_| "session_data_remove_failed")?;
+        }
+        Ok(())
+    }
+
     pub fn append_history_record(
         &self,
         session_id: &str,
@@ -226,36 +279,188 @@ impl SessionStore {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)
+            .open(&path)
             .map_err(|_| "chat_history_open_failed")?;
         let line =
             serde_json::to_string(record).map_err(|_| "chat_history_record_serialize_failed")?;
-        writeln!(file, "{line}").map_err(|_| "chat_history_write_failed".to_string())
+        writeln!(file, "{line}").map_err(|_| "chat_history_write_failed".to_string())?;
+        self.history_indexes
+            .lock()
+            .map_err(|_| "chat_history_index_poisoned")?
+            .remove(&path);
+        Ok(())
     }
 
     pub fn read_history_page(
         &self,
         session_id: &str,
         before_cursor: Option<&str>,
-        limit: usize,
+        turn_limit: usize,
     ) -> Result<ChatHistoryPage, String> {
-        read_history_page_from_path(
-            &self.history_path_for_session(session_id),
-            before_cursor,
-            limit,
-        )
+        let path = self.history_path_for_session(session_id);
+        let index = self.history_index_for_path(&path)?;
+        read_history_page_from_index(&path, &index, before_cursor, turn_limit)
     }
+
+    fn history_index_for_path(&self, path: &Path) -> Result<HistoryIndex, String> {
+        if !path.exists() {
+            return Ok(HistoryIndex {
+                file_len: 0,
+                modified_at_ms: None,
+                entries: Vec::new(),
+            });
+        }
+        let metadata = fs::metadata(path).map_err(|_| "chat_history_open_failed")?;
+        let file_len = metadata.len();
+        let modified_at_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_millis());
+        if let Some(existing) = self
+            .history_indexes
+            .lock()
+            .map_err(|_| "chat_history_index_poisoned")?
+            .get(path)
+            .filter(|index| index.file_len == file_len && index.modified_at_ms == modified_at_ms)
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let index = build_history_index(path, file_len, modified_at_ms)?;
+        self.history_indexes
+            .lock()
+            .map_err(|_| "chat_history_index_poisoned")?
+            .insert(path.to_path_buf(), index.clone());
+        Ok(index)
+    }
+}
+
+#[cfg(unix)]
+fn restrict_session_path_permissions(path: &Path, directory: bool) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = if directory { 0o700 } else { 0o600 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|_| "session_permissions_update_failed".to_string())
+}
+
+#[cfg(not(unix))]
+fn restrict_session_path_permissions(_path: &Path, _directory: bool) -> Result<(), String> {
+    Ok(())
+}
+
+fn build_history_index(
+    path: &Path,
+    file_len: u64,
+    modified_at_ms: Option<u128>,
+) -> Result<HistoryIndex, String> {
+    let file = fs::File::open(path).map_err(|_| "chat_history_open_failed")?;
+    let mut reader = BufReader::new(file);
+    let mut byte_offset = 0u64;
+    let mut entries = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let byte_len = reader
+            .read_line(&mut line)
+            .map_err(|_| "chat_history_read_failed")?;
+        if byte_len == 0 {
+            break;
+        }
+        if let Some(record) = (!line.trim().is_empty())
+            .then(|| parse_chat_history_record_line(&line))
+            .flatten()
+        {
+            entries.push(HistoryIndexEntry {
+                byte_offset,
+                byte_len: byte_len as u64,
+                turn_id: record.turn_id().to_string(),
+            });
+        }
+        byte_offset = byte_offset.saturating_add(byte_len as u64);
+    }
+    Ok(HistoryIndex {
+        file_len,
+        modified_at_ms,
+        entries,
+    })
+}
+
+fn read_history_page_from_index(
+    path: &Path,
+    index: &HistoryIndex,
+    before_cursor: Option<&str>,
+    turn_limit: usize,
+) -> Result<ChatHistoryPage, String> {
+    let turn_limit = if turn_limit == 0 {
+        DEFAULT_HISTORY_PAGE_LIMIT
+    } else {
+        turn_limit
+    };
+    let requested_end = before_cursor
+        .map(|cursor| {
+            cursor
+                .parse::<usize>()
+                .map_err(|_| "invalid_history_cursor")
+        })
+        .transpose()?;
+    let end = requested_end
+        .unwrap_or(index.entries.len())
+        .min(index.entries.len());
+    let start = page_start_index(&index.entries, end, turn_limit);
+    if index.entries.is_empty() && !path.exists() {
+        return Ok(ChatHistoryPage {
+            records: Vec::new(),
+            before_cursor: None,
+            has_more: false,
+        });
+    }
+    let mut file = fs::File::open(path).map_err(|_| "chat_history_open_failed")?;
+    let mut records = Vec::with_capacity(end.saturating_sub(start));
+    for entry in &index.entries[start..end] {
+        file.seek(SeekFrom::Start(entry.byte_offset))
+            .map_err(|_| "chat_history_read_failed")?;
+        let mut bytes = vec![0; entry.byte_len as usize];
+        file.read_exact(&mut bytes)
+            .map_err(|_| "chat_history_read_failed")?;
+        let line = String::from_utf8(bytes).map_err(|_| "chat_history_read_failed")?;
+        if let Some(record) = parse_chat_history_record_line(&line) {
+            records.push(record);
+        }
+    }
+    Ok(ChatHistoryPage {
+        records,
+        before_cursor: (start > 0).then(|| start.to_string()),
+        has_more: start > 0,
+    })
+}
+
+fn page_start_index(entries: &[HistoryIndexEntry], end: usize, limit: usize) -> usize {
+    let mut start = end;
+    let mut turn_count = 0usize;
+    while start > 0 && turn_count < limit {
+        let turn_id = &entries[start - 1].turn_id;
+        let mut turn_start = start - 1;
+        while turn_start > 0 && entries[turn_start - 1].turn_id == *turn_id {
+            turn_start -= 1;
+        }
+        start = turn_start;
+        turn_count = turn_count.saturating_add(1);
+    }
+    start
 }
 
 pub fn read_history_page_from_path(
     path: &Path,
     before_cursor: Option<&str>,
-    limit: usize,
+    turn_limit: usize,
 ) -> Result<ChatHistoryPage, String> {
-    let limit = if limit == 0 {
+    let turn_limit = if turn_limit == 0 {
         DEFAULT_HISTORY_PAGE_LIMIT
     } else {
-        limit
+        turn_limit
     };
     if !path.exists() {
         return Ok(ChatHistoryPage {
@@ -273,7 +478,6 @@ pub fn read_history_page_from_path(
         .transpose()?;
     let file = fs::File::open(path).map_err(|_| "chat_history_open_failed")?;
     let mut page = VecDeque::<(usize, String, Vec<ChatHistoryRecord>)>::new();
-    let mut page_len = 0usize;
     let mut logical_index = 0usize;
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|_| "chat_history_read_failed")?;
@@ -294,14 +498,11 @@ pub fn read_history_page_from_path(
             } else {
                 page.push_back((logical_index, turn_id, vec![record]));
             }
-            page_len = page_len.saturating_add(1);
-            // A restored page must never begin in the middle of a turn. Keep
-            // the newest complete turns near the requested record budget; a
-            // single very large turn is intentionally allowed to exceed it.
-            while page_len > limit && page.len() > 1 {
-                if let Some((_, _, removed)) = page.pop_front() {
-                    page_len = page_len.saturating_sub(removed.len());
-                }
+            // The page limit counts complete turns, not JSONL records. A
+            // complex turn may contain many action and result records but is
+            // still one user-visible task in the history UI.
+            while page.len() > turn_limit {
+                page.pop_front();
             }
         }
         logical_index = logical_index.saturating_add(1);
@@ -384,6 +585,7 @@ pub fn new_stored_session(
         profile,
         env: BTreeMap::new(),
         env_overrides: Some(BTreeMap::new()),
+        mcp_server_ids: Vec::new(),
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: history_path.as_ref().display().to_string(),

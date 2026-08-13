@@ -10,10 +10,9 @@ fn env(items: &[(&str, &str)]) -> HashMap<String, String> {
 
 #[test]
 fn generic_api_key_wins_over_vendor_key() {
-    let config = provider_config_from_sources(
-        &ProviderConfigSource {
-            provider: Some("aliyun".into()),
-            ..ProviderConfigSource::default()
+    let config = model_service_config_from_sources(
+        &ModelServiceConfigSource {
+            ..ModelServiceConfigSource::default()
         },
         &env(&[
             ("TIMEM_API_KEY", "generic"),
@@ -25,13 +24,12 @@ fn generic_api_key_wins_over_vendor_key() {
 }
 
 #[test]
-fn default_gateway_provider_is_aliyun() {
-    let config = provider_config_from_sources(
-        &ProviderConfigSource::default(),
+fn defaults_are_defined_without_a_service_identity() {
+    let config = model_service_config_from_sources(
+        &ModelServiceConfigSource::default(),
         &env(&[("TIMEM_API_KEY", "k")]),
     )
     .unwrap();
-    assert_eq!(config.provider, "aliyun");
     assert_eq!(config.model, "qwen-plus");
     assert_eq!(
         config.base_url,
@@ -41,20 +39,30 @@ fn default_gateway_provider_is_aliyun() {
 }
 
 #[test]
-fn known_providers_have_explicit_default_base_urls() {
+fn optional_api_key_config_supports_configurable_hosts_without_weakening_strict_startup() {
+    let source = ModelServiceConfigSource::default();
+    let empty_env = HashMap::new();
+
+    let draft =
+        model_service_config_from_sources_allow_missing_api_key(&source, &empty_env).unwrap();
+    assert!(draft.api_key.is_empty());
+    assert_eq!(draft.model, "qwen-plus");
+
+    assert!(model_service_config_from_sources(&source, &empty_env)
+        .unwrap_err()
+        .starts_with("missing_api_key:"));
+}
+
+#[test]
+fn api_protocols_have_explicit_default_base_urls() {
     let cases = [
         (
-            "aliyun",
+            "openai-compatible",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ApiProtocol::OpenAiCompatible,
         ),
         (
-            "dashscope",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            ApiProtocol::OpenAiCompatible,
-        ),
-        (
-            "openai",
+            "openai-responses",
             "https://api.openai.com/v1",
             ApiProtocol::OpenAiResponses,
         ),
@@ -65,11 +73,11 @@ fn known_providers_have_explicit_default_base_urls() {
         ),
     ];
 
-    for (provider, expected_base_url, expected_protocol) in cases {
-        let config = provider_config_from_sources(
-            &ProviderConfigSource {
-                provider: Some(provider.to_string()),
-                ..ProviderConfigSource::default()
+    for (protocol, expected_base_url, expected_protocol) in cases {
+        let config = model_service_config_from_sources(
+            &ModelServiceConfigSource {
+                api_protocol: Some(protocol.to_string()),
+                ..ModelServiceConfigSource::default()
             },
             &env(&[("TIMEM_API_KEY", "k")]),
         )
@@ -81,10 +89,9 @@ fn known_providers_have_explicit_default_base_urls() {
 
 #[test]
 fn empty_generic_api_key_falls_back_to_vendor_key() {
-    let config = provider_config_from_sources(
-        &ProviderConfigSource {
-            provider: Some("aliyun".into()),
-            ..ProviderConfigSource::default()
+    let config = model_service_config_from_sources(
+        &ModelServiceConfigSource {
+            ..ModelServiceConfigSource::default()
         },
         &env(&[("TIMEM_API_KEY", ""), ("DASHSCOPE_API_KEY", "vendor")]),
     )
@@ -93,28 +100,16 @@ fn empty_generic_api_key_falls_back_to_vendor_key() {
 }
 
 #[test]
-fn local_key_is_only_used_for_aliyun_like_providers() {
-    let aliyun = provider_config_from_sources(
-        &ProviderConfigSource {
-            provider: Some("aliyun".into()),
+fn local_key_is_available_to_the_default_model_service() {
+    let config = model_service_config_from_sources(
+        &ModelServiceConfigSource {
             local_api_key: Some("local-key".into()),
-            ..ProviderConfigSource::default()
+            ..ModelServiceConfigSource::default()
         },
         &HashMap::new(),
     )
     .unwrap();
-    assert_eq!(aliyun.api_key, "local-key");
-
-    let err = provider_config_from_sources(
-        &ProviderConfigSource {
-            provider: Some("openai".into()),
-            local_api_key: Some("local-key".into()),
-            ..ProviderConfigSource::default()
-        },
-        &HashMap::new(),
-    )
-    .unwrap_err();
-    assert!(err.contains("missing_api_key"));
+    assert_eq!(config.api_key, "local-key");
 }
 
 #[test]
@@ -133,10 +128,9 @@ fn local_llm_key_file_rejects_missing_models() {
 }
 
 #[test]
-fn local_llm_key_file_builds_aliyun_provider_config() {
+fn local_llm_key_file_builds_model_service_config() {
     let parsed = LocalLLMKeyFile::parse("key:\nsk-test\navailable_model:\nqwen3.7-plus\n").unwrap();
-    let config = parsed.to_provider_config("qwen3.7-plus");
-    assert_eq!(config.provider, "aliyun");
+    let config = parsed.to_model_service_config("qwen3.7-plus");
     assert_eq!(config.model, "qwen3.7-plus");
     assert_eq!(config.api_key, "sk-test");
     assert_eq!(config.api_protocol, ApiProtocol::OpenAiCompatible);
@@ -144,10 +138,9 @@ fn local_llm_key_file_builds_aliyun_provider_config() {
 
 #[test]
 fn empty_api_key_reports_missing_key() {
-    let err = provider_config_from_sources(
-        &ProviderConfigSource {
-            provider: Some("openai".into()),
-            ..ProviderConfigSource::default()
+    let err = model_service_config_from_sources(
+        &ModelServiceConfigSource {
+            ..ModelServiceConfigSource::default()
         },
         &env(&[("TIMEM_API_KEY", ""), ("OPENAI_API_KEY", "")]),
     )
@@ -157,10 +150,9 @@ fn empty_api_key_reports_missing_key() {
 
 #[test]
 fn non_ascii_api_key_reports_clear_error() {
-    let err = provider_config_from_sources(
-        &ProviderConfigSource {
-            provider: Some("aliyun".into()),
-            ..ProviderConfigSource::default()
+    let err = model_service_config_from_sources(
+        &ModelServiceConfigSource {
+            ..ModelServiceConfigSource::default()
         },
         &env(&[("TIMEM_API_KEY", "你的token")]),
     )
@@ -169,10 +161,26 @@ fn non_ascii_api_key_reports_clear_error() {
 }
 
 #[test]
+fn api_key_rejects_control_characters_and_whitespace() {
+    for key in ["sk-test\nInjected: yes", "sk-test token", "sk-test\tsecret"] {
+        let err = model_service_config_from_sources(
+            &ModelServiceConfigSource {
+                ..ModelServiceConfigSource::default()
+            },
+            &env(&[("TIMEM_API_KEY", key)]),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("invalid_api_key_control_or_whitespace"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn source_values_override_env_config_values() {
-    let config = provider_config_from_sources(
-        &ProviderConfigSource {
-            provider: Some("custom".into()),
+    let config = model_service_config_from_sources(
+        &ModelServiceConfigSource {
             api_protocol: Some("anthropic".into()),
             model: Some("cli-model".into()),
             base_url: Some("https://cli.example/v1".into()),
@@ -180,10 +188,9 @@ fn source_values_override_env_config_values() {
             max_llm_output_tokens: Some(1234),
             max_llm_input_tokens: Some(64_000),
             api_key: Some("cli-key".into()),
-            ..ProviderConfigSource::default()
+            ..ModelServiceConfigSource::default()
         },
         &env(&[
-            ("TIMEM_GATEWAY_PROVIDER", "aliyun"),
             ("TIMEM_API_PROTOCOL", "openai-compatible"),
             ("TIMEM_MODEL", "env-model"),
             ("TIMEM_BASE_URL", "https://env.example/v1"),
@@ -195,7 +202,6 @@ fn source_values_override_env_config_values() {
     )
     .unwrap();
 
-    assert_eq!(config.provider, "custom");
     assert_eq!(config.api_protocol, ApiProtocol::Anthropic);
     assert_eq!(config.model, "cli-model");
     assert_eq!(config.base_url, "https://cli.example/v1");
@@ -207,16 +213,16 @@ fn source_values_override_env_config_values() {
 
 #[test]
 fn token_limits_default_and_can_come_from_env() {
-    let defaulted = provider_config_from_sources(
-        &ProviderConfigSource::default(),
+    let defaulted = model_service_config_from_sources(
+        &ModelServiceConfigSource::default(),
         &env(&[("TIMEM_API_KEY", "k")]),
     )
     .unwrap();
     assert_eq!(defaulted.max_llm_input_tokens, 100_000);
-    assert_eq!(defaulted.max_llm_output_tokens, 10_000);
+    assert_eq!(defaulted.max_llm_output_tokens, 20_000);
 
-    let configured = provider_config_from_sources(
-        &ProviderConfigSource::default(),
+    let configured = model_service_config_from_sources(
+        &ModelServiceConfigSource::default(),
         &env(&[
             ("TIMEM_API_KEY", "k"),
             ("TIMEM_MAX_LLM_INPUT", "128K"),
@@ -230,8 +236,8 @@ fn token_limits_default_and_can_come_from_env() {
 
 #[test]
 fn openai_compatible_thinking_options_are_loaded_from_env() {
-    let config = provider_config_from_sources(
-        &ProviderConfigSource::default(),
+    let config = model_service_config_from_sources(
+        &ModelServiceConfigSource::default(),
         &env(&[
             ("TIMEM_API_KEY", "k"),
             ("TIMEM_ENABLE_THINKING", "true"),
@@ -256,8 +262,8 @@ fn openai_compatible_thinking_options_reject_invalid_env_values() {
         ("TIMEM_STREAM", "maybe"),
         ("TIMEM_REASONING_EFFORT", "max; rm"),
     ] {
-        let error = provider_config_from_sources(
-            &ProviderConfigSource::default(),
+        let error = model_service_config_from_sources(
+            &ModelServiceConfigSource::default(),
             &env(&[("TIMEM_API_KEY", "k"), (key, value)]),
         )
         .unwrap_err();

@@ -1,4 +1,4 @@
-use agent_core::{provider_config_from_sources, ProviderConfigSource, UsageStats};
+use agent_core::{model_service_config_from_sources, ModelServiceConfigSource, UsageStats};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,12 +11,11 @@ pub use agent_core::{
     append_audit_event as append_audit, apply_runtime_config_value,
     apply_workspace_command_to_path, bash_approval_mode_from_sources, bash_approval_mode_label,
     capabilities_dir_from_sources, collect_storage_profile, combine_additional_contexts,
-    compact_runtime_status_text, default_api_protocol_for_provider, default_base_url_for_provider,
-    default_data_root, default_model_for_provider, estimate_prompt_context_tokens,
-    host_start_audit_event, is_default_base_url_for_provider, is_default_model_for_provider,
-    known_default_base_url_for_provider, layout_for_space, load_workspace_dirs_from_path,
-    local_time_label, meaningful_latest_usage, model_retry_audit_event, normalize_workspace_dir,
-    parse_api_protocol, parse_token_count, resolve_topic_reply, runtime_active_elapsed_secs,
+    compact_runtime_status_text, default_api_protocol, default_base_url, default_data_root,
+    default_model, estimate_prompt_context_tokens, host_start_audit_event, is_default_base_url,
+    is_default_model, layout_for_space, load_workspace_dirs_from_path, local_time_label,
+    meaningful_latest_usage, model_retry_audit_event, normalize_workspace_dir, parse_api_protocol,
+    parse_token_count, resolve_topic_reply, runtime_active_elapsed_secs,
     runtime_config_apply_report, runtime_config_field_value, runtime_config_menu_report,
     runtime_config_report, runtime_info_context, runtime_profile_report, runtime_retry_status_view,
     runtime_time_context, runtime_token_status_view, stale_context_decision_request,
@@ -27,8 +26,8 @@ pub use agent_core::{
     CoreLifecycleEvent, CoreLifecycleTopic, CoreMemoryActivity, CoreModelResponseTopic,
     CoreTopicEvent, HostDecision, HostDecisionDefault, HostDecisionRequest, HostStatusLevel,
     HostStatusMessage, LocalLLMKeyFile, LongRunningCommandContinueRequest, ModelDirection,
-    ModelProfile, NoopTurnUi, OutputExpansionRequest, ProviderConfig, RoundLimitDecisionRequest,
-    RunningShellJob, RuntimeConfigApplyError, RuntimeConfigApplyMessage,
+    ModelProfile, ModelServiceConfig, NoopTurnUi, OutputExpansionRequest,
+    RoundLimitDecisionRequest, RunningShellJob, RuntimeConfigApplyError, RuntimeConfigApplyMessage,
     RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigEffect,
     RuntimeConfigField, RuntimeConfigMenuItem, RuntimeConfigMenuReport, RuntimeConfigReport,
     RuntimeConfigReportInput, RuntimeConfigReportItem, RuntimeConfigReportRow,
@@ -119,9 +118,8 @@ pub fn shell_status_message_from_lifecycle_topic(
                 .map(|worker| format!(" {}", worker.display_name))
                 .unwrap_or_default();
             HostStatusMessage::info(format!(
-                "Timem Core{} 启动成功：{}:{}，response protocol={}，tools={}，skills={}",
+                "Timem Core{} 启动成功：{}，response protocol={}，tools={}，skills={}",
                 worker_label,
-                lifecycle.profile.provider,
                 lifecycle.profile.model,
                 lifecycle.response_protocol,
                 lifecycle.tool_count,
@@ -240,7 +238,6 @@ pub fn render_final_response_at(
     text: &str,
     stats: &UsageStats,
     latest_usage: Option<&UsageStats>,
-    provider: &str,
     model: &str,
     elapsed_secs: u64,
     max_llm_input_tokens: u32,
@@ -249,7 +246,6 @@ pub fn render_final_response_at(
     let status = final_status_line(
         stats,
         latest_usage,
-        provider,
         model,
         elapsed_secs,
         max_llm_input_tokens,
@@ -341,8 +337,7 @@ fn thinking_status_lines(snapshot: &ShellStatusSnapshot) -> Vec<String> {
     let has_retry = !retry_lines.is_empty();
     let mut lines = Vec::new();
     lines.push(format!(
-        "{}:{} ⇌{} ║ {}",
-        snapshot.provider,
+        "{} ⇌{} ║ {}",
         snapshot.model,
         model_round_with_repairs(view.model_rounds, view.repair_calls),
         compact_token_totals(&view.total)
@@ -404,7 +399,6 @@ fn compact_retry_notice(text: &str) -> String {
 fn final_status_line(
     stats: &UsageStats,
     latest_usage: Option<&UsageStats>,
-    provider: &str,
     model: &str,
     elapsed_secs: u64,
     max_llm_input_tokens: u32,
@@ -421,9 +415,8 @@ fn final_status_line(
         parts.push(kvc);
     }
     format!(
-        " ↳  {}s    {}:{} ⇌{} ║ {}",
+        " ↳  {}s    {} ⇌{} ║ {}",
         elapsed_secs,
-        provider,
         model,
         model_round_with_repairs(view.model_rounds, view.repair_calls),
         parts.join("  ")
@@ -588,7 +581,6 @@ pub fn memory_activity_marker(activity: CoreMemoryActivity) -> &'static str {
 #[derive(Debug, Clone, Default)]
 pub struct CliOptions {
     pub space: Option<String>,
-    pub provider: Option<String>,
     pub api_protocol: Option<String>,
     pub response_protocol: Option<String>,
     pub api_key: Option<String>,
@@ -614,10 +606,6 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
         match (key, value) {
             ("--space", Some(v)) => {
                 options.space = Some(v);
-                idx += 2;
-            }
-            ("--gateway-provider", Some(v)) => {
-                options.provider = Some(v);
                 idx += 2;
             }
             ("--api-protocol", Some(v)) => {
@@ -684,13 +672,12 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
     options
 }
 
-pub fn provider_config_from_env(
+pub fn model_service_config_from_env(
     options: &CliOptions,
     env: &HashMap<String, String>,
-) -> Result<ProviderConfig, String> {
-    provider_config_from_sources(
-        &ProviderConfigSource {
-            provider: options.provider.clone(),
+) -> Result<ModelServiceConfig, String> {
+    model_service_config_from_sources(
+        &ModelServiceConfigSource {
             api_protocol: options.api_protocol.clone(),
             api_key: options.api_key.clone(),
             model: options.model.clone(),

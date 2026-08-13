@@ -1,7 +1,7 @@
 use crate::{
     core_initialized_topic_event_with_worker, run_session_turn_with_model_client, AgentCore,
     CoreGlobalWorkerStatus, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent,
-    HostDecision, HostDecisionRequest, ModelClient, ProviderConfig, ProviderModelClient,
+    HostDecision, HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig,
     ResponseProtocolKind, RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail,
     TurnUi, UsageStats,
 };
@@ -167,10 +167,6 @@ pub enum CoreSessionWorkerEvent {
         usage: UsageStats,
         runtime_phase: Option<String>,
     },
-    ModelResponseDiscarded {
-        round: u32,
-        reason: String,
-    },
     ModelRetry {
         attempt: u32,
         max_attempts: u32,
@@ -197,13 +193,35 @@ enum CoreSessionWorkerCommand {
     Rename {
         display_name: String,
     },
+    UpdateBashApproval {
+        mode: crate::BashApprovalMode,
+    },
+    UpdateRuntimeConfig {
+        field: crate::RuntimeConfigField,
+        value: String,
+    },
+    UpdateApiKey {
+        api_key: String,
+    },
+    UpdateMcp {
+        base_capabilities: crate::capability::CapabilityRegistry,
+        runtime: crate::mcp::McpRuntime,
+        servers: Vec<crate::mcp::McpServerConfig>,
+        tools: Vec<crate::mcp::McpTool>,
+    },
     Shutdown,
+}
+
+#[derive(Default)]
+struct SupplementMailbox {
+    accepting: bool,
+    queue: Vec<String>,
 }
 
 #[derive(Clone)]
 pub struct CoreSessionWorkerHandle {
     command_tx: Sender<CoreSessionWorkerCommand>,
-    supplement_queue: Arc<Mutex<Vec<String>>>,
+    supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
     cancel_requested: Arc<AtomicBool>,
     shutdown_requested: Arc<AtomicBool>,
     reply_tx: Sender<TopicReply>,
@@ -219,12 +237,18 @@ impl CoreSessionWorkerHandle {
             return Err("core_session_worker_stopped".to_string());
         }
         self.cancel_requested.store(false, Ordering::SeqCst);
-        self.command_tx
+        self.open_supplement_mailbox();
+        let result = self
+            .command_tx
             .send(CoreSessionWorkerCommand::RunTurn {
                 input: input.into(),
                 additional_context,
             })
-            .map_err(|_| "core_session_worker_stopped".to_string())
+            .map_err(|_| "core_session_worker_stopped".to_string());
+        if result.is_err() {
+            self.close_supplement_mailbox();
+        }
+        result
     }
 
     pub fn run_toolgen(&self, request: ToolGenRequest) -> Result<(), String> {
@@ -232,15 +256,32 @@ impl CoreSessionWorkerHandle {
             return Err("core_session_worker_stopped".to_string());
         }
         self.cancel_requested.store(false, Ordering::SeqCst);
-        self.command_tx
+        self.open_supplement_mailbox();
+        let result = self
+            .command_tx
             .send(CoreSessionWorkerCommand::RunToolGen { request })
-            .map_err(|_| "core_session_worker_stopped".to_string())
+            .map_err(|_| "core_session_worker_stopped".to_string());
+        if result.is_err() {
+            self.close_supplement_mailbox();
+        }
+        result
+    }
+
+    pub fn try_add_user_supplement(&self, supplement: impl Into<String>) -> bool {
+        self.supplement_mailbox
+            .lock()
+            .map(|mut mailbox| {
+                if !mailbox.accepting {
+                    return false;
+                }
+                mailbox.queue.push(supplement.into());
+                true
+            })
+            .unwrap_or(false)
     }
 
     pub fn add_user_supplement(&self, supplement: impl Into<String>) {
-        if let Ok(mut queue) = self.supplement_queue.lock() {
-            queue.push(supplement.into());
-        }
+        let _ = self.try_add_user_supplement(supplement);
     }
 
     pub fn cancel_current_turn(&self) {
@@ -254,11 +295,35 @@ impl CoreSessionWorkerHandle {
     }
 
     pub fn request_shutdown(&self) -> Result<(), String> {
+        self.close_supplement_mailbox();
         self.shutdown_requested.store(true, Ordering::SeqCst);
         self.cancel_requested.store(true, Ordering::SeqCst);
         self.command_tx
             .send(CoreSessionWorkerCommand::Shutdown)
             .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    fn close_supplement_mailbox(&self) {
+        if let Ok(mut mailbox) = self.supplement_mailbox.lock() {
+            mailbox.accepting = false;
+            mailbox.queue.clear();
+        }
+    }
+
+    fn open_supplement_mailbox(&self) {
+        if let Ok(mut mailbox) = self.supplement_mailbox.lock() {
+            if !mailbox.accepting {
+                mailbox.accepting = true;
+                mailbox.queue.clear();
+            }
+        }
+    }
+
+    pub fn is_accepting_user_supplements(&self) -> bool {
+        self.supplement_mailbox
+            .lock()
+            .map(|mailbox| mailbox.accepting)
+            .unwrap_or(false)
     }
 
     pub fn rename(&self, display_name: impl Into<String>) -> Result<(), String> {
@@ -268,6 +333,57 @@ impl CoreSessionWorkerHandle {
         self.command_tx
             .send(CoreSessionWorkerCommand::Rename {
                 display_name: display_name.into(),
+            })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_bash_approval(&self, mode: crate::BashApprovalMode) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateBashApproval { mode })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_runtime_config(
+        &self,
+        field: crate::RuntimeConfigField,
+        value: String,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateRuntimeConfig { field, value })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_api_key(&self, api_key: String) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateApiKey { api_key })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_mcp(
+        &self,
+        base_capabilities: crate::capability::CapabilityRegistry,
+        runtime: crate::mcp::McpRuntime,
+        servers: Vec<crate::mcp::McpServerConfig>,
+        tools: Vec<crate::mcp::McpTool>,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateMcp {
+                base_capabilities,
+                runtime,
+                servers,
+                tools,
             })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
@@ -346,7 +462,7 @@ impl CoreSessionWorkerManager {
     pub fn ensure_default_worker(
         &mut self,
         core: AgentCore,
-        config: ProviderConfig,
+        config: ModelServiceConfig,
         workspace: CoreSessionWorkerWorkspace,
     ) -> Result<String, String> {
         if let Some(worker_id) = self.workers.keys().next() {
@@ -358,7 +474,7 @@ impl CoreSessionWorkerManager {
     pub fn ensure_default_worker_with_model_client<M>(
         &mut self,
         core: AgentCore,
-        config: ProviderConfig,
+        config: ModelServiceConfig,
         workspace: CoreSessionWorkerWorkspace,
         model_client: M,
     ) -> Result<String, String>
@@ -374,7 +490,7 @@ impl CoreSessionWorkerManager {
     pub fn spawn_worker(
         &mut self,
         core: AgentCore,
-        config: ProviderConfig,
+        config: ModelServiceConfig,
         workspace: CoreSessionWorkerWorkspace,
         display_name: Option<String>,
         parent_worker_id: Option<String>,
@@ -385,7 +501,7 @@ impl CoreSessionWorkerManager {
             workspace,
             display_name,
             parent_worker_id,
-            ProviderModelClient,
+            HttpModelClient,
         )
     }
 
@@ -393,7 +509,7 @@ impl CoreSessionWorkerManager {
     pub fn spawn_worker_in_session(
         &mut self,
         core: AgentCore,
-        config: ProviderConfig,
+        config: ModelServiceConfig,
         workspace: CoreSessionWorkerWorkspace,
         session_id: impl Into<String>,
         context_id: impl Into<String>,
@@ -408,14 +524,14 @@ impl CoreSessionWorkerManager {
             context_id,
             display_name,
             parent_worker_id,
-            ProviderModelClient,
+            HttpModelClient,
         )
     }
 
     pub fn spawn_worker_with_model_client<M>(
         &mut self,
         core: AgentCore,
-        config: ProviderConfig,
+        config: ModelServiceConfig,
         workspace: CoreSessionWorkerWorkspace,
         display_name: Option<String>,
         parent_worker_id: Option<String>,
@@ -445,7 +561,7 @@ impl CoreSessionWorkerManager {
     pub fn spawn_worker_in_session_with_model_client<M>(
         &mut self,
         core: AgentCore,
-        config: ProviderConfig,
+        config: ModelServiceConfig,
         workspace: CoreSessionWorkerWorkspace,
         session_id: impl Into<String>,
         context_id: impl Into<String>,
@@ -537,6 +653,14 @@ impl CoreSessionWorkerManager {
         managed.worker.shutdown()
     }
 
+    pub fn shutdown_worker(&mut self, worker_id: &str) -> Result<(), String> {
+        let managed = self
+            .workers
+            .remove(worker_id)
+            .ok_or_else(|| "session_worker_not_found".to_string())?;
+        managed.worker.shutdown()
+    }
+
     pub fn shutdown_all(mut self) -> Result<(), String> {
         for managed in self.workers.values_mut() {
             let _ = managed.worker.handle().request_shutdown();
@@ -554,6 +678,13 @@ impl CoreSessionWorkerManager {
             Ok(())
         }
     }
+
+    pub fn shutdown_all_detached(self) -> Result<(), String> {
+        for (_worker_id, managed) in self.workers {
+            managed.worker.shutdown_detached();
+        }
+        Ok(())
+    }
 }
 
 impl Default for CoreSessionWorkerManager {
@@ -565,7 +696,7 @@ impl Default for CoreSessionWorkerManager {
 impl CoreSessionWorker {
     pub fn spawn(
         core: AgentCore,
-        config: ProviderConfig,
+        config: ModelServiceConfig,
         worker_config: CoreSessionWorkerConfig,
     ) -> Self {
         Self::spawn_with_runtime_model_client(
@@ -573,13 +704,13 @@ impl CoreSessionWorker {
             config,
             worker_config,
             CoreSessionWorkerRuntime::new(),
-            ProviderModelClient,
+            HttpModelClient,
         )
     }
 
     pub fn spawn_with_model_client<M>(
         core: AgentCore,
-        config: ProviderConfig,
+        config: ModelServiceConfig,
         worker_config: CoreSessionWorkerConfig,
         model_client: M,
     ) -> Self
@@ -597,7 +728,7 @@ impl CoreSessionWorker {
 
     pub fn spawn_with_runtime_model_client<M>(
         mut core: AgentCore,
-        mut config: ProviderConfig,
+        mut config: ModelServiceConfig,
         worker_config: CoreSessionWorkerConfig,
         runtime: CoreSessionWorkerRuntime,
         mut model_client: M,
@@ -608,12 +739,12 @@ impl CoreSessionWorker {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
-        let supplement_queue = Arc::new(Mutex::new(Vec::new()));
+        let supplement_mailbox = Arc::new(Mutex::new(SupplementMailbox::default()));
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let handle = CoreSessionWorkerHandle {
             command_tx,
-            supplement_queue: Arc::clone(&supplement_queue),
+            supplement_mailbox: Arc::clone(&supplement_mailbox),
             cancel_requested: Arc::clone(&cancel_requested),
             shutdown_requested: Arc::clone(&shutdown_requested),
             reply_tx,
@@ -644,13 +775,14 @@ impl CoreSessionWorker {
                 session_id: identity.session_id.clone(),
                 context_id: identity.context_id.clone(),
                 worker_id: identity.worker_id.clone(),
-                supplement_queue,
+                supplement_mailbox,
                 cancel_requested,
                 reply_rx,
                 runtime: runtime.clone(),
                 current_turn_active: None,
                 phase: None,
                 accept_supplements: true,
+                pending_bash_always_allow: false,
             };
 
             while let Ok(command) = command_rx.recv() {
@@ -658,6 +790,10 @@ impl CoreSessionWorker {
                     CoreSessionWorkerCommand::RunTurn { .. }
                     | CoreSessionWorkerCommand::RunToolGen { .. }
                     | CoreSessionWorkerCommand::Rename { .. }
+                    | CoreSessionWorkerCommand::UpdateBashApproval { .. }
+                    | CoreSessionWorkerCommand::UpdateRuntimeConfig { .. }
+                    | CoreSessionWorkerCommand::UpdateApiKey { .. }
+                    | CoreSessionWorkerCommand::UpdateMcp { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
                         break;
@@ -686,7 +822,14 @@ impl CoreSessionWorker {
                                     Some(&mut profiler),
                                     &mut model_client,
                                 );
-                                let supplements = ui.take_supplements_for_main_context();
+                                if main_outcome.stop_summary.is_some() {
+                                    // A structured stop is a hard boundary. Late supplements are
+                                    // already retained by the host turn UI, but must not bypass
+                                    // cancellation, repair, or runtime-failure limits here.
+                                    let _ = ui.close_supplements_for_main_context();
+                                    break main_outcome;
+                                }
+                                let supplements = ui.take_or_close_supplements_for_main_context();
                                 if supplements.is_empty() {
                                     break main_outcome;
                                 }
@@ -759,6 +902,59 @@ impl CoreSessionWorker {
                         .with_worker_scope(&identity.context_id, &identity.worker_id);
                         let _ = event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
                     }
+                    CoreSessionWorkerCommand::UpdateBashApproval { mode } => {
+                        core.set_bash_approval_mode(mode);
+                    }
+                    CoreSessionWorkerCommand::UpdateRuntimeConfig { field, value } => {
+                        use crate::RuntimeConfigField;
+                        match field {
+                            RuntimeConfigField::Model => config.model = value,
+                            RuntimeConfigField::ApiProtocol => {
+                                if let Ok(proto) = crate::parse_api_protocol(&value) {
+                                    config.api_protocol = proto;
+                                }
+                            }
+                            RuntimeConfigField::BaseUrl => config.base_url = value,
+                            RuntimeConfigField::MaxInput => {
+                                if let Some(tokens) = crate::parse_token_count(&value) {
+                                    let tokens = tokens.max(3_000);
+                                    config.max_llm_input_tokens = tokens;
+                                    core.set_max_llm_input_tokens(tokens);
+                                }
+                            }
+                            RuntimeConfigField::MaxOutput => {
+                                if let Some(tokens) = crate::parse_token_count(&value) {
+                                    config.max_llm_output_tokens = tokens.max(512);
+                                }
+                            }
+                            RuntimeConfigField::BashApproval => {
+                                let mode = match value.trim().to_lowercase().as_str() {
+                                    "approve" => Some(crate::BashApprovalMode::Approve),
+                                    "ask" => Some(crate::BashApprovalMode::Ask),
+                                    _ => None,
+                                };
+                                if let Some(mode) = mode {
+                                    core.set_bash_approval_mode(mode);
+                                }
+                            }
+                            RuntimeConfigField::WorkInstructions => {}
+                        }
+                    }
+                    CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
+                        config.api_key = api_key;
+                    }
+                    CoreSessionWorkerCommand::UpdateMcp {
+                        base_capabilities,
+                        runtime,
+                        servers,
+                        tools,
+                    } => {
+                        if let Err(error) =
+                            core.apply_mcp_update(base_capabilities, runtime, servers, tools)
+                        {
+                            let _ = event_tx.send(CoreSessionWorkerEvent::ModelError { error });
+                        }
+                    }
                     CoreSessionWorkerCommand::Shutdown => break,
                 }
             }
@@ -789,6 +985,12 @@ impl CoreSessionWorker {
         }
         Ok(())
     }
+
+    pub fn shutdown_detached(mut self) {
+        self.handle.cancel_current_turn();
+        let _ = self.handle.request_shutdown();
+        let _ = self.join.take();
+    }
 }
 
 impl Drop for CoreSessionWorker {
@@ -806,13 +1008,14 @@ struct WorkerTurnUi {
     session_id: String,
     context_id: String,
     worker_id: String,
-    supplement_queue: Arc<Mutex<Vec<String>>>,
+    supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
     cancel_requested: Arc<AtomicBool>,
     reply_rx: Receiver<TopicReply>,
     runtime: CoreSessionWorkerRuntime,
     current_turn_active: Option<Arc<AtomicBool>>,
     phase: Option<String>,
     accept_supplements: bool,
+    pending_bash_always_allow: bool,
 }
 
 fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static str {
@@ -825,7 +1028,7 @@ fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static st
 
 struct ToolGenRunner<'a, M: ModelClient> {
     core: &'a mut AgentCore,
-    config: &'a mut ProviderConfig,
+    config: &'a mut ModelServiceConfig,
     workspace: &'a CoreSessionWorkerWorkspace,
     identity: &'a CoreSessionWorkerIdentity,
     ui: &'a mut WorkerTurnUi,
@@ -882,7 +1085,11 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                 Some(profiler),
                 model_client,
             );
-            let supplements = ui.take_supplements_for_main_context();
+            if current.stop_summary.is_some() {
+                let _ = ui.close_supplements_for_main_context();
+                break current;
+            }
+            let supplements = ui.take_or_close_supplements_for_main_context();
             if supplements.is_empty() {
                 break current;
             }
@@ -967,9 +1174,9 @@ impl TurnUi for WorkerTurnUi {
         if !self.accept_supplements {
             return Vec::new();
         }
-        self.supplement_queue
+        self.supplement_mailbox
             .lock()
-            .map(|mut queue| std::mem::take(&mut *queue))
+            .map(|mut mailbox| std::mem::take(&mut mailbox.queue))
             .unwrap_or_default()
     }
 
@@ -985,15 +1192,6 @@ impl TurnUi for WorkerTurnUi {
             usage: usage.clone(),
             runtime_phase: self.phase.clone(),
         });
-    }
-
-    fn on_model_response_discarded(&mut self, round: u32, reason: &str) {
-        let _ = self
-            .event_tx
-            .send(CoreSessionWorkerEvent::ModelResponseDiscarded {
-                round,
-                reason: reason.to_string(),
-            });
     }
 
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
@@ -1067,17 +1265,42 @@ impl TurnUi for WorkerTurnUi {
                 continue;
             };
             if let Ok(decision) = crate::resolve_topic_reply(&event, None, &reply) {
+                if reply.always_allow {
+                    self.pending_bash_always_allow = true;
+                }
                 return decision;
             }
         }
     }
+
+    fn take_bash_always_allow(&mut self) -> bool {
+        let flag = self.pending_bash_always_allow;
+        self.pending_bash_always_allow = false;
+        flag
+    }
 }
 
 impl WorkerTurnUi {
-    fn take_supplements_for_main_context(&mut self) -> Vec<String> {
-        self.supplement_queue
+    fn take_or_close_supplements_for_main_context(&mut self) -> Vec<String> {
+        self.supplement_mailbox
             .lock()
-            .map(|mut queue| std::mem::take(&mut *queue))
+            .map(|mut mailbox| {
+                let supplements = std::mem::take(&mut mailbox.queue);
+                if supplements.is_empty() {
+                    mailbox.accepting = false;
+                }
+                supplements
+            })
+            .unwrap_or_default()
+    }
+
+    fn close_supplements_for_main_context(&mut self) -> Vec<String> {
+        self.supplement_mailbox
+            .lock()
+            .map(|mut mailbox| {
+                mailbox.accepting = false;
+                std::mem::take(&mut mailbox.queue)
+            })
             .unwrap_or_default()
     }
 

@@ -62,15 +62,8 @@ impl ModelProfileReport {
 }
 
 impl RuntimeProfiler {
-    pub fn record_model_wait(
-        &mut self,
-        provider: &str,
-        model: &str,
-        usage: &UsageStats,
-        wait: Duration,
-    ) {
-        let key = format!("{}:{}", provider, model);
-        let profile = self.models.entry(key).or_default();
+    pub fn record_model_wait(&mut self, model: &str, usage: &UsageStats, wait: Duration) {
+        let profile = self.models.entry(model.to_string()).or_default();
         profile.llm_calls = profile.llm_calls.saturating_add(usage.llm_calls);
         profile.input_tokens = profile
             .input_tokens

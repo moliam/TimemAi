@@ -1,7 +1,6 @@
 use crate::{
-    default_api_protocol_for_provider, is_default_base_url_for_provider,
-    is_default_model_for_provider, work_instruction_mode_label, BashApprovalMode, ProviderConfig,
-    WorkInstructionLoadMode,
+    default_api_protocol, is_default_base_url, is_default_model, work_instruction_mode_label,
+    BashApprovalMode, ModelServiceConfig, WorkInstructionLoadMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +24,6 @@ pub enum RuntimeConfigSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeConfigRowKind {
     Model,
-    GatewayProvider,
     ApiProtocol,
     BaseUrl,
     MaxLlmInput,
@@ -57,10 +55,10 @@ pub struct RuntimeConfigReportInput {
 }
 
 pub fn runtime_config_report(
-    config: &ProviderConfig,
+    config: &ModelServiceConfig,
     input: RuntimeConfigReportInput,
 ) -> RuntimeConfigReport {
-    let default_protocol = default_api_protocol_for_provider(&config.provider);
+    let default_protocol = default_api_protocol();
     RuntimeConfigReport {
         items: vec![
             RuntimeConfigReportItem::Section(RuntimeConfigSection::Model),
@@ -68,13 +66,7 @@ pub fn runtime_config_report(
                 RuntimeConfigRowKind::Model,
                 "TIMEM_MODEL",
                 config.model.clone(),
-                !is_default_model_for_provider(&config.provider, &config.model),
-            ),
-            row(
-                RuntimeConfigRowKind::GatewayProvider,
-                "TIMEM_GATEWAY_PROVIDER",
-                config.provider.clone(),
-                false,
+                !is_default_model(&config.model),
             ),
             row(
                 RuntimeConfigRowKind::ApiProtocol,
@@ -86,7 +78,7 @@ pub fn runtime_config_report(
                 RuntimeConfigRowKind::BaseUrl,
                 "TIMEM_BASE_URL",
                 config.base_url.clone(),
-                !is_default_base_url_for_provider(&config.provider, &config.base_url),
+                !is_default_base_url(&config.api_protocol, &config.base_url),
             ),
             RuntimeConfigReportItem::Section(RuntimeConfigSection::Runtime),
             row(

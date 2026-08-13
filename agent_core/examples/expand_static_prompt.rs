@@ -8,8 +8,6 @@ fn main() {
     let mut core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
-            name: "snapshot".to_string(),
-            provider: "snapshot".to_string(),
             model: "snapshot".to_string(),
         },
         memory_dir,

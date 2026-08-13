@@ -754,8 +754,6 @@ impl CoreTopicEvent {
             event: CoreLifecycleEvent::from_name(self.payload["event"].as_str()?)?,
             version: self.payload["version"].as_str()?.to_string(),
             profile: CoreProfile {
-                name: self.payload["profile"]["name"].as_str()?.to_string(),
-                provider: self.payload["profile"]["provider"].as_str()?.to_string(),
                 model: self.payload["profile"]["model"].as_str()?.to_string(),
             },
             response_protocol: self.payload["response_protocol"].as_str()?.to_string(),
@@ -940,8 +938,6 @@ pub fn core_initialized_topic_event_with_worker(
             "event": CoreLifecycleEvent::Initialized.name(),
             "version": env!("CARGO_PKG_VERSION"),
             "profile": {
-                "name": &profile.name,
-                "provider": &profile.provider,
                 "model": &profile.model,
             },
             "response_protocol": response_protocol,
@@ -1106,6 +1102,7 @@ fn path_string(path: impl AsRef<Path>) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicReply {
+    pub always_allow: bool,
     pub session_id: String,
     pub topic_name: String,
     pub request_id: Option<String>,
@@ -1129,6 +1126,7 @@ impl TopicReply {
         payload: Value,
     ) -> Self {
         Self {
+            always_allow: false,
             session_id: session_id.into(),
             topic_name: topic_name.into(),
             request_id: None,
@@ -1139,6 +1137,11 @@ impl TopicReply {
 
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
+        self
+    }
+
+    pub fn with_always_allow(mut self) -> Self {
+        self.always_allow = true;
         self
     }
 
@@ -1656,8 +1659,6 @@ pub trait TurnUi {
 
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
 
-    fn on_model_response_discarded(&mut self, _round: u32, _reason: &str) {}
-
     fn on_core_topic_events(&mut self, _events: &[CoreTopicEvent]) {}
 
     fn on_model_error(&mut self, _error: &str) {}
@@ -1723,6 +1724,12 @@ pub trait TurnUi {
     fn request_expand_output_tokens(&mut self, request: OutputExpansionRequest) -> bool {
         self.request_host_decision(HostDecisionRequest::OutputExpansion(request))
             .as_bool()
+    }
+
+    /// Returns true if the host signaled "always allow bash" during the last
+    /// approval decision. The flag is consumed (reset) on each call.
+    fn take_bash_always_allow(&mut self) -> bool {
+        false
     }
 }
 

@@ -19,6 +19,9 @@ This prompt will contain all historical records shown like a chat history, where
 Prefer direct, token-saving but complete conclusions. For multi-item answers, prefer structured
 layout over long text paragraphs.
 
+Use emoji sparingly. Do not decorate ordinary headings, status updates, test results, or
+confirmations with emoji. Use one only when it adds meaning or the user asks for it.
+
 Properly make a plan first for a complex task.
 
 Do not expose internal mechanisms unless the user explicitly asks about Timem
@@ -58,7 +61,7 @@ new user input, or user supplement entered while the current turn was already in
 progress.
 
 ## {{ASSSISTANT_ID}}
-replay of your response
+your response in this round
 
 ## SYSTEM
 runtime's feedback to your response.

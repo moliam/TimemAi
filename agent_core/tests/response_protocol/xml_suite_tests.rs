@@ -24,7 +24,7 @@ fn extract_response_examples(text: &str) -> Vec<String> {
 fn documented_xml_response_examples_parse_with_runtime_parser() {
     let examples = extract_response_examples(XML_RESPONSE_PROTOCOL_SECTION);
     assert!(
-        examples.len() >= 4,
+        examples.len() >= 3,
         "expected protocol doc to contain concrete XML response examples"
     );
 
@@ -58,6 +58,354 @@ fn parses_final_answer() {
 }
 
 #[test]
+fn recovered_final_answer_requires_an_unmodified_retry() {
+    for raw in [
+        "preface<response><final_answer>done</final_answer></response>",
+        "<response><final_answer>done</final_answer></response>trailing",
+        "<final_answer>done</final_answer>",
+        "<response><final_answer>done</final_answer>",
+    ] {
+        let env = parse_xml_envelope(raw, &caps());
+        assert_eq!(
+            env.repair_issue.as_deref(),
+            Some("xml_recovered_final_answer_requires_retry"),
+            "raw={raw}"
+        );
+        assert!(env.final_answer.is_empty(), "raw={raw}");
+        assert!(env.continue_work, "raw={raw}");
+        assert!(env.next_actions.is_empty(), "raw={raw}");
+    }
+}
+
+#[test]
+fn recovery_remains_allowed_for_non_terminal_actions() {
+    let env = parse_xml_envelope(
+        "preface<response><actions><run_bash><cmd>printf safe</cmd></run_bash></actions></response>trailing",
+        &caps(),
+    );
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(env.next_actions[0].input_str("cmd"), "printf safe");
+    assert!(env.final_answer.is_empty());
+    assert!(env.continue_work);
+}
+
+#[test]
+fn cdata_text_fields_are_literal_while_normal_xml_text_decodes_once() {
+    let cdata = parse_xml_envelope(
+        "<response><final_answer><![CDATA[&lt;literal&gt; &amp;]]></final_answer></response>",
+        &caps(),
+    );
+    assert_eq!(cdata.final_answer, "&lt;literal&gt; &amp;");
+
+    let escaped = parse_xml_envelope(
+        "<response><final_answer>&amp;lt;decoded-once&amp;gt;</final_answer></response>",
+        &caps(),
+    );
+    assert_eq!(escaped.final_answer, "&lt;decoded-once&gt;");
+}
+
+#[test]
+fn parses_xml_native_actions_with_sequential_and_parallel_groups() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <free_talk>Inspect, then test.</free_talk>
+  <actions>
+    <run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash>
+    <parallel>
+      <run_bash timeout_ms="6000"><cmd>git status --short</cmd></run_bash>
+      <run_bash background="true"><cmd><![CDATA[printf '%s\n' '<ready>' > result.txt]]></cmd></run_bash>
+    </parallel>
+  </actions>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.action_groups.len(), 2);
+    assert_eq!(
+        env.action_groups[0].order,
+        crate::ActionGroupOrder::Sequential
+    );
+    assert_eq!(
+        env.action_groups[1].order,
+        crate::ActionGroupOrder::Parallel
+    );
+    assert_eq!(env.action_groups[1].actions.len(), 2);
+    assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+    assert_eq!(env.next_actions[0].input_i64("timeout_ms"), Some(5000));
+    assert_eq!(env.next_actions[1].input_i64("timeout_ms"), Some(6000));
+    assert!(env.next_actions[2].input_bool("background"));
+    assert!(env.next_actions[2].input_raw_str("cmd").contains("<ready>"));
+}
+
+#[test]
+fn recovers_one_missing_final_tool_close_before_parallel_close() {
+    let env = parse_xml_envelope(
+        r#"<response>
+  <actions>
+    <parallel>
+      <run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash>
+      <run_bash timeout_ms="5000"><cmd><![CDATA[git status --short]]></cmd>
+    </parallel>
+  </actions>
+</response>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.action_groups.len(), 1);
+    assert_eq!(env.action_groups[0].actions.len(), 2);
+    assert_eq!(env.next_actions[1].input_str("cmd"), "git status --short");
+}
+
+#[test]
+fn does_not_recover_argument_or_unrelated_mismatched_close_tags() {
+    for raw in [
+        r#"<response><actions><parallel><run_bash><cmd>pwd</run_bash></parallel></actions></response>"#,
+        r#"<response><actions><parallel><run_bash><cmd>pwd</cmd></memmgr></parallel></actions></response>"#,
+    ] {
+        let env = parse_xml_envelope(raw, &caps());
+        assert!(
+            env.repair_issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("mismatched_close")),
+            "{:?}",
+            env.repair_issue
+        );
+    }
+}
+
+#[test]
+fn xml_native_actions_reject_nested_parallel_and_duplicate_arguments() {
+    let nested = parse_xml_envelope(
+        r#"<response><actions><parallel><parallel><run_bash><cmd>pwd</cmd></run_bash></parallel></parallel></actions></response>"#,
+        &caps(),
+    );
+    assert!(nested
+        .repair_issue
+        .as_deref()
+        .is_some_and(|issue| issue.ends_with("parallel_nested")));
+
+    let duplicate = parse_xml_envelope(
+        r#"<response><actions><run_bash timeout_ms="1"><cmd>pwd</cmd><timeout_ms>2</timeout_ms></run_bash></actions></response>"#,
+        &caps(),
+    );
+    assert!(duplicate
+        .repair_issue
+        .as_deref()
+        .is_some_and(|issue| issue.ends_with("input.timeout_ms_duplicate")));
+}
+
+#[test]
+fn xml_native_actions_convert_schema_typed_arrays_objects_and_mcp_tool_names() {
+    let tool = crate::mcp::McpTool {
+        server_id: "demo".to_string(),
+        server_name: "Demo".to_string(),
+        name: "batch".to_string(),
+        action_name: "mcp.demo.batch".to_string(),
+        description: "Batch demo".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "required": ["files", "options"],
+            "properties": {
+                "files": {"type": "array", "items": {"type": "string"}},
+                "options": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer"},
+                        "strict": {"type": "boolean"}
+                    }
+                }
+            }
+        }),
+    };
+    let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
+    let env = parse_xml_envelope(
+        r#"<response><actions><mcp.demo.batch>
+          <files><item>README.md</item><item>package.json</item></files>
+          <options strict="true"><limit>20</limit></options>
+        </mcp.demo.batch></actions></response>"#,
+        &capabilities,
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions[0].action, "mcp.demo.batch");
+    assert_eq!(
+        env.next_actions[0].raw_input["files"],
+        serde_json::json!(["README.md", "package.json"])
+    );
+    assert_eq!(
+        env.next_actions[0].raw_input["options"],
+        serde_json::json!({"strict": true, "limit": 20})
+    );
+}
+
+#[test]
+fn xml_native_values_cover_nullable_large_integer_additional_properties_and_literal_cdata() {
+    let tool = crate::mcp::McpTool {
+        server_id: "types".to_string(),
+        server_name: "Types".to_string(),
+        name: "probe".to_string(),
+        action_name: "mcp.types.probe".to_string(),
+        description: "Exercise XML value conversion".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "required": ["count", "ratio", "choice", "nothing", "tuple", "metadata", "rows", "payload"],
+            "properties": {
+                "count": {"type": ["integer", "null"]},
+                "ratio": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+                "choice": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                "nothing": {"type": ["string", "null"]},
+                "tuple": {
+                    "type": "array",
+                    "prefixItems": [{"type": "integer"}, {"type": "boolean"}]
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"}
+                },
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ok": {"type": "boolean"},
+                            "name": {"type": "string"}
+                        }
+                    }
+                },
+                "payload": {"type": "string"}
+            }
+        }),
+    };
+    let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
+    let env = parse_xml_envelope(
+        r#"<response><actions><mcp.types.probe count="18446744073709551615" ratio="1.25" choice="7">
+          <nothing/>
+          <tuple><item>9</item><item>false</item></tuple>
+          <metadata><alpha>1</alpha><beta>2</beta></metadata>
+          <rows><item ok="true"><name>A&#38;B</name></item></rows>
+          <payload><![CDATA[  &lt;raw>&value  ]]></payload>
+        </mcp.types.probe></actions></response>"#,
+        &capabilities,
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    let input = &env.next_actions[0].raw_input;
+    assert_eq!(input["count"], serde_json::json!(u64::MAX));
+    assert_eq!(input["ratio"], serde_json::json!(1.25));
+    assert_eq!(input["choice"], serde_json::json!(7));
+    assert_eq!(input["nothing"], serde_json::Value::Null);
+    assert_eq!(input["tuple"], serde_json::json!([9, false]));
+    assert_eq!(
+        input["metadata"],
+        serde_json::json!({"alpha": 1, "beta": 2})
+    );
+    assert_eq!(
+        input["rows"],
+        serde_json::json!([{"ok": true, "name": "A&B"}])
+    );
+    assert_eq!(input["payload"], "  &lt;raw>&value  ");
+}
+
+#[test]
+fn capability_prompt_exposes_the_same_nested_types_that_xml_runtime_accepts() {
+    let tool = crate::mcp::McpTool {
+        server_id: "typed".to_string(),
+        server_name: "Typed".to_string(),
+        name: "submit".to_string(),
+        action_name: "mcp.typed.submit".to_string(),
+        description: "Submit typed values".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "required": ["rows"],
+            "properties": {
+                "rows": {
+                    "type": "array",
+                    "description": "Rows to submit.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "count": {"type": "integer"},
+                            "enabled": {"type": "boolean"}
+                        }
+                    }
+                }
+            }
+        }),
+    };
+    let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
+    let prompt = capabilities.render_tool_catalog_markdown();
+
+    assert!(prompt.contains(
+        "Type: array<object {count: integer, enabled: boolean, name: string}>. Rows to submit."
+    ));
+    assert!(prompt.contains("Provide arguments matching this MCP tool's input options."));
+    assert!(prompt.contains(
+        "the MCP server validates advanced schema constraints, and any rejection returns as tool evidence"
+    ));
+    assert!(!prompt.contains("Pass a JSON object matching this MCP tool"));
+}
+
+#[test]
+fn xml_native_actions_reject_unsafe_xml_constructs_and_resource_exhaustion() {
+    for raw in [
+        r#"<response><actions><run_bash><cmd>&unknown;</cmd></run_bash></actions></response>"#,
+        r#"<response><actions><run_bash><cmd>&unterminated</cmd></run_bash></actions></response>"#,
+        r#"<response><actions><run_bash><cmd><!-- hidden --></cmd></run_bash></actions></response>"#,
+        r#"<response><actions><!DOCTYPE run_bash><run_bash><cmd>pwd</cmd></run_bash></actions></response>"#,
+    ] {
+        let env = parse_xml_envelope(raw, &caps());
+        assert!(env.repair_issue.is_some(), "unsafe XML accepted: {raw}");
+        assert!(env.next_actions.is_empty(), "unsafe XML executed: {raw}");
+        let issue = env.repair_issue.as_deref().expect("repair issue");
+        let guidance = xml_repair_instruction_for_response(issue, raw);
+        assert!(guidance.contains("Exact protocol error:"));
+        assert!(guidance.contains("Cause:"));
+        assert!(guidance.contains("Correction:"));
+    }
+
+    let nested = format!(
+        "<response><actions><run_bash><cmd>{}x{}</cmd></run_bash></actions></response>",
+        "<level>".repeat(MAX_XML_ACTION_DEPTH + 1),
+        "</level>".repeat(MAX_XML_ACTION_DEPTH + 1)
+    );
+    let env = parse_xml_envelope(&nested, &caps());
+    assert!(env
+        .repair_issue
+        .as_deref()
+        .is_some_and(|issue| issue.contains("xml_depth_limit_exceeded")));
+    assert!(env.next_actions.is_empty());
+
+    let oversized = format!(
+        "<response><actions>{}</actions></response>",
+        "<run_bash/>".repeat(MAX_XML_ACTION_ELEMENTS + 1)
+    );
+    let env = parse_xml_envelope(&oversized, &caps());
+    assert!(env
+        .repair_issue
+        .as_deref()
+        .is_some_and(|issue| issue.contains("xml_element_limit_exceeded")));
+    assert!(env.next_actions.is_empty());
+}
+
+#[test]
+fn xml_native_action_batch_is_atomic_when_a_later_action_is_invalid() {
+    let env = parse_xml_envelope(
+        r#"<response><actions>
+          <run_bash><cmd>printf should-not-run</cmd></run_bash>
+          <run_bash timeout_ms="not-an-integer"><cmd>pwd</cmd></run_bash>
+        </actions></response>"#,
+        &caps(),
+    );
+    assert!(env.repair_issue.is_some());
+    assert!(env.next_actions.is_empty());
+    assert!(env.action_groups.is_empty());
+}
+
+#[test]
 fn xml_protocol_rejects_json_markdown_and_plain_text_roots() {
     let cases = [
         r#"{"final_answer":"done"}"#,
@@ -80,6 +428,47 @@ fn xml_protocol_rejects_json_markdown_and_plain_text_roots() {
 }
 
 #[test]
+fn outer_text_around_first_response_root_is_recovered_as_free_talk() {
+    let env = parse_xml_envelope(
+        r#"prefix prose <actions><run_bash><cmd>must not execute</cmd></run_bash></actions>
+<response>
+  <free_talk>inside thought</free_talk>
+  <actions><run_bash><cmd>printf safe</cmd></run_bash></actions>
+</response>
+trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(env.next_actions[0].input_str("cmd"), "printf safe");
+    assert_eq!(
+        env.thought,
+        "prefix prose <actions><run_bash><cmd>must not execute</cmd></run_bash></actions>\n\ntrailing prose <run_bash><cmd>also must not execute</cmd></run_bash>\n\ninside thought"
+    );
+    assert_eq!(
+        env.runtime_note.as_deref(),
+        Some("auto_recovered_xml_prefix_as_free_talk")
+    );
+}
+
+#[test]
+fn adjacent_response_roots_keep_only_the_first_root_as_protocol() {
+    let env = parse_xml_envelope(
+        "before<response><actions><run_bash><cmd>printf first</cmd></run_bash></actions></response><response><actions><run_bash><cmd>must not execute</cmd></run_bash></actions></response>after",
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert!(env.final_answer.is_empty());
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(env.next_actions[0].input_str("cmd"), "printf first");
+    assert!(env.thought.starts_with("before\n\n<response>"));
+    assert!(env.thought.contains("must not execute"));
+    assert!(env.thought.ends_with("</response>after"));
+}
+
+#[test]
 fn root_repair_moves_free_talk_inside_response_with_matching_action_branch() {
     let malformed = r#"<free_talk>searching</free_talk>
 <response><working_still_action>...</working_still_action></response>"#;
@@ -87,7 +476,7 @@ fn root_repair_moves_free_talk_inside_response_with_matching_action_branch() {
 
     assert!(instruction.contains("placed content before the <response> root"));
     assert!(instruction.contains(
-            "The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'"
+            "The response must be in format '<response><free_talk>...</free_talk><actions>...</actions></response>'"
         ));
     assert!(instruction.contains("output nothing before <response> or after </response>"));
 }
@@ -113,26 +502,6 @@ fn root_repair_selects_the_branch_present_in_the_malformed_response() {
 #[test]
 fn malformed_raw_responses_map_to_distinct_issue_and_guidance() {
     let cases = [
-            (
-                "<free_talk>x</free_talk><response><final_answer>done</final_answer></response>",
-                "xml_content_before_response",
-                "placed content before the <response> root",
-            ),
-            (
-                "<response><final_answer>done</final_answer></response>tail",
-                "xml_content_after_response",
-                "placed content after the </response> root",
-            ),
-            (
-                "<free_talk>missing root</free_talk>",
-                "xml_response_root_missing",
-                "did not contain the required <response> root",
-            ),
-            (
-                "<response><final_answer>done</final_answer>",
-                "xml_response_root_unclosed",
-                "did not form one complete <response>...</response> root",
-            ),
             (
                 "<response/>",
                 "xml_response_root_self_closing",
@@ -187,42 +556,6 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
                 guidance: "没有生成可解析的内容",
             },
             Case {
-                name: "missing response root",
-                raw: "<final_answer>done</final_answer>",
-                issue: "xml_response_root_missing",
-                guidance: "did not contain the required <response> root",
-            },
-            Case {
-                name: "xml declaration before root",
-                raw: "<?xml version=\"1.0\"?><response><final_answer>done</final_answer></response>",
-                issue: "xml_content_before_response",
-                guidance: "content before the <response> root",
-            },
-            Case {
-                name: "free talk before root",
-                raw: "<free_talk>thinking</free_talk><response><final_answer>done</final_answer></response>",
-                issue: "xml_content_before_response",
-                guidance: "Move every tag, including <free_talk>, inside <response>",
-            },
-            Case {
-                name: "trailing prose after root",
-                raw: "<response><final_answer>done</final_answer></response>extra",
-                issue: "xml_content_after_response",
-                guidance: "content after the </response> root",
-            },
-            Case {
-                name: "second response root",
-                raw: "<response><final_answer>one</final_answer></response><response><final_answer>two</final_answer></response>",
-                issue: "xml_content_after_response",
-                guidance: "Output nothing before <response> or after </response>",
-            },
-            Case {
-                name: "unclosed response root",
-                raw: "<response><final_answer>done</final_answer>",
-                issue: "xml_response_root_unclosed",
-                guidance: "one complete <response>...</response> root",
-            },
-            Case {
                 name: "self closing response root",
                 raw: "<response/>",
                 issue: "xml_response_root_self_closing",
@@ -232,7 +565,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
                 name: "empty response body",
                 raw: "<response></response>",
                 issue: "next_actions_required_when_status_working",
-                guidance: "必须提供 <working_still_action>",
+                guidance: "必须提供非空 <actions>",
             },
             Case {
                 name: "unknown top level tag",
@@ -268,7 +601,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
                 name: "working and final branches together",
                 raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\"}}]]]></action_json></working_still_action><final_answer>done</final_answer></response>",
                 issue: "status_finished_must_not_include_next_actions",
-                guidance: "不能同时包含 <working_still_action>",
+                guidance: "不能同时包含 <actions>",
             },
             Case {
                 name: "compact and final branches together",
@@ -286,13 +619,13 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
                 name: "action payload is not array",
                 raw: "<response><working_still_action><action_json><![CDATA[{\"run_bash\":{\"cmd\":\"pwd\"}}]]></action_json></working_still_action></response>",
                 issue: "actions[0].array_required",
-                guidance: "必须是 JSON array",
+                guidance: "请改用 XML-native <actions>",
             },
             Case {
                 name: "invalid action json",
                 raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\",}}]]]></action_json></working_still_action></response>",
                 issue: "actions[0].invalid_json:trailing comma at line 1 column 27",
-                guidance: "not valid JSON",
+                guidance: "legacy JSON action payload was malformed",
             },
             Case {
                 name: "removed action group shape",
@@ -304,13 +637,13 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
                 name: "empty workflow",
                 raw: "<response><working_still_action><action_json><![CDATA[[]]]></action_json></working_still_action></response>",
                 issue: "actions[0].actions_required",
-                guidance: "empty or incomplete stage",
+                guidance: "<actions> or <parallel> element is empty",
             },
             Case {
                 name: "empty parallel stage",
                 raw: "<response><working_still_action><action_json><![CDATA[[[]]]]></action_json></working_still_action></response>",
                 issue: "actions[0][0].actions_required",
-                guidance: "empty or incomplete stage",
+                guidance: "<actions> or <parallel> element is empty",
             },
             Case {
                 name: "action has no tool key",
@@ -340,13 +673,13 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
                 name: "unknown tool",
                 raw: "<response><working_still_action><action_json><![CDATA[[{\"not_a_tool\":{}}]]]></action_json></working_still_action></response>",
                 issue: "unsupported_action:not_a_tool",
-                guidance: "not in the available capability catalog",
+                guidance: "not in the capability catalog",
             },
             Case {
                 name: "missing required run bash command",
                 raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{}}]]]></action_json></working_still_action></response>",
                 issue: "actions[0][0].input.any_required:cmd|loop_cmd",
-                guidance: "do not satisfy the capability specification",
+                guidance: "do not satisfy the capability schema",
             },
             Case {
                 name: "compact missing ids",
@@ -362,7 +695,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             },
         ];
 
-    assert!(cases.len() >= 30, "keep the malformed corpus substantial");
+    assert!(cases.len() >= 23, "keep the malformed corpus substantial");
     for case in cases {
         let parsed = parse_xml_envelope(case.raw, &caps());
         assert_eq!(
@@ -373,6 +706,9 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             case.raw
         );
         let instruction = xml_repair_instruction_for_response(case.issue, case.raw);
+        assert!(instruction.contains(&format!("Exact protocol error: `{}`", case.issue)));
+        assert!(instruction.contains("Cause:"));
+        assert!(instruction.contains("Correction:"));
         assert!(
             instruction.contains(case.guidance),
             "case={} issue={} guidance={} instruction={}",
@@ -386,33 +722,39 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
 
 #[test]
 fn non_root_repair_keeps_issue_specific_static_instruction() {
-    assert_eq!(
-        xml_repair_instruction_for_response(
-            "state_branch_must_choose_one",
-            "<response></response>"
-        ),
-        xml_repair_instruction("state_branch_must_choose_one")
+    let instruction = xml_repair_instruction_for_response(
+        "actions[0][1].input.timeout_ms_must_be_integer",
+        "<response></response>",
     );
+    assert!(instruction
+        .contains("Exact protocol error: `actions[0][1].input.timeout_ms_must_be_integer`"));
+    assert!(instruction.contains("block, stage, and tool"));
+    assert!(instruction.contains("input.<name>"));
+    assert!(instruction.contains("Cause: Argument `timeout_ms` must be an integer"));
+    assert!(instruction.contains("change the smallest failing element or argument"));
 }
 
 #[test]
 fn common_action_repair_issues_have_specific_correction_guidance() {
     let cases = [
-        ("actions[0].invalid_json", "not valid JSON"),
+        (
+            "actions[0].invalid_json",
+            "legacy JSON action payload was malformed",
+        ),
         ("actions[0].action_missing", "missing its tool-name key"),
         ("actions[0].args_must_be_object", "not a JSON object"),
         (
             "actions[0].old_group_object_not_supported",
             "removed {\"order\":...,\"actions\":[...]} group shape",
         ),
-        ("actions[0].actions_required", "empty or incomplete stage"),
         (
-            "unsupported_action:ghost",
-            "not in the available capability catalog",
+            "actions[0].actions_required",
+            "<actions> or <parallel> element is empty",
         ),
+        ("unsupported_action:ghost", "not in the capability catalog"),
         (
             "actions[0].input.cmd_required",
-            "do not satisfy the capability specification",
+            "do not satisfy the capability schema",
         ),
         ("context_compact[0].ids_required", "at least one non-empty"),
         (

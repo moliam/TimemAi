@@ -1,7 +1,7 @@
 use agent_core::session_store::{
     chat_history_prompt_format_hint, new_stored_session, read_all_history_records,
-    ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole, SessionResumeNotice, SessionStore,
-    StoredSessionProfile, StoredSessionState,
+    read_history_page_from_path, ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole,
+    SessionResumeNotice, SessionStore, StoredSessionProfile, StoredSessionState,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -35,7 +35,6 @@ fn now_ms() -> u128 {
 
 fn profile() -> StoredSessionProfile {
     StoredSessionProfile {
-        provider: "aliyun".to_string(),
         model: "qwen-plus".to_string(),
         api_protocol: "openai-compatible".to_string(),
         response_protocol: "xml".to_string(),
@@ -176,6 +175,80 @@ fn history_page_loads_latest_then_older_without_overlap() {
 }
 
 #[test]
+fn indexed_history_pages_match_the_uncached_reader_and_refresh_after_append() {
+    let root = tmp_dir("indexed_history");
+    let store = SessionStore::new(&root);
+    for index in 0..215 {
+        store
+            .append_history_record("session_a", &message(index))
+            .unwrap();
+    }
+    let path = store.history_path_for_session("session_a");
+
+    let indexed_latest = store.read_history_page("session_a", None, 20).unwrap();
+    let uncached_latest = read_history_page_from_path(&path, None, 20).unwrap();
+    assert_eq!(indexed_latest, uncached_latest);
+
+    let indexed_previous = store
+        .read_history_page("session_a", indexed_latest.before_cursor.as_deref(), 20)
+        .unwrap();
+    let uncached_previous =
+        read_history_page_from_path(&path, uncached_latest.before_cursor.as_deref(), 20).unwrap();
+    assert_eq!(indexed_previous, uncached_previous);
+
+    for index in 215..225 {
+        store
+            .append_history_record("session_a", &message(index))
+            .unwrap();
+    }
+    let refreshed = store.read_history_page("session_a", None, 20).unwrap();
+    assert_eq!(refreshed.records.first().unwrap().turn_id(), "turn_205");
+    assert_eq!(refreshed.records.last().unwrap().turn_id(), "turn_224");
+}
+
+#[test]
+fn indexed_history_reader_treats_a_missing_history_file_as_empty() {
+    let root = tmp_dir("missing_indexed_history");
+    let store = SessionStore::new(&root);
+
+    let page = store
+        .read_history_page("session_without_history", None, 200)
+        .unwrap();
+
+    assert!(page.records.is_empty());
+    assert!(page.before_cursor.is_none());
+    assert!(!page.has_more);
+}
+
+#[test]
+fn indexed_history_reader_pages_a_large_session_without_losing_turn_order() {
+    let root = tmp_dir("large_indexed_history");
+    let store = SessionStore::new(&root);
+    let path = store.history_path_for_session("session_a");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut history = String::new();
+    for index in 0..5_000 {
+        history.push_str(&serde_json::to_string(&message(index)).unwrap());
+        history.push('\n');
+    }
+    fs::write(path, history).unwrap();
+
+    let latest = store.read_history_page("session_a", None, 200).unwrap();
+    assert_eq!(latest.records.len(), 200);
+    assert_eq!(latest.records.first().unwrap().turn_id(), "turn_4800");
+    assert_eq!(latest.records.last().unwrap().turn_id(), "turn_4999");
+    assert_eq!(latest.before_cursor.as_deref(), Some("4800"));
+
+    let previous = store
+        .read_history_page("session_a", latest.before_cursor.as_deref(), 200)
+        .unwrap();
+    assert_eq!(previous.records.len(), 200);
+    assert_eq!(previous.records.first().unwrap().turn_id(), "turn_4600");
+    assert_eq!(previous.records.last().unwrap().turn_id(), "turn_4799");
+    assert_eq!(previous.before_cursor.as_deref(), Some("4600"));
+}
+
+#[test]
 fn history_readers_skip_malformed_jsonl_lines() {
     let root = tmp_dir("malformed_history");
     let store = SessionStore::new(&root);
@@ -281,13 +354,13 @@ fn history_pages_never_restore_a_supplement_without_its_turn_task() {
         store.append_history_record(session_id, record).unwrap();
     }
 
-    let latest = store.read_history_page(session_id, None, 3).unwrap();
+    let latest = store.read_history_page(session_id, None, 1).unwrap();
     assert_eq!(latest.records.len(), 1);
     assert_eq!(latest.records[0].turn_id(), "turn_latest");
     assert_eq!(latest.before_cursor.as_deref(), Some("4"));
 
     let previous = store
-        .read_history_page(session_id, latest.before_cursor.as_deref(), 3)
+        .read_history_page(session_id, latest.before_cursor.as_deref(), 1)
         .unwrap();
     assert_eq!(previous.records.len(), 4);
     assert!(previous
@@ -302,6 +375,43 @@ fn history_pages_never_restore_a_supplement_without_its_turn_task() {
 }
 
 #[test]
+fn history_page_limit_counts_complete_turns_instead_of_records() {
+    let root = tmp_dir("turn_count_paging");
+    let store = SessionStore::new(&root);
+    for turn in 0..5 {
+        for record in 0..40 {
+            store
+                .append_history_record(
+                    "session_a",
+                    &ChatHistoryRecord::Event {
+                        role: ChatHistoryRole::System,
+                        turn_id: format!("turn_{turn}"),
+                        created_at_ms: (turn * 40 + record) as i64,
+                        kind: ChatHistoryEventKind::Action,
+                        content: format!("action {record}"),
+                        extra: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    let latest = store.read_history_page("session_a", None, 3).unwrap();
+    let turn_ids = latest
+        .records
+        .iter()
+        .map(ChatHistoryRecord::turn_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        turn_ids,
+        ["turn_2", "turn_3", "turn_4"].into_iter().collect()
+    );
+    assert_eq!(latest.records.len(), 120);
+    assert_eq!(latest.before_cursor.as_deref(), Some("80"));
+    assert!(latest.has_more);
+}
+
+#[test]
 fn stored_sessions_are_host_agnostic_and_sorted_by_recent_update() {
     let root = tmp_dir("stored_sessions");
     let store = SessionStore::new(&root);
@@ -313,6 +423,7 @@ fn stored_sessions_are_host_agnostic_and_sorted_by_recent_update() {
         store.history_path_for_session("session_web"),
     );
     first.updated_at_ms = 10;
+    first.mcp_server_ids = vec!["github".to_string(), "filesystem".to_string()];
     let mut second = new_stored_session(
         "session_shell",
         "Shell follow-up",
@@ -333,8 +444,84 @@ fn stored_sessions_are_host_agnostic_and_sorted_by_recent_update() {
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, "session_web");
     assert_eq!(sessions[0].display_name, "Renamed project work");
+    assert_eq!(sessions[0].mcp_server_ids, vec!["github", "filesystem"]);
     assert_eq!(sessions[1].session_id, "session_shell");
     assert_eq!(sessions[1].state, StoredSessionState::Interrupted);
+}
+
+#[test]
+fn deleting_a_session_removes_its_index_entry_and_persisted_data() {
+    let root = tmp_dir("delete_session");
+    let store = SessionStore::new(&root);
+    let session = new_stored_session(
+        "session_delete",
+        "Delete me",
+        "/tmp/project",
+        profile(),
+        store.history_path_for_session("session_delete"),
+    );
+    store.upsert_session(&session).unwrap();
+    store
+        .append_history_record("session_delete", &message(1))
+        .unwrap();
+    let session_dir = store
+        .history_path_for_session("session_delete")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    store.delete_session("session_delete").unwrap();
+
+    assert!(store.load_session("session_delete").unwrap().is_none());
+    assert!(!session_dir.exists());
+    assert_eq!(
+        store.delete_session("session_delete").unwrap_err(),
+        "session_not_found"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn session_index_permissions_protect_cached_environment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tmp_dir("session_env_permissions");
+    let store = SessionStore::new(&root);
+    let mut session = new_stored_session(
+        "session_secure",
+        "Secure session",
+        "/tmp/project",
+        profile(),
+        store.history_path_for_session("session_secure"),
+    );
+    session
+        .env
+        .insert("TIMEM_API_KEY".to_string(), "local-secret".to_string());
+
+    store.upsert_session(&session).unwrap();
+
+    let directory_mode = std::fs::metadata(store.sessions_dir())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    let index_mode = std::fs::metadata(store.index_path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(directory_mode, 0o700);
+    assert_eq!(index_mode, 0o600);
+    assert_eq!(
+        store
+            .load_session("session_secure")
+            .unwrap()
+            .unwrap()
+            .env
+            .get("TIMEM_API_KEY")
+            .map(String::as_str),
+        Some("local-secret")
+    );
 }
 
 #[test]

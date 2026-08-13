@@ -282,8 +282,10 @@ fn validate_parsed_action(
     if !capabilities.contains_tool(&name) {
         return Err(format!("unsupported_action:{name}"));
     }
-    if let Err(issue) = capabilities.validate_action_input(&name, &input) {
-        return Err(format!("{label}.{issue}"));
+    if capabilities.validates_input_during_protocol_parse(&name) {
+        if let Err(issue) = capabilities.validate_action_input(&name, &input) {
+            return Err(format!("{label}.{issue}"));
+        }
     }
     Ok(ParsedAction {
         action: name,
@@ -355,6 +357,7 @@ pub struct ParsedContextCompact {
 pub trait ResponseProtocolSuite {
     fn name(&self) -> &str;
     fn lang_format(&self) -> &str;
+    fn response_shape_hint(&self) -> &str;
     fn protocol_schema(&self) -> &str;
     fn protocol_examples(&self) -> &str;
     fn response_schema_summary(&self) -> &str;

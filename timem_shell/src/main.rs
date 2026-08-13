@@ -30,9 +30,9 @@ use timem_shell::{
     append_audit, apply_workspace_command_to_path, bash_approval_mode_from_sources,
     capabilities_dir_from_sources, combine_additional_contexts, default_data_root,
     estimate_prompt_context_tokens, format_token_count, host_start_audit_event, layout_for_space,
-    load_workspace_dirs_from_path, local_time_label, observation_events_from_core_topic_events,
-    observation_panel_width_for_terminal, parse_cli_args, provider_config_from_env,
-    render_final_response_at, render_prof_report_data, render_shell_status_bar,
+    load_workspace_dirs_from_path, local_time_label, model_service_config_from_env,
+    observation_events_from_core_topic_events, observation_panel_width_for_terminal,
+    parse_cli_args, render_final_response_at, render_prof_report_data, render_shell_status_bar,
     render_thinking_view_at, render_turn_outcome_text, run_session_turn,
     runtime_active_elapsed_secs, runtime_info_context, runtime_profile_report,
     shell_status_message_from_core_topic, stale_context_decision_request, topic_event_status_hint,
@@ -80,13 +80,6 @@ fn main() {
         std::env::set_var("TIMEM_DATA_DIR", data_dir);
     }
     let env: HashMap<String, String> = std::env::vars().collect();
-    let mut config = match provider_config_from_env(&options, &env) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("[config_error] {err}");
-            std::process::exit(2);
-        }
-    };
     let space = options
         .space
         .clone()
@@ -98,32 +91,34 @@ fn main() {
     let action_audit_file = layout.action_audit_file();
     let memory_dir = layout.memory_dir();
     let session_store = SessionStore::new(&memory_dir);
-    let workspace_config = workspace_config_file(&data_root);
-    let mut bash_approval_mode =
-        bash_approval_mode_from_sources(options.bash_approval.as_deref(), &env);
-    let mut work_instruction_mode =
-        work_instruction_mode_from_sources(options.work_instructions.as_deref(), &env);
-    let current_work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut profiler = RuntimeProfiler::default();
-    let mut stored_session = load_or_create_shell_session(
-        &session_store,
-        &config,
-        bash_approval_mode,
-        work_instruction_mode,
-        &current_work_dir,
-    );
-    let session_env = shell_session_effective_env(&env, &stored_session);
-    config = match provider_config_from_env(&options, &session_env) {
+    let restored_session = load_resumable_shell_session(&session_store);
+    let session_env = restored_session
+        .as_ref()
+        .map(|session| shell_session_effective_env(&env, session))
+        .unwrap_or_else(|| env.clone());
+    let mut config = match model_service_config_from_env(&options, &session_env) {
         Ok(config) => config,
         Err(err) => {
-            eprintln!("[config_error] restored_session_config_invalid: {err}");
+            eprintln!("[config_error] {err}");
             std::process::exit(2);
         }
     };
-    bash_approval_mode =
+    let workspace_config = workspace_config_file(&data_root);
+    let mut bash_approval_mode =
         bash_approval_mode_from_sources(options.bash_approval.as_deref(), &session_env);
-    work_instruction_mode =
+    let mut work_instruction_mode =
         work_instruction_mode_from_sources(options.work_instructions.as_deref(), &session_env);
+    let current_work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut profiler = RuntimeProfiler::default();
+    let mut stored_session = restored_session.unwrap_or_else(|| {
+        new_shell_session(
+            &session_store,
+            &config,
+            bash_approval_mode,
+            work_instruction_mode,
+            &current_work_dir,
+        )
+    });
     let response_protocol = options
         .response_protocol
         .as_deref()
@@ -135,10 +130,27 @@ fn main() {
         .map(ResponseProtocolKind::from_name)
         .unwrap_or_default();
     config.response_protocol = response_protocol;
+    let session_work_dir = shell_session_work_dir(&stored_session, &current_work_dir);
+    cache_shell_session_runtime(
+        &mut stored_session,
+        &config,
+        bash_approval_mode,
+        work_instruction_mode,
+        &session_work_dir,
+    );
+    if let Err(error) = session_store.upsert_session(&stored_session) {
+        eprintln!("[session_cache_error] {error}");
+    }
+    let mut effective_session_env = session_env;
+    effective_session_env.extend(shell_session_env_values(
+        &config,
+        bash_approval_mode,
+        work_instruction_mode,
+    ));
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
     core.set_response_protocol(response_protocol);
     core.configure_self_tool_runtime(
-        session_env.clone().into_iter().collect(),
+        effective_session_env.clone().into_iter().collect(),
         SelfToolPaths {
             space_dir: absolute_path(layout.space_dir()),
             memory_dir: absolute_path(memory_dir.clone()),
@@ -149,7 +161,7 @@ fn main() {
         },
     );
     if let Some(capabilities_dir) =
-        capabilities_dir_from_sources(options.capabilities_dir.as_deref(), &session_env)
+        capabilities_dir_from_sources(options.capabilities_dir.as_deref(), &effective_session_env)
     {
         match CapabilityRegistry::builtin_with_overlay_dir(&capabilities_dir) {
             Ok(registry) => core.set_capability_registry(registry),
@@ -161,7 +173,6 @@ fn main() {
     }
     core.configure_runtime_from_host(&config, bash_approval_mode);
     let session_runtime_info = runtime_info_context(&shell_runtime_info_entries(&core));
-    let session_work_dir = shell_session_work_dir(&stored_session, &current_work_dir);
     let _ = core.change_prompt_cwd(session_work_dir.to_string_lossy());
     let (mut work_instruction_context, work_instruction_notice) = match work_instruction_mode {
         WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(&session_work_dir),
@@ -238,7 +249,6 @@ fn main() {
             "shell",
             &session,
             &space,
-            &config.provider,
             &config.base_url,
             &config.api_protocol,
             &config.model,
@@ -343,6 +353,16 @@ fn main() {
                 &mut work_instruction_context,
                 &prompt_cwd,
             ) {
+                cache_shell_session_runtime(
+                    &mut stored_session,
+                    &config,
+                    bash_approval_mode,
+                    work_instruction_mode,
+                    &prompt_cwd,
+                );
+                if let Err(error) = session_store.upsert_session(&stored_session) {
+                    eprintln!("[session_cache_error] {error}");
+                }
                 println!(
                     "{}",
                     render_startup_banner(
@@ -396,8 +416,7 @@ fn main() {
         } else {
             None
         };
-        let mut status =
-            ThinkingStatus::start(&config.provider, &config.model, config.max_llm_input_tokens);
+        let mut status = ThinkingStatus::start(&config.model, config.max_llm_input_tokens);
         TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
         let _sigint_guard = SigintGuard::install();
         let mut turn_ui = CliTurnUi {
@@ -450,7 +469,6 @@ fn main() {
                 &render_turn_outcome_text(&outcome),
                 &stats,
                 latest.as_ref(),
-                &config.provider,
                 &config.model,
                 outcome.elapsed,
                 config.max_llm_input_tokens,
@@ -461,7 +479,6 @@ fn main() {
                 &render_turn_outcome_text(&outcome),
                 &outcome.stats,
                 outcome.latest_usage.as_ref(),
-                &config.provider,
                 &config.model,
                 outcome.elapsed,
                 config.max_llm_input_tokens,
@@ -538,19 +555,40 @@ fn absolute_path(path: PathBuf) -> PathBuf {
     }
 }
 
+#[cfg(test)]
 fn load_or_create_shell_session(
     session_store: &SessionStore,
-    config: &agent_core::ProviderConfig,
+    config: &agent_core::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     current_dir: &Path,
 ) -> StoredSession {
-    if let Ok(Some(session)) = session_store
-        .list_sessions()
-        .map(|sessions| sessions.into_iter().find(stored_session_is_resumable))
-    {
+    if let Some(session) = load_resumable_shell_session(session_store) {
         return session;
     }
+    new_shell_session(
+        session_store,
+        config,
+        bash_approval_mode,
+        work_instruction_mode,
+        current_dir,
+    )
+}
+
+fn load_resumable_shell_session(session_store: &SessionStore) -> Option<StoredSession> {
+    session_store
+        .list_sessions()
+        .ok()
+        .and_then(|sessions| sessions.into_iter().find(stored_session_is_resumable))
+}
+
+fn new_shell_session(
+    session_store: &SessionStore,
+    config: &agent_core::ModelServiceConfig,
+    bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
+    current_dir: &Path,
+) -> StoredSession {
     let session_id = "shell_default".to_string();
     StoredSession {
         session_id: session_id.clone(),
@@ -561,6 +599,7 @@ fn load_or_create_shell_session(
         profile: shell_session_profile(config),
         env: shell_session_env_values(config, bash_approval_mode, work_instruction_mode),
         env_overrides: None,
+        mcp_server_ids: Vec::new(),
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: session_store
@@ -594,9 +633,8 @@ fn shell_session_effective_env(
     merged
 }
 
-fn shell_session_profile(config: &agent_core::ProviderConfig) -> StoredSessionProfile {
+fn shell_session_profile(config: &agent_core::ModelServiceConfig) -> StoredSessionProfile {
     StoredSessionProfile {
-        provider: config.provider.clone(),
         model: config.model.clone(),
         api_protocol: config.api_protocol.label().to_string(),
         response_protocol: config.response_protocol.name().to_string(),
@@ -604,15 +642,11 @@ fn shell_session_profile(config: &agent_core::ProviderConfig) -> StoredSessionPr
 }
 
 fn shell_session_env_values(
-    config: &agent_core::ProviderConfig,
+    config: &agent_core::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::from([
-        (
-            "TIMEM_GATEWAY_PROVIDER".to_string(),
-            config.provider.clone(),
-        ),
         ("TIMEM_MODEL".to_string(), config.model.clone()),
         (
             "TIMEM_API_PROTOCOL".to_string(),
@@ -640,6 +674,7 @@ fn shell_session_env_values(
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             agent_core::work_instruction_mode_label(work_instruction_mode).to_string(),
         ),
+        ("TIMEM_API_KEY".to_string(), config.api_key.clone()),
     ]);
     if let Some(value) = config.openai_compatible.enable_thinking {
         env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
@@ -652,6 +687,20 @@ fn shell_session_env_values(
         config.openai_compatible.stream.to_string(),
     );
     env
+}
+
+fn cache_shell_session_runtime(
+    stored_session: &mut StoredSession,
+    config: &agent_core::ModelServiceConfig,
+    bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
+    current_dir: &Path,
+) {
+    stored_session.updated_at_ms = now_ms_i64();
+    stored_session.current_dir = current_dir.display().to_string();
+    stored_session.profile = shell_session_profile(config);
+    stored_session.env =
+        shell_session_env_values(config, bash_approval_mode, work_instruction_mode);
 }
 
 fn take_shell_resume_notice(
@@ -699,7 +748,7 @@ fn append_shell_turn_result(
     turn_id: &str,
     assistant_text: &str,
     outcome: &timem_shell::TurnOutcome,
-    config: &agent_core::ProviderConfig,
+    config: &agent_core::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     current_dir: &Path,
@@ -732,11 +781,13 @@ fn append_shell_turn_result(
             extra,
         },
     );
-    stored_session.updated_at_ms = now_ms_i64();
-    stored_session.current_dir = current_dir.display().to_string();
-    stored_session.profile = shell_session_profile(config);
-    stored_session.env =
-        shell_session_env_values(config, bash_approval_mode, work_instruction_mode);
+    cache_shell_session_runtime(
+        stored_session,
+        config,
+        bash_approval_mode,
+        work_instruction_mode,
+        current_dir,
+    );
     stored_session.state = if outcome.stop_reason.is_some() {
         StoredSessionState::Interrupted
     } else {
@@ -807,12 +858,6 @@ impl TurnUi for CliTurnUi<'_> {
             status.clear_transient_observation();
             status.set_usage(usage.clone());
             status.set_model_direction(round, ModelDirection::Downstream);
-        }
-    }
-
-    fn on_model_response_discarded(&mut self, _round: u32, _reason: &str) {
-        if let Some(status) = self.status.as_deref_mut() {
-            status.clear_transient_observation();
         }
     }
 
@@ -895,12 +940,11 @@ struct ThinkingStatus {
 }
 
 impl ThinkingStatus {
-    fn start(provider: &str, model: &str, max_llm_input_tokens: u32) -> Self {
+    fn start(model: &str, max_llm_input_tokens: u32) -> Self {
         let started_at = Instant::now();
         let paused_total = Arc::new(Mutex::new(Duration::ZERO));
         let state = Arc::new(Mutex::new(ThinkingViewSnapshot {
             status: ShellStatusSnapshot {
-                provider: provider.to_string(),
                 model: model.to_string(),
                 intent: "思考中".to_string(),
                 memory_activity: CoreMemoryActivity::None,
@@ -1547,7 +1591,7 @@ fn choose_raw_multiline_paste_submit(line_count: usize) -> ApprovalChoice {
 
 fn choose_user_approval(request: &ApprovalRequest) -> ApprovalChoice {
     print!("{}", render_user_approval_prompt(request));
-    choose_with_keyboard(render_approval_choices, ApprovalChoice::Allow)
+    choose_with_keyboard(render_approval_choices, ApprovalChoice::Deny)
 }
 
 fn choose_round_limit_continue(request: RoundLimitDecisionRequest) -> ApprovalChoice {
@@ -1770,7 +1814,7 @@ fn paste_recovery_return_edit_clear_lines(
 type ConfigField = RuntimeConfigField;
 
 fn run_config_menu(
-    config: &mut timem_shell::ProviderConfig,
+    config: &mut timem_shell::ModelServiceConfig,
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
@@ -2053,7 +2097,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn choose_config_field(
-    config: &timem_shell::ProviderConfig,
+    config: &timem_shell::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> Option<ConfigField> {
@@ -2126,13 +2170,6 @@ fn render_config_apply_report(report: &RuntimeConfigApplyReport) -> String {
 
 fn render_config_apply_error(error: RuntimeConfigApplyError) -> String {
     match error {
-        RuntimeConfigApplyError::EmptyGatewayProvider => {
-            "配置无效：TIMEM_GATEWAY_PROVIDER 不能为空。".to_string()
-        }
-        RuntimeConfigApplyError::CustomGatewayRequiresBaseUrl => {
-            "配置无效：自定义 gateway provider 需要先设置 TIMEM_BASE_URL，避免沿用旧平台默认 URL。"
-                .to_string()
-        }
         RuntimeConfigApplyError::InvalidApiProtocol => {
             "配置无效：API protocol 只能是 openai-compatible、openai-responses 或 anthropic。"
                 .to_string()
@@ -2188,7 +2225,7 @@ fn read_menu_key(input: &mut impl Read) -> MenuKey {
 }
 
 fn config_field_value(
-    config: &timem_shell::ProviderConfig,
+    config: &timem_shell::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     field: ConfigField,
@@ -2218,7 +2255,6 @@ fn config_display_value(kind: timem_shell::RuntimeConfigRowKind, value: &str) ->
 fn config_field_row_kind(field: ConfigField) -> timem_shell::RuntimeConfigRowKind {
     match field {
         RuntimeConfigField::Model => timem_shell::RuntimeConfigRowKind::Model,
-        RuntimeConfigField::GatewayProvider => timem_shell::RuntimeConfigRowKind::GatewayProvider,
         RuntimeConfigField::ApiProtocol => timem_shell::RuntimeConfigRowKind::ApiProtocol,
         RuntimeConfigField::BaseUrl => timem_shell::RuntimeConfigRowKind::BaseUrl,
         RuntimeConfigField::MaxInput => timem_shell::RuntimeConfigRowKind::MaxLlmInput,
@@ -2229,7 +2265,7 @@ fn config_field_row_kind(field: ConfigField) -> timem_shell::RuntimeConfigRowKin
 }
 
 fn apply_config_value(
-    config: &mut timem_shell::ProviderConfig,
+    config: &mut timem_shell::ModelServiceConfig,
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
@@ -3508,7 +3544,6 @@ fn print_final_response(
     text: &str,
     stats: &UsageStats,
     latest_usage: Option<&UsageStats>,
-    provider: &str,
     model: &str,
     elapsed: Duration,
     max_llm_input_tokens: u32,
@@ -3517,7 +3552,6 @@ fn print_final_response(
         text,
         stats,
         latest_usage,
-        provider,
         model,
         elapsed.as_secs(),
         max_llm_input_tokens,
@@ -3529,7 +3563,7 @@ fn print_final_response(
 
 fn render_startup_banner(
     space: &str,
-    config: &timem_shell::ProviderConfig,
+    config: &timem_shell::ModelServiceConfig,
     data_root: &std::path::Path,
     audit_file: &std::path::Path,
     action_audit_file: &std::path::Path,
@@ -3580,9 +3614,8 @@ fn config_section_label(section: timem_shell::RuntimeConfigSection) -> &'static 
 fn config_row_description(kind: timem_shell::RuntimeConfigRowKind) -> &'static str {
     match kind {
         timem_shell::RuntimeConfigRowKind::Model => "模型名称",
-        timem_shell::RuntimeConfigRowKind::GatewayProvider => "流量平台，决定默认 base url",
         timem_shell::RuntimeConfigRowKind::ApiProtocol => "API 提交网络包格式",
-        timem_shell::RuntimeConfigRowKind::BaseUrl => "网关 base url",
+        timem_shell::RuntimeConfigRowKind::BaseUrl => "模型服务 base URL",
         timem_shell::RuntimeConfigRowKind::MaxLlmInput => "最大输入 token",
         timem_shell::RuntimeConfigRowKind::MaxLlmOutput => "最大输出 token",
         timem_shell::RuntimeConfigRowKind::BashApproval => "bash 允许策略，approve/ask",
@@ -3836,7 +3869,7 @@ fn print_help() {
 }
 
 fn cli_help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override process env values; process env overrides defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it explicitly:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_GATEWAY_PROVIDER=aliyun\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir data --space .test_mem --gateway-provider aliyun --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --gateway-provider <name>      env TIMEM_GATEWAY_PROVIDER; traffic platform / default base URL provider\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; provider wire format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; model response parser: markdown|json|xml, default xml\n  --base-url <url>               env TIMEM_BASE_URL; override provider default base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root\n  --timeout <seconds>            env TIMEM_TIMEOUT; provider HTTP timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai -> openai-responses; anthropic -> anthropic; others -> openai-compatible\n  Response protocol: xml\n\nVendor fallback key env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override the restored Session cache; the Session cache overrides process env defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it for initial configuration:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir .timem_data --space .test_mem --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; model response parser: markdown|json|xml, default xml\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root, default .timem_data for new environments\n  --timeout <seconds>            env TIMEM_TIMEOUT; model request timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Response protocol: xml\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn runtime_help_text() -> &'static str {

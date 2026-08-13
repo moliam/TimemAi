@@ -2,20 +2,68 @@ use crate::{
     append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
     model_retry_audit_event, model_retry_decision, normalize_user_supplements,
     turn_supporting_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
-    HostDecisionRequest, LlmResponse, LongRunningCommandContinueRequest,
-    LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome, ModelSystemRetryPolicy,
-    OutputExpansionRequest, OutputExpansionResolution, ProviderConfig, ProviderModelClient,
+    HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandContinueRequest,
+    LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome, ModelServiceConfig,
+    ModelSystemRetryPolicy, OutputExpansionRequest, OutputExpansionResolution, PromptComponentRole,
     RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn,
     SupportingContextInput, TurnInput, TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi,
     UsageStats,
 };
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const TURN_FOCUS_REMINDER_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const TURN_FOCUS_REMINDERS: [&str; 3] = [
+    "注意：目标是什么，不要忘了跑偏了，如果忘了及时提出",
+    "注意：现在的阶段工作到哪里哪里了？ 有没有迷路，迷路了及时停止",
+    "注意：现在的工作是不是钻了牛角尖，要注意总体思考，迷路了及时停止",
+];
+
+struct TurnFocusReminderSchedule {
+    interval: Duration,
+    last_emitted_period: u64,
+    random_state: RandomState,
+    turn_id: String,
+}
+
+impl TurnFocusReminderSchedule {
+    fn new(turn_id: &str, interval: Duration) -> Self {
+        Self {
+            interval,
+            last_emitted_period: 0,
+            random_state: RandomState::new(),
+            turn_id: turn_id.to_string(),
+        }
+    }
+
+    fn take_due(&mut self, active_elapsed: Duration) -> Option<&'static str> {
+        let interval_nanos = self.interval.as_nanos();
+        if interval_nanos == 0 {
+            return None;
+        }
+        let period = active_elapsed.as_nanos() / interval_nanos;
+        let period = u64::try_from(period).unwrap_or(u64::MAX);
+        if period == 0 || period <= self.last_emitted_period {
+            return None;
+        }
+
+        // One reminder is enough after a long blocking operation. Advancing to
+        // the latest period avoids injecting a backlog of stale reminders.
+        self.last_emitted_period = period;
+        let mut hasher = self.random_state.build_hasher();
+        self.turn_id.hash(&mut hasher);
+        period.hash(&mut hasher);
+        let index = (hasher.finish() as usize) % TURN_FOCUS_REMINDERS.len();
+        Some(TURN_FOCUS_REMINDERS[index])
+    }
+}
 
 pub trait ModelClient {
     fn call_model(
         &mut self,
-        config: &ProviderConfig,
+        config: &ModelServiceConfig,
         prompt: &str,
         audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -24,31 +72,51 @@ pub trait ModelClient {
 
 pub fn run_session_turn(
     core: &mut AgentCore,
-    config: &mut ProviderConfig,
+    config: &mut ModelServiceConfig,
     request: TurnInput<'_>,
     ui: &mut dyn TurnUi,
     profiler: Option<&mut RuntimeProfiler>,
 ) -> TurnOutcome {
-    let mut model_client = ProviderModelClient;
+    let mut model_client = HttpModelClient;
     run_session_turn_with_model_client(core, config, request, ui, profiler, &mut model_client)
 }
 
 pub fn run_session_turn_with_model_client(
     core: &mut AgentCore,
-    config: &mut ProviderConfig,
+    config: &mut ModelServiceConfig,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_focus_interval(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        TURN_FOCUS_REMINDER_INTERVAL,
+    )
+}
+
+fn run_session_turn_with_model_client_and_focus_interval(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
     request: TurnInput<'_>,
     ui: &mut dyn TurnUi,
     mut profiler: Option<&mut RuntimeProfiler>,
     model_client: &mut dyn ModelClient,
+    focus_reminder_interval: Duration,
 ) -> TurnOutcome {
     core.set_response_protocol(config.response_protocol);
     let turn_id = format!("turn_{}", epoch_millis());
+    let mut focus_reminders = TurnFocusReminderSchedule::new(&turn_id, focus_reminder_interval);
     core.record_turn_start_audit(request.audit_file, request.session, &turn_id, request.input);
     let start = Instant::now();
     let mut user_wait_this_turn = Duration::ZERO;
     let context = turn_supporting_context(
         SupportingContextInput {
-            provider: &config.provider,
             model: &config.model,
             runtime: request.runtime,
             run_bash_target: request.run_bash_target,
@@ -78,6 +146,20 @@ pub fn run_session_turn_with_model_client(
                     }
                     continue;
                 }
+                let active_elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
+                if let Some(reminder) = focus_reminders.take_due(active_elapsed) {
+                    core.submit_prompt_component(
+                        PromptComponentRole::system(),
+                        "turn_focus_reminder",
+                        reminder,
+                        "turn_runtime",
+                    );
+                    step = CoreStep::NeedModel {
+                        prompt: core.build_next_prompt(),
+                        rounds_remaining: core.remaining_rounds(),
+                    };
+                    continue;
+                }
                 rounds += 1;
                 ui.on_model_request(rounds, prompt);
                 match call_model_with_system_retries(
@@ -97,23 +179,6 @@ pub fn run_session_turn_with_model_client(
                         if ui.take_cancel_request() {
                             break cancelled_turn_parts();
                         }
-                        let supplements = normalize_user_supplements(ui.drain_user_supplements());
-                        if !supplements.is_empty() {
-                            core.record_discarded_model_response_usage(&response.response.usage);
-                            ui.on_model_response_discarded(
-                                rounds,
-                                "user_supplement_preempted_stale_response",
-                            );
-                            if let Some(next_step) = core.append_user_supplements_with_audit(
-                                supplements,
-                                request.audit_file,
-                                request.session,
-                                &turn_id,
-                            ) {
-                                step = next_step;
-                            }
-                            continue;
-                        }
                         if response.response.truncated && ui.can_request_output_expansion() {
                             let expansion =
                                 OutputExpansionRequest::new(config.max_llm_output_tokens);
@@ -127,6 +192,7 @@ pub fn run_session_turn_with_model_client(
                                 .as_bool();
                             user_wait_this_turn =
                                 user_wait_this_turn.saturating_add(user_wait_start.elapsed());
+                            let truncated_usage = response.response.usage.clone();
                             match core.resolve_output_expansion_with_audit(
                                 config,
                                 expansion,
@@ -137,6 +203,19 @@ pub fn run_session_turn_with_model_client(
                                 &turn_id,
                             ) {
                                 OutputExpansionResolution::RetryWithExpandedLimit { .. } => {
+                                    core.record_unapplied_model_response_usage(&truncated_usage);
+                                    let supplements =
+                                        normalize_user_supplements(ui.drain_user_supplements());
+                                    if let Some(next_step) = core
+                                        .append_user_supplements_with_audit(
+                                            supplements,
+                                            request.audit_file,
+                                            request.session,
+                                            &turn_id,
+                                        )
+                                    {
+                                        step = next_step;
+                                    }
                                     ui.resume_after_user_decision();
                                     continue;
                                 }
@@ -161,15 +240,19 @@ pub fn run_session_turn_with_model_client(
                         );
                         user_wait_this_turn =
                             user_wait_this_turn.saturating_add(action_runtime.user_wait());
-                        let command_supplements = action_runtime.take_pending_supplements();
-                        if !command_supplements.is_empty() {
-                            if let Some(next_step) = core.append_user_supplements_with_audit(
-                                command_supplements,
-                                request.audit_file,
-                                request.session,
-                                &turn_id,
-                            ) {
-                                step = next_step;
+                        if !is_terminal_stop(&step) {
+                            let mut all_supplements = action_runtime.take_pending_supplements();
+                            all_supplements
+                                .extend(normalize_user_supplements(ui.drain_user_supplements()));
+                            if !all_supplements.is_empty() {
+                                if let Some(next_step) = core.append_user_supplements_with_audit(
+                                    all_supplements,
+                                    request.audit_file,
+                                    request.session,
+                                    &turn_id,
+                                ) {
+                                    step = next_step;
+                                }
                             }
                         }
                     }
@@ -237,15 +320,18 @@ pub fn run_session_turn_with_model_client(
                 );
                 user_wait_this_turn =
                     user_wait_this_turn.saturating_add(action_runtime.user_wait());
-                let command_supplements = action_runtime.take_pending_supplements();
-                if !command_supplements.is_empty() {
-                    if let Some(next_step) = core.append_user_supplements_with_audit(
-                        command_supplements,
-                        request.audit_file,
-                        request.session,
-                        &turn_id,
-                    ) {
-                        step = next_step;
+                if !is_terminal_stop(&step) {
+                    let mut all_supplements = action_runtime.take_pending_supplements();
+                    all_supplements.extend(normalize_user_supplements(ui.drain_user_supplements()));
+                    if !all_supplements.is_empty() {
+                        if let Some(next_step) = core.append_user_supplements_with_audit(
+                            all_supplements,
+                            request.audit_file,
+                            request.session,
+                            &turn_id,
+                        ) {
+                            step = next_step;
+                        }
                     }
                 }
                 ui.resume_after_user_decision();
@@ -280,6 +366,18 @@ pub fn run_session_turn_with_model_client(
                 if let Some(stop) = turn.stop_summary {
                     break turn_stop_parts(stop);
                 }
+                let supplements = normalize_user_supplements(ui.drain_user_supplements());
+                if !supplements.is_empty() {
+                    if let Some(next_step) = core.append_user_supplements_with_audit(
+                        supplements,
+                        request.audit_file,
+                        request.session,
+                        &turn_id,
+                    ) {
+                        step = next_step;
+                        continue;
+                    }
+                }
                 break (
                     turn.final_answer,
                     None,
@@ -310,6 +408,10 @@ pub fn run_session_turn_with_model_client(
     }
     core.record_turn_final_audit(request.audit_file, request.session, &turn_id, &outcome);
     outcome
+}
+
+fn is_terminal_stop(step: &CoreStep) -> bool {
+    matches!(step, CoreStep::Final(turn) if turn.stop_summary.is_some())
 }
 
 struct TurnActionRuntime<'a> {
@@ -385,7 +487,7 @@ impl ActionRuntime for TurnActionRuntime<'_> {
 #[allow(clippy::too_many_arguments)]
 fn call_model_with_system_retries(
     model_client: &mut dyn ModelClient,
-    config: &ProviderConfig,
+    config: &ModelServiceConfig,
     prompt: &str,
     audit_file: &Path,
     ui: &mut dyn TurnUi,
@@ -405,12 +507,7 @@ fn call_model_with_system_retries(
         match result {
             Ok(response) => {
                 if let Some(profiler) = profiler.as_deref_mut() {
-                    profiler.record_model_wait(
-                        &config.provider,
-                        &response.model_name,
-                        &response.usage,
-                        model_wait,
-                    );
+                    profiler.record_model_wait(&response.model_name, &response.usage, model_wait);
                 }
                 return Ok(ModelCallOutcome {
                     response,
@@ -420,12 +517,7 @@ fn call_model_with_system_retries(
             }
             Err(err) => {
                 if let Some(profiler) = profiler.as_deref_mut() {
-                    profiler.record_model_wait(
-                        &config.provider,
-                        &config.model,
-                        &UsageStats::zero(),
-                        model_wait,
-                    );
+                    profiler.record_model_wait(&config.model, &UsageStats::zero(), model_wait);
                 }
                 let Some(decision) =
                     model_retry_decision(&err, attempt, retry_policy, ui.is_cancel_requested())
@@ -457,7 +549,7 @@ fn call_model_with_system_retries(
             }
         }
     }
-    Err("provider_network_error: retry loop exhausted".to_string())
+    Err("model_network_error: retry loop exhausted".to_string())
 }
 
 #[cfg(not(test))]

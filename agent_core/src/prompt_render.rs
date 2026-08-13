@@ -4,20 +4,18 @@ use crate::response_protocol::ResponseProtocolSuite;
 use crate::{PromptDelta, PromptSlice};
 
 pub(crate) fn formatted_response_trailer(
-    protocol_language: &str,
-    assistant_heading: &str,
+    response_shape_hint: &str,
+    _assistant_heading: &str,
 ) -> String {
-    let instruction = if protocol_language.trim().eq_ignore_ascii_case("XML") {
-        "Now please continue your ID's response part in XML as required in protocol:"
-    } else {
-        "Now please continue your ID's response part as required in protocol:"
-    };
-    format!("{instruction}\n## {}", assistant_heading.trim())
+    let response_shape_hint = response_shape_hint.trim();
+    format!("Now please fulfill your response part like {response_shape_hint}:")
 }
 
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
     let trimmed = rendered_prompt.trim_end();
     let Some(trailer_start) = [
+        "\n\nNow please fulfill your response part like ",
+        "\n\nNow please fulfill your response part in one-",
         "\n\nNow please continue your ID's response part as required in protocol:\n## ",
         "\n\nNow please continue your ID's response part in XML as required in protocol:\n## ",
     ]
@@ -27,11 +25,29 @@ pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, 
         return (rendered_prompt, None);
     };
     let candidate = &trimmed[trailer_start + 2..];
-    let assistant_heading = candidate
+    let (instruction, legacy_assistant_heading) = candidate
         .split_once("\n## ")
-        .map(|(_, heading)| heading)
-        .unwrap_or_default();
-    if !assistant_heading.is_empty() && !assistant_heading.contains('\n') {
+        .map_or((candidate, None), |(instruction, heading)| {
+            (instruction, Some(heading))
+        });
+    let shape_hint = instruction
+        .strip_prefix("Now please fulfill your response part like ")
+        .and_then(|value| value.strip_suffix(':'));
+    let one_format_protocol = instruction
+        .strip_prefix("Now please fulfill your response part in one-")
+        .and_then(|value| value.strip_suffix(" format as required in protocol:"));
+    let valid_instruction = shape_hint
+        .is_some_and(|hint| !hint.is_empty() && !hint.contains(['\n', '\r']))
+        || one_format_protocol
+            .is_some_and(|protocol| !protocol.is_empty() && !protocol.contains(['\n', '\r']))
+        || matches!(
+            instruction,
+            "Now please continue your ID's response part as required in protocol:"
+                | "Now please continue your ID's response part in XML as required in protocol:"
+        );
+    let valid_legacy_heading = legacy_assistant_heading
+        .is_none_or(|heading| !heading.is_empty() && !heading.contains('\n'));
+    if valid_instruction && valid_legacy_heading {
         let prefix = trimmed[..trailer_start].trim_end();
         return (prefix, Some(candidate.to_string()));
     }
@@ -104,7 +120,7 @@ pub(crate) fn render_prompt_with_rendered_static(
     rendered_static_prompt: &str,
     deltas: &[PromptDelta],
     assistant_heading: &str,
-    protocol_language: &str,
+    response_shape_hint: &str,
 ) -> String {
     let mut out = rendered_static_prompt.to_string();
 
@@ -147,7 +163,7 @@ pub(crate) fn render_prompt_with_rendered_static(
 
     out.push_str("\n\n");
     out.push_str(&formatted_response_trailer(
-        protocol_language,
+        response_shape_hint,
         assistant_heading,
     ));
     out

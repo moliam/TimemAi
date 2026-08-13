@@ -9,7 +9,6 @@ pub enum ModelDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStatusSnapshot {
-    pub provider: String,
     pub model: String,
     pub intent: String,
     pub memory_activity: CoreMemoryActivity,
