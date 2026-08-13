@@ -6,6 +6,15 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-08-13
+
+### Fixed
+
+- Unified the Rust workspace, embedded Web host, and frontend package version
+  metadata so every Timem Web release reports one authoritative version.
+- Added a release gate that rejects mismatched Cargo, Cargo.lock, and frontend
+  package versions before tests or packaging begin.
+
 ## [1.0.3] - 2026-08-13
 
 - New environments now store runtime data under hidden `.timem_data/` by
