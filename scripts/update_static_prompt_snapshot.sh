@@ -30,8 +30,6 @@ validate_one() {
     '#### `memmgr`'
     "**Usage**"
     "**Result**"
-    '"run_bash":'
-    '"cmd":'
   )
   local forbidden=(
     "Runtime info:"
@@ -71,17 +69,25 @@ render_one json "$TMP_JSON"
 render_one xml "$TMP_XML"
 
 validate_one markdown "$TMP_MARKDOWN" \
+  '"run_bash":' \
+  '"cmd":' \
   "Markdown response sections." \
   "The top-level response is Markdown, not JSON." \
   '`## Status`' \
   '`## Working_Still_Action`'
-validate_one json "$TMP_JSON"
+validate_one json "$TMP_JSON" \
+  '"run_bash":' \
+  '"cmd":'
 validate_one xml "$TMP_XML" \
   "# System Response Protocol" \
-  "All responses must be valid XML wrapped in a single" \
+  'Return one XML `<response>` root.' \
   '`<response>`' \
   '`<final_answer>`' \
-  '`<working_still_action>`'
+  '## XML-native actions' \
+  '<actions>' \
+  '<parallel>' \
+  '<run_bash timeout_ms="5000">' \
+  '<cmd>pwd</cmd>'
 
 if [ "${1:-}" = "--check" ]; then
   echo "static_prompt_expansion: ok"

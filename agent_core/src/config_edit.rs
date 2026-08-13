@@ -1,7 +1,6 @@
 use crate::{
-    bash_approval_mode_label, default_api_protocol_for_provider,
-    known_default_base_url_for_provider, parse_api_protocol, status_view::HostStatusLevel,
-    BashApprovalMode, ProviderConfig, WorkInstructionLoadMode,
+    bash_approval_mode_label, default_base_url, is_default_base_url, parse_api_protocol,
+    status_view::HostStatusLevel, BashApprovalMode, ModelServiceConfig, WorkInstructionLoadMode,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,7 +8,6 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeConfigField {
     Model,
-    GatewayProvider,
     ApiProtocol,
     BaseUrl,
     MaxInput,
@@ -48,8 +46,6 @@ pub struct RuntimeConfigApplyReport {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeConfigApplyError {
-    EmptyGatewayProvider,
-    CustomGatewayRequiresBaseUrl,
     InvalidApiProtocol,
     InvalidTokenCount { field: RuntimeConfigField },
     InvalidBashApproval,
@@ -80,9 +76,8 @@ impl RuntimeConfigApplyReport {
     }
 }
 
-pub const RUNTIME_CONFIG_FIELDS: [RuntimeConfigField; 8] = [
+pub const RUNTIME_CONFIG_FIELDS: [RuntimeConfigField; 7] = [
     RuntimeConfigField::Model,
-    RuntimeConfigField::GatewayProvider,
     RuntimeConfigField::ApiProtocol,
     RuntimeConfigField::BaseUrl,
     RuntimeConfigField::MaxInput,
@@ -98,7 +93,7 @@ pub fn bash_approval_mode_from_sources(
     let raw = option
         .map(ToString::to_string)
         .or_else(|| env.get("TIMEM_BASH_APPROVAL").cloned())
-        .unwrap_or_else(|| "ask".to_string())
+        .unwrap_or_else(|| "approve".to_string())
         .trim()
         .to_lowercase();
     match raw.as_str() {
@@ -122,7 +117,6 @@ impl RuntimeConfigField {
     pub fn label(self) -> &'static str {
         match self {
             RuntimeConfigField::Model => "TIMEM_MODEL",
-            RuntimeConfigField::GatewayProvider => "TIMEM_GATEWAY_PROVIDER",
             RuntimeConfigField::ApiProtocol => "TIMEM_API_PROTOCOL",
             RuntimeConfigField::BaseUrl => "TIMEM_BASE_URL",
             RuntimeConfigField::MaxInput => "TIMEM_MAX_LLM_INPUT",
@@ -134,14 +128,13 @@ impl RuntimeConfigField {
 }
 
 pub fn runtime_config_field_value(
-    config: &ProviderConfig,
+    config: &ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     field: RuntimeConfigField,
 ) -> String {
     match field {
         RuntimeConfigField::Model => config.model.clone(),
-        RuntimeConfigField::GatewayProvider => config.provider.clone(),
         RuntimeConfigField::ApiProtocol => config.api_protocol.label().to_string(),
         RuntimeConfigField::BaseUrl => config.base_url.clone(),
         RuntimeConfigField::MaxInput => config.max_llm_input_tokens.to_string(),
@@ -156,7 +149,7 @@ pub fn runtime_config_field_value(
 }
 
 pub fn runtime_config_menu_report(
-    config: &ProviderConfig,
+    config: &ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> RuntimeConfigMenuReport {
@@ -178,7 +171,7 @@ pub fn runtime_config_menu_report(
 }
 
 pub fn runtime_config_apply_report(
-    config: &ProviderConfig,
+    config: &ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     field: RuntimeConfigField,
@@ -193,7 +186,7 @@ pub fn runtime_config_apply_report(
 }
 
 pub fn apply_runtime_config_value(
-    config: &mut ProviderConfig,
+    config: &mut ModelServiceConfig,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
     field: RuntimeConfigField,
@@ -204,13 +197,15 @@ pub fn apply_runtime_config_value(
             config.model = value.to_string();
             Ok(RuntimeConfigEffect::None)
         }
-        RuntimeConfigField::GatewayProvider => {
-            apply_gateway_provider(config, value)?;
-            Ok(RuntimeConfigEffect::None)
-        }
         RuntimeConfigField::ApiProtocol => {
-            config.api_protocol = parse_api_protocol(value)
+            let old_protocol = config.api_protocol;
+            let used_default_base_url = is_default_base_url(&old_protocol, &config.base_url);
+            let next_protocol = parse_api_protocol(value)
                 .map_err(|_| RuntimeConfigApplyError::InvalidApiProtocol)?;
+            config.api_protocol = next_protocol;
+            if used_default_base_url {
+                config.base_url = default_base_url(&next_protocol).to_string();
+            }
             Ok(RuntimeConfigEffect::None)
         }
         RuntimeConfigField::BaseUrl => {
@@ -259,34 +254,6 @@ pub fn work_instruction_mode_label(mode: WorkInstructionLoadMode) -> &'static st
         WorkInstructionLoadMode::Ask => "ask",
         WorkInstructionLoadMode::Off => "off",
     }
-}
-
-fn apply_gateway_provider(
-    config: &mut ProviderConfig,
-    value: &str,
-) -> Result<(), RuntimeConfigApplyError> {
-    let old_provider = config.provider.clone();
-    let next_provider = value.to_lowercase();
-    if next_provider.trim().is_empty() {
-        return Err(RuntimeConfigApplyError::EmptyGatewayProvider);
-    }
-    if let Some(default_base_url) = known_default_base_url_for_provider(&next_provider) {
-        config.provider = next_provider.clone();
-        config.api_protocol = default_api_protocol_for_provider(&next_provider);
-        config.base_url = default_base_url;
-        return Ok(());
-    }
-
-    let old_default_base_url = known_default_base_url_for_provider(&old_provider);
-    let using_old_default = old_default_base_url
-        .as_deref()
-        .map(|default| config.base_url.trim_end_matches('/') == default.trim_end_matches('/'))
-        .unwrap_or(false);
-    if using_old_default {
-        return Err(RuntimeConfigApplyError::CustomGatewayRequiresBaseUrl);
-    }
-    config.provider = next_provider;
-    Ok(())
 }
 
 pub fn parse_token_count(value: &str) -> Option<u32> {

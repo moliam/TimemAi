@@ -1,16 +1,17 @@
 use super::{
-    active_elapsed_secs, apply_config_value, boxed_config_table_at_width, cli_help_text,
-    config_field_value, consume_turn_cancel_request, display_width, load_or_create_shell_session,
-    merge_queued_input, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
+    active_elapsed_secs, apply_config_value, boxed_config_table_at_width,
+    cache_shell_session_runtime, cli_help_text, config_field_value, consume_turn_cancel_request,
+    display_width, load_or_create_shell_session, merge_queued_input, model_service_config_from_env,
+    new_shell_session, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
     paste_marker_segments, paste_recovery_return_edit_clear_lines,
     paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
-    provider_config_from_env, push_thinking_supplement_bytes, queued_input_drain_from_bytes,
-    queued_text_to_supplements, random_spinner_tick, raw_multiline_paste_display,
-    raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
-    read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
-    reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
-    render_config_menu, render_expand_output_choices, render_expand_output_prompt,
-    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
+    push_thinking_supplement_bytes, queued_input_drain_from_bytes, queued_text_to_supplements,
+    random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
+    read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
+    reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
+    render_approval_choices, render_config_apply_report, render_config_menu,
+    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
+    render_paste_recovery_choices, render_paste_recovery_prompt,
     render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
     render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
     render_stale_context_prompt, render_startup_banner, render_startup_status_block,
@@ -45,9 +46,9 @@ use agent_core::{
     },
     stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
     OutputExpansionRequest, ResponseProtocolKind, RoundLimitDecisionRequest,
-    RuntimeConfigApplyError, StaleContextDecisionRequest, WorkInstructionLoadMode,
-    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
-    WorkspaceChange, WorkspaceCommandOutcome, WorkspaceCommandReport,
+    StaleContextDecisionRequest, WorkInstructionLoadMode, WorkInstructionLoadReport,
+    WorkInstructionLoadRequest, WorkInstructionLoadStatus, WorkspaceChange,
+    WorkspaceCommandOutcome, WorkspaceCommandReport,
     DEFAULT_STALE_CONTEXT_IDLE as STALE_CONTEXT_IDLE,
     DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD as STALE_CONTEXT_TOKEN_THRESHOLD,
 };
@@ -68,7 +69,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use timem_shell::CliOptions;
 use timem_shell::{
-    workspace_menu_report, ApiProtocol, HostStatusLevel, ProviderConfig, SPINNER_ICONS,
+    workspace_menu_report, ApiProtocol, HostStatusLevel, ModelServiceConfig, SPINNER_ICONS,
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -191,7 +192,7 @@ fn thinking_supplement_terminal_mode_is_noncanonical_but_keeps_sigint() {
 }
 
 #[test]
-fn public_repo_sources_do_not_contain_private_gateway_markers() {
+fn public_repo_sources_do_not_contain_private_service_markers() {
     let source_text = [
         include_str!("../../../README.md"),
         include_str!("../../../env_template"),
@@ -233,7 +234,7 @@ fn active_elapsed_excludes_user_pause_duration() {
 
 #[test]
 fn thinking_status_finish_wakes_renderer_without_waiting_for_tick() {
-    let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
 
     let start = Instant::now();
     status.finish();
@@ -247,7 +248,7 @@ fn thinking_status_finish_wakes_renderer_without_waiting_for_tick() {
 
 #[test]
 fn thinking_status_initial_frame_includes_thought_panel() {
-    let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
     let snapshot = status.state.lock().unwrap().clone();
     let rendered = timem_shell::render_thinking_view_at(&snapshot, "12:00:00");
 
@@ -260,7 +261,7 @@ fn thinking_status_initial_frame_includes_thought_panel() {
 
 #[test]
 fn thinking_status_model_request_does_not_duplicate_initial_thinking_line() {
-    let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
     status.set_transient_observation("思考中...");
     let snapshot = status.state.lock().unwrap().clone();
     let rendered = timem_shell::render_thinking_view_at(&snapshot, "12:00:00");
@@ -273,7 +274,7 @@ fn thinking_status_model_request_does_not_duplicate_initial_thinking_line() {
 
 #[test]
 fn thinking_status_finish_cancelled_preserves_display_and_stats() {
-    let mut status = ThinkingStatus::start("aliyun", "qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
     status.set_usage(super::UsageStats {
         llm_calls: 1,
         prompt_tokens: 5000,
@@ -457,8 +458,7 @@ fn workspace_path_normalization_canonicalizes_existing_paths() {
 
 #[test]
 fn config_menu_renders_effective_values_and_can_apply_updates() {
-    let mut config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let mut config = ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -472,8 +472,6 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
     let mut core = AgentCore::new(
         "STATIC",
         CoreProfile {
-            name: "aliyun".to_string(),
-            provider: "aliyun".to_string(),
             model: "qwen-plus".to_string(),
         },
         std::env::temp_dir().join(format!("timem_config_test_{}", epoch_millis())),
@@ -544,9 +542,8 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
 }
 
 #[test]
-fn config_provider_update_keeps_dependent_defaults_consistent() {
-    let mut config = ProviderConfig {
-        provider: "aliyun".to_string(),
+fn config_protocol_update_keeps_endpoint_defaults_consistent() {
+    let mut config = ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -560,11 +557,9 @@ fn config_provider_update_keeps_dependent_defaults_consistent() {
     let mut core = AgentCore::new(
         "STATIC",
         CoreProfile {
-            name: "aliyun".to_string(),
-            provider: "aliyun".to_string(),
             model: "qwen-plus".to_string(),
         },
-        std::env::temp_dir().join(format!("timem_config_provider_test_{}", epoch_millis())),
+        std::env::temp_dir().join(format!("timem_config_protocol_test_{}", epoch_millis())),
     );
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
@@ -574,25 +569,13 @@ fn config_provider_update_keeps_dependent_defaults_consistent() {
         &mut core,
         &mut bash,
         &mut work,
-        ConfigField::GatewayProvider,
+        ConfigField::ApiProtocol,
         "anthropic",
     )
     .unwrap();
 
-    assert_eq!(config.provider, "anthropic");
     assert_eq!(config.api_protocol, ApiProtocol::Anthropic);
     assert_eq!(config.base_url, "https://api.anthropic.com");
-
-    let err = apply_config_value(
-        &mut config,
-        &mut core,
-        &mut bash,
-        &mut work,
-        ConfigField::GatewayProvider,
-        "private",
-    )
-    .unwrap_err();
-    assert_eq!(err, RuntimeConfigApplyError::CustomGatewayRequiresBaseUrl);
 
     apply_config_value(
         &mut config,
@@ -608,18 +591,17 @@ fn config_provider_update_keeps_dependent_defaults_consistent() {
         &mut core,
         &mut bash,
         &mut work,
-        ConfigField::GatewayProvider,
-        "private",
+        ConfigField::ApiProtocol,
+        "openai-responses",
     )
     .unwrap();
-    assert_eq!(config.provider, "private");
+    assert_eq!(config.api_protocol, ApiProtocol::OpenAiResponses);
     assert_eq!(config.base_url, "https://private.example/v1");
 }
 
 #[test]
-fn config_provider_update_resets_custom_settings_when_returning_to_known_provider() {
-    let mut config = ProviderConfig {
-        provider: "private".to_string(),
+fn config_protocol_update_preserves_explicit_endpoint() {
+    let mut config = ModelServiceConfig {
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -633,12 +615,10 @@ fn config_provider_update_resets_custom_settings_when_returning_to_known_provide
     let mut core = AgentCore::new(
         "STATIC",
         CoreProfile {
-            name: "private".to_string(),
-            provider: "private".to_string(),
             model: "aws-claude-sonnet-4-6".to_string(),
         },
         std::env::temp_dir().join(format!(
-            "timem_config_provider_reset_test_{}",
+            "timem_config_protocol_explicit_test_{}",
             epoch_millis()
         )),
     );
@@ -650,17 +630,13 @@ fn config_provider_update_resets_custom_settings_when_returning_to_known_provide
         &mut core,
         &mut bash,
         &mut work,
-        ConfigField::GatewayProvider,
-        "aliyun",
+        ConfigField::ApiProtocol,
+        "openai-compatible",
     )
     .unwrap();
 
-    assert_eq!(config.provider, "aliyun");
     assert_eq!(config.api_protocol, ApiProtocol::OpenAiCompatible);
-    assert_eq!(
-        config.base_url,
-        "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    );
+    assert_eq!(config.base_url, "https://private.example/v1");
 }
 
 #[test]
@@ -688,8 +664,7 @@ fn random_spinner_tick_maps_to_valid_icon_slot() {
 
 #[test]
 fn startup_banner_lists_env_overrides_on_separate_lines() {
-    let config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let config = ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -734,9 +709,6 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
     assert!(!banner
         .lines()
         .any(|line| line.trim_start().starts_with("│ TIMEM_SPACE=")));
-    assert!(banner.contains("TIMEM_GATEWAY_PROVIDER"));
-    assert!(banner.contains("流量平台"));
-    assert!(banner.contains("aliyun"));
     assert!(banner.contains("TIMEM_API_PROTOCOL"));
     assert!(banner.contains("openai-compatible"));
     assert!(banner.contains("TIMEM_BASE_URL"));
@@ -767,13 +739,13 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
         .iter()
         .all(|line| display_width(line) == first_width));
     let model_idx = banner.find("TIMEM_MODEL").unwrap();
-    let provider_idx = banner.find("TIMEM_GATEWAY_PROVIDER").unwrap();
+    let protocol_idx = banner.find("TIMEM_API_PROTOCOL").unwrap();
     let runtime_idx = banner.find("TIMEM_MAX_LLM_INPUT").unwrap();
     let bash_idx = banner.find("TIMEM_BASH_APPROVAL").unwrap();
     let space_idx = banner.find("TIMEM_SPACE").unwrap();
     let data_idx = banner.find("TIMEM_DATA_DIR").unwrap();
-    assert!(model_idx < provider_idx);
-    assert!(provider_idx < runtime_idx);
+    assert!(model_idx < protocol_idx);
+    assert!(protocol_idx < runtime_idx);
     assert!(runtime_idx < bash_idx);
     assert!(bash_idx < space_idx);
     assert!(space_idx < data_idx);
@@ -784,17 +756,17 @@ fn config_table_uses_window_width_ratio_and_wraps_long_values() {
     let items = [
         ConfigTableItem::Section("MODEL".to_string()),
         ConfigTableItem::Row(ConfigRow {
-            key: "TIMEM_GATEWAY_PROVIDER".to_string(),
-            value: "aliyun".to_string(),
-            desc: "流量平台，决定默认 base url".to_string(),
+            key: "TIMEM_API_PROTOCOL".to_string(),
+            value: "openai-compatible".to_string(),
+            desc: "模型 API 协议".to_string(),
             highlight: false,
         }),
         ConfigTableItem::Row(ConfigRow {
             key: "TIMEM_BASE_URL".to_string(),
             value:
-                "https://very-long-provider.example.com/compatible-mode/v1/with/a/path/that/wraps"
+                "https://very-long-model-service.example.com/compatible-mode/v1/with/a/path/that/wraps"
                     .to_string(),
-            desc: "网关 base url".to_string(),
+            desc: "模型服务 base URL".to_string(),
             highlight: false,
         }),
         ConfigTableItem::Row(ConfigRow {
@@ -815,7 +787,7 @@ fn config_table_uses_window_width_ratio_and_wraps_long_values() {
         .lines()
         .next()
         .is_some_and(|line| display_width(line) == 80));
-    assert!(banner.contains("very-long-provider"));
+    assert!(banner.contains("very-long-model"));
     assert!(banner.contains("TIMEM_WORK_INSTRUCTIONS"));
     assert!(!banner.contains("│ S "));
     let data_rows = banner
@@ -833,12 +805,11 @@ fn config_table_uses_window_width_ratio_and_wraps_long_values() {
 }
 
 #[test]
-fn startup_banner_highlights_values_outside_provider_defaults() {
-    let default_config = ProviderConfig {
-        provider: "aliyun".to_string(),
+fn startup_banner_highlights_values_outside_protocol_defaults() {
+    let default_config = ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
-        model: "qwen-max".to_string(),
+        model: "qwen-plus".to_string(),
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
@@ -857,8 +828,7 @@ fn startup_banner_highlights_values_outside_provider_defaults() {
     );
     assert!(!default_banner.contains(ANSI_HIGHLIGHT));
 
-    let override_config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let override_config = ModelServiceConfig {
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -892,13 +862,12 @@ fn startup_banner_highlights_values_outside_provider_defaults() {
 }
 
 #[test]
-fn startup_banner_does_not_highlight_custom_provider_model_or_base_url() {
-    let config = ProviderConfig {
-        provider: "private".to_string(),
+fn startup_banner_highlights_custom_model_and_base_url() {
+    let config = ModelServiceConfig {
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
-        base_url: "https://your-private-gateway.example/v1".to_string(),
+        base_url: "https://private.example/v1".to_string(),
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
@@ -915,10 +884,9 @@ fn startup_banner_does_not_highlight_custom_provider_model_or_base_url() {
         WorkInstructionLoadMode::Silent,
     );
 
-    assert!(!banner.contains(&format!(
-        "{ANSI_HIGHLIGHT}https://your-private-gateway.example/v1"
-    )));
-    assert!(!banner.contains(&format!("{ANSI_HIGHLIGHT}aws-claude-sonnet-4-6")));
+    assert!(banner.contains("https://private.example/v1"));
+    assert!(banner.contains("aws-claude-sonnet-4-6"));
+    assert!(banner.contains(ANSI_HIGHLIGHT));
 }
 
 #[test]
@@ -926,13 +894,11 @@ fn cli_help_lists_all_env_backed_options() {
     let help = cli_help_text();
     for expected in [
         "\x1b[1mPrecedence:",
-        "command line options override process env values; process env overrides defaults.\x1b[0m",
+        "command line options override the restored Session cache; the Session cache overrides process env defaults.\x1b[0m",
         "cp env_template env",
         "source /path/to/your/env",
         "--space",
         "TIMEM_SPACE",
-        "--gateway-provider",
-        "TIMEM_GATEWAY_PROVIDER",
         "--api-protocol",
         "TIMEM_API_PROTOCOL",
         "--base-url",
@@ -972,7 +938,7 @@ fn cli_help_lists_all_env_backed_options() {
         "  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K"
     ));
     assert!(help.contains(
-        "  --max-llm-output <n|10K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 10K"
+        "  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K"
     ));
     assert!(help.contains(
             "  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay"
@@ -1009,7 +975,6 @@ fn runtime_help_omits_startup_options_and_highlights_sections() {
         "cp env_template env",
         "source /path/to/your/env",
         "--space",
-        "--gateway-provider",
         "--api-key",
         "TIMEM_API_KEY",
         "Vendor fallback key env vars",
@@ -1035,7 +1000,6 @@ fn startup_control_hint_points_to_help_instead_of_listing_commands() {
 fn env_template_exports_values_for_plain_source() {
     let template = include_str!("../../../env_template");
     for key in [
-        "TIMEM_GATEWAY_PROVIDER",
         "TIMEM_API_PROTOCOL",
         "TIMEM_API_KEY",
         "TIMEM_BASE_URL",
@@ -1099,29 +1063,32 @@ fn sourced_env_file_reaches_child_process_without_set_a() {
     path.push(format!("timem_source_env_{}.sh", epoch_millis()));
     fs::write(
         &path,
-        "export TIMEM_GATEWAY_PROVIDER=custom\nexport TIMEM_API_PROTOCOL=anthropic\n",
+        "export TIMEM_API_PROTOCOL=anthropic\nexport TIMEM_MODEL=claude-test\n",
     )
     .unwrap();
     let script = format!(
-        ". \"{}\"; printf '%s|%s' \"$TIMEM_GATEWAY_PROVIDER\" \"$TIMEM_API_PROTOCOL\"",
+        ". \"{}\"; printf '%s|%s' \"$TIMEM_API_PROTOCOL\" \"$TIMEM_MODEL\"",
         path.display()
     );
     let output = Command::new("sh").arg("-c").arg(script).output().unwrap();
     let _ = fs::remove_file(&path);
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "custom|anthropic");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "anthropic|claude-test"
+    );
 }
 
 #[test]
-fn shell_provider_and_session_env_keep_openai_thinking_stream_options() {
+fn shell_and_session_env_keep_openai_thinking_stream_options() {
     let env = HashMap::from([
         ("TIMEM_API_KEY".to_string(), "test-key".to_string()),
         ("TIMEM_ENABLE_THINKING".to_string(), "true".to_string()),
         ("TIMEM_REASONING_EFFORT".to_string(), "max".to_string()),
         ("TIMEM_STREAM".to_string(), "true".to_string()),
     ]);
-    let config = provider_config_from_env(&CliOptions::default(), &env).unwrap();
+    let config = model_service_config_from_env(&CliOptions::default(), &env).unwrap();
     assert_eq!(config.openai_compatible.enable_thinking, Some(true));
     assert_eq!(
         config.openai_compatible.reasoning_effort.as_deref(),
@@ -1151,7 +1118,7 @@ fn bash_approval_mode_accepts_only_current_documented_values() {
     let empty = HashMap::new();
     assert_eq!(
         timem_shell::bash_approval_mode_from_sources(options.bash_approval.as_deref(), &empty),
-        BashApprovalMode::Ask
+        BashApprovalMode::Approve
     );
 
     let mut approve_env = HashMap::new();
@@ -1530,7 +1497,7 @@ fn raw_multiline_paste_submit_prompt_is_keyboard_driven() {
 #[test]
 fn queued_paste_fallback_keeps_multiline_config_table_as_one_user_input() {
     let queued = queued_input_drain_from_bytes(
-            "│ TIMEM_MODEL             │ qwen-plus │ 模型名称 │\n│ TIMEM_BASE_URL          │ https://example.com/v1 │ 网关 base url │\n"
+            "│ TIMEM_MODEL             │ qwen-plus │ 模型名称 │\n│ TIMEM_BASE_URL          │ https://example.com/v1 │ 模型服务 base URL │\n"
                 .as_bytes(),
         );
     let merged = merge_queued_input("请分析这段配置".to_string(), &queued);
@@ -1538,7 +1505,7 @@ fn queued_paste_fallback_keeps_multiline_config_table_as_one_user_input() {
     assert!(!queued.interrupted);
     assert_eq!(
             merged,
-            "请分析这段配置\n│ TIMEM_MODEL             │ qwen-plus │ 模型名称 │\n│ TIMEM_BASE_URL          │ https://example.com/v1 │ 网关 base url │\n"
+            "请分析这段配置\n│ TIMEM_MODEL             │ qwen-plus │ 模型名称 │\n│ TIMEM_BASE_URL          │ https://example.com/v1 │ 模型服务 base URL │\n"
         );
     assert_eq!(merged.matches("│ TIMEM_").count(), 2);
 }
@@ -1821,7 +1788,7 @@ fn note_box_wraps_lines_and_keeps_reverse_video_marker() {
 fn startup_status_block_groups_core_topics_away_from_help_text() {
     let rendered = render_startup_status_block(&[
         timem_shell::HostStatusMessage::info(
-            "Timem Core 启动成功：aliyun:qwen-plus，response protocol=xml，tools=6，skills=0",
+            "Timem Core 启动成功：qwen-plus，response protocol=xml，tools=6，skills=0",
         ),
         timem_shell::HostStatusMessage::info("已加载当前工作目录指令：AGENTS.md"),
     ]);
@@ -1984,7 +1951,7 @@ fn wrapped_terminal_rows_counts_cjk_display_width() {
 #[test]
 fn rendered_terminal_rows_counts_soft_wrapped_status_lines() {
     let rendered =
-            "[23:55:16] 𝓣𝓲𝓶𝓮𝓶  ⬇\n  └─ 网络错误，10s 后重试（第1/5次）\n  └─ 详情：provider_network_error: curl: (16) Error in the HTTP2 framing layer\n";
+            "[23:55:16] 𝓣𝓲𝓶𝓮𝓶  ⬇\n  └─ 网络错误，10s 后重试（第1/5次）\n  └─ 详情：model_network_error: curl: (16) Error in the HTTP2 framing layer\n";
     let logical_lines = rendered.lines().count();
     let physical_rows = rendered_terminal_rows(rendered, 40);
 
@@ -2003,8 +1970,6 @@ fn shell_runtime_info_is_host_supplied_and_has_no_cwd() {
     let core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
-            name: "test".into(),
-            provider: "aliyun".into(),
             model: "qwen-plus".into(),
         },
         std::env::temp_dir().join(format!("timem_shell_runtime_info_{}", epoch_millis())),
@@ -2032,8 +1997,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let store = SessionStore::new(root.join("memory"));
-    let config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let config = ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2057,6 +2021,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
             WorkInstructionLoadMode::Silent,
         ),
         env_overrides: None,
+        mcp_server_ids: Vec::new(),
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: store
@@ -2097,8 +2062,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     fs::create_dir_all(&launch_dir).unwrap();
     fs::create_dir_all(&restored_dir).unwrap();
     let store = SessionStore::new(root.join("memory"));
-    let config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let config = ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2123,6 +2087,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
                 WorkInstructionLoadMode::Silent,
             ),
             env_overrides: None,
+            mcp_server_ids: Vec::new(),
             state: StoredSessionState::Ready,
             last_turn_id: None,
             raw_chat_history_path: store
@@ -2146,8 +2111,6 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     let mut core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test".to_string(),
         },
         store.root(),
@@ -2172,8 +2135,6 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let launch_env = HashMap::from([
-        ("TIMEM_API_KEY".to_string(), "test-key".to_string()),
-        ("TIMEM_GATEWAY_PROVIDER".to_string(), "aliyun".to_string()),
         ("TIMEM_MODEL".to_string(), "launch-model".to_string()),
         (
             "TIMEM_RESPONSE_PROTOCOL".to_string(),
@@ -2187,19 +2148,18 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
         profile: StoredSessionProfile {
-            provider: "aliyun".to_string(),
             model: "stored-model".to_string(),
             api_protocol: "openai-compatible".to_string(),
             response_protocol: "xml".to_string(),
         },
         env: BTreeMap::from([
-            ("TIMEM_GATEWAY_PROVIDER".to_string(), "aliyun".to_string()),
             ("TIMEM_MODEL".to_string(), "stored-model".to_string()),
             (
                 "TIMEM_API_PROTOCOL".to_string(),
                 "openai-compatible".to_string(),
             ),
             ("TIMEM_RESPONSE_PROTOCOL".to_string(), "xml".to_string()),
+            ("TIMEM_API_KEY".to_string(), "cached-key".to_string()),
             (
                 "TIMEM_BASE_URL".to_string(),
                 "https://stored.example/v1".to_string(),
@@ -2207,6 +2167,7 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
             ("TIMEM_TIMEOUT".to_string(), "77".to_string()),
         ]),
         env_overrides: None,
+        mcp_server_ids: Vec::new(),
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: root
@@ -2216,16 +2177,17 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
     };
 
     let merged = shell_session_effective_env(&launch_env, &session);
-    let restored = provider_config_from_env(&CliOptions::default(), &merged).unwrap();
+    let restored = model_service_config_from_env(&CliOptions::default(), &merged).unwrap();
     assert_eq!(restored.model, "stored-model");
     assert_eq!(restored.base_url, "https://stored.example/v1");
     assert_eq!(restored.timeout_secs, 77);
+    assert_eq!(restored.api_key, "cached-key");
     assert_eq!(
         merged.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str),
         Some("xml")
     );
 
-    let cli_override = provider_config_from_env(
+    let cli_override = model_service_config_from_env(
         &CliOptions {
             model: Some("cli-model".to_string()),
             base_url: Some("https://cli.example/v1".to_string()),
@@ -2241,14 +2203,113 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
 }
 
 #[test]
+fn shell_resume_selects_the_most_recent_valid_session() {
+    let root = std::env::temp_dir().join(format!("timem_shell_recent_env_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    let config = ModelServiceConfig {
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "launch-secret".to_string(),
+        model: "launch-model".to_string(),
+        base_url: "https://example.test/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    let mut older = new_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &workspace,
+    );
+    older.session_id = "older".to_string();
+    older.updated_at_ms = 10;
+    older
+        .env
+        .insert("TIMEM_MODEL".to_string(), "older-model".to_string());
+    let mut newer = older.clone();
+    newer.session_id = "newer".to_string();
+    newer.updated_at_ms = 20;
+    newer
+        .env
+        .insert("TIMEM_MODEL".to_string(), "newer-model".to_string());
+    store.upsert_session(&newer).unwrap();
+    store.upsert_session(&older).unwrap();
+
+    let restored = load_or_create_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &workspace,
+    );
+    assert_eq!(restored.session_id, "newer");
+    assert_eq!(
+        restored.env.get("TIMEM_MODEL").map(String::as_str),
+        Some("newer-model")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_runtime_config_changes_are_cached_before_another_turn_runs() {
+    let root = std::env::temp_dir().join(format!("timem_shell_config_cache_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    let mut config = ModelServiceConfig {
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "cached-secret".to_string(),
+        model: "old-model".to_string(),
+        base_url: "https://example.test/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    let mut bash = BashApprovalMode::Approve;
+    let mut work = WorkInstructionLoadMode::Silent;
+    let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), root.join("memory"));
+    let mut stored = new_shell_session(&store, &config, bash, work, &workspace);
+
+    apply_config_value(
+        &mut config,
+        &mut core,
+        &mut bash,
+        &mut work,
+        ConfigField::Model,
+        "new-model",
+    )
+    .unwrap();
+    cache_shell_session_runtime(&mut stored, &config, bash, work, &workspace);
+    store.upsert_session(&stored).unwrap();
+
+    let restored = store.load_session(&stored.session_id).unwrap().unwrap();
+    assert_eq!(restored.profile.model, "new-model");
+    assert_eq!(
+        restored.env.get("TIMEM_MODEL").map(String::as_str),
+        Some("new-model")
+    );
+    assert_eq!(
+        restored.env.get("TIMEM_API_KEY").map(String::as_str),
+        Some("cached-secret")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn shell_can_resume_web_style_session_history() {
     let root = std::env::temp_dir().join(format!("timem_shell_cross_host_{}", epoch_millis()));
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let session_id = "web_session_handoff";
-    let config = ProviderConfig {
-        provider: "aliyun".to_string(),
+    let config = ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2273,6 +2334,7 @@ fn shell_can_resume_web_style_session_history() {
                 WorkInstructionLoadMode::Silent,
             ),
             env_overrides: None,
+            mcp_server_ids: Vec::new(),
             state: StoredSessionState::Ready,
             last_turn_id: Some("turn_web_1".to_string()),
             raw_chat_history_path: store

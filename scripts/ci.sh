@@ -5,9 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "== shell scripts syntax =="
-bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/clippy_check.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_license_check.sh scripts/ci.sh
-python3 -m py_compile scripts/fake_openai_provider.py scripts/web_ui_matrix_check.py
-python3 scripts/fake_openai_provider.py --self-test
+bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/clippy_check.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_license_check.sh scripts/version_consistency_check.sh scripts/ci.sh
+python3 -m py_compile scripts/fake_openai_server.py scripts/web_ui_matrix_check.py
+python3 scripts/fake_openai_server.py --self-test
+
+echo "== release version consistency =="
+scripts/version_consistency_check.sh
 
 echo "== module boundary =="
 scripts/module_boundary_check.sh

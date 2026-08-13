@@ -12,6 +12,47 @@ use std::time::{Duration, Instant};
 
 const TEST_PORT: u16 = 12345;
 
+#[tokio::test]
+async fn ordered_browser_command_worker_keeps_async_runtime_responsive_and_results_ordered() {
+    let (commands_tx, commands_rx) = tokio_mpsc::channel(4);
+    let (results_tx, mut results_rx) = tokio_mpsc::unbounded_channel();
+    let worker = tokio::spawn(run_ordered_blocking_queue(
+        commands_rx,
+        results_tx,
+        |value: usize| {
+            thread::sleep(Duration::from_millis(40));
+            Ok(value)
+        },
+    ));
+    commands_tx.send(1).await.unwrap();
+    commands_tx.send(2).await.unwrap();
+
+    let heartbeat = tokio::time::timeout(Duration::from_millis(20), async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        "responsive"
+    })
+    .await
+    .unwrap();
+    assert_eq!(heartbeat, "responsive");
+    assert_eq!(results_rx.recv().await.unwrap().unwrap(), 1);
+    assert_eq!(results_rx.recv().await.unwrap().unwrap(), 2);
+    drop(commands_tx);
+    worker.await.unwrap();
+}
+
+#[tokio::test]
+async fn browser_command_queue_is_bounded_under_click_flood() {
+    let (commands_tx, mut commands_rx) = tokio_mpsc::channel::<usize>(2);
+    commands_tx.try_send(1).unwrap();
+    commands_tx.try_send(2).unwrap();
+    assert!(matches!(
+        commands_tx.try_send(3),
+        Err(tokio_mpsc::error::TrySendError::Full(3))
+    ));
+    assert_eq!(commands_rx.recv().await, Some(1));
+    assert_eq!(commands_rx.recv().await, Some(2));
+}
+
 #[test]
 fn parses_basic_web_launch_options() {
     let options = WebLaunchOptions::parse(&[
@@ -54,6 +95,254 @@ fn public_url_uses_explicit_host_without_placeholder() {
         public_access_url(Some("2001:db8::10"), 14983, "token"),
         Some("http://[2001:db8::10]:14983/?token=token".to_string())
     );
+    let too_long = "a".repeat(254);
+    for host in [
+        "",
+        "example.com/path",
+        "example.com?x=1",
+        "example.com#frag",
+        "user@example.com",
+        "example.com\nSet-Cookie: x=y",
+        "example com",
+        too_long.as_str(),
+    ] {
+        assert_eq!(
+            public_access_url(Some(host), 14983, "token"),
+            None,
+            "{host}"
+        );
+    }
+}
+
+#[test]
+fn mcp_definition_is_mem_scoped_and_session_enablement_is_isolated() {
+    let state = routing_test_state();
+    let config = McpServerConfig {
+        id: "demo".to_string(),
+        name: "Demo MCP".to_string(),
+        enabled: true,
+        transport: agent_core::mcp::McpTransportConfig::Stdio {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"while IFS= read -r line; do case "$line" in *\"method\":\"initialize\"*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}';; *\"method\":\"tools/list\"*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{}}}]}}';; esac; done"#.to_string(),
+            ],
+            env: BTreeMap::new(),
+        },
+        request_timeout_ms: 2_000,
+    };
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::McpServerUpsert {
+            session_id: "session_a".to_string(),
+            config,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(event, WireEvent::McpUpdated { .. }));
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions["session_a"].mcp_server_ids, vec!["demo"]);
+    assert!(sessions["session_b"].mcp_server_ids.is_empty());
+    assert_ne!(
+        sessions["session_a"].mcp_config_revision,
+        sessions["session_a"].applied_mcp_config_revision
+    );
+    drop(sessions);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let mem = state.mem.lock().unwrap();
+        assert!(mem.mcp_store.file().is_file());
+        let connected = mcp_reports(&mem)
+            .first()
+            .is_some_and(|report| report.state == "connected" && !report.tools.is_empty());
+        drop(mem);
+        if connected {
+            break;
+        }
+        assert!(Instant::now() < deadline, "MCP discovery did not finish");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        mcp_reports(&state.mem.lock().unwrap())[0].tools[0].action_name,
+        "mcp.demo.echo"
+    );
+
+    assert!(apply_pending_session_mcp(&state, "session_a").unwrap());
+    assert!(!apply_pending_session_mcp(&state, "session_a").unwrap());
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(
+        sessions["session_a"].mcp_config_revision,
+        sessions["session_a"].applied_mcp_config_revision
+    );
+    drop(sessions);
+}
+
+#[test]
+fn mcp_toggle_is_deferred_until_the_next_new_turn_boundary() {
+    let state = routing_test_state();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.mcp_configs.push(McpServerConfig {
+            id: "deferred".to_string(),
+            name: "Deferred".to_string(),
+            enabled: true,
+            transport: agent_core::mcp::McpTransportConfig::Stdio {
+                command: "/bin/false".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+            request_timeout_ms: 10,
+        });
+    }
+
+    enable_mcp_for_session(&state, "session_a", true, Some("deferred")).unwrap();
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions["session_a"].mcp_server_ids, vec!["deferred"]);
+    let enabled_revision = sessions["session_a"].mcp_config_revision;
+    assert_ne!(
+        sessions["session_a"].mcp_config_revision,
+        sessions["session_a"].applied_mcp_config_revision
+    );
+    drop(sessions);
+
+    enable_mcp_for_session(&state, "session_a", true, Some("deferred")).unwrap();
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"].mcp_config_revision,
+        enabled_revision,
+        "repeating the same desired state must not create another pending revision"
+    );
+
+    enable_mcp_for_session(&state, "session_a", false, Some("deferred")).unwrap();
+    let sessions = state.sessions.lock().unwrap();
+    assert!(sessions["session_a"].mcp_server_ids.is_empty());
+    assert_ne!(
+        sessions["session_a"].mcp_config_revision,
+        sessions["session_a"].applied_mcp_config_revision
+    );
+}
+
+#[test]
+fn deleting_mcp_definition_removes_it_from_every_session() {
+    let state = routing_test_state();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.mcp_configs.push(McpServerConfig {
+            id: "gone".to_string(),
+            name: "Gone".to_string(),
+            enabled: false,
+            transport: agent_core::mcp::McpTransportConfig::Stdio {
+                command: "/bin/false".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+            request_timeout_ms: 10,
+        });
+        mem.mcp_store.save(&mem.mcp_configs).unwrap();
+    }
+    for session in state.sessions.lock().unwrap().values_mut() {
+        session.mcp_server_ids.push("gone".to_string());
+    }
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::McpServerDelete {
+            server_id: "gone".to_string(),
+        },
+    )
+    .unwrap();
+    assert!(state
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .all(|session| session.mcp_server_ids.is_empty()));
+    assert!(state.mem.lock().unwrap().mcp_configs.is_empty());
+}
+
+#[test]
+fn mcp_snapshot_redacts_secrets_and_edit_preserves_unmodified_values() {
+    let state = routing_test_state();
+    let config = McpServerConfig {
+        id: "remote".to_string(),
+        name: "Remote".to_string(),
+        enabled: false,
+        transport: agent_core::mcp::McpTransportConfig::StreamableHttp {
+            url: "https://example.invalid/mcp".to_string(),
+            headers: BTreeMap::from([
+                ("Authorization".to_string(), "Bearer private".to_string()),
+                ("X-Mode".to_string(), "read-only".to_string()),
+            ]),
+        },
+        request_timeout_ms: 100,
+    };
+    upsert_mcp_server(&state, config).unwrap();
+    let report = mcp_reports(&state.mem.lock().unwrap()).remove(0);
+    let agent_core::mcp::McpTransportConfig::StreamableHttp { headers, .. } =
+        &report.config.transport
+    else {
+        panic!("expected HTTP")
+    };
+    assert_eq!(headers["Authorization"], "****");
+    assert_eq!(headers["X-Mode"], "read-only");
+
+    let revealed = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::McpServerSecretsReveal {
+            server_id: "remote".to_string(),
+        },
+    )
+    .unwrap()
+    .expect("secret reveal should reply only to the requesting socket");
+    assert!(matches!(
+        revealed,
+        WireEvent::McpServerSecretsRevealed { ref server_id, ref values }
+            if server_id == "remote"
+                && values.get("Authorization").map(String::as_str) == Some("Bearer private")
+                && !values.contains_key("X-Mode")
+    ));
+
+    let mut edited = report.config;
+    edited.name = "Renamed".to_string();
+    upsert_mcp_server(&state, edited).unwrap();
+    let mem = state.mem.lock().unwrap();
+    let agent_core::mcp::McpTransportConfig::StreamableHttp { headers, .. } =
+        &mem.mcp_configs[0].transport
+    else {
+        panic!("expected HTTP")
+    };
+    assert_eq!(headers["Authorization"], "Bearer private");
+}
+
+#[test]
+fn legacy_sse_snapshot_redacts_sensitive_headers() {
+    let state = routing_test_state();
+    upsert_mcp_server(
+        &state,
+        McpServerConfig {
+            id: "legacy".to_string(),
+            name: "Legacy SSE".to_string(),
+            enabled: true,
+            transport: agent_core::mcp::McpTransportConfig::Sse {
+                url: "https://example.invalid/sse".to_string(),
+                headers: BTreeMap::from([
+                    ("Authorization".to_string(), "Bearer private".to_string()),
+                    ("X-Mode".to_string(), "read-only".to_string()),
+                ]),
+            },
+            request_timeout_ms: 100,
+        },
+    )
+    .unwrap();
+    let report = mcp_reports(&state.mem.lock().unwrap()).remove(0);
+    let agent_core::mcp::McpTransportConfig::Sse { headers, .. } = report.config.transport else {
+        panic!("expected SSE")
+    };
+    assert_eq!(headers["Authorization"], "****");
+    assert_eq!(headers["X-Mode"], "read-only");
 }
 
 #[test]
@@ -90,6 +379,20 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
         },
         &HeaderMap::new()
     ));
+    assert!(!authorized(
+        &state,
+        &AuthQuery {
+            token: Some("te".to_string())
+        },
+        &HeaderMap::new()
+    ));
+    assert!(!authorized(
+        &state,
+        &AuthQuery {
+            token: Some("test-extra".to_string())
+        },
+        &HeaderMap::new()
+    ));
     assert!(authorized(
         &state,
         &AuthQuery {
@@ -107,6 +410,35 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
         &state,
         &AuthQuery { token: None },
         &cookie_headers
+    ));
+    assert!(!authorized(
+        &state,
+        &AuthQuery {
+            token: Some("te".to_string())
+        },
+        &cookie_headers
+    ));
+
+    let mut partial_cookie_headers = HeaderMap::new();
+    partial_cookie_headers.insert(
+        header::COOKIE,
+        HeaderValue::from_static("timem_web_token=te"),
+    );
+    assert!(!authorized(
+        &state,
+        &AuthQuery { token: None },
+        &partial_cookie_headers
+    ));
+
+    let mut similar_cookie_headers = HeaderMap::new();
+    similar_cookie_headers.insert(
+        header::COOKIE,
+        HeaderValue::from_static("x_timem_web_token=test"),
+    );
+    assert!(!authorized(
+        &state,
+        &AuthQuery { token: None },
+        &similar_cookie_headers
     ));
 }
 
@@ -161,6 +493,104 @@ async fn static_web_entry_requires_token_or_authenticated_cookie() {
     )
     .await;
     assert_ne!(cookie_allowed.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn explicit_partial_static_token_does_not_fallback_to_cookie() {
+    let state = routing_test_state();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_static("timem_web_token=test"),
+    );
+    let denied = static_asset(
+        State((state, TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("te".to_string()),
+        }),
+        headers,
+        Uri::from_static("/"),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn api_origin_check_requires_same_host_when_origin_is_present() {
+    assert!(request_origin_allowed(&HeaderMap::new()));
+
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert(header::HOST, HeaderValue::from_static("127.0.0.1:12345"));
+    same_origin.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://127.0.0.1:12345"),
+    );
+    assert!(request_origin_allowed(&same_origin));
+
+    let mut cross_origin = HeaderMap::new();
+    cross_origin.insert(header::HOST, HeaderValue::from_static("127.0.0.1:12345"));
+    cross_origin.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://evil.example"),
+    );
+    assert!(!request_origin_allowed(&cross_origin));
+
+    let mut missing_host = HeaderMap::new();
+    missing_host.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://127.0.0.1:12345"),
+    );
+    assert!(!request_origin_allowed(&missing_host));
+}
+
+#[tokio::test]
+async fn api_routes_reject_cross_origin_even_with_valid_token() {
+    let state = routing_test_state();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:12345"));
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://evil.example"),
+    );
+
+    let denied = health(
+        State((state, TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+        }),
+        headers,
+    )
+    .await;
+
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn upload_session_id_cannot_escape_upload_root_even_if_registered() {
+    let state = routing_test_state();
+    let malicious_session_id = "../escape";
+    state.sessions.lock().unwrap().insert(
+        malicious_session_id.to_string(),
+        test_web_session(malicious_session_id, 9, "Bad Session".to_string()),
+    );
+
+    let result = store_upload(
+        &state,
+        malicious_session_id,
+        "notes.md".to_string(),
+        b"private notes",
+    )
+    .await;
+
+    assert_eq!(result.unwrap_err(), "invalid_upload_session_id");
+    assert!(!state.template.data_dir.join("escape").exists());
+    assert!(!state
+        .template
+        .data_dir
+        .join("web_uploads")
+        .join("..")
+        .join("escape")
+        .exists());
 }
 
 #[test]
@@ -391,6 +821,20 @@ fn browser_commands_are_strictly_tagged_and_do_not_accept_unknown_variants() {
     .unwrap();
     assert!(matches!(rename, ClientCommand::SessionRename { .. }));
 
+    let credential = serde_json::from_str::<ClientCommand>(
+        r#"{"type":"session_api_key_update","session_id":"session_1","api_key":"secret"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        credential,
+        ClientCommand::SessionApiKeyUpdate { .. }
+    ));
+    let reveal = serde_json::from_str::<ClientCommand>(
+        r#"{"type":"session_api_key_reveal","session_id":"session_1"}"#,
+    )
+    .unwrap();
+    assert!(matches!(reveal, ClientCommand::SessionApiKeyReveal { .. }));
+
     let attachment_remove = serde_json::from_str::<ClientCommand>(
         r#"{"type":"attachment_remove","session_id":"session_1","attachment_id":"upload_1"}"#,
     )
@@ -400,7 +844,54 @@ fn browser_commands_are_strictly_tagged_and_do_not_accept_unknown_variants() {
         ClientCommand::AttachmentRemove { .. }
     ));
 
+    let mem_switch =
+        serde_json::from_str::<ClientCommand>(r#"{"type":"mem_switch","path":"/tmp/.test_mem"}"#)
+            .unwrap();
+    assert!(matches!(
+        mem_switch,
+        ClientCommand::MemSwitch { ref path } if path == "/tmp/.test_mem"
+    ));
+    let legacy_mem_switch =
+        serde_json::from_str::<ClientCommand>(r#"{"type":"mem_switch","space":".test_mem"}"#)
+            .unwrap();
+    assert!(matches!(
+        legacy_mem_switch,
+        ClientCommand::MemSwitch { ref path } if path == ".test_mem"
+    ));
+
     assert!(serde_json::from_str::<ClientCommand>(r#"{"type":"shell_exec"}"#).is_err());
+}
+
+#[test]
+fn always_allow_topic_reply_promotes_session_bash_approval() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "ALWAYS_ALLOW_DONE");
+    let worker_id = state.sessions.lock().unwrap()[&session_id]
+        .primary_worker_id
+        .clone();
+    start_web_turn(&state, &session_id, "needs bash approval").unwrap();
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TopicReply {
+            session_id: session_id.clone(),
+            worker_id: Some(worker_id),
+            topic_name: CORE_TOPIC_USER_APPROVAL_REQUEST.to_string(),
+            request_id: Some("approval_1".to_string()),
+            decision: "always_allow".to_string(),
+            payload: json!({ "summary": "always allow bash for this session" }),
+        },
+    )
+    .unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(
+        session.runtime.settings.bash_approval_mode,
+        BashApprovalMode::Approve
+    );
+    assert_eq!(session.runtime_profile.bash_approval, "approve");
 }
 
 #[test]
@@ -430,7 +921,41 @@ fn web_runtime_updates_only_accept_the_shared_runtime_config_keys() {
 }
 
 #[test]
-fn runtime_update_refreshes_new_session_defaults_without_rewriting_existing_sessions() {
+fn incomplete_session_model_service_config_blocks_send_without_starting_a_turn() {
+    let state = routing_test_state();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions
+            .get_mut("session_a")
+            .unwrap()
+            .runtime
+            .settings
+            .config
+            .api_key
+            .clear();
+    }
+
+    let error = submit_turn(&state, "session_a", "hello".to_string()).unwrap_err();
+    assert_eq!(
+        error,
+        "session_model_service_config_incomplete:missing_api_key"
+    );
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions["session_a"];
+    assert!(session.active_turn_id.is_none());
+    assert!(session.turns.is_empty());
+}
+
+#[test]
+fn web_draft_model_service_config_allows_startup_without_an_api_key() {
+    let config =
+        model_service_config_for_web_launch(&WebLaunchOptions::default(), &HashMap::new()).unwrap();
+    assert!(config.api_key.is_empty());
+    assert_eq!(config.model, "qwen-plus");
+}
+
+#[test]
+fn runtime_update_propagates_to_existing_sessions_and_new_session_defaults() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_runtime_update_{}", now_ms()));
     std::fs::create_dir_all(&root).unwrap();
@@ -447,9 +972,6 @@ fn runtime_update_refreshes_new_session_defaults_without_rewriting_existing_sess
         .keys()
         .next()
         .unwrap()
-        .clone();
-    let existing_profile = state.sessions.lock().unwrap()[&existing_session_id]
-        .runtime_profile
         .clone();
     let mut events = state.events.subscribe();
 
@@ -479,9 +1001,21 @@ fn runtime_update_refreshes_new_session_defaults_without_rewriting_existing_sess
         Some("future-session-model")
     );
     assert!(!session_env_defaults.contains_key("TIMEM_API_KEY"));
+    // After propagation, existing sessions should be updated too
     assert_eq!(
-        state.sessions.lock().unwrap()[&existing_session_id].runtime_profile,
-        existing_profile
+        state.sessions.lock().unwrap()[&existing_session_id]
+            .runtime_profile
+            .model,
+        "future-session-model"
+    );
+    let cached = current_session_store(&state)
+        .unwrap()
+        .load_session(&existing_session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cached.env.get("TIMEM_MODEL").map(String::as_str),
+        Some("future-session-model")
     );
 
     let created = handle_command(
@@ -498,6 +1032,153 @@ fn runtime_update_refreshes_new_session_defaults_without_rewriting_existing_sess
         panic!("runtime-updated defaults must be visible on the next created session")
     };
     assert_eq!(session.runtime_profile.model, "future-session-model");
+}
+
+#[test]
+fn session_runtime_update_is_scoped_and_persisted_without_changing_host_defaults() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(format!("timem_web_scoped_runtime_update_{}", now_ms()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
+    let untouched_session_id = state
+        .sessions
+        .lock()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let target_session_id = create_session(
+        &state,
+        Some("Scoped runtime".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let host_model = state.template.settings.lock().unwrap().config.model.clone();
+    let untouched_model = state.sessions.lock().unwrap()[&untouched_session_id]
+        .runtime_profile
+        .model
+        .clone();
+    let mut events = state.events.subscribe();
+
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionRuntimeUpdate {
+            session_id: target_session_id.clone(),
+            key: "TIMEM_MODEL".to_string(),
+            value: "session-only-model".to_string(),
+        },
+    )
+    .unwrap()
+    .is_none());
+
+    let event = events
+        .try_recv()
+        .expect("scoped update should publish an event");
+    assert!(matches!(
+        event,
+        WireEvent::SessionRuntimeConfigUpdated {
+            ref session_id,
+            ref key,
+            ref value,
+            ref runtime_profile,
+        } if session_id == &target_session_id
+            && key == "TIMEM_MODEL"
+            && value == "session-only-model"
+            && runtime_profile.model == "session-only-model"
+    ));
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(
+        sessions[&target_session_id].runtime_profile.model,
+        "session-only-model"
+    );
+    assert_eq!(
+        sessions[&untouched_session_id].runtime_profile.model,
+        untouched_model
+    );
+    drop(sessions);
+    assert_eq!(
+        state.template.settings.lock().unwrap().config.model,
+        host_model
+    );
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(&target_session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.env.get("TIMEM_MODEL").map(String::as_str),
+        Some("session-only-model")
+    );
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::take(&mut *guard)
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn web_startup_can_bootstrap_model_service_config_from_latest_session_cache() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_cached_bootstrap"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "cached_bootstrap_mem";
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template);
+    set_test_mem(&state, data_dir.clone(), space);
+    state.sessions.lock().unwrap().clear();
+
+    create_session(
+        &state,
+        Some("Cached runtime".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::from([
+            (
+                "TIMEM_MODEL".to_string(),
+                "cached-session-model".to_string(),
+            ),
+            (
+                "TIMEM_API_KEY".to_string(),
+                "cached-session-secret".to_string(),
+            ),
+        ]),
+    )
+    .unwrap();
+    let store = current_session_store(&state).unwrap();
+    let mut older = store.list_sessions().unwrap().remove(0);
+    older.session_id = "older_cached_session".to_string();
+    older.updated_at_ms = 1;
+    older
+        .env
+        .insert("TIMEM_MODEL".to_string(), "older-model".to_string());
+    older
+        .env
+        .insert("TIMEM_API_KEY".to_string(), "older-secret".to_string());
+    store.upsert_session(&older).unwrap();
+
+    let launch = WebLaunchOptions {
+        data_dir: Some(data_dir.display().to_string()),
+        space: Some(space.to_string()),
+        ..WebLaunchOptions::default()
+    };
+    let restored_template = WorkerTemplate::from_environment(&launch).unwrap();
+    let settings = restored_template.settings.lock().unwrap();
+    assert_eq!(settings.config.model, "cached-session-model");
+    assert_eq!(settings.config.api_key, "cached-session-secret");
 }
 
 #[test]
@@ -565,8 +1246,7 @@ fn browser_responses_disable_referrer_leaks_and_remote_active_content() {
 fn workspace_snapshot_deduplicates_registered_current_directory() {
     let template = WorkerTemplate {
         settings: Arc::new(Mutex::new(RuntimeSettings {
-            config: ProviderConfig {
-                provider: "test".to_string(),
+            config: ModelServiceConfig {
                 model: "test-model".to_string(),
                 base_url: "http://127.0.0.1".to_string(),
                 api_key: "test".to_string(),
@@ -643,6 +1323,75 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
 }
 
 #[test]
+fn session_delete_stops_workers_and_removes_persisted_session() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(format!("timem_web_session_delete_{}", now_ms()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
+
+    let created = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionCreate {
+            display_name: Some("Disposable".to_string()),
+            workspace_dir: Some(root.display().to_string()),
+            env: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let Some(WireEvent::SessionCreated { session }) = created else {
+        panic!("expected SessionCreated")
+    };
+    let store = current_session_store(&state).unwrap();
+    let session_dir = store
+        .history_path_for_session(&session.session_id)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(store.load_session(&session.session_id).unwrap().is_some());
+    store
+        .append_history_record(
+            &session.session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "turn_delete".to_string(),
+                created_at_ms: 1,
+                kind: None,
+                content: "delete this history".to_string(),
+            },
+        )
+        .unwrap();
+    assert!(session_dir.exists());
+
+    let deleted = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionDelete {
+            session_id: session.session_id.clone(),
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        deleted,
+        Some(WireEvent::SessionDeleted { session_id }) if session_id == session.session_id
+    ));
+    assert!(!state
+        .sessions
+        .lock()
+        .unwrap()
+        .contains_key(&session.session_id));
+    assert!(store.load_session(&session.session_id).unwrap().is_none());
+    assert!(!session_dir.exists());
+    assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
+}
+
+#[test]
 fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_default_session_name_{}", now_ms()));
@@ -691,6 +1440,153 @@ fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
 }
 
 #[test]
+fn existing_session_api_key_can_be_updated_without_exposing_the_secret() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(format!("timem_web_session_api_key_{}", now_ms()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
+    let session_id = create_session(
+        &state,
+        Some("Credential test".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let mut events = state.events.subscribe();
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionApiKeyUpdate {
+            session_id: session_id.clone(),
+            api_key: "new-session-secret".to_string(),
+        },
+    )
+    .unwrap()
+    .is_none());
+    let event = events
+        .try_recv()
+        .expect("credential update should publish a scoped event");
+    assert!(matches!(
+        event,
+        WireEvent::SessionRuntimeUpdated {
+            session_id: ref event_session_id,
+            ref runtime_profile,
+        } if event_session_id == &session_id && runtime_profile.api_key_configured
+    ));
+    let serialized = serde_json::to_string(&event).unwrap();
+    assert!(!serialized.contains("new-session-secret"));
+    assert!(!serialized.contains("TIMEM_API_KEY"));
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .runtime
+            .settings
+            .config
+            .api_key,
+        "new-session-secret"
+    );
+    let reveal = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionApiKeyReveal {
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap()
+    .expect("credential reveal should reply to its requesting socket");
+    assert!(matches!(
+        reveal,
+        WireEvent::SessionApiKeyRevealed {
+            session_id: ref event_session_id,
+            ref api_key,
+        } if event_session_id == &session_id && api_key == "new-session-secret"
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "credential reveal must not be broadcast"
+    );
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.env.get("TIMEM_API_KEY").map(String::as_str),
+        Some("new-session-secret")
+    );
+
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionApiKeyUpdate {
+            session_id: session_id.clone(),
+            api_key: String::new(),
+        },
+    )
+    .unwrap()
+    .is_none());
+    let cleared = events
+        .try_recv()
+        .expect("credential clearing should publish a scoped event");
+    assert!(matches!(
+        cleared,
+        WireEvent::SessionRuntimeUpdated {
+            runtime_profile: WebSessionRuntimeProfile {
+                api_key_configured: false,
+                ..
+            },
+            ..
+        }
+    ));
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::take(&mut *guard)
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_api_key_update_is_rejected_during_an_active_turn() {
+    let state = routing_test_state();
+    let mut sessions = state.sessions.lock().unwrap();
+    let session = sessions.get_mut("session_a").unwrap();
+    session.active_turn_id = Some("turn_active".to_string());
+    session.turns.push(WebTurn {
+        turn_id: "turn_active".to_string(),
+        state: "working".to_string(),
+        created_at_ms: now_ms(),
+        user_entries: Vec::new(),
+        events: Vec::new(),
+        final_answer: None,
+        completion: None,
+    });
+    drop(sessions);
+    let error = update_session_api_key(&state, "session_a", "new-secret".to_string()).unwrap_err();
+    assert_eq!(error, "session_api_key_update_while_working");
+}
+
+#[test]
+fn session_api_key_update_rejects_invalid_or_oversized_values_before_dispatch() {
+    let state = routing_test_state();
+    assert!(
+        update_session_api_key(&state, "session_a", "bad key".to_string())
+            .unwrap_err()
+            .starts_with("invalid_session_api_key:")
+    );
+    assert_eq!(
+        update_session_api_key(&state, "session_a", "x".repeat(8 * 1024 + 1)).unwrap_err(),
+        "session_api_key_too_large"
+    );
+}
+
+#[test]
 fn session_creation_applies_independent_runtime_env_without_mutating_defaults() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_session_env_{}", now_ms()));
@@ -703,10 +1599,6 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     set_test_mem(&state, root.join("data"), ".test_mem");
 
     let first_env = BTreeMap::from([
-        (
-            "TIMEM_GATEWAY_PROVIDER".to_string(),
-            "anthropic".to_string(),
-        ),
         ("TIMEM_MODEL".to_string(), "claude-session-a".to_string()),
         ("TIMEM_API_PROTOCOL".to_string(), "anthropic".to_string()),
         ("TIMEM_RESPONSE_PROTOCOL".to_string(), "json".to_string()),
@@ -740,12 +1632,10 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     .unwrap();
 
     let sessions = state.sessions.lock().unwrap();
-    assert_eq!(sessions[&first].runtime_profile.provider, "anthropic");
     assert_eq!(sessions[&first].runtime_profile.model, "claude-session-a");
     assert_eq!(sessions[&first].runtime_profile.api_protocol, "anthropic");
     assert_eq!(sessions[&first].runtime_profile.response_protocol, "json");
     assert_eq!(sessions[&first].max_llm_input_tokens, 128_000);
-    assert_eq!(sessions[&second].runtime_profile.provider, "test");
     assert_eq!(sessions[&second].runtime_profile.model, "qwen-session-b");
     assert_eq!(
         sessions[&second].runtime_profile.response_protocol,
@@ -782,7 +1672,6 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     drop(sessions);
 
     let defaults = state.template.settings.lock().unwrap();
-    assert_eq!(defaults.config.provider, "test");
     assert_eq!(defaults.config.model, "test-model");
     assert_eq!(defaults.config.max_llm_input_tokens, 10_000);
     drop(defaults);
@@ -790,7 +1679,6 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     let serialized = serde_json::to_string(&snapshot_for(&state, 12345)).unwrap();
     assert!(!serialized.contains("session-a-secret"));
     assert!(!serialized.contains("TIMEM_API_KEY"));
-
     let mut lifecycle_profiles = BTreeMap::new();
     let mut lifecycle_leaked_secret = false;
     for _ in 0..100 {
@@ -804,7 +1692,6 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
                     lifecycle_profiles.insert(
                         session_id,
                         (
-                            lifecycle.profile.provider,
                             lifecycle.profile.model,
                             lifecycle.response_protocol,
                             lifecycle.max_llm_input_tokens,
@@ -820,21 +1707,11 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     }
     assert_eq!(
         lifecycle_profiles.get(&first),
-        Some(&(
-            "anthropic".to_string(),
-            "claude-session-a".to_string(),
-            "json".to_string(),
-            128_000,
-        ))
+        Some(&("claude-session-a".to_string(), "json".to_string(), 128_000,))
     );
     assert_eq!(
         lifecycle_profiles.get(&second),
-        Some(&(
-            "test".to_string(),
-            "qwen-session-b".to_string(),
-            "markdown".to_string(),
-            64_000,
-        ))
+        Some(&("qwen-session-b".to_string(), "markdown".to_string(), 64_000,))
     );
     assert!(!lifecycle_leaked_secret);
 }
@@ -920,19 +1797,25 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let turn = start_web_turn(&state, &session_id, "remember this after restart").unwrap();
     assert_eq!(turn.user_entries[0].text, "remember this after restart");
 
-    // Simulate a session persisted by the previous Web host, where `env`
-    // contained the fully resolved profile and carried no override provenance.
+    // Simulate a session persisted by the previous Web host. The effective
+    // Session environment remains authoritative even without separate override
+    // provenance.
     let store = current_session_store(&state).unwrap();
     let mut legacy = store.load_session(&session_id).unwrap().unwrap();
     legacy.env_overrides = None;
     legacy
         .env
         .insert("TIMEM_MODEL".to_string(), "stale-model".to_string());
+    legacy.env.insert(
+        "TIMEM_GATEWAY_PROVIDER".to_string(),
+        "retired-provider".to_string(),
+    );
     store.upsert_session(&legacy).unwrap();
 
-    // A default-inheriting session must follow the environment/configuration
-    // used by the newly started host instead of pinning its old resolved model.
+    // Changing a later host default must not silently replace a restored
+    // Session's cached runtime environment.
     template.settings.lock().unwrap().config.model = "model-from-new-env".to_string();
+    let expected_migrated_key = template.settings.lock().unwrap().config.api_key.clone();
 
     let mut restarted = routing_test_state();
     restarted.sessions.lock().unwrap().clear();
@@ -957,8 +1840,24 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     );
     assert!(restored_session.active_turn_id.is_none());
     assert!(restored_session.resume_notice_pending);
-    assert_eq!(restored_session.runtime_profile.model, "model-from-new-env");
+    assert_eq!(restored_session.runtime_profile.model, "stale-model");
     drop(sessions);
+
+    let migrated = current_session_store(&restarted)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(migrated.updated_at_ms, legacy.updated_at_ms);
+    assert_eq!(
+        migrated.env.get("TIMEM_MODEL").map(String::as_str),
+        Some("stale-model")
+    );
+    assert_eq!(
+        migrated.env.get("TIMEM_API_KEY").map(String::as_str),
+        Some(expected_migrated_key.as_str())
+    );
+    assert!(!migrated.env.contains_key("TIMEM_GATEWAY_PROVIDER"));
 
     let context = session_context(&restarted, &session_id, &[])
         .unwrap()
@@ -970,6 +1869,175 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
         .unwrap()
         .unwrap_or_default();
     assert!(!context_after_first_use.contains("This session was restored"));
+}
+
+#[test]
+fn restore_keeps_multiple_legacy_sessions_when_retired_provider_cache_is_present() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_legacy_sessions"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "legacy_sessions_mem";
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    set_test_mem(&state, data_dir.clone(), space);
+    state.sessions.lock().unwrap().clear();
+
+    for name in ["ADstart", "self-dev"] {
+        let session_id = create_session(
+            &state,
+            Some(name.to_string()),
+            Some(root.display().to_string()),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let store = current_session_store(&state).unwrap();
+        let mut stored = store.load_session(&session_id).unwrap().unwrap();
+        stored.env.insert(
+            "TIMEM_GATEWAY_PROVIDER".to_string(),
+            "retired-provider".to_string(),
+        );
+        store.upsert_session(&stored).unwrap();
+    }
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 2);
+    let sessions = restarted.sessions.lock().unwrap();
+    let names = sessions
+        .values()
+        .map(|session| session.display_name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(names, BTreeSet::from(["ADstart", "self-dev"]));
+    drop(sessions);
+
+    for stored in current_session_store(&restarted)
+        .unwrap()
+        .list_sessions()
+        .unwrap()
+    {
+        assert!(!stored.env.contains_key("TIMEM_GATEWAY_PROVIDER"));
+    }
+}
+
+#[test]
+fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_deferred_mcp_restore"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let marker = root.join("mcp_process_started");
+    let space = "deferred_mcp_restore_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.mcp_configs.push(McpServerConfig {
+            id: "blocking-on-connect".to_string(),
+            name: "Blocking on connect".to_string(),
+            enabled: true,
+            transport: agent_core::mcp::McpTransportConfig::Stdio {
+                command: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    format!("touch '{}'; sleep 30", marker.display()),
+                ],
+                env: BTreeMap::new(),
+            },
+            request_timeout_ms: 100,
+        });
+        mem.mcp_store.save(&mem.mcp_configs).unwrap();
+    }
+
+    let started = Instant::now();
+    let session_id = create_session(
+        &state,
+        Some("Deferred MCP".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!marker.exists(), "worker creation must not connect to MCP");
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.mcp_server_ids, vec!["blocking-on-connect"]);
+        assert_ne!(
+            session.mcp_config_revision,
+            session.applied_mcp_config_revision
+        );
+    }
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    let started = Instant::now();
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 1);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        !marker.exists(),
+        "session restore must not connect to an external MCP server"
+    );
+    let sessions = restarted.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_ne!(
+        session.mcp_config_revision,
+        session.applied_mcp_config_revision
+    );
+    drop(sessions);
+
+    let started = Instant::now();
+    assert_eq!(
+        schedule_selected_session_mcp_refreshes(&restarted).unwrap(),
+        1
+    );
+    assert_eq!(
+        schedule_selected_session_mcp_refreshes(&restarted).unwrap(),
+        0,
+        "an in-flight MCP discovery must be deduplicated"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "background MCP prewarm must return immediately"
+    );
+
+    let started = Instant::now();
+    assert!(apply_pending_session_mcp(&restarted, &session_id).unwrap());
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "turn preparation must not wait for MCP discovery"
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let report = mcp_reports(&restarted.mem.lock().unwrap())
+            .into_iter()
+            .next()
+            .unwrap();
+        if report.state == "error" {
+            assert!(marker.exists(), "background discovery was not attempted");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background MCP failure was not reported"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]
@@ -1060,7 +2128,7 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
 }
 
 #[test]
-fn restored_session_keeps_only_explicit_non_secret_runtime_overrides() {
+fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_overrides"));
     std::fs::create_dir_all(&root).unwrap();
@@ -1105,7 +2173,14 @@ fn restored_session_keeps_only_explicit_non_secret_runtime_overrides() {
         persisted_overrides.get("TIMEM_STREAM").map(String::as_str),
         Some("true")
     );
-    assert!(stored.env.is_empty());
+    assert_eq!(
+        stored.env.get("TIMEM_MODEL").map(String::as_str),
+        Some("session-model")
+    );
+    assert_eq!(
+        stored.env.get("TIMEM_API_KEY").map(String::as_str),
+        Some("session-only-secret")
+    );
 
     template.settings.lock().unwrap().config.model = "model-from-new-env".to_string();
     template.settings.lock().unwrap().config.api_key = "new-process-secret".to_string();
@@ -1120,9 +2195,12 @@ fn restored_session_keeps_only_explicit_non_secret_runtime_overrides() {
     assert_eq!(restored.runtime_profile.model, "session-model");
     assert_eq!(
         restored.runtime.settings.config.api_key,
-        "new-process-secret"
+        "session-only-secret"
     );
     assert!(restored.runtime.settings.config.openai_compatible.stream);
+    assert!(!serde_json::to_string(restored)
+        .unwrap()
+        .contains("session-only-secret"));
 }
 
 #[test]
@@ -1401,7 +2479,7 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
         create_session(&state, Some("Beta work".to_string()), None, BTreeMap::new()).unwrap();
     start_web_turn(&state, &beta_session, "beta task").unwrap();
 
-    set_test_mem(&state, data_dir, "alpha");
+    set_test_mem(&state, data_dir.clone(), "alpha");
     state.sessions.lock().unwrap().clear();
     restore_stored_sessions(&state).unwrap();
     assert!(state.sessions.lock().unwrap().contains_key(&alpha_session));
@@ -1412,7 +2490,7 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
         &state,
         TEST_PORT,
         ClientCommand::MemSwitch {
-            space: "beta".to_string(),
+            path: data_dir.join("beta").display().to_string(),
         },
     )
     .unwrap()
@@ -1433,22 +2511,23 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
 }
 
 #[test]
-fn mem_switch_rejects_paths_and_parent_traversal() {
+fn mem_switch_requires_a_safe_absolute_directory_path() {
     let state = routing_test_state();
-    for space in [
+    let too_long = format!("/tmp/{}", "a".repeat(4097));
+    for path in [
         "",
         ".",
         "..",
         "../other",
-        "/tmp/mem",
         "alpha/beta",
-        "alpha..beta",
+        "/tmp/../other",
+        too_long.as_str(),
     ] {
         assert!(handle_command(
             &state,
             TEST_PORT,
             ClientCommand::MemSwitch {
-                space: space.to_string(),
+                path: path.to_string(),
             },
         )
         .is_err());
@@ -1513,6 +2592,43 @@ fn session_runtime_env_rejects_unknown_empty_and_invalid_values() {
 }
 
 #[test]
+fn session_runtime_env_accepts_an_explicitly_unconfigured_api_key_draft() {
+    let state = routing_test_state();
+    let settings = state
+        .template
+        .session_settings(&BTreeMap::from([(
+            "TIMEM_API_KEY".to_string(),
+            String::new(),
+        )]))
+        .unwrap();
+    assert!(settings.config.api_key.is_empty());
+}
+
+#[test]
+fn session_runtime_env_restores_protocol_base_url_and_model_as_one_configuration() {
+    let state = routing_test_state();
+    let settings = state
+        .template
+        .session_settings(&BTreeMap::from([
+            (
+                "TIMEM_BASE_URL".to_string(),
+                "https://gateway.example.test/v1".to_string(),
+            ),
+            ("TIMEM_API_PROTOCOL".to_string(), "anthropic".to_string()),
+            ("TIMEM_MODEL".to_string(), "custom-model".to_string()),
+            ("TIMEM_API_KEY".to_string(), String::new()),
+        ]))
+        .unwrap();
+    assert_eq!(settings.config.base_url, "https://gateway.example.test/v1");
+    assert_eq!(
+        settings.config.api_protocol,
+        agent_core::ApiProtocol::Anthropic
+    );
+    assert_eq!(settings.config.model, "custom-model");
+    assert!(settings.config.api_key.is_empty());
+}
+
+#[test]
 fn ask_mode_does_not_announce_work_instructions_before_user_acceptance() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -1541,8 +2657,7 @@ fn ask_mode_does_not_announce_work_instructions_before_user_acceptance() {
 }
 
 fn routing_test_state() -> AppState {
-    let config = ProviderConfig {
-        provider: "test".to_string(),
+    let config = ModelServiceConfig {
         model: "test-model".to_string(),
         base_url: "http://127.0.0.1".to_string(),
         api_key: "test".to_string(),
@@ -1605,6 +2720,9 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         current_dir: "/work".to_string(),
         max_llm_input_tokens: 10_000,
         tools: Vec::new(),
+        mcp_server_ids: Vec::new(),
+        mcp_config_revision: 0,
+        applied_mcp_config_revision: 0,
         runtime_profile: test_runtime_profile(),
         contexts: vec![WebContext {
             context_id: context_id.clone(),
@@ -1651,8 +2769,7 @@ fn test_worker_id(session_id: &str) -> String {
 
 fn test_runtime_settings() -> RuntimeSettings {
     RuntimeSettings {
-        config: ProviderConfig {
-            provider: "test".to_string(),
+        config: ModelServiceConfig {
             model: "model".to_string(),
             base_url: "http://127.0.0.1:9".to_string(),
             api_key: "test".to_string(),
@@ -1670,7 +2787,6 @@ fn test_runtime_settings() -> RuntimeSettings {
 
 fn test_runtime_profile() -> WebSessionRuntimeProfile {
     WebSessionRuntimeProfile {
-        provider: "test".to_string(),
         model: "model".to_string(),
         api_protocol: "openai-compatible".to_string(),
         response_protocol: "xml".to_string(),
@@ -1680,6 +2796,7 @@ fn test_runtime_profile() -> WebSessionRuntimeProfile {
         max_llm_output_tokens: 1_024,
         bash_approval: "ask".to_string(),
         work_instructions: "off".to_string(),
+        api_key_configured: true,
     }
 }
 
@@ -2037,6 +3154,83 @@ fn web_runtime_shutdown_stops_all_session_workers() {
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
 }
 
+struct BlockingShutdownModel {
+    entered: Arc<AtomicUsize>,
+}
+
+impl ModelClient for BlockingShutdownModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(Duration::from_secs(2));
+        Ok(LlmResponse {
+            content: "<response><status>ALL_FINISHED</status><final_answer>late</final_answer></response>".to_string(),
+            model_name: "test-model".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn web_runtime_shutdown_detaches_active_workers_so_ctrl_c_can_exit() {
+    let state = routing_test_state();
+    let dir = std::env::temp_dir().join(unique_web_id("web_shutdown_active_worker"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entered = Arc::new(AtomicUsize::new(0));
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(&dir, dir.join("audit.json"), "test-web", "local"),
+            "session_a",
+            "context_active_shutdown",
+            Some("Active".to_string()),
+            None,
+            BlockingShutdownModel {
+                entered: Arc::clone(&entered),
+            },
+        )
+        .unwrap();
+    state
+        .manager
+        .lock()
+        .unwrap()
+        .handle(&worker_id)
+        .unwrap()
+        .run_turn("block", None)
+        .unwrap();
+    let started = Instant::now();
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(started.elapsed() < Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let shutdown_started = Instant::now();
+    shutdown_web_runtime(&state).unwrap();
+    assert!(
+        shutdown_started.elapsed() < Duration::from_millis(250),
+        "web Ctrl+C shutdown should not wait for an active model call to finish"
+    );
+    assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 struct CancelThenFinishModel {
     calls: Arc<AtomicUsize>,
     entered: Arc<AtomicUsize>,
@@ -2046,7 +3240,7 @@ struct CancelThenFinishModel {
 impl ModelClient for CancelThenFinishModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         _prompt: &str,
         _audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -2108,8 +3302,6 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
         let core = AgentCore::new(
             STATIC_PROMPT,
             CoreProfile {
-                name: "test".to_string(),
-                provider: "test".to_string(),
                 model: "test-model".to_string(),
             },
             &worker_dir,
@@ -2509,8 +3701,6 @@ fn lifecycle_updates_the_session_specific_context_limit() {
     let lifecycle = core_initialized_topic_event(
         "session_a",
         &CoreProfile {
-            name: "test".to_string(),
-            provider: "local".to_string(),
             model: "model".to_string(),
         },
         "xml",
@@ -2535,13 +3725,10 @@ fn user_supplement_is_retained_in_the_authoritative_web_session_snapshot() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "SUPPLEMENT_DONE");
     let turn = start_web_turn(&state, &session_id, "Inspect the project").unwrap();
-    handle_command(
+    append_turn_supplement_with_pending_attachments(
         &state,
-        TEST_PORT,
-        ClientCommand::TurnSupplement {
-            session_id: session_id.clone(),
-            text: "Use the second verification path".to_string(),
-        },
+        &session_id,
+        "Use the second verification path".to_string(),
     )
     .unwrap();
     let sessions = state.sessions.lock().unwrap();
@@ -2579,22 +3766,12 @@ fn active_turn_supplement_consumes_pending_attachments_into_the_same_turn() {
         .attachments
         .push(attachment.clone());
 
-    let event = handle_command(
+    let updated = append_turn_supplement_with_pending_attachments(
         &state,
-        TEST_PORT,
-        ClientCommand::TurnSubmit {
-            session_id: session_id.clone(),
-            text: "also use this attached context".to_string(),
-            input_kind: None,
-            source_turn_id: None,
-        },
+        &session_id,
+        "also use this attached context".to_string(),
     )
-    .unwrap()
-    .expect("active submit should become an attached supplement");
-
-    let WireEvent::TurnUpdated { turn: updated, .. } = event else {
-        panic!("expected turn update")
-    };
+    .unwrap();
     assert_eq!(updated.turn_id, turn.turn_id);
     assert_eq!(updated.user_entries.len(), 2);
     assert_eq!(updated.user_entries[1].kind, "supplement");
@@ -2692,18 +3869,79 @@ fn stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task() {
 }
 
 #[test]
+fn immediate_message_after_core_finalization_starts_a_new_turn() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "FINAL_RACE");
+    let first = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "finish immediately".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+        },
+    )
+    .unwrap()
+    .expect("first task should start");
+    let WireEvent::TurnUpdated { turn: first, .. } = first else {
+        panic!("expected first turn update")
+    };
+    let handle = primary_worker_handle(&state, &session_id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while handle.is_accepting_user_supplements() {
+        assert!(
+            Instant::now() < deadline,
+            "worker should close its supplement window"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .active_turn_id
+            .as_deref(),
+        Some(first.turn_id.as_str()),
+        "the host must still expose the narrow stale-working window"
+    );
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSupplement {
+            session_id: session_id.clone(),
+            text: "run this after the final answer".to_string(),
+        },
+    )
+    .unwrap()
+    .expect("late immediate message should be resubmitted as a new task");
+
+    let WireEvent::TurnUpdated { turn: second, .. } = event else {
+        panic!("expected second turn update")
+    };
+    assert_ne!(second.turn_id, first.turn_id);
+    assert_eq!(second.user_entries[0].kind, "task");
+    assert_eq!(
+        second.user_entries[0].text,
+        "run this after the final answer"
+    );
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .active_turn_id
+            .as_deref(),
+        Some(second.turn_id.as_str())
+    );
+}
+
+#[test]
 fn turn_user_entries_are_persisted_with_raw_text_and_semantic_kind() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "HISTORY_KIND_WRITE");
     let turn = start_web_turn(&state, &session_id, "initial task").unwrap();
 
-    handle_command(
+    append_turn_supplement_with_pending_attachments(
         &state,
-        TEST_PORT,
-        ClientCommand::TurnSupplement {
-            session_id: session_id.clone(),
-            text: "mid-turn correction".to_string(),
-        },
+        &session_id,
+        "mid-turn correction".to_string(),
     )
     .unwrap();
     handle_command(
@@ -2803,22 +4041,12 @@ fn rapid_submit_during_an_active_turn_is_treated_as_a_supplement() {
     let session_id = register_real_worker(&state, "SUBMIT_RACE");
     let first = start_web_turn(&state, &session_id, "initial upload task").unwrap();
 
-    let event = handle_command(
+    let turn = append_turn_supplement_with_pending_attachments(
         &state,
-        TEST_PORT,
-        ClientCommand::TurnSubmit {
-            session_id: session_id.clone(),
-            text: "stop if this is still running".to_string(),
-            input_kind: None,
-            source_turn_id: None,
-        },
+        &session_id,
+        "stop if this is still running".to_string(),
     )
-    .unwrap()
-    .expect("active submit should return the updated active turn");
-
-    let WireEvent::TurnUpdated { turn, .. } = event else {
-        panic!("expected turn update")
-    };
+    .unwrap();
     assert_eq!(turn.turn_id, first.turn_id);
     assert_eq!(turn.user_entries.len(), 2);
     assert_eq!(turn.user_entries[1].kind, "supplement");
@@ -2836,29 +4064,15 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
         "second correction after seeing output",
         "third correction from a rapid send click",
     ] {
-        handle_command(
-            &state,
-            TEST_PORT,
-            ClientCommand::TurnSubmit {
-                session_id: session_id.clone(),
-                text: text.to_string(),
-                input_kind: None,
-                source_turn_id: None,
-            },
-        )
-        .unwrap()
-        .expect("active submit should update the current turn");
+        append_turn_supplement_with_pending_attachments(&state, &session_id, text.to_string())
+            .unwrap();
     }
-    handle_command(
+    append_turn_supplement_with_pending_attachments(
         &state,
-        TEST_PORT,
-        ClientCommand::TurnSupplement {
-            session_id: session_id.clone(),
-            text: "explicit supplement command stays in the same turn".to_string(),
-        },
+        &session_id,
+        "explicit supplement command stays in the same turn".to_string(),
     )
-    .unwrap()
-    .expect("active supplement should update the current turn");
+    .unwrap();
 
     let sessions = state.sessions.lock().unwrap();
     let retained = sessions[&session_id]
@@ -2891,21 +4105,12 @@ fn rapid_stop_and_send_clicks_during_active_turn_do_not_break_the_session() {
     let session_id = register_real_worker(&state, "STOP_AND_SEND_RACE");
     let first = start_web_turn(&state, &session_id, "copy a large artifact").unwrap();
 
-    let event = handle_command(
+    let turn = append_turn_supplement_with_pending_attachments(
         &state,
-        TEST_PORT,
-        ClientCommand::TurnSubmit {
-            session_id: session_id.clone(),
-            text: "first correction before stopping".to_string(),
-            input_kind: None,
-            source_turn_id: None,
-        },
+        &session_id,
+        "first correction before stopping".to_string(),
     )
-    .unwrap()
-    .expect("active submit should update the active turn");
-    let WireEvent::TurnUpdated { turn, .. } = event else {
-        panic!("expected turn update")
-    };
+    .unwrap();
     assert_eq!(turn.turn_id, first.turn_id);
 
     for _ in 0..3 {
@@ -2920,21 +4125,12 @@ fn rapid_stop_and_send_clicks_during_active_turn_do_not_break_the_session() {
         .is_none());
     }
 
-    let event = handle_command(
+    let turn = append_turn_supplement_with_pending_attachments(
         &state,
-        TEST_PORT,
-        ClientCommand::TurnSubmit {
-            session_id: session_id.clone(),
-            text: "late correction from another rapid send click".to_string(),
-            input_kind: None,
-            source_turn_id: None,
-        },
+        &session_id,
+        "late correction from another rapid send click".to_string(),
     )
-    .unwrap()
-    .expect("late active submit should still update the active turn");
-    let WireEvent::TurnUpdated { turn, .. } = event else {
-        panic!("expected turn update")
-    };
+    .unwrap();
     assert_eq!(turn.turn_id, first.turn_id);
 
     let sessions = state.sessions.lock().unwrap();
@@ -3145,7 +4341,7 @@ struct TaggedFinalModel(&'static str);
 impl ModelClient for TaggedFinalModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         _prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -3175,7 +4371,7 @@ struct ToolGenPromptCaptureModel {
 impl ModelClient for ToolGenPromptCaptureModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -3203,7 +4399,7 @@ struct ToolGenPublishModel {
 impl ModelClient for ToolGenPublishModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -3270,7 +4466,7 @@ struct ChangeCwdModel {
 impl ModelClient for ChangeCwdModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         _prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -3309,8 +4505,6 @@ fn register_real_worker(state: &AppState, name: &'static str) -> String {
     let core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &worker_dir,
@@ -3364,8 +4558,6 @@ fn register_toolgen_capture_worker(state: &AppState, prompts: Arc<Mutex<Vec<Stri
     let core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &worker_dir,
@@ -3420,8 +4612,6 @@ fn register_toolgen_publish_worker(state: &AppState) -> String {
     let mut core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &memory_dir,
@@ -3821,8 +5011,6 @@ fn real_worker_cwd_tool_call_updates_web_session_state() {
     let mut core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         root.join("memory"),

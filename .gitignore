@@ -2,10 +2,12 @@ target/
 /key
 /.timem_native_shell/
 /data/
+/.timem_data/
 /env
 /*_env
 *.log
 *.tmp
+*.swp
 .DS_Store
 __pycache__/
 *.pyc

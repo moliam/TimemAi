@@ -5,7 +5,7 @@ use crate::{
     LlmResponse, PromptBlock, PromptBlockRole, ResponseProtocolKind, UsageStats,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiProtocol {
     OpenAiCompatible,
     OpenAiResponses,
@@ -34,68 +34,32 @@ pub fn parse_api_protocol(value: &str) -> Result<ApiProtocol, String> {
     }
 }
 
-pub fn default_api_protocol_for_provider(provider: &str) -> ApiProtocol {
-    match provider.trim().to_lowercase().as_str() {
-        "openai" => ApiProtocol::OpenAiResponses,
-        "anthropic" => ApiProtocol::Anthropic,
-        _ => ApiProtocol::OpenAiCompatible,
+pub fn default_api_protocol() -> ApiProtocol {
+    ApiProtocol::OpenAiCompatible
+}
+
+pub fn default_model() -> &'static str {
+    "qwen-plus"
+}
+
+pub fn is_default_model(model: &str) -> bool {
+    model.trim() == default_model()
+}
+
+pub fn default_base_url(api_protocol: &ApiProtocol) -> &'static str {
+    match api_protocol {
+        ApiProtocol::OpenAiCompatible => "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ApiProtocol::OpenAiResponses => "https://api.openai.com/v1",
+        ApiProtocol::Anthropic => "https://api.anthropic.com",
     }
 }
 
-pub fn default_model_for_provider(provider: &str) -> &'static str {
-    match provider.trim().to_lowercase().as_str() {
-        "openai" => "gpt-4o",
-        "anthropic" => "claude-sonnet-4-20250514",
-        _ => "qwen-plus",
-    }
-}
-
-pub fn is_default_model_for_provider(provider: &str, model: &str) -> bool {
-    let provider = provider.trim().to_lowercase();
-    let model = model.trim().to_lowercase();
-    match provider.as_str() {
-        "openai" => model.contains("gpt"),
-        "anthropic" => model.contains("claude"),
-        "aliyun" | "dashscope" => model.contains("qwen"),
-        _ => true,
-    }
-}
-
-fn default_base_url(provider: &str) -> &'static str {
-    match provider {
-        "openai" => "https://api.openai.com/v1",
-        "anthropic" => "https://api.anthropic.com",
-        "aliyun" | "dashscope" => "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        _ => "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    }
-}
-
-pub fn default_base_url_for_provider(provider: &str) -> String {
-    default_base_url(&provider.trim().to_lowercase()).to_string()
-}
-
-pub fn known_default_base_url_for_provider(provider: &str) -> Option<String> {
-    let provider = provider.trim().to_lowercase();
-    matches!(
-        provider.as_str(),
-        "openai" | "anthropic" | "aliyun" | "dashscope"
-    )
-    .then(|| default_base_url(&provider).to_string())
-}
-
-pub fn is_default_base_url_for_provider(provider: &str, base_url: &str) -> bool {
-    let provider = provider.trim().to_lowercase();
-    match provider.as_str() {
-        "openai" | "anthropic" | "aliyun" | "dashscope" => {
-            base_url.trim_end_matches('/') == default_base_url(&provider).trim_end_matches('/')
-        }
-        _ => true,
-    }
+pub fn is_default_base_url(api_protocol: &ApiProtocol, base_url: &str) -> bool {
+    base_url.trim_end_matches('/') == default_base_url(api_protocol).trim_end_matches('/')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderConfig {
-    pub provider: String,
+pub struct ModelServiceConfig {
     pub model: String,
     pub base_url: String,
     pub api_key: String,
@@ -114,11 +78,9 @@ pub struct OpenAiCompatibleOptions {
     pub stream: bool,
 }
 
-impl ProviderConfig {
+impl ModelServiceConfig {
     pub fn core_profile(&self) -> CoreProfile {
         CoreProfile {
-            name: self.provider.clone(),
-            provider: self.provider.clone(),
             model: self.model.clone(),
         }
     }
@@ -144,40 +106,40 @@ impl ProviderConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderPromptRole {
+pub enum ModelPromptRole {
     System,
     User,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderCacheControl {
+pub enum ModelCacheControl {
     None,
     Ephemeral,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderPromptBlock {
-    pub role: ProviderPromptRole,
+pub struct ModelPromptBlock {
+    pub role: ModelPromptRole,
     pub text: String,
-    pub cache: ProviderCacheControl,
+    pub cache: ModelCacheControl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedProviderRequest {
+pub struct PreparedModelRequest {
     pub body: Value,
     pub prompt_cache_plan: Value,
     pub structured_output: StructuredOutputHint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedProviderHttpRequest {
+pub struct PreparedModelHttpRequest {
     pub endpoint: String,
     pub headers: Vec<(String, String)>,
-    pub provider_request: PreparedProviderRequest,
+    pub model_request: PreparedModelRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderHttpResponseInterpretation {
+pub struct ModelHttpResponseInterpretation {
     pub status: u16,
     pub raw_json: Value,
     pub result: Result<LlmResponse, String>,
@@ -189,27 +151,19 @@ pub enum StructuredOutputHint {
     JsonObject,
 }
 
-pub fn plan_structured_output(config: &ProviderConfig) -> StructuredOutputHint {
+pub fn plan_structured_output(config: &ModelServiceConfig) -> StructuredOutputHint {
     if config.response_protocol != ResponseProtocolKind::Json {
         return StructuredOutputHint::None;
     }
     match config.api_protocol {
-        ApiProtocol::OpenAiCompatible
-            if supports_openai_compatible_json_object(&config.provider) =>
-        {
-            StructuredOutputHint::JsonObject
-        }
+        ApiProtocol::OpenAiCompatible => StructuredOutputHint::JsonObject,
         _ => StructuredOutputHint::None,
     }
 }
 
-fn supports_openai_compatible_json_object(provider: &str) -> bool {
-    matches!(provider, "aliyun" | "dashscope" | "openai")
-}
-
-pub fn build_provider_request(
-    config: &ProviderConfig,
-    blocks: &[ProviderPromptBlock],
+pub fn build_model_request(
+    config: &ModelServiceConfig,
+    blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
 ) -> Value {
     match config.api_protocol {
@@ -221,32 +175,32 @@ pub fn build_provider_request(
     }
 }
 
-pub fn prepare_provider_request(
-    config: &ProviderConfig,
+pub fn prepare_model_request(
+    config: &ModelServiceConfig,
     rendered_prompt: &str,
-) -> PreparedProviderRequest {
+) -> PreparedModelRequest {
     let prompt_blocks = plan_prompt_cache(rendered_prompt);
     let structured_output = plan_structured_output(config);
-    let provider_blocks = provider_prompt_blocks(&prompt_blocks);
-    PreparedProviderRequest {
-        body: build_provider_request(config, &provider_blocks, structured_output),
+    let model_blocks = model_prompt_blocks(&prompt_blocks);
+    PreparedModelRequest {
+        body: build_model_request(config, &model_blocks, structured_output),
         prompt_cache_plan: prompt_cache_plan_audit(&prompt_blocks),
         structured_output,
     }
 }
 
-pub fn prepare_provider_http_request(
-    config: &ProviderConfig,
+pub fn prepare_model_http_request(
+    config: &ModelServiceConfig,
     rendered_prompt: &str,
-) -> PreparedProviderHttpRequest {
-    PreparedProviderHttpRequest {
+) -> PreparedModelHttpRequest {
+    PreparedModelHttpRequest {
         endpoint: config.endpoint(),
-        headers: provider_http_headers(config),
-        provider_request: prepare_provider_request(config, rendered_prompt),
+        headers: model_http_headers(config),
+        model_request: prepare_model_request(config, rendered_prompt),
     }
 }
 
-fn provider_http_headers(config: &ProviderConfig) -> Vec<(String, String)> {
+fn model_http_headers(config: &ModelServiceConfig) -> Vec<(String, String)> {
     let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
     match config.api_protocol {
         ApiProtocol::OpenAiCompatible | ApiProtocol::OpenAiResponses => {
@@ -263,14 +217,14 @@ fn provider_http_headers(config: &ProviderConfig) -> Vec<(String, String)> {
     headers
 }
 
-pub fn provider_request_audit_event(
-    config: &ProviderConfig,
-    prepared_request: &PreparedProviderRequest,
+pub fn model_request_audit_event(
+    config: &ModelServiceConfig,
+    prepared_request: &PreparedModelRequest,
 ) -> Value {
     json!({
         "type": "llm_request",
-        "provider": config.provider,
         "model": config.model,
+        "api_protocol": config.api_protocol.label(),
         "endpoint": config.endpoint(),
         "prompt_cache_plan": prepared_request.prompt_cache_plan,
         "structured_output": structured_output_label(prepared_request.structured_output),
@@ -278,7 +232,7 @@ pub fn provider_request_audit_event(
     })
 }
 
-pub fn provider_response_audit_event(status: u16, raw_body: &Value) -> Value {
+pub fn model_response_audit_event(status: u16, raw_body: &Value) -> Value {
     let error_kind = if !(200..400).contains(&status) {
         "http_error"
     } else {
@@ -308,18 +262,18 @@ fn structured_output_label(value: StructuredOutputHint) -> &'static str {
     }
 }
 
-pub fn provider_prompt_blocks(blocks: &[PromptBlock]) -> Vec<ProviderPromptBlock> {
+pub fn model_prompt_blocks(blocks: &[PromptBlock]) -> Vec<ModelPromptBlock> {
     blocks
         .iter()
-        .map(|block| ProviderPromptBlock {
+        .map(|block| ModelPromptBlock {
             role: match block.role {
-                PromptBlockRole::System => ProviderPromptRole::System,
-                PromptBlockRole::User => ProviderPromptRole::User,
+                PromptBlockRole::System => ModelPromptRole::System,
+                PromptBlockRole::User => ModelPromptRole::User,
             },
             text: block.text.clone(),
             cache: match block.cache {
-                CacheControl::None => ProviderCacheControl::None,
-                CacheControl::Ephemeral => ProviderCacheControl::Ephemeral,
+                CacheControl::None => ModelCacheControl::None,
+                CacheControl::Ephemeral => ModelCacheControl::Ephemeral,
             },
         })
         .collect()
@@ -348,8 +302,8 @@ pub fn prompt_cache_plan_audit(blocks: &[PromptBlock]) -> Value {
 }
 
 fn build_openai_compatible_request(
-    config: &ProviderConfig,
-    blocks: &[ProviderPromptBlock],
+    config: &ModelServiceConfig,
+    blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
 ) -> Value {
     let messages = blocks
@@ -383,18 +337,18 @@ fn build_openai_compatible_request(
 }
 
 fn build_openai_responses_request(
-    config: &ProviderConfig,
-    blocks: &[ProviderPromptBlock],
+    config: &ModelServiceConfig,
+    blocks: &[ModelPromptBlock],
 ) -> Value {
     let instructions = blocks
         .iter()
-        .filter(|block| block.role == ProviderPromptRole::System)
+        .filter(|block| block.role == ModelPromptRole::System)
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
     let input = blocks
         .iter()
-        .filter(|block| block.role == ProviderPromptRole::User)
+        .filter(|block| block.role == ModelPromptRole::User)
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
@@ -406,10 +360,10 @@ fn build_openai_responses_request(
     })
 }
 
-fn build_anthropic_request(config: &ProviderConfig, blocks: &[ProviderPromptBlock]) -> Value {
+fn build_anthropic_request(config: &ModelServiceConfig, blocks: &[ModelPromptBlock]) -> Value {
     let system = blocks
         .iter()
-        .filter(|block| block.role == ProviderPromptRole::System)
+        .filter(|block| block.role == ModelPromptRole::System)
         .map(|block| {
             let mut item = json!({"type":"text", "text": block.text});
             apply_cache_control(&mut item, block.cache);
@@ -418,7 +372,7 @@ fn build_anthropic_request(config: &ProviderConfig, blocks: &[ProviderPromptBloc
         .collect::<Vec<_>>();
     let content = blocks
         .iter()
-        .filter(|block| block.role == ProviderPromptRole::User)
+        .filter(|block| block.role == ModelPromptRole::User)
         .map(|block| {
             let mut item = json!({"type":"text", "text": block.text});
             apply_cache_control(&mut item, block.cache);
@@ -433,15 +387,15 @@ fn build_anthropic_request(config: &ProviderConfig, blocks: &[ProviderPromptBloc
     })
 }
 
-fn role_label(role: ProviderPromptRole) -> &'static str {
+fn role_label(role: ModelPromptRole) -> &'static str {
     match role {
-        ProviderPromptRole::System => "system",
-        ProviderPromptRole::User => "user",
+        ModelPromptRole::System => "system",
+        ModelPromptRole::User => "user",
     }
 }
 
-fn apply_cache_control(value: &mut Value, cache: ProviderCacheControl) {
-    if cache == ProviderCacheControl::Ephemeral {
+fn apply_cache_control(value: &mut Value, cache: ModelCacheControl) {
+    if cache == ModelCacheControl::Ephemeral {
         if let Some(map) = value.as_object_mut() {
             map.insert("cache_control".to_string(), json!({"type":"ephemeral"}));
         }
@@ -456,8 +410,8 @@ fn apply_structured_output(value: &mut Value, structured_output: StructuredOutpu
     }
 }
 
-pub fn parse_provider_response(
-    config: &ProviderConfig,
+pub fn parse_model_response(
+    config: &ModelServiceConfig,
     raw: &Value,
 ) -> Result<LlmResponse, String> {
     let (content, usage, truncated) = match config.api_protocol {
@@ -596,12 +550,12 @@ pub fn parse_provider_response(
     })
 }
 
-pub fn interpret_provider_http_response(
-    config: &ProviderConfig,
+pub fn interpret_model_http_response(
+    config: &ModelServiceConfig,
     status: u16,
     body_text: &str,
     stderr_text: &str,
-) -> ProviderHttpResponseInterpretation {
+) -> ModelHttpResponseInterpretation {
     if (200..300).contains(&status)
         && config.api_protocol == ApiProtocol::OpenAiCompatible
         && looks_like_sse(body_text)
@@ -617,7 +571,7 @@ pub fn interpret_provider_http_response(
         })
     });
     let result = if !(200..300).contains(&status) {
-        Err(provider_http_error_message(status, &raw_json))
+        Err(model_http_error_message(status, &raw_json))
     } else if !parsed_json {
         Ok(LlmResponse {
             content: body_text.to_string(),
@@ -626,9 +580,9 @@ pub fn interpret_provider_http_response(
             truncated: false,
         })
     } else {
-        parse_provider_response(config, &raw_json)
+        parse_model_response(config, &raw_json)
     };
-    ProviderHttpResponseInterpretation {
+    ModelHttpResponseInterpretation {
         status,
         raw_json,
         result,
@@ -643,10 +597,10 @@ fn looks_like_sse(body: &str) -> bool {
 }
 
 fn interpret_openai_compatible_sse(
-    config: &ProviderConfig,
+    config: &ModelServiceConfig,
     status: u16,
     body_text: &str,
-) -> ProviderHttpResponseInterpretation {
+) -> ModelHttpResponseInterpretation {
     let mut content = String::new();
     let mut finish_reason = String::new();
     let mut usage = Value::Null;
@@ -665,7 +619,7 @@ fn interpret_openai_compatible_sse(
         let event: Value = match serde_json::from_str(payload) {
             Ok(event) => event,
             Err(error) => {
-                parse_error = Some(format!("invalid_provider_sse_event: {error}"));
+                parse_error = Some(format!("invalid_model_sse_event: {error}"));
                 break;
             }
         };
@@ -708,36 +662,36 @@ fn interpret_openai_compatible_sse(
     });
     let result = match parse_error {
         Some(error) => Err(error),
-        None if event_count == 0 => Err("empty_provider_sse_response".to_string()),
-        None => parse_provider_response(config, &raw_json),
+        None if event_count == 0 => Err("empty_model_sse_response".to_string()),
+        None => parse_model_response(config, &raw_json),
     };
-    ProviderHttpResponseInterpretation {
+    ModelHttpResponseInterpretation {
         status,
         raw_json,
         result,
     }
 }
 
-pub fn provider_http_error_message(status: u16, body: &Value) -> String {
-    let reason = provider_error_reason(body)
-        .map(sanitize_provider_error_reason)
+pub fn model_http_error_message(status: u16, body: &Value) -> String {
+    let reason = model_error_reason(body)
+        .map(sanitize_model_error_reason)
         .filter(|text| !text.trim().is_empty());
     if status == 0 {
         return match reason {
             Some(reason) if reason.to_lowercase().contains("timed out") => {
-                format!("provider_timeout: {reason}")
+                format!("model_timeout: {reason}")
             }
-            Some(reason) => format!("provider_network_error: {reason}"),
-            None => "provider_network_error".to_string(),
+            Some(reason) => format!("model_network_error: {reason}"),
+            None => "model_network_error".to_string(),
         };
     }
     match reason {
-        Some(reason) => format!("provider_http_{status}: {reason}"),
-        None => format!("provider_http_{status}"),
+        Some(reason) => format!("model_http_{status}: {reason}"),
+        None => format!("model_http_{status}"),
     }
 }
 
-fn provider_error_reason(body: &Value) -> Option<String> {
+fn model_error_reason(body: &Value) -> Option<String> {
     for pointer in [
         "/error/message",
         "/error/code",
@@ -770,10 +724,10 @@ fn provider_error_reason(body: &Value) -> Option<String> {
     None
 }
 
-fn sanitize_provider_error_reason(reason: String) -> String {
+fn sanitize_model_error_reason(reason: String) -> String {
     let single_line = reason.split_whitespace().collect::<Vec<_>>().join(" ");
     let redacted = redact_secret_like_text(&single_line);
-    compact_provider_error_text(&redacted, 240)
+    compact_model_error_text(&redacted, 240)
 }
 
 fn redact_secret_like_text(text: &str) -> String {
@@ -795,7 +749,7 @@ fn redact_secret_like_text(text: &str) -> String {
         .join(" ")
 }
 
-fn compact_provider_error_text(text: &str, max_chars: usize) -> String {
+fn compact_model_error_text(text: &str, max_chars: usize) -> String {
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out = String::new();
     for (idx, ch) in one_line.chars().enumerate() {
@@ -837,5 +791,5 @@ fn extract_openai_response_text(raw: &Value) -> String {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/provider_tests.rs"]
+#[path = "../tests/unit/model_api_tests.rs"]
 mod tests;

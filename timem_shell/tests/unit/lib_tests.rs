@@ -33,9 +33,8 @@ fn visible_width_for_test(text: &str) -> usize {
 
 #[test]
 fn generic_api_key_wins_over_vendor_key() {
-    let config = provider_config_from_env(
+    let config = model_service_config_from_env(
         &CliOptions {
-            provider: Some("aliyun".into()),
             ..CliOptions::default()
         },
         &env(&[
@@ -48,10 +47,10 @@ fn generic_api_key_wins_over_vendor_key() {
 }
 
 #[test]
-fn default_gateway_provider_is_aliyun() {
+fn default_model_service_has_explicit_protocol_and_endpoint() {
     let config =
-        provider_config_from_env(&CliOptions::default(), &env(&[("TIMEM_API_KEY", "k")])).unwrap();
-    assert_eq!(config.provider, "aliyun");
+        model_service_config_from_env(&CliOptions::default(), &env(&[("TIMEM_API_KEY", "k")]))
+            .unwrap();
     assert_eq!(config.model, "qwen-plus");
     assert_eq!(
         config.base_url,
@@ -66,9 +65,8 @@ fn default_gateway_provider_is_aliyun() {
 
 #[test]
 fn empty_generic_api_key_falls_back_to_vendor_key() {
-    let config = provider_config_from_env(
+    let config = model_service_config_from_env(
         &CliOptions {
-            provider: Some("aliyun".into()),
             ..CliOptions::default()
         },
         &env(&[("TIMEM_API_KEY", ""), ("DASHSCOPE_API_KEY", "vendor")]),
@@ -79,9 +77,8 @@ fn empty_generic_api_key_falls_back_to_vendor_key() {
 
 #[test]
 fn empty_api_key_reports_missing_key() {
-    let err = provider_config_from_env(
+    let err = model_service_config_from_env(
         &CliOptions {
-            provider: Some("openai".into()),
             ..CliOptions::default()
         },
         &env(&[("TIMEM_API_KEY", ""), ("OPENAI_API_KEY", "")]),
@@ -92,9 +89,8 @@ fn empty_api_key_reports_missing_key() {
 
 #[test]
 fn non_ascii_api_key_reports_clear_error() {
-    let err = provider_config_from_env(
+    let err = model_service_config_from_env(
         &CliOptions {
-            provider: Some("aliyun".into()),
             ..CliOptions::default()
         },
         &env(&[("TIMEM_API_KEY", "你的token")]),
@@ -104,12 +100,10 @@ fn non_ascii_api_key_reports_clear_error() {
 }
 
 #[test]
-fn parse_cli_args_reads_provider_model_and_limits() {
+fn parse_cli_args_reads_model_service_and_limits() {
     let args = [
         "--space",
         ".x",
-        "--gateway-provider",
-        "custom-claude-gateway",
         "--api-protocol",
         "openai-compatible",
         "--response-protocol",
@@ -144,7 +138,6 @@ fn parse_cli_args_reads_provider_model_and_limits() {
     .collect::<Vec<_>>();
     let options = parse_cli_args(&args);
     assert_eq!(options.space.as_deref(), Some(".x"));
-    assert_eq!(options.provider.as_deref(), Some("custom-claude-gateway"));
     assert_eq!(options.api_protocol.as_deref(), Some("openai-compatible"));
     assert_eq!(options.response_protocol.as_deref(), Some("xml"));
     assert_eq!(options.api_key.as_deref(), Some("cli-key"));
@@ -169,7 +162,7 @@ fn parse_cli_args_reads_provider_model_and_limits() {
 
 #[test]
 fn cli_api_key_overrides_env_api_key() {
-    let config = provider_config_from_env(
+    let config = model_service_config_from_env(
         &CliOptions {
             api_key: Some("cli-key".into()),
             ..CliOptions::default()
@@ -181,18 +174,18 @@ fn cli_api_key_overrides_env_api_key() {
 }
 
 #[test]
-fn default_token_limits_are_input_100k_and_output_10k() {
+fn default_token_limits_are_input_100k_and_output_20k() {
     let config =
-        provider_config_from_env(&CliOptions::default(), &env(&[("TIMEM_API_KEY", "k")])).unwrap();
+        model_service_config_from_env(&CliOptions::default(), &env(&[("TIMEM_API_KEY", "k")]))
+            .unwrap();
     assert_eq!(config.max_llm_input_tokens, 100_000);
-    assert_eq!(config.max_llm_output_tokens, 10_000);
+    assert_eq!(config.max_llm_output_tokens, 20_000);
 }
 
 #[test]
 fn cli_options_override_env_config_values() {
-    let config = provider_config_from_env(
+    let config = model_service_config_from_env(
         &CliOptions {
-            provider: Some("custom".into()),
             api_protocol: Some("anthropic".into()),
             model: Some("cli-model".into()),
             base_url: Some("https://cli.example/v1".into()),
@@ -203,7 +196,6 @@ fn cli_options_override_env_config_values() {
             ..CliOptions::default()
         },
         &env(&[
-            ("TIMEM_GATEWAY_PROVIDER", "aliyun"),
             ("TIMEM_API_PROTOCOL", "openai-compatible"),
             ("TIMEM_MODEL", "env-model"),
             ("TIMEM_BASE_URL", "https://env.example/v1"),
@@ -215,7 +207,6 @@ fn cli_options_override_env_config_values() {
     )
     .unwrap();
 
-    assert_eq!(config.provider, "custom");
     assert_eq!(config.api_protocol, ApiProtocol::Anthropic);
     assert_eq!(config.model, "cli-model");
     assert_eq!(config.base_url, "https://cli.example/v1");
@@ -226,17 +217,12 @@ fn cli_options_override_env_config_values() {
 }
 
 #[test]
-fn gateway_provider_env_selects_gateway_and_context_window() {
-    let config = provider_config_from_env(
+fn input_limit_env_selects_context_window() {
+    let config = model_service_config_from_env(
         &CliOptions::default(),
-        &env(&[
-            ("TIMEM_API_KEY", "k"),
-            ("TIMEM_GATEWAY_PROVIDER", "custom"),
-            ("TIMEM_MAX_LLM_INPUT", "128K"),
-        ]),
+        &env(&[("TIMEM_API_KEY", "k"), ("TIMEM_MAX_LLM_INPUT", "128K")]),
     )
     .unwrap();
-    assert_eq!(config.provider, "custom");
     assert_eq!(config.max_llm_input_tokens, 128_000);
 }
 
@@ -269,24 +255,23 @@ fn token_status_uses_compact_numbers() {
             ..UsageStats::zero()
         },
         None,
-        "aliyun",
         "qwen-plus",
         1,
         100_000,
         "10:52:57",
     );
-    assert!(rendered.contains("aliyun:qwen-plus ⇌3 ║ ▲1.2K  ▼88  KVC(⌁1.21M)"));
+    assert!(rendered.contains("qwen-plus ⇌3 ║ ▲1.2K  ▼88  KVC(⌁1.21M)"));
 }
 
 #[test]
 fn shell_renders_stopped_turn_text_from_core_summary() {
-    let stopped = TurnStopSummary::model_error("provider_http_400").into_stopped_turn();
+    let stopped = TurnStopSummary::model_error("model_http_400").into_stopped_turn();
     let outcome = TurnOutcome::stopped("", stopped, Duration::from_secs(1));
 
     assert!(outcome.text.is_empty());
     assert_eq!(
         render_turn_outcome_text(&outcome),
-        "模型调用失败：provider_http_400"
+        "模型调用失败：model_http_400"
     );
 }
 
@@ -332,14 +317,12 @@ fn final_status_shows_repair_call_count_when_present() {
             completion_tokens: 321,
             ..UsageStats::zero()
         }),
-        "custom",
         "aws-claude-opus-4-7",
         6,
         100_000,
         "22:29:07",
     );
-    assert!(rendered
-        .contains("custom:aws-claude-opus-4-7 ⇌13 (⚠3) ║ ctx[80%]  ▲85K  ▼3.5K  KVC(⌁53.9K)"));
+    assert!(rendered.contains("aws-claude-opus-4-7 ⇌13 (⚠3) ║ ctx[80%]  ▲85K  ▼3.5K  KVC(⌁53.9K)"));
 }
 
 #[test]
@@ -414,8 +397,8 @@ fn token_status_groups_cache_creation_as_kvc() {
         "△4.9K  ▽39  KVC(✚4.9K)"
     );
     assert_eq!(
-        final_status_line(&total, Some(&latest), "aliyun", "qwen-plus", 1, 100_000),
-        " ↳  1s    aliyun:qwen-plus ⇌0 ║ ctx[5%]  ▲4.9K  ▼39  KVC(✚4.9K)"
+        final_status_line(&total, Some(&latest), "qwen-plus", 1, 100_000),
+        " ↳  1s    qwen-plus ⇌0 ║ ctx[5%]  ▲4.9K  ▼39  KVC(✚4.9K)"
     );
 }
 
@@ -456,13 +439,13 @@ fn final_token_status_does_not_show_latest_output_delta() {
             completion_tokens: 45,
             ..UsageStats::zero()
         }),
-        "custom",
         "aws-claude-sonnet-4-6",
         2,
         100_000,
         "09:24:00",
     );
-    assert!(rendered.contains("custom:aws-claude-sonnet-4-6 ⇌1 ║ ctx[6%]  ▲5.1K  ▼45"));
+    assert!(rendered.contains("aws-claude-sonnet-4-6 ⇌1 ║ ctx[6%]  ▲5.1K  ▼45"));
+    assert!(!rendered.contains("custom:aws-claude-sonnet-4-6"));
     assert!(!rendered.contains("▼45(+45)"));
 }
 
@@ -470,7 +453,6 @@ fn final_token_status_does_not_show_latest_output_delta() {
 fn thinking_block_visual_contract() {
     let block = render_thinking_block_at(
         &ShellStatusSnapshot {
-            provider: "aliyun".into(),
             model: "qwen-plus".into(),
             intent: "查询记忆".into(),
             memory_activity: CoreMemoryActivity::Read,
@@ -496,7 +478,8 @@ fn thinking_block_visual_contract() {
     );
     assert!(block.contains("[08:56:33] 𝓣𝓲𝓶𝓮𝓶  ⬇"));
     assert!(block.contains("🦩 ◂⛃ 查询记忆..."));
-    assert!(block.contains("aliyun:qwen-plus ⇌2 ║ ▲210 | ▼21"));
+    assert!(block.contains("qwen-plus ⇌2 ║ ▲210 | ▼21"));
+    assert!(!block.contains("aliyun:qwen-plus"));
     assert!(block.contains("├─ context : ▰▱▱▱▱▱▱▱▱▱"));
     assert!(block.contains("└─ △110  ▽9"));
     assert!(!block.contains("已用 7s"));
@@ -509,7 +492,6 @@ fn thinking_block_visual_contract() {
 fn thinking_block_compacts_long_model_intent_to_two_lines() {
     let block = render_thinking_block_at(
             &ShellStatusSnapshot {
-                provider: "aliyun".into(),
                 model: "qwen-plus".into(),
                 intent: "Check local system date and calendar to verify current date context and compute June 12 significance (e.g., holiday, observance, personal memory).".into(),
                 memory_activity: CoreMemoryActivity::None,
@@ -543,7 +525,6 @@ fn thinking_view_renders_observation_panel_and_status_line() {
     let view = render_thinking_view_at(
         &ThinkingViewSnapshot {
             status: ShellStatusSnapshot {
-                provider: "aliyun".into(),
                 model: "qwen-plus".into(),
                 intent: "ignored in panel mode".into(),
                 memory_activity: CoreMemoryActivity::None,
@@ -575,7 +556,8 @@ fn thinking_view_renders_observation_panel_and_status_line() {
     assert!(view.contains("Thought / Action  ⏳ 00:12"));
     assert!(view.contains("· 正在分析用户请求"));
     assert!(view.contains("\x1b[38;5;245m· rg --files | wc -l"));
-    assert!(view.contains("aliyun:qwen-plus ⇌2 ║ ▲1.2K | ▼20 | KVC(⌁300)"));
+    assert!(view.contains("qwen-plus ⇌2 ║ ▲1.2K | ▼20 | KVC(⌁300)"));
+    assert!(!view.contains("aliyun:qwen-plus"));
     assert!(view.contains("├─ context : ▰▱▱▱▱▱▱▱▱▱"));
     assert!(view.contains("└─ △800  ▽12"));
     assert!(!view.contains("已用 12s"));
@@ -603,7 +585,6 @@ fn multi_worker_thinking_view_keeps_identity_and_bounded_layout() {
         observations.apply(ObservationEvent::Transient("思考中...".into()));
         ThinkingViewSnapshot {
             status: ShellStatusSnapshot {
-                provider: "aliyun".into(),
                 model: "qwen-plus".into(),
                 intent: "private model thought should not render".into(),
                 memory_activity: CoreMemoryActivity::None,
@@ -664,7 +645,7 @@ fn multi_worker_thinking_view_keeps_identity_and_bounded_layout() {
     assert!(rendered.contains("[09:30:00] 𝓣𝓲𝓶𝓮𝓶 Review  ⬇"));
     assert_eq!(rendered.matches("Thought / Action  ⏳").count(), 3);
     assert_eq!(rendered.matches("思考中...").count(), 3);
-    assert!(rendered.contains("aliyun:qwen-plus ⇌12 (⚠3)"));
+    assert!(rendered.contains("qwen-plus ⇌12 (⚠3)"));
     assert!(rendered.contains("KVC(⌁53.9K ✚4.9K)"));
     assert!(rendered.contains("└─ cargo test -p agent_core"));
     assert!(rendered.contains("└─ printf"));
@@ -686,7 +667,6 @@ fn thinking_status_line_shows_retry_from_structured_fields() {
     let view = render_thinking_view_at(
         &ThinkingViewSnapshot {
             status: ShellStatusSnapshot {
-                provider: "aliyun".into(),
                 model: "qwen-plus".into(),
                 intent: "ignored in panel mode".into(),
                 memory_activity: CoreMemoryActivity::None,
@@ -716,11 +696,10 @@ fn thinking_status_line_shows_retry_from_structured_fields() {
 
 #[test]
 fn thinking_status_line_compacts_long_retry_detail_to_one_line() {
-    let long_error = "provider_network_error: curl: (16) Error in the HTTP2 framing layer while reading response headers from upstream gateway after a long timeout";
+    let long_error = "model_network_error: curl: (16) Error in the HTTP2 framing layer while reading response headers from upstream gateway after a long timeout";
     let view = render_thinking_view_at(
         &ThinkingViewSnapshot {
             status: ShellStatusSnapshot {
-                provider: "aliyun".into(),
                 model: "qwen-plus".into(),
                 intent: String::new(),
                 memory_activity: CoreMemoryActivity::None,
@@ -745,7 +724,7 @@ fn thinking_status_line_compacts_long_retry_detail_to_one_line() {
 
     let retry_lines: Vec<_> = view
         .lines()
-        .filter(|line| line.contains("详情：provider_network_error"))
+        .filter(|line| line.contains("详情：model_network_error"))
         .collect();
     assert_eq!(retry_lines.len(), 1, "{view}");
     assert!(retry_lines[0].contains('…'), "{view}");
@@ -758,7 +737,6 @@ fn thinking_status_line_shows_network_retry_countdown_and_detail_line() {
     let view = render_thinking_view_at(
             &ThinkingViewSnapshot {
                 status: ShellStatusSnapshot {
-                    provider: "aliyun".into(),
                     model: "qwen-plus".into(),
                     intent: String::new(),
                     memory_activity: CoreMemoryActivity::None,
@@ -772,7 +750,7 @@ fn thinking_status_line_shows_network_retry_countdown_and_detail_line() {
                     retry: Some(RuntimeRetryStatus {
                         until_epoch_ms: Some(current_epoch_ms() + 10_000),
                         error: Some(
-                            "provider_network_error: curl: (16) Error in the HTTP2 framing layer while reading response headers from upstream gateway"
+                            "model_network_error: curl: (16) Error in the HTTP2 framing layer while reading response headers from upstream gateway"
                                 .into(),
                         ),
                         attempt: Some(1),
@@ -788,7 +766,7 @@ fn thinking_status_line_shows_network_retry_countdown_and_detail_line() {
         view.contains("├─ 网络错误，10s 后重试（第1/5次）"),
         "{view}"
     );
-    assert!(view.contains("└─ 详情：provider_network_error"), "{view}");
+    assert!(view.contains("└─ 详情：model_network_error"), "{view}");
     assert!(!view.contains("网络错误，10s 后重试（第1次）"), "{view}");
     assert!(!view.contains("reading response headers from upstream gateway"));
 }
@@ -799,13 +777,13 @@ fn retry_status_renderer_consumes_core_retry_view() {
         remaining_secs: 7,
         attempt: 2,
         max_attempts: 5,
-        error: Some("provider_timeout: upstream gateway timed out".to_string()),
+        error: Some("model_timeout: upstream gateway timed out".to_string()),
     });
 
     assert_eq!(lines[0], "  ├─ 网络错误，7s 后重试（第2/5次）");
     assert_eq!(
         lines[1],
-        "  └─ 详情：provider_timeout: upstream gateway timed out"
+        "  └─ 详情：model_timeout: upstream gateway timed out"
     );
 }
 
@@ -814,7 +792,6 @@ fn thinking_status_line_shows_repair_call_count_when_present() {
     let view = render_thinking_view_at(
         &ThinkingViewSnapshot {
             status: ShellStatusSnapshot {
-                provider: "custom".into(),
                 model: "aws-claude-sonnet-4-6".into(),
                 intent: "ignored in panel mode".into(),
                 memory_activity: CoreMemoryActivity::None,
@@ -841,7 +818,8 @@ fn thinking_status_line_shows_repair_call_count_when_present() {
         "12:00:00",
     );
 
-    assert!(view.contains("custom:aws-claude-sonnet-4-6 ⇌13 (⚠3) ║ ▲85K | ▼3.5K | KVC(⌁53.9K)"));
+    assert!(view.contains("aws-claude-sonnet-4-6 ⇌13 (⚠3) ║ ▲85K | ▼3.5K | KVC(⌁53.9K)"));
+    assert!(!view.contains("custom:aws-claude-sonnet-4-6"));
 }
 
 #[test]
@@ -855,7 +833,6 @@ fn thinking_view_renders_protocol_repair_warning_in_observation_panel() {
     let view = render_thinking_view_at(
         &ThinkingViewSnapshot {
             status: ShellStatusSnapshot {
-                provider: "aliyun".into(),
                 model: "qwen-plus".into(),
                 intent: "ignored in panel mode".into(),
                 memory_activity: CoreMemoryActivity::None,
@@ -888,7 +865,7 @@ fn thinking_view_renders_protocol_repair_warning_in_observation_panel() {
         "{view}"
     );
     assert!(view.contains("思考中..."), "{view}");
-    assert!(view.contains("aliyun:qwen-plus ⇌4 (⚠2)"), "{view}");
+    assert!(view.contains("qwen-plus ⇌4 (⚠2)"), "{view}");
 }
 
 #[test]
@@ -909,7 +886,6 @@ fn final_response_visual_contract() {
             completion_tokens: 31,
             ..UsageStats::zero()
         }),
-        "aliyun",
         "qwen-plus",
         2,
         100_000,
@@ -923,7 +899,7 @@ fn final_response_visual_contract() {
         .nth(1)
         .is_some_and(|line| line == "测试代号是 ALPHA-42。"));
     assert!(rendered.contains("测试代号是 ALPHA-42。"));
-    assert!(rendered.contains("aliyun:qwen-plus ⇌2 ║ ctx[1%]  ▲812  ▼52  KVC(⌁384)"));
+    assert!(rendered.contains("qwen-plus ⇌2 ║ ctx[1%]  ▲812  ▼52  KVC(⌁384)"));
     assert!(!rendered.contains("▼52(+31)"));
     assert!(!rendered.contains("你 >"));
     assert!(!rendered.contains("thinking..."));
@@ -940,7 +916,6 @@ fn final_response_renders_simple_markdown_bold() {
             ..UsageStats::zero()
         },
         None,
-        "custom",
         "aws-claude-sonnet-4-6",
         1,
         100_000,
@@ -961,7 +936,6 @@ fn final_response_renders_common_markdown_shapes() {
             ..UsageStats::zero()
         },
         None,
-        "custom",
         "qwen-plus",
         1,
         100_000,
@@ -996,7 +970,6 @@ fn final_status_line_is_always_dim_wrapped() {
             ..UsageStats::zero()
         },
         None,
-        "aliyun",
         "qwen-plus",
         1,
         100_000,
@@ -1034,8 +1007,6 @@ fn shell_status_bar_is_dim_wrapped_and_extensible() {
 #[test]
 fn shell_renders_core_lifecycle_topic_as_startup_status() {
     let profile = agent_core::CoreProfile {
-        name: "test".to_string(),
-        provider: "aliyun".to_string(),
         model: "qwen-plus".to_string(),
     };
     let event =
@@ -1045,7 +1016,8 @@ fn shell_renders_core_lifecycle_topic_as_startup_status() {
         .expect("shell should understand core lifecycle topic");
     assert_eq!(message.level, HostStatusLevel::Info);
     assert!(message.text.contains("Timem Core 启动成功"));
-    assert!(message.text.contains("aliyun:qwen-plus"));
+    assert!(message.text.contains("qwen-plus"));
+    assert!(!message.text.contains("aliyun:qwen-plus"));
     assert!(message.text.contains("response protocol=xml"));
     assert!(message.text.contains("tools=6"));
 
@@ -1078,8 +1050,6 @@ fn shell_renders_work_instruction_load_topic_as_status() {
 #[test]
 fn shell_renders_worker_identity_from_lifecycle_topic() {
     let profile = agent_core::CoreProfile {
-        name: "test".to_string(),
-        provider: "local".to_string(),
         model: "fake-model".to_string(),
     };
     let identity = agent_core::CoreSessionWorkerIdentity::new(
@@ -1104,7 +1074,8 @@ fn shell_renders_worker_identity_from_lifecycle_topic() {
     let message = shell_status_message_from_core_topic(&event)
         .expect("shell should render worker lifecycle topic");
     assert!(message.text.contains("Timem Core 日志分析 启动成功"));
-    assert!(message.text.contains("local:fake-model"));
+    assert!(message.text.contains("fake-model"));
+    assert!(!message.text.contains("local:fake-model"));
 }
 
 #[test]
@@ -1118,13 +1089,12 @@ fn no_memory_status_omits_memory_icon() {
             ..UsageStats::zero()
         },
         None,
-        "aliyun",
         "qwen-plus",
         1,
         100_000,
         "10:08:43",
     );
-    assert!(rendered.contains("aliyun:qwen-plus ⇌1 ║ ▲237  ▼26"));
+    assert!(rendered.contains("qwen-plus ⇌1 ║ ▲237  ▼26"));
     assert!(!rendered.contains("⛃"));
 }
 

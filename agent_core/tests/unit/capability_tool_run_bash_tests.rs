@@ -699,6 +699,14 @@ fn bash_validation_blocks_recursive_force_root_delete_variants() {
         "rm -rf $(printf '')/",
         "rm -rf $(printf '')/*",
         "if true; then rm -rf /; fi",
+        "sudo rm -rf /",
+        "sudo -n -- rm -rf /",
+        "command rm -rf /",
+        "builtin rm -rf /",
+        "exec rm -rf /",
+        "nohup rm -rf /",
+        "env EMPTY= rm -rf \"$EMPTY\"/",
+        "env -u EMPTY rm -rf ${EMPTY}/*",
     ] {
         assert_eq!(
             validate_bash_request(command),

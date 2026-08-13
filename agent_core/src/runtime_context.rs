@@ -25,7 +25,6 @@ pub fn runtime_time_context() -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupportingContextInput<'a> {
-    pub provider: &'a str,
     pub model: &'a str,
     pub runtime: &'a str,
     pub run_bash_target: &'a str,
@@ -33,8 +32,7 @@ pub struct SupportingContextInput<'a> {
 
 pub fn supporting_context(input: SupportingContextInput<'_>) -> String {
     format!(
-        "provider: {}, model: {}\nruntime: {}\nrun_bash_target: {}\nruntime_time: {}",
-        input.provider,
+        "model: {}\nruntime: {}\nrun_bash_target: {}\nruntime_time: {}",
         input.model,
         input.runtime,
         input.run_bash_target,
@@ -74,8 +72,8 @@ pub fn runtime_info_context(entries: &[impl AsRef<str>]) -> Option<String> {
 
 pub fn format_supporting_context(input: SupportingContextInput<'_>, runtime_time: &str) -> String {
     format!(
-        "provider: {}, model: {}\nruntime: {}\nrun_bash_target: {}\nruntime_time: {}",
-        input.provider, input.model, input.runtime, input.run_bash_target, runtime_time
+        "model: {}\nruntime: {}\nrun_bash_target: {}\nruntime_time: {}",
+        input.model, input.runtime, input.run_bash_target, runtime_time
     )
 }
 

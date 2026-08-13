@@ -10,12 +10,35 @@ It may contain:
 - Session worker orchestration and browser-facing snapshots.
 - Per-session runtime-profile collection and safe projection. The host copies
   global defaults when a Session is created, keeps secrets server-side, and
-  gives every context/worker belonging to that Session the same profile. It
-  does not reinterpret provider or protocol semantics.
+  gives every context/worker belonging to that Session the same profile. The
+  effective allowlisted runtime environment is cached in the core Session
+  store and updated immediately after supported runtime configuration changes;
+  explicit launch options retain precedence. Browser snapshots and topics must
+  use the redacted projection and never include the cached API key. The host
+  does not reinterpret model API or response protocol semantics.
+- Model service-incomplete startup for browser configurability. The host may hold an
+  empty API key while serving the UI and restoring history, but it must validate
+  the selected Session before creating a user turn or ToolGen turn. This Web
+  draft state must not weaken Shell startup or model service-call validation.
 - Static asset serving and browser transport backpressure/reconnect behavior.
+  Browser commands enter a bounded, ordered queue and execute on the blocking
+  pool; filesystem/session work must never stop the WebSocket loop from
+  forwarding core topics. Queue overflow is rejected explicitly rather than
+  growing memory without bound.
 - Per-session browser upload storage and attachment metadata. Uploaded bytes
   remain host-local; the host only contributes their paths as session context.
 - Host-only settings and UI command validation.
+- MCP configuration projection and Session enablement routing. Server
+  definitions are persisted in the active mem, secrets remain server-side and
+  are redacted in browser snapshots, and each Session carries its own enabled
+  server-id set. UI changes advance a Session-local desired revision. Worker
+  creation, Session restore, and new-turn submission must not wait on external
+  MCP I/O: they apply only an exact connected tool cache and schedule missing
+  discovery on a deduplicated background task. Successful discovery advances a
+  new desired revision for the following new-turn boundary; failure updates
+  connection status without blocking agent work. The host must not mutate a
+  running worker capability set, parse MCP arguments, or execute MCP tool calls
+  itself.
 - Session-scoped ToolGen commands and ToolRepo projections. The Web host may
   start ToolGen manually for an exact completed turn, attach optional user
   guidance, list/search/detail/rename tools, and request opening a validated
@@ -33,6 +56,16 @@ creation path can attach child workers to new contexts without moving profile
 ownership down to a worker. A different Session may use a different profile.
 One Context currently has exactly one worker; subtask concurrency is created as
 a new Context plus a new Worker so mutable prompt state cannot fork silently.
+Session credentials are server-owned. Web may replace or clear the API key for
+an idle Session, persist it in the owner-protected core Session index, and
+update every worker before the next turn. Browser snapshots and broadcast
+topics expose only `api_key_configured`; they must never serialize the key.
+Credential mutation during an active turn is rejected.
+An authenticated browser may explicitly reveal a Session API key or sensitive
+MCP map values for editing. Such plaintext is a direct reply to the requesting
+WebSocket only: it must not enter broadcast events, snapshots, prompt context,
+history, activity, or audit. The browser must discard the reply after closing
+the editor, changing Session/mem, reconnecting, or saving.
 
 Core topic routing is keyed by the cross-language scope tuple
 `session_id/context_id/worker_id`. Session-level commands currently target the
@@ -57,8 +90,8 @@ workers are not resumed or broadcast the new input.
 
 It must not contain:
 
-- Model provider wire formatting, curl calls, prompt assembly, memory semantics,
-  tool argument parsing, or tool execution.
+- Model API wire formatting, curl calls, prompt assembly, memory semantics,
+  tool argument parsing, MCP protocol execution, or other tool execution.
 - React layout, CSS, browser state reducers, or user-facing visual policy. Those
   belong in `web_ui/timem-web`.
 - Natural-language reinterpretation of core topics. UI receives semantic topic

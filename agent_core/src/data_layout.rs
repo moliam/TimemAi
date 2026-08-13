@@ -46,7 +46,43 @@ impl RuntimeDataLayout {
 pub fn default_data_root() -> PathBuf {
     std::env::var("TIMEM_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data"))
+        .unwrap_or_else(|_| default_unconfigured_data_root(Path::new(".")))
+}
+
+fn default_unconfigured_data_root(current_dir: &Path) -> PathBuf {
+    let hidden = current_dir.join(".timem_data");
+    let legacy = current_dir.join("data");
+    if !hidden.exists() && is_legacy_timem_data_root(&legacy) {
+        PathBuf::from("data")
+    } else {
+        PathBuf::from(".timem_data")
+    }
+}
+
+fn is_legacy_timem_data_root(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let workspace_is_timem = std::fs::read_to_string(path.join("workspace.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.get("dirs").and_then(|dirs| dirs.as_array()).cloned())
+        .is_some();
+    if workspace_is_timem {
+        return true;
+    }
+    std::fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|space| space.is_dir())
+        .any(|space| {
+            space.join("memory/sessions/index.jsonl").is_file()
+                || (space.join("audit/api_audit.json").is_file()
+                    && space.join("audit/action_audit.json").is_file())
+        })
 }
 
 pub fn layout_for_space(space: &str) -> RuntimeDataLayout {

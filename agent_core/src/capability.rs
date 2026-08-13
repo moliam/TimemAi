@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::mcp::McpTool;
 use crate::prompt_spec::replace_markdown_placeholder_with_text;
 
 const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
@@ -205,6 +206,91 @@ impl CapabilityRegistry {
         self
     }
 
+    pub fn with_mcp_tools(mut self, tools: &[McpTool]) -> Result<Self, String> {
+        self.tools
+            .retain(|_, tool| tool.binding.binding_type != "mcp");
+        for tool in tools {
+            let schema = tool
+                .input_schema
+                .as_object()
+                .ok_or_else(|| format!("{}:mcp_input_schema_must_be_object", tool.action_name))?;
+            let schema_type = schema
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("object")
+                .to_string();
+            if schema_type != "object" {
+                return Err(format!(
+                    "{}:mcp_input_schema_must_be_object",
+                    tool.action_name
+                ));
+            }
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if self.tools.contains_key(&tool.action_name) {
+                return Err(format!("duplicate_tool_manifest_id:{}", tool.action_name));
+            }
+            self.tools.insert(
+                tool.action_name.clone(),
+                ToolManifest {
+                    kind: "tool".to_string(),
+                    id: tool.action_name.clone(),
+                    binding: CapabilityBinding {
+                        binding_type: "mcp".to_string(),
+                        name: format!("{}::{}", tool.server_id, tool.name),
+                        command_path: None,
+                    },
+                    requires_host: None,
+                    summary: tool.description.clone(),
+                    prompt: CapabilityPrompt {
+                        description: tool.description.clone(),
+                        synopsis: format!("{} <arguments matching the options below>", tool.action_name),
+                        input: "Provide arguments matching this MCP tool's input options."
+                            .to_string(),
+                        result: format!("Returns the result from MCP server {}.", tool.server_name),
+                    },
+                    input_schema: CapabilityInputSchema {
+                        schema_type,
+                        required,
+                        required_any: Vec::new(),
+                        required_when: Vec::new(),
+                        required_any_when: Vec::new(),
+                        enum_fields: BTreeMap::new(),
+                        properties,
+                    },
+                    output_schema: CapabilityOutputSchema {
+                        schema_type: "object".to_string(),
+                        properties: BTreeMap::from([(
+                            "content".to_string(),
+                            serde_json::json!({ "description": "Content returned by the MCP server." }),
+                        )]),
+                    },
+                    example: Value::Object(Map::new()),
+                },
+            );
+        }
+        Ok(self)
+    }
+
     pub(crate) fn enable_toolgen(&mut self) -> Result<(), String> {
         let manifest = parse_tool_manifest(TOOLGEN_MANIFEST)?;
         validate_manifest(&manifest)?;
@@ -286,6 +372,18 @@ impl CapabilityRegistry {
         self.tools.contains_key(action)
     }
 
+    pub(crate) fn tool_input_property_schema(
+        &self,
+        action: &str,
+        property: &str,
+    ) -> Option<&Value> {
+        self.tools
+            .get(action)?
+            .input_schema
+            .properties
+            .get(property)
+    }
+
     pub fn tool_count(&self) -> usize {
         self.tools.len()
     }
@@ -304,10 +402,22 @@ impl CapabilityRegistry {
         self.tools.get(action).map(|manifest| &manifest.binding)
     }
 
+    pub fn validates_input_during_protocol_parse(&self, action: &str) -> bool {
+        self.binding(action)
+            .map(|binding| binding.binding_type != "mcp")
+            .unwrap_or(true)
+    }
+
     pub fn validate_action_input(&self, action: &str, input: &Value) -> Result<(), String> {
         let Some(manifest) = self.tools.get(action) else {
             return Err(format!("unsupported_action:{action}"));
         };
+        // MCP inputSchema is full JSON Schema. The manifest projection is used
+        // for prompt rendering only; the MCP server remains authoritative for
+        // nested types, additionalProperties, and conditional validation.
+        if manifest.binding.binding_type == "mcp" {
+            return Ok(());
+        }
         if let Some(object) = input.as_object() {
             for key in object.keys() {
                 if !input_property_declared(&manifest.input_schema.properties, key) {
@@ -646,10 +756,17 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest) -> String {
     lines.push(String::new());
     lines.push("**Result**".to_string());
     lines.push(one_line(&manifest.prompt.result));
-    lines.push(
-        "If args do not match this tool spec, runtime asks you to repair the response before executing the tool."
-            .to_string(),
-    );
+    if manifest.binding.binding_type == "mcp" {
+        lines.push(
+            "Runtime validates the XML value shape before dispatch; the MCP server validates advanced schema constraints, and any rejection returns as tool evidence for the next correction."
+                .to_string(),
+        );
+    } else {
+        lines.push(
+            "If args do not match this tool spec, runtime asks you to repair the response before executing the tool."
+                .to_string(),
+        );
+    }
     lines.join("\n")
 }
 
@@ -735,11 +852,16 @@ fn synopsis_placeholder(property: &Value) -> String {
 }
 
 fn property_option_text(property: &Value) -> String {
-    let mut text = property
+    let mut text = format!("Type: {}.", concise_schema_shape(property, 0));
+    if let Some(description) = property
         .get("description")
         .and_then(Value::as_str)
         .map(one_line)
-        .unwrap_or_else(|| "Tool input field.".to_string());
+        .filter(|description| !description.is_empty())
+    {
+        text.push(' ');
+        text.push_str(&description);
+    }
     if let Some(values) = property.get("enum").and_then(Value::as_array) {
         let allowed = values
             .iter()
@@ -751,6 +873,117 @@ fn property_option_text(property: &Value) -> String {
         }
     }
     text
+}
+
+fn concise_schema_shape(schema: &Value, depth: usize) -> String {
+    if depth >= 3 {
+        return schema_type_names(schema).join(" | ");
+    }
+    let types = schema_type_names(schema);
+    if types.len() != 1 {
+        return types.join(" | ");
+    }
+    match types[0].as_str() {
+        "array" => schema
+            .get("prefixItems")
+            .and_then(Value::as_array)
+            .filter(|items| !items.is_empty())
+            .map(|items| {
+                format!(
+                    "tuple<{}>",
+                    items
+                        .iter()
+                        .map(|item| concise_schema_shape(item, depth + 1))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .or_else(|| {
+                schema
+                    .get("items")
+                    .map(|items| format!("array<{}>", concise_schema_shape(items, depth + 1)))
+            })
+            .unwrap_or_else(|| "array".to_string()),
+        "object" => {
+            let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+                return schema
+                    .get("additionalProperties")
+                    .filter(|value| value.is_object())
+                    .map(|value| {
+                        format!("object<string, {}>", concise_schema_shape(value, depth + 1))
+                    })
+                    .unwrap_or_else(|| "object".to_string());
+            };
+            let mut fields = properties
+                .iter()
+                .take(6)
+                .map(|(name, value)| format!("{name}: {}", concise_schema_shape(value, depth + 1)))
+                .collect::<Vec<_>>();
+            if properties.len() > fields.len() {
+                fields.push("…".to_string());
+            }
+            format!("object {{{}}}", fields.join(", "))
+        }
+        other => other.to_string(),
+    }
+}
+
+fn schema_type_names(schema: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(name) = schema.get("type").and_then(Value::as_str) {
+        names.push(name.to_string());
+    } else if let Some(types) = schema.get("type").and_then(Value::as_array) {
+        names.extend(types.iter().filter_map(Value::as_str).map(str::to_string));
+    } else {
+        for alternatives in ["anyOf", "oneOf"] {
+            if let Some(items) = schema.get(alternatives).and_then(Value::as_array) {
+                for item in items {
+                    for name in schema_type_names(item) {
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        let values = schema
+            .get("const")
+            .into_iter()
+            .chain(
+                schema
+                    .get("enum")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect::<Vec<_>>();
+        for value in values {
+            let name = match value {
+                Value::Null => "null",
+                Value::Bool(_) => "boolean",
+                Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+            };
+            if !names.iter().any(|existing| existing == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    if names.is_empty() {
+        if schema.get("properties").is_some() || schema.get("additionalProperties").is_some() {
+            names.push("object".to_string());
+        } else if schema.get("items").is_some() || schema.get("prefixItems").is_some() {
+            names.push("array".to_string());
+        } else {
+            names.push("string".to_string());
+        }
+    }
+    names
 }
 
 fn one_line(text: &str) -> String {

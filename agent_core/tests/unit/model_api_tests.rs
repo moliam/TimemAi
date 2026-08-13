@@ -1,8 +1,7 @@
 use super::*;
 
-fn config(api_protocol: ApiProtocol) -> ProviderConfig {
-    ProviderConfig {
-        provider: "test".to_string(),
+fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
+    ModelServiceConfig {
         model: "test-model".to_string(),
         base_url: "https://example.invalid/v1".to_string(),
         api_key: "dummy".to_string(),
@@ -16,7 +15,7 @@ fn config(api_protocol: ApiProtocol) -> ProviderConfig {
 }
 
 #[test]
-fn provider_defaults_are_core_owned_pure_functions() {
+fn model_service_defaults_are_protocol_based() {
     assert_eq!(
         parse_api_protocol("openai-compatible").unwrap(),
         ApiProtocol::OpenAiCompatible
@@ -31,67 +30,43 @@ fn provider_defaults_are_core_owned_pure_functions() {
     );
     assert!(parse_api_protocol("unknown").is_err());
 
-    assert_eq!(
-        default_api_protocol_for_provider("openai"),
-        ApiProtocol::OpenAiResponses
-    );
-    assert_eq!(
-        default_api_protocol_for_provider("anthropic"),
-        ApiProtocol::Anthropic
-    );
-    assert_eq!(
-        default_api_protocol_for_provider("aliyun"),
-        ApiProtocol::OpenAiCompatible
-    );
-    assert_eq!(default_model_for_provider("openai"), "gpt-4o");
-    assert_eq!(
-        default_model_for_provider("anthropic"),
-        "claude-sonnet-4-20250514"
-    );
-    assert_eq!(default_model_for_provider("custom"), "qwen-plus");
+    assert_eq!(default_api_protocol(), ApiProtocol::OpenAiCompatible);
+    assert_eq!(default_model(), "qwen-plus");
 }
 
 #[test]
-fn provider_default_detection_handles_known_and_custom_gateways() {
-    assert!(is_default_model_for_provider("aliyun", "qwen-plus"));
-    assert!(is_default_model_for_provider(
-        "anthropic",
-        "claude-sonnet-4"
-    ));
-    assert!(!is_default_model_for_provider("openai", "claude-sonnet-4"));
-    assert!(is_default_model_for_provider("private", "any-model-name"));
-
-    assert_eq!(
-        known_default_base_url_for_provider("dashscope").as_deref(),
-        Some("https://dashscope.aliyuncs.com/compatible-mode/v1")
-    );
-    assert_eq!(known_default_base_url_for_provider("private"), None);
-    assert!(is_default_base_url_for_provider(
-        "aliyun",
+fn model_and_base_url_defaults_do_not_require_service_identity() {
+    assert!(is_default_model("qwen-plus"));
+    assert!(!is_default_model("claude-sonnet-4"));
+    assert!(is_default_base_url(
+        &ApiProtocol::OpenAiCompatible,
         "https://dashscope.aliyuncs.com/compatible-mode/v1/"
     ));
-    assert!(!is_default_base_url_for_provider(
-        "openai",
+    assert!(!is_default_base_url(
+        &ApiProtocol::OpenAiResponses,
         "https://example.invalid/v1"
     ));
-    assert!(is_default_base_url_for_provider(
-        "private",
-        "https://example.invalid/v1"
-    ));
+    assert_eq!(
+        default_base_url(&ApiProtocol::OpenAiResponses),
+        "https://api.openai.com/v1"
+    );
+    assert_eq!(
+        default_base_url(&ApiProtocol::Anthropic),
+        "https://api.anthropic.com"
+    );
 }
 
 #[test]
 fn openai_compatible_request_uses_messages_and_structured_output() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
-    config.provider = "aliyun".to_string();
     config.model = "qwen-plus".to_string();
     config.max_llm_output_tokens = 2048;
-    let body = build_provider_request(
+    let body = build_model_request(
         &config,
-        &[ProviderPromptBlock {
-            role: ProviderPromptRole::System,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::System,
             text: "Return JSON".to_string(),
-            cache: ProviderCacheControl::Ephemeral,
+            cache: ModelCacheControl::Ephemeral,
         }],
         StructuredOutputHint::JsonObject,
     );
@@ -113,12 +88,12 @@ fn openai_compatible_request_supports_official_thinking_stream_options() {
         stream: true,
     };
 
-    let body = build_provider_request(
+    let body = build_model_request(
         &config,
-        &[ProviderPromptBlock {
-            role: ProviderPromptRole::User,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::User,
             text: "hello".to_string(),
-            cache: ProviderCacheControl::None,
+            cache: ModelCacheControl::None,
         }],
         StructuredOutputHint::None,
     );
@@ -130,9 +105,8 @@ fn openai_compatible_request_supports_official_thinking_stream_options() {
 }
 
 #[test]
-fn structured_output_strategy_is_provider_and_protocol_specific() {
+fn structured_output_strategy_is_response_and_api_protocol_specific() {
     let mut aliyun = config(ApiProtocol::OpenAiCompatible);
-    aliyun.provider = "aliyun".to_string();
     aliyun.response_protocol = ResponseProtocolKind::Json;
     assert_eq!(
         plan_structured_output(&aliyun),
@@ -141,12 +115,12 @@ fn structured_output_strategy_is_provider_and_protocol_specific() {
 
     aliyun.response_protocol = ResponseProtocolKind::Markdown;
     assert_eq!(plan_structured_output(&aliyun), StructuredOutputHint::None);
-    let markdown_body = build_provider_request(
+    let markdown_body = build_model_request(
         &aliyun,
-        &[ProviderPromptBlock {
-            role: ProviderPromptRole::System,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::System,
             text: "The top-level response is Markdown, not JSON.".to_string(),
-            cache: ProviderCacheControl::None,
+            cache: ModelCacheControl::None,
         }],
         plan_structured_output(&aliyun),
     );
@@ -154,34 +128,35 @@ fn structured_output_strategy_is_provider_and_protocol_specific() {
 
     aliyun.response_protocol = ResponseProtocolKind::Xml;
     assert_eq!(plan_structured_output(&aliyun), StructuredOutputHint::None);
-    let xml_body = build_provider_request(
+    let xml_body = build_model_request(
         &aliyun,
-        &[ProviderPromptBlock {
-            role: ProviderPromptRole::System,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::System,
             text: "The top-level response is XML, not JSON or Markdown.".to_string(),
-            cache: ProviderCacheControl::None,
+            cache: ModelCacheControl::None,
         }],
         plan_structured_output(&aliyun),
     );
     assert!(xml_body.get("response_format").is_none());
 
     let mut custom = config(ApiProtocol::OpenAiCompatible);
-    custom.provider = "custom".to_string();
     custom.response_protocol = ResponseProtocolKind::Json;
-    assert_eq!(plan_structured_output(&custom), StructuredOutputHint::None);
-    let body = build_provider_request(
+    assert_eq!(
+        plan_structured_output(&custom),
+        StructuredOutputHint::JsonObject
+    );
+    let body = build_model_request(
         &custom,
-        &[ProviderPromptBlock {
-            role: ProviderPromptRole::System,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::System,
             text: "hello".to_string(),
-            cache: ProviderCacheControl::None,
+            cache: ModelCacheControl::None,
         }],
         plan_structured_output(&custom),
     );
-    assert!(body.get("response_format").is_none());
+    assert_eq!(body["response_format"]["type"], "json_object");
 
-    let mut anthropic = config(ApiProtocol::Anthropic);
-    anthropic.provider = "anthropic".to_string();
+    let anthropic = config(ApiProtocol::Anthropic);
     assert_eq!(
         plan_structured_output(&anthropic),
         StructuredOutputHint::None
@@ -191,12 +166,11 @@ fn structured_output_strategy_is_provider_and_protocol_specific() {
 #[test]
 fn anthropic_request_maps_cache_strategy_blocks_to_content_blocks() {
     let mut config = config(ApiProtocol::Anthropic);
-    config.provider = "anthropic".to_string();
     config.model = "claude-sonnet-4-20250514".to_string();
     config.max_llm_output_tokens = 2048;
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## TIMEM_ASSISTANT\ndelta1\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_2\n\n## USER\ndelta2\n[END DELTA]";
 
-    let prepared = prepare_provider_request(&config, prompt);
+    let prepared = prepare_model_request(&config, prompt);
     let body = prepared.body;
 
     assert_eq!(body["max_tokens"], 2048);
@@ -222,36 +196,37 @@ fn anthropic_request_maps_cache_strategy_blocks_to_content_blocks() {
 
 #[test]
 fn anthropic_request_sends_formatted_response_trailer_without_cache_control() {
-    let mut config = config(ApiProtocol::Anthropic);
-    config.provider = "anthropic".to_string();
+    let config = config(ApiProtocol::Anthropic);
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer("XML", "Ai4")
+            crate::prompt_render::formatted_response_trailer(
+                "one-root label <response>...</response>",
+                "Ai4",
+            )
         );
 
-    let prepared = prepare_provider_request(&config, &prompt);
+    let prepared = prepare_model_request(&config, &prompt);
     let content = prepared.body["messages"][0]["content"].as_array().unwrap();
 
     assert_eq!(
         content.last().unwrap()["text"],
-        "Now please continue your ID's response part in XML as required in protocol:\n## Ai4"
+        "Now please fulfill your response part like one-root label <response>...</response>:"
     );
     assert_eq!(content.last().unwrap().get("cache_control"), None);
     assert!(!content[0]["text"]
         .as_str()
         .unwrap()
-        .contains("Now please continue your ID's response part"));
+        .contains("Now please fulfill your response part"));
 }
 
 #[test]
 fn openai_responses_request_uses_official_shape() {
     let mut config = config(ApiProtocol::OpenAiResponses);
-    config.provider = "openai".to_string();
     config.model = "gpt-4o".to_string();
     config.max_llm_output_tokens = 2048;
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]";
 
-    let prepared = prepare_provider_request(&config, prompt);
+    let prepared = prepare_model_request(&config, prompt);
     let body = prepared.body;
 
     assert_eq!(config.endpoint(), "https://example.invalid/v1/responses");
@@ -268,11 +243,10 @@ fn openai_responses_request_uses_official_shape() {
 
 #[test]
 fn openai_compatible_request_splits_static_and_dynamic_prompt() {
-    let mut config = config(ApiProtocol::OpenAiCompatible);
-    config.provider = "aliyun".to_string();
+    let config = config(ApiProtocol::OpenAiCompatible);
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nsecret\n[END DELTA]";
 
-    let prepared = prepare_provider_request(&config, prompt);
+    let prepared = prepare_model_request(&config, prompt);
     let body = prepared.body;
     let system_content = body["messages"][0]["content"].as_str().unwrap();
     let user_content = body["messages"][1]["content"].as_str().unwrap();
@@ -289,7 +263,6 @@ fn openai_compatible_request_splits_static_and_dynamic_prompt() {
 #[test]
 fn openai_compatible_request_maps_cache_strategy_to_messages() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
-    config.provider = "aliyun".to_string();
     config.model = "qwen-plus".to_string();
     let mut prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
     for idx in 1..=5 {
@@ -298,7 +271,7 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
         ));
     }
 
-    let prepared = prepare_provider_request(&config, &prompt);
+    let prepared = prepare_model_request(&config, &prompt);
     let messages = prepared.body["messages"].as_array().unwrap();
 
     assert_eq!(messages.len(), 6);
@@ -321,34 +294,35 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
 
 #[test]
 fn openai_compatible_request_sends_formatted_response_trailer_without_cache_control() {
-    let mut config = config(ApiProtocol::OpenAiCompatible);
-    config.provider = "aliyun".to_string();
+    let config = config(ApiProtocol::OpenAiCompatible);
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer("Markdown", "Ai9")
+            crate::prompt_render::formatted_response_trailer(
+                "one Markdown response with one state branch",
+                "Ai9",
+            )
         );
 
-    let prepared = prepare_provider_request(&config, &prompt);
+    let prepared = prepare_model_request(&config, &prompt);
     let messages = prepared.body["messages"].as_array().unwrap();
 
     assert_eq!(
         messages.last().unwrap()["content"],
-        "Now please continue your ID's response part as required in protocol:\n## Ai9"
+        "Now please fulfill your response part like one Markdown response with one state branch:"
     );
     assert_eq!(messages.last().unwrap().get("cache_control"), None);
     assert!(!messages[messages.len() - 2]["content"]
         .as_str()
         .unwrap()
-        .contains("Now please continue your ID's response part"));
+        .contains("Now please fulfill your response part"));
 }
 
 #[test]
 fn prepared_request_builds_body_and_prompt_cache_audit_without_prompt_text() {
-    let mut config = config(ApiProtocol::Anthropic);
-    config.provider = "anthropic".to_string();
+    let config = config(ApiProtocol::Anthropic);
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC SECRET\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta secret\n[END DELTA]";
 
-    let prepared = prepare_provider_request(&config, prompt);
+    let prepared = prepare_model_request(&config, prompt);
 
     assert_eq!(prepared.structured_output, StructuredOutputHint::None);
     assert_eq!(prepared.body["system"][0]["text"], "STATIC SECRET");
@@ -369,12 +343,11 @@ fn prepared_request_builds_body_and_prompt_cache_audit_without_prompt_text() {
 }
 
 #[test]
-fn prepared_http_request_keeps_provider_headers_in_core() {
+fn prepared_http_request_keeps_model_api_headers_in_core() {
     let mut openai_like = config(ApiProtocol::OpenAiCompatible);
-    openai_like.provider = "aliyun".to_string();
     openai_like.api_key = "test-openai-key".to_string();
 
-    let http = prepare_provider_http_request(&openai_like, "Return JSON\nhello");
+    let http = prepare_model_http_request(&openai_like, "Return JSON\nhello");
     assert_eq!(
         http.endpoint,
         "https://example.invalid/v1/chat/completions".to_string()
@@ -386,13 +359,12 @@ fn prepared_http_request_keeps_provider_headers_in_core() {
         "Authorization".to_string(),
         "Bearer test-openai-key".to_string()
     )));
-    assert_eq!(http.provider_request.body["model"], openai_like.model);
+    assert_eq!(http.model_request.body["model"], openai_like.model);
 
     let mut anthropic = config(ApiProtocol::Anthropic);
-    anthropic.provider = "anthropic".to_string();
     anthropic.api_key = "test-anthropic-key".to_string();
 
-    let http = prepare_provider_http_request(&anthropic, "hello");
+    let http = prepare_model_http_request(&anthropic, "hello");
     assert_eq!(http.endpoint, "https://example.invalid/v1/messages");
     assert!(http
         .headers
@@ -405,7 +377,6 @@ fn prepared_http_request_keeps_provider_headers_in_core() {
 #[test]
 fn anthropic_endpoint_avoids_double_v1_when_base_already_ends_with_v1() {
     let mut config = config(ApiProtocol::Anthropic);
-    config.provider = "anthropic".to_string();
     config.base_url = "https://example.com/api/v1".to_string();
     assert_eq!(config.endpoint(), "https://example.com/api/v1/messages");
 
@@ -414,9 +385,9 @@ fn anthropic_endpoint_avoids_double_v1_when_base_already_ends_with_v1() {
 }
 
 #[test]
-fn provider_http_response_interpretation_is_core_owned() {
+fn model_http_response_interpretation_is_core_owned() {
     let config = config(ApiProtocol::OpenAiCompatible);
-    let interpreted = interpret_provider_http_response(
+    let interpreted = interpret_model_http_response(
         &config,
         200,
         r#"{
@@ -431,7 +402,7 @@ fn provider_http_response_interpretation_is_core_owned() {
     assert_eq!(response.usage.prompt_tokens, 10);
     assert_eq!(response.usage.completion_tokens, 2);
 
-    let interpreted = interpret_provider_http_response(
+    let interpreted = interpret_model_http_response(
         &config,
         429,
         r#"{"error":{"message":"rate limit sk-sensitive-token"}}"#,
@@ -439,11 +410,10 @@ fn provider_http_response_interpretation_is_core_owned() {
     );
     assert_eq!(interpreted.status, 429);
     let err = interpreted.result.unwrap_err();
-    assert!(err.contains("provider_http_429"));
+    assert!(err.contains("model_http_429"));
     assert!(!err.contains("sk-sensitive-token"));
 
-    let interpreted =
-        interpret_provider_http_response(&config, 200, "not json", "curl stderr detail");
+    let interpreted = interpret_model_http_response(&config, 200, "not json", "curl stderr detail");
     assert_eq!(interpreted.raw_json["raw_text"], "not json");
     assert_eq!(interpreted.raw_json["stderr"], "curl stderr detail");
     assert_eq!(interpreted.result.unwrap().content, "not json");
@@ -460,7 +430,7 @@ fn openai_compatible_sse_collects_content_and_usage_without_exposing_reasoning()
         "data: [DONE]\n",
     );
 
-    let interpreted = interpret_provider_http_response(&config, 200, body, "");
+    let interpreted = interpret_model_http_response(&config, 200, body, "");
     let response = interpreted.result.unwrap();
     assert_eq!(response.content, "<response>ok</response>");
     assert_eq!(response.usage.prompt_tokens, 16);
@@ -474,8 +444,8 @@ fn openai_compatible_sse_collects_content_and_usage_without_exposing_reasoning()
 }
 
 #[test]
-fn malformed_openai_compatible_sse_is_a_provider_error_not_model_content() {
-    let interpreted = interpret_provider_http_response(
+fn malformed_openai_compatible_sse_is_a_transport_error_not_model_content() {
+    let interpreted = interpret_model_http_response(
         &config(ApiProtocol::OpenAiCompatible),
         200,
         "data: {not-json}\n\ndata: [DONE]\n",
@@ -484,23 +454,22 @@ fn malformed_openai_compatible_sse_is_a_provider_error_not_model_content() {
     assert!(interpreted
         .result
         .unwrap_err()
-        .starts_with("invalid_provider_sse_event:"));
+        .starts_with("invalid_model_sse_event:"));
 }
 
 #[test]
-fn provider_request_audit_event_is_redacted_and_ui_neutral() {
+fn model_request_audit_event_is_redacted_and_ui_neutral() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
-    config.provider = "aliyun".to_string();
     config.api_key = "sk-sensitive-token".to_string();
     config.response_protocol = ResponseProtocolKind::Json;
-    let mut prepared = prepare_provider_request(&config, "Return JSON\nhello");
+    let mut prepared = prepare_model_request(&config, "Return JSON\nhello");
     prepared.body["metadata"] = json!({"api_key":"sk-sensitive-token"});
 
-    let audit = provider_request_audit_event(&config, &prepared);
+    let audit = model_request_audit_event(&config, &prepared);
 
     assert_eq!(audit["type"], "llm_request");
-    assert_eq!(audit["provider"], config.provider);
     assert_eq!(audit["model"], config.model);
+    assert_eq!(audit["api_protocol"], "openai-compatible");
     assert_eq!(audit["endpoint"], config.endpoint());
     assert_eq!(audit["structured_output"], "json_object");
     assert!(audit["prompt_cache_plan"].is_array());
@@ -510,8 +479,8 @@ fn provider_request_audit_event_is_redacted_and_ui_neutral() {
 }
 
 #[test]
-fn provider_response_audit_event_is_redacted() {
-    let audit = provider_response_audit_event(
+fn model_response_audit_event_is_redacted() {
+    let audit = model_response_audit_event(
         401,
         &json!({
             "error": {"message": "bad token sk-sensitive-token"},
@@ -533,7 +502,7 @@ fn provider_response_audit_event_is_redacted() {
 
 #[test]
 fn anthropic_response_counts_cache_tokens() {
-    let response = parse_provider_response(
+    let response = parse_model_response(
         &config(ApiProtocol::Anthropic),
         &json!({
             "content":[{"type":"text","text":"ok"}],
@@ -556,7 +525,7 @@ fn anthropic_response_counts_cache_tokens() {
 
 #[test]
 fn openai_compatible_response_reads_cache_and_truncation() {
-    let empty = parse_provider_response(
+    let empty = parse_model_response(
         &config(ApiProtocol::OpenAiCompatible),
         &json!({
             "choices":[{"finish_reason":"stop","message":{"content":"","role":"assistant"}}],
@@ -569,7 +538,7 @@ fn openai_compatible_response_reads_cache_and_truncation() {
     assert_eq!(empty.usage.completion_tokens, 2);
     assert!(!empty.truncated);
 
-    let response = parse_provider_response(
+    let response = parse_model_response(
         &config(ApiProtocol::OpenAiCompatible),
         &json!({
             "choices":[{"message":{"content":"{\"free_talk\":\"hi\"}"}}],
@@ -587,7 +556,7 @@ fn openai_compatible_response_reads_cache_and_truncation() {
     assert_eq!(response.usage.cached_tokens, 2048);
     assert!(!response.truncated);
 
-    let response = parse_provider_response(
+    let response = parse_model_response(
             &config(ApiProtocol::OpenAiCompatible),
             &json!({
                 "choices":[{"finish_reason":"length","message":{"content":"{\"free_talk\":\"partial\"}"}}],
@@ -597,7 +566,7 @@ fn openai_compatible_response_reads_cache_and_truncation() {
         .unwrap();
     assert!(response.truncated);
 
-    let response = parse_provider_response(
+    let response = parse_model_response(
         &config(ApiProtocol::OpenAiCompatible),
         &json!({
             "choices":[{"message":{"content":"{\"free_talk\":\"hi\"}"}}],
@@ -618,7 +587,7 @@ fn openai_compatible_response_reads_cache_and_truncation() {
 
 #[test]
 fn openai_responses_response_reads_usage_text_and_truncation() {
-    let response = parse_provider_response(
+    let response = parse_model_response(
         &config(ApiProtocol::OpenAiResponses),
         &json!({
             "output_text":"{\"free_talk\":\"hi\"}",
@@ -639,7 +608,7 @@ fn openai_responses_response_reads_usage_text_and_truncation() {
     assert_eq!(response.usage.cached_tokens, 4096);
     assert!(!response.truncated);
 
-    let response = parse_provider_response(
+    let response = parse_model_response(
         &config(ApiProtocol::OpenAiResponses),
         &json!({
             "status":"incomplete",
@@ -651,7 +620,7 @@ fn openai_responses_response_reads_usage_text_and_truncation() {
     .unwrap();
     assert!(response.truncated);
 
-    let response = parse_provider_response(
+    let response = parse_model_response(
             &config(ApiProtocol::OpenAiResponses),
             &json!({
                 "output":[{
@@ -677,7 +646,7 @@ fn openai_responses_response_reads_usage_text_and_truncation() {
 
 #[test]
 fn anthropic_response_reads_cache_creation_truncation_and_missing_cache_defaults() {
-    let response = parse_provider_response(
+    let response = parse_model_response(
         &config(ApiProtocol::Anthropic),
         &json!({
             "content":[{"type":"text","text":"ok"}],
@@ -697,7 +666,7 @@ fn anthropic_response_reads_cache_creation_truncation_and_missing_cache_defaults
     assert_eq!(response.usage.cache_created_tokens, 6155);
     assert!(!response.truncated);
 
-    let response = parse_provider_response(
+    let response = parse_model_response(
         &config(ApiProtocol::Anthropic),
         &json!({
             "stop_reason":"max_tokens",
@@ -708,7 +677,7 @@ fn anthropic_response_reads_cache_creation_truncation_and_missing_cache_defaults
     .unwrap();
     assert!(response.truncated);
 
-    let response = parse_provider_response(
+    let response = parse_model_response(
         &config(ApiProtocol::Anthropic),
         &json!({
             "content":[{"type":"text","text":"ok"}],
@@ -723,7 +692,7 @@ fn anthropic_response_reads_cache_creation_truncation_and_missing_cache_defaults
 }
 
 #[test]
-fn provider_http_error_includes_sanitized_provider_reason() {
+fn model_http_error_includes_sanitized_service_reason() {
     let openai_like = json!({
         "error": {
             "message": "The model `missing-model` does not exist or you do not have access to it.",
@@ -731,9 +700,9 @@ fn provider_http_error_includes_sanitized_provider_reason() {
         }
     });
     assert_eq!(
-            provider_http_error_message(400, &openai_like),
-            "provider_http_400: The model `missing-model` does not exist or you do not have access to it."
-        );
+        model_http_error_message(400, &openai_like),
+        "model_http_400: The model `missing-model` does not exist or you do not have access to it."
+    );
 
     let anthropic_like = json!({
         "type": "error",
@@ -743,30 +712,30 @@ fn provider_http_error_includes_sanitized_provider_reason() {
         }
     });
     assert_eq!(
-        provider_http_error_message(404, &anthropic_like),
-        "provider_http_404: model: claude-missing not found"
+        model_http_error_message(404, &anthropic_like),
+        "model_http_404: model: claude-missing not found"
     );
 
     let raw_text = json!({"raw_text":"invalid Authorization Bearer sk-secret-token"});
-    let rendered = provider_http_error_message(401, &raw_text);
-    assert!(rendered.starts_with("provider_http_401:"));
+    let rendered = model_http_error_message(401, &raw_text);
+    assert!(rendered.starts_with("model_http_401:"));
     assert!(rendered.contains("***REDACTED***"));
     assert!(!rendered.contains("sk-secret-token"));
 
-    let long = provider_http_error_message(400, &json!({"error":{"message":"x ".repeat(400)}}));
+    let long = model_http_error_message(400, &json!({"error":{"message":"x ".repeat(400)}}));
     assert!(long.contains('…'));
     assert!(long.len() < 280);
 
-    let timeout = provider_http_error_message(
+    let timeout = model_http_error_message(
         0,
         &json!({"raw_text":"","stderr":"curl: (28) Operation timed out after 120006 milliseconds with 0 bytes received"}),
     );
-    assert!(timeout.starts_with("provider_timeout:"));
+    assert!(timeout.starts_with("model_timeout:"));
     assert!(timeout.contains("Operation timed out"));
 }
 
 #[test]
-fn provider_http_error_is_resilient_to_unusual_bodies() {
+fn model_http_error_is_resilient_to_unusual_bodies() {
     for body in [
         Value::Null,
         json!("plain string error"),
@@ -775,8 +744,8 @@ fn provider_http_error_is_resilient_to_unusual_bodies() {
         json!({"detail":{"nested":"not a string"}}),
         json!({"raw_text":""}),
     ] {
-        let rendered = provider_http_error_message(500, &body);
-        assert!(rendered.starts_with("provider_http_500"));
+        let rendered = model_http_error_message(500, &body);
+        assert!(rendered.starts_with("model_http_500"));
         assert!(rendered.len() < 280);
     }
 }

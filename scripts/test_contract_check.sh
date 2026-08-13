@@ -61,7 +61,7 @@ required_patterns=(
   "run_shift_enter_cancel_smoke"
   "run_wrapped_edit_cancel_smoke"
   "run_config_value_cancel_smoke"
-  "run_config_provider_switch_smoke"
+  "run_config_protocol_switch_smoke"
   "run_workspace_add_cancel_smoke"
   "real_tty_supplement_smoke"
   "raw_multiline_paste_requires_confirmation_before_model_submit"
@@ -121,6 +121,7 @@ ci_required=(
   "scripts/performance_guard.sh"
   "scripts/cross_host_resume_smoke.sh"
   "scripts/web_license_check.sh"
+  "scripts/version_consistency_check.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
@@ -149,9 +150,9 @@ for pattern in "${shell_lib_forbidden_wrappers[@]}"; do
 done
 
 shell_lib_forbidden_core_internals=(
-  "prepare_provider_request"
-  "prepare_provider_http_request"
-  "provider_http_error_message"
+  "prepare_model_request"
+  "prepare_model_http_request"
+  "model_http_error_message"
   "prompt_cache_plan_audit"
   "plan_prompt_cache"
   "plan_incremental_cache"
@@ -166,7 +167,7 @@ shell_lib_forbidden_core_internals=(
 
 for pattern in "${shell_lib_forbidden_core_internals[@]}"; do
   if search_fixed "$pattern" timem_shell/src/lib.rs; then
-    echo "timem_shell must not re-export provider/cache core internals: $pattern" >&2
+    echo "timem_shell must not re-export model cache core internals: $pattern" >&2
     exit 1
   fi
 done
@@ -181,7 +182,7 @@ shell_src_forbidden_execution=(
 
 for pattern in "${shell_src_forbidden_execution[@]}"; do
   if search_fixed "$pattern" timem_shell/src; then
-    echo "timem_shell must not implement provider/tool execution: $pattern" >&2
+    echo "timem_shell must not implement model transport/tool execution: $pattern" >&2
     exit 1
   fi
 done
@@ -380,8 +381,8 @@ web_ui_required_test_names=(
   "uses frame styling without repeating user or session identity labels"
   "coalesces tool lifecycles and renders tools as compact subordinate rows"
   "replaces an action start with its terminal lifecycle event"
-  "shows the live session cwd in navigation and above the composer"
-  "uses only the selected session's latest real provider usage for context"
+  "shows the live session cwd in navigation and the composer footer"
+  "uses only the selected session's latest real model usage for context"
   "renders live task usage and session context without replacing final telemetry"
   "attaches completion telemetry only to the matching final answer"
   "persists theme, font, and text-size appearance without changing core state"
@@ -389,8 +390,7 @@ web_ui_required_test_names=(
   "public_web_launch_keeps_token_auth_and_reports_bind_mode"
   "static_web_entry_requires_token_or_authenticated_cookie"
   "shows the runtime bind host and public-token mode from the server snapshot"
-  "shows host and session errors outside the default-hidden diagnostic panel"
-  "defaults the diagnostic activity panel to hidden"
+  "shows host and session errors directly without an Activity panel"
   "bounds a reconnect snapshot with many turns and high-frequency events"
   "bounds newly appended turns without changing chronological order"
   "keeps repeated live event bursts bounded and isolated across sessions"
@@ -410,7 +410,7 @@ manual_smoke_required=(
   "Firefox"
   "Terminal Emulator Matrix"
   "Clean-Machine Install"
-  "Live Provider Smoke"
+  "Live Model Service Smoke"
 )
 
 for pattern in "${manual_smoke_required[@]}"; do

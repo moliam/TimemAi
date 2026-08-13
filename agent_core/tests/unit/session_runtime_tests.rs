@@ -23,15 +23,12 @@ fn tmp_dir(name: &str) -> std::path::PathBuf {
 
 fn test_profile() -> CoreProfile {
     CoreProfile {
-        name: "test".to_string(),
-        provider: "test".to_string(),
         model: "test-model".to_string(),
     }
 }
 
-fn test_config() -> ProviderConfig {
-    ProviderConfig {
-        provider: "test".to_string(),
+fn test_config() -> ModelServiceConfig {
+    ModelServiceConfig {
         model: "test-model".to_string(),
         api_key: "dummy".to_string(),
         base_url: "http://127.0.0.1:9/v1".to_string(),
@@ -138,7 +135,7 @@ impl ReplayModel {
 impl ModelClient for ReplayModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -147,6 +144,42 @@ impl ModelClient for ReplayModel {
         self.responses
             .pop_front()
             .unwrap_or_else(|| Err("unexpected_extra_model_call".to_string()))
+    }
+}
+
+struct DelayedFirstReplayModel {
+    inner: ReplayModel,
+    first_delay: Duration,
+    calls: usize,
+}
+
+impl DelayedFirstReplayModel {
+    fn new(
+        first_delay: Duration,
+        responses: impl IntoIterator<Item = Result<LlmResponse, String>>,
+    ) -> Self {
+        Self {
+            inner: ReplayModel::new(responses),
+            first_delay,
+            calls: 0,
+        }
+    }
+}
+
+impl ModelClient for DelayedFirstReplayModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        prompt: &str,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            thread::sleep(self.first_delay);
+        }
+        self.inner
+            .call_model(config, prompt, audit_file, should_cancel)
     }
 }
 
@@ -198,7 +231,7 @@ impl PollingReplayModel {
 impl ModelClient for PollingReplayModel {
     fn call_model(
         &mut self,
-        config: &ProviderConfig,
+        config: &ModelServiceConfig,
         prompt: &str,
         audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -230,7 +263,6 @@ impl TurnUi for RetryRecordingUi {
 struct SupplementDuringModelUi {
     injected: bool,
     pending: Vec<String>,
-    discarded_responses: Vec<(u32, String)>,
 }
 
 impl TurnUi for SupplementDuringModelUi {
@@ -249,10 +281,6 @@ impl TurnUi for SupplementDuringModelUi {
     fn drain_user_supplements(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending)
     }
-
-    fn on_model_response_discarded(&mut self, round: u32, reason: &str) {
-        self.discarded_responses.push((round, reason.to_string()));
-    }
 }
 
 #[derive(Default)]
@@ -260,7 +288,43 @@ struct SupplementAndExpansionUi {
     injected: bool,
     pending: Vec<String>,
     expansion_requests: u32,
-    discarded_responses: Vec<(u32, String)>,
+}
+
+#[derive(Default)]
+struct SupplementAtFinalBoundaryUi {
+    drain_calls: u32,
+    inject_at_drain: u32,
+}
+
+impl TurnUi for SupplementAtFinalBoundaryUi {
+    fn drain_user_supplements(&mut self) -> Vec<String> {
+        self.drain_calls += 1;
+        if self.drain_calls == self.inject_at_drain {
+            vec!["补充：请在最终结束前纳入这条指示".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Default)]
+struct SupplementAtTerminalRepairUi {
+    responses: u32,
+    pending: Vec<String>,
+}
+
+impl TurnUi for SupplementAtTerminalRepairUi {
+    fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {
+        self.responses += 1;
+        if self.responses == 6 {
+            self.pending
+                .push("补充：这条内容不能复活已经失败的 turn".to_string());
+        }
+    }
+
+    fn drain_user_supplements(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending)
+    }
 }
 
 impl TurnUi for SupplementAndExpansionUi {
@@ -279,10 +343,6 @@ impl TurnUi for SupplementAndExpansionUi {
 
     fn drain_user_supplements(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending)
-    }
-
-    fn on_model_response_discarded(&mut self, round: u32, reason: &str) {
-        self.discarded_responses.push((round, reason.to_string()));
     }
 
     fn can_request_output_expansion(&mut self) -> bool {
@@ -318,7 +378,7 @@ impl TurnUi for DeclineLongRunningCommandUi {
 }
 
 #[test]
-fn session_turn_uses_provider_config_response_protocol_over_core_state() {
+fn session_turn_uses_model_service_config_response_protocol_over_core_state() {
     let dir = tmp_dir("runtime_config_protocol_wins");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new("STATIC", test_profile(), &dir);
@@ -352,16 +412,79 @@ fn session_turn_uses_provider_config_response_protocol_over_core_state() {
 }
 
 #[test]
-fn session_turn_retries_transient_provider_errors_and_reports_status() {
-    let dir = tmp_dir("retry_transient_provider_error");
+fn turn_focus_reminder_schedule_respects_periods_and_skips_backlog() {
+    let interval = Duration::from_secs(10 * 60);
+    let mut schedule = TurnFocusReminderSchedule::new("turn_test", interval);
+
+    assert_eq!(schedule.take_due(interval - Duration::from_nanos(1)), None);
+    let first = schedule.take_due(interval).unwrap();
+    assert!(TURN_FOCUS_REMINDERS.contains(&first));
+    assert_eq!(schedule.take_due(interval + Duration::from_secs(1)), None);
+
+    let jumped = schedule.take_due(interval * 4).unwrap();
+    assert!(TURN_FOCUS_REMINDERS.contains(&jumped));
+    assert_eq!(schedule.take_due(interval * 4), None);
+}
+
+#[test]
+fn session_turn_injects_due_focus_reminder_before_the_next_model_request() {
+    let dir = tmp_dir("turn_focus_reminder");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = DelayedFirstReplayModel::new(
+        Duration::from_millis(150),
+        [
+            Ok(llm("not protocol compliant", 1_000, false)),
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"提醒后完成。"}"#,
+                1_100,
+                false,
+            )),
+        ],
+    );
+
+    let outcome = run_session_turn_with_model_client_and_focus_interval(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "完成一个长任务",
+            session: "focus_session",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+        Duration::from_millis(100),
+    );
+
+    assert_eq!(outcome.text, "提醒后完成。");
+    assert_eq!(model.inner.prompts.len(), 2);
+    assert!(model.inner.prompts[1].contains("## SYSTEM"));
+    assert_eq!(
+        TURN_FOCUS_REMINDERS
+            .iter()
+            .filter(|reminder| model.inner.prompts[1].contains(**reminder))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn session_turn_retries_transient_model_api_errors_and_reports_status() {
+    let dir = tmp_dir("retry_transient_model_api_error");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
-        Err("provider_http_500: upstream overloaded".to_string()),
-        Err("provider_network_error: curl: (16) Error in the HTTP2 framing layer".to_string()),
+        Err("model_http_500: upstream overloaded".to_string()),
+        Err("model_network_error: curl: (16) Error in the HTTP2 framing layer".to_string()),
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"重试后成功。"}"#,
             1_000,
@@ -391,7 +514,7 @@ fn session_turn_retries_transient_provider_errors_and_reports_status() {
     assert_eq!(ui.retries[0].0, 1);
     assert_eq!(ui.retries[0].1, 5);
     assert_eq!(ui.retries[0].2, Duration::ZERO);
-    assert!(ui.retries[0].3.contains("provider_http_500"));
+    assert!(ui.retries[0].3.contains("model_http_500"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_retry"), 2);
 }
@@ -552,16 +675,16 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
 }
 
 #[test]
-fn session_turn_recovers_from_provider_input_overflow_variants() {
+fn session_turn_recovers_from_model_input_overflow_variants() {
     for (case, error) in [
         ("argv", "Argument list too long (os error 7)"),
-        ("http_413", "provider_http_413: payload too large"),
+        ("http_413", "model_http_413: payload too large"),
         (
             "context_limit",
-            "provider_http_400: context_length_exceeded: too many input tokens",
+            "model_http_400: context_length_exceeded: too many input tokens",
         ),
     ] {
-        let dir = tmp_dir(&format!("provider_input_overflow_{case}"));
+        let dir = tmp_dir(&format!("model_input_overflow_{case}"));
         let audit = dir.join("audit.json");
         let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         core.set_response_protocol(crate::ResponseProtocolKind::Json);
@@ -630,8 +753,8 @@ fn session_turn_recovers_from_provider_input_overflow_variants() {
 }
 
 #[test]
-fn repeated_provider_overflow_stops_after_single_delta_recovery() {
-    let dir = tmp_dir("provider_overflow_does_not_loop");
+fn repeated_model_input_overflow_stops_after_single_delta_recovery() {
+    let dir = tmp_dir("model_input_overflow_does_not_loop");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
@@ -639,7 +762,7 @@ fn repeated_provider_overflow_stops_after_single_delta_recovery() {
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
-    let error = "provider_http_400: context_length_exceeded";
+    let error = "model_http_400: context_length_exceeded";
     let mut model = ReplayModel::new([
         Ok(llm(
             r#"{"working_still_action":{"run_bash":{"cmd":"printf ONE_SHOT_RESULT","timeout_ms":5000}}}"#,
@@ -735,7 +858,7 @@ This is an answer, not an executable action:
 }
 
 #[test]
-fn session_turn_xml_root_repair_explains_exact_structure_then_continues_action() {
+fn session_turn_xml_outer_text_becomes_free_talk_and_continues_action() {
     let dir = tmp_dir("xml_root_repair_exact_structure");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -755,17 +878,7 @@ fn session_turn_xml_root_repair_explains_exact_structure_then_continues_action()
             false,
         )),
         Ok(llm(
-            r#"<response>
-  <free_talk>search memory</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[[{"memmgr":{"type":"raw_chat","op":"search","search_text":"fixture","limit":1}}]]]></action_json>
-  </working_still_action>
-</response>"#,
-            1_000,
-            false,
-        )),
-        Ok(llm(
-            "<response><final_answer>repair recovered</final_answer></response>",
+            "<response><final_answer>outer text recovered</final_answer></response>",
             1_000,
             false,
         )),
@@ -787,32 +900,69 @@ fn session_turn_xml_root_repair_explains_exact_structure_then_continues_action()
         &mut model,
     );
 
-    assert_eq!(outcome.text, "repair recovered");
-    assert_eq!(outcome.stats.repair_calls, 1);
+    assert_eq!(outcome.text, "outer text recovered");
+    assert_eq!(outcome.stats.repair_calls, 0);
     assert_eq!(outcome.stats.tool_calls, 1);
-    assert_eq!(model.prompts.len(), 3);
+    assert_eq!(model.prompts.len(), 2);
     assert!(model.prompts[1].contains("## TIMEM_ASSISTANT"));
     assert!(model.prompts[1].contains("<free_talk>search memory</free_talk>"));
-    assert!(model.prompts[1].contains(
-            "The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'"
-        ));
-    assert!(model.prompts[2].contains("Action result: memmgr"));
+    assert!(model.prompts[1].contains("Action result: memmgr"));
     let repair_events = read_audit_events(&audit)
         .into_iter()
         .filter(|event| event["type"] == "model_repair_request")
         .collect::<Vec<_>>();
-    assert_eq!(repair_events.len(), 1);
-    let repair_log: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("api_output_repair.json")).unwrap())
-            .unwrap();
-    let repair_record = &repair_log["records"][0];
-    assert_eq!(repair_record["issue"], "xml_content_before_response");
-    assert!(repair_record["system_message"]
-            .as_str()
-            .unwrap()
-            .contains(
-                "The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'"
-            ));
+    assert!(repair_events.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_turn_retries_a_recovered_final_answer_before_finishing() {
+    let dir = tmp_dir("xml_recovered_final_retry");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    let mut ui = RetryRecordingUi::default();
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            "preface<response><final_answer>must retry</final_answer></response>",
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            "<response><final_answer>accepted final</final_answer></response>",
+            1_000,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "finish safely",
+            session: "xml_recovered_final_retry_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "accepted final");
+    assert_eq!(outcome.stats.repair_calls, 1);
+    assert_eq!(model.prompts.len(), 2);
+    assert!(model.prompts[1].contains("xml_recovered_final_answer_requires_retry"));
+    assert!(model.prompts[1].contains("cannot finish the task"));
+    let events = read_audit_events(&audit);
+    assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
+    assert!(events
+        .iter()
+        .any(|event| { event["issue"] == "xml_recovered_final_answer_requires_retry" }));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1055,13 +1205,13 @@ fn session_turn_emits_repair_topic_for_each_protocol_repair_attempt() {
 }
 
 #[test]
-fn session_turn_does_not_retry_non_transient_provider_errors() {
-    let dir = tmp_dir("no_retry_provider_400");
+fn session_turn_does_not_retry_non_transient_model_api_errors() {
+    let dir = tmp_dir("no_retry_model_api_400");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     let mut ui = RetryRecordingUi::default();
-    let mut model = ReplayModel::new([Err("provider_http_400: model name is invalid".to_string())]);
+    let mut model = ReplayModel::new([Err("model_http_400: model name is invalid".to_string())]);
 
     let outcome = run_session_turn_with_model_client(
         &mut core,
@@ -1084,7 +1234,7 @@ fn session_turn_does_not_retry_non_transient_provider_errors() {
     assert_eq!(
         outcome.stop_summary.as_ref().map(|summary| &summary.detail),
         Some(&TurnStopDetail::ModelError {
-            error: "provider_http_400: model name is invalid".to_string()
+            error: "model_http_400: model name is invalid".to_string()
         })
     );
     assert_eq!(model.prompts.len(), 1);
@@ -1734,7 +1884,7 @@ finished
 }
 
 #[test]
-fn session_turn_user_supplement_during_model_wait_continues_after_stale_final() {
+fn session_turn_user_supplement_during_model_wait_continues_after_current_response() {
     let dir = tmp_dir("user_supplement_during_wait");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -1781,18 +1931,15 @@ fn session_turn_user_supplement_during_model_wait_continues_after_stale_final() 
     );
     assert_eq!(model.inner.prompts.len(), 2);
     assert!(!model.inner.prompts[0].contains("user_supplement"));
+    assert!(model.inner.prompts[1].contains("旧答案。"));
     assert!(model.inner.prompts[1].contains("## USER"));
     assert!(model.inner.prompts[1].contains("补充：请按最新指示重新回答"));
-    assert_eq!(
-        ui.discarded_responses,
-        vec![(1, "user_supplement_preempted_stale_response".to_string())]
-    );
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_supplement"), 1);
 }
 
 #[test]
-fn session_turn_user_supplement_preempts_stale_truncated_output_expansion() {
+fn session_turn_user_supplement_waits_for_truncated_output_retry_then_continues() {
     let dir = tmp_dir("user_supplement_preempts_truncated_expand");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -1837,18 +1984,110 @@ fn session_turn_user_supplement_preempts_stale_truncated_output_expansion() {
             .map(|usage| usage.prompt_tokens),
         Some(1_200)
     );
-    assert_eq!(ui.expansion_requests, 0);
+    assert_eq!(ui.expansion_requests, 1);
     assert_eq!(model.inner.prompts.len(), 2);
     assert!(!model.inner.prompts[0].contains("user_supplement"));
     assert!(model.inner.prompts[1].contains("## USER"));
     assert!(model.inner.prompts[1].contains("不要展开旧输出"));
-    assert_eq!(
-        ui.discarded_responses,
-        vec![(1, "user_supplement_preempted_stale_response".to_string())]
-    );
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_supplement"), 1);
-    assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 0);
+    assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 1);
+}
+
+#[test]
+fn session_turn_user_supplement_at_final_boundary_continues_same_turn() {
+    let dir = tmp_dir("user_supplement_at_final_boundary");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut ui = SupplementAtFinalBoundaryUi {
+        inject_at_drain: 3,
+        ..Default::default()
+    };
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"边界前的答案。"}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"已纳入边界补充。"}"#,
+            1_100,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "先回答",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "已纳入边界补充。");
+    assert_eq!(outcome.stats.llm_calls, 2);
+    assert_eq!(outcome.stats.prompt_tokens, 2_100);
+    assert_eq!(model.prompts.len(), 2);
+    assert!(model.prompts[1].contains("边界前的答案。"));
+    assert!(model.prompts[1].contains("补充：请在最终结束前纳入这条指示"));
+    let events = read_audit_events(&audit);
+    assert_eq!(audit_event_count(&events, "user_supplement"), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_turn_user_supplement_after_model_response_continues_same_turn() {
+    let dir = tmp_dir("user_supplement_after_model_response");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut ui = SupplementAtFinalBoundaryUi {
+        inject_at_drain: 2,
+        ..Default::default()
+    };
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"边界前的答案。"}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"已纳入边界补充。"}"#,
+            1_100,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "先回答",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "已纳入边界补充。");
+    assert_eq!(model.prompts.len(), 2);
+    assert!(model.prompts[1].contains("边界前的答案。"));
+    assert!(model.prompts[1].contains("补充：请在最终结束前纳入这条指示"));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -1904,7 +2143,10 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     assert_eq!(first_blocks[2].cache, crate::CacheControl::None);
     assert_eq!(
         first_blocks[2].text,
-        crate::prompt_render::formatted_response_trailer("XML", "TIMEM_ASSISTANT")
+        crate::prompt_render::formatted_response_trailer(
+            "one-root label <response>...</response>",
+            "TIMEM_ASSISTANT",
+        )
     );
 
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
@@ -2351,7 +2593,7 @@ fn session_turn_records_cached_tokens_in_profiler_and_latest_usage() {
 
     assert_eq!(outcome.text, "完成。");
     assert_eq!(outcome.latest_usage, Some(second_usage));
-    let profile = profiler.models().get("test:test-model").unwrap();
+    let profile = profiler.models().get("test-model").unwrap();
     assert_eq!(profile.llm_calls, 2);
     assert_eq!(profile.input_tokens, 15_500);
     assert_eq!(profile.output_tokens, 360);
@@ -2361,7 +2603,7 @@ fn session_turn_records_cached_tokens_in_profiler_and_latest_usage() {
     let model_report = report
         .models
         .iter()
-        .find(|model| model.model == "test:test-model")
+        .find(|model| model.model == "test-model")
         .unwrap();
     assert_eq!(model_report.cache_hit_percent_tenths(), Some(677));
     assert_eq!(model_report.cached_tokens, 10_500);
@@ -2374,7 +2616,7 @@ struct ShrinkReplayModel {
 impl ModelClient for ShrinkReplayModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -2413,7 +2655,7 @@ impl TurnUi for CancelImmediately {
 }
 
 #[test]
-fn session_turn_can_cancel_before_provider_call_without_network() {
+fn session_turn_can_cancel_before_model_call_without_network() {
     let dir = tmp_dir("cancel");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -2573,6 +2815,50 @@ fn session_turn_protocol_repair_failure_is_structured() {
         final_event["stop_summary"]["stop_reason"],
         "protocol_repair_failed"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_turn_terminal_protocol_failure_does_not_consume_or_revive_late_supplement() {
+    let dir = tmp_dir("terminal_repair_late_supplement");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Json);
+    let mut config = test_config();
+    let mut ui = SupplementAtTerminalRepairUi::default();
+    let mut model = ReplayModel::new((0..6).map(|idx| {
+        Ok(llm(
+            format!("{{not valid json repair attempt {idx}"),
+            5_000 + idx as u32,
+            false,
+        ))
+    }));
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "代码提交下",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(
+        outcome.stop_reason,
+        Some(TurnStopReason::ProtocolRepairFailed)
+    );
+    assert_eq!(model.prompts.len(), 6);
+    assert_eq!(ui.pending, ["补充：这条内容不能复活已经失败的 turn"]);
+    let events = read_audit_events(&audit);
+    assert_eq!(audit_event_count(&events, "user_supplement"), 0);
+    assert_eq!(audit_event_count(&events, "turn_final"), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -3368,7 +3654,7 @@ struct ScratchOffloadReplayModel {
 impl ModelClient for ScratchOffloadReplayModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -3453,7 +3739,7 @@ struct CompactThenFinishModel {
 impl ModelClient for CompactThenFinishModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -3622,7 +3908,7 @@ impl StoryReplayModel {
 impl ModelClient for StoryReplayModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &Path,
         _should_cancel: &mut dyn FnMut() -> bool,

@@ -52,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.capture_prompt_file:
             with open(self.capture_prompt_file, "a", encoding="utf-8") as capture:
                 capture.write(prompt)
-                capture.write("\n---TIMEM_FAKE_PROVIDER_REQUEST---\n")
+                capture.write("\n---TIMEM_FAKE_MODEL_REQUEST---\n")
         if self.scenario == "toolgen":
             content = toolgen_scenario_response(prompt)
         elif "CROSS_HOST_RESUME_SMOKE" in prompt:
@@ -112,9 +112,9 @@ class Handler(BaseHTTPRequestHandler):
                 "</response>"
             )
 
-        self.send_provider_response(prompt, content)
+        self.send_model_response(prompt, content)
 
-    def send_provider_response(self, prompt, content):
+    def send_model_response(self, prompt, content):
         prompt_tokens = max(1, len(prompt) // 4)
         completion_tokens = max(1, len(content) // 4)
         total_tokens = max(2, (len(prompt) + len(content)) // 4)
@@ -271,7 +271,7 @@ def self_test():
     assert "toolgen_retrospect" in finished and "final_answer" in finished
     failed = toolgen_scenario_response(toolgen_prompt + "\nFORCE_TOOLGEN_PROTOCOL_FAILURE")
     assert failed == "ToolGen fixture intentionally returned a non-protocol response."
-    print("fake_provider_toolgen_scenario: ok")
+    print("fake_model_server_toolgen_scenario: ok")
 
 
 def main():
@@ -289,7 +289,7 @@ def main():
     Handler.capture_prompt_file = args.capture_prompt_file
     Handler.scenario = args.scenario
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"fake_provider_ready:{server.server_port}", flush=True)
+    print(f"fake_model_server_ready:{server.server_port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -8,8 +8,17 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutorTarget {
-    Builtin { binding_name: String },
-    Command { action: String, path: PathBuf },
+    Builtin {
+        binding_name: String,
+    },
+    Command {
+        action: String,
+        path: PathBuf,
+    },
+    Mcp {
+        server_id: String,
+        tool_name: String,
+    },
 }
 
 pub fn resolve_action(
@@ -30,6 +39,15 @@ pub fn resolve_action(
             Ok(ExecutorTarget::Command {
                 action: action.to_string(),
                 path,
+            })
+        }
+        "mcp" => {
+            let Some((server_id, tool_name)) = binding.name.split_once("::") else {
+                return Err(format!("{action}:mcp_binding_invalid"));
+            };
+            Ok(ExecutorTarget::Mcp {
+                server_id: server_id.to_string(),
+                tool_name: tool_name.to_string(),
             })
         }
         other => Err(format!("{action}:unsupported_binding_type:{other}")),
