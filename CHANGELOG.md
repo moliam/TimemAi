@@ -6,6 +6,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-08-13
+
 - New environments now store runtime data under hidden `.timem_data/` by
   default, while unconfigured installations with an existing legacy `data/`
   directory continue using it for upgrade compatibility.
