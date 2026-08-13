@@ -1,16 +1,18 @@
+use agent_core::mcp::{McpRuntime, McpServerConfig, McpServerReport, McpStore, McpTool};
 use agent_core::session_store::{
     ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole, SessionResumeNotice, SessionStore,
     StoredSession, StoredSessionProfile, StoredSessionState,
 };
 use agent_core::{
     apply_runtime_config_value, combine_additional_contexts, default_data_root,
-    load_workspace_dirs_from_path, provider_config_from_sources, runtime_config_menu_report,
-    runtime_info_context, validate_provider_api_key, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
-    CoreSessionWorkerEvent, CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision,
-    HostDecisionRequest, ProviderConfig, ProviderConfigSource, ResponseProtocolKind,
-    RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
-    WorkInstructionLoadMode, CORE_TOPIC_TOOLGEN, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
+    runtime_config_menu_report, runtime_info_context, validate_api_key,
+    work_instruction_load_report, work_instruction_load_request,
+    work_instruction_mode_from_sources, AgentCore, BashApprovalMode, CoreSessionWorkerEvent,
+    CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest,
+    ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
+    SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply, WorkInstructionLoadMode,
+    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{capability::CapabilityRegistry, self_tool::SelfToolPaths};
 use axum::{
@@ -40,7 +42,11 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{net::TcpListener, sync::broadcast, time::sleep};
+use tokio::{
+    net::TcpListener,
+    sync::{broadcast, mpsc as tokio_mpsc},
+    time::sleep,
+};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
 
@@ -57,6 +63,7 @@ const MAX_TURN_USER_ENTRIES: usize = 200;
 const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SESSION_UPLOADS: usize = 20;
 const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
+const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_WEB_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -86,32 +93,58 @@ struct WebMemState {
     space: String,
     layout: RuntimeDataLayout,
     session_store: SessionStore,
+    mcp_store: McpStore,
+    mcp_runtime: McpRuntime,
+    mcp_configs: Vec<McpServerConfig>,
+    mcp_reports: BTreeMap<String, McpServerReport>,
 }
 
 impl WebMemState {
     fn new(data_dir: PathBuf, space: String) -> Result<Self, String> {
         validate_web_space_name(&space)?;
         let layout = RuntimeDataLayout::new(data_dir, space.clone());
+        let mcp_store = McpStore::new(layout.memory_dir());
+        let mcp_configs = mcp_store.list()?;
         Ok(Self {
             space,
             session_store: SessionStore::new(layout.memory_dir()),
+            mcp_store,
+            mcp_runtime: McpRuntime::default(),
+            mcp_configs,
+            mcp_reports: BTreeMap::new(),
             layout,
         })
+    }
+
+    fn from_directory(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = validate_web_mem_directory(path.as_ref())?;
+        let space = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "mem_path_invalid".to_string())?
+            .to_string();
+        let data_dir = path
+            .parent()
+            .ok_or_else(|| "mem_path_invalid".to_string())?
+            .to_path_buf();
+        Self::new(data_dir, space)
     }
 
     fn info(&self) -> WebMemInfo {
         WebMemInfo {
             space: self.space.clone(),
-            data_dir: self.layout.data_root().display().to_string(),
-            space_dir: self.layout.space_dir().display().to_string(),
-            memory_dir: self.layout.memory_dir().display().to_string(),
+            data_dir: absolute_path(self.layout.data_root()).display().to_string(),
+            space_dir: absolute_path(self.layout.space_dir()).display().to_string(),
+            memory_dir: absolute_path(self.layout.memory_dir())
+                .display()
+                .to_string(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 struct RuntimeSettings {
-    config: ProviderConfig,
+    config: ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 }
@@ -125,6 +158,11 @@ struct WebSession {
     current_dir: String,
     max_llm_input_tokens: u32,
     tools: Vec<ToolSummary>,
+    mcp_server_ids: Vec<String>,
+    #[serde(skip)]
+    mcp_config_revision: u64,
+    #[serde(skip)]
+    applied_mcp_config_revision: u64,
     runtime_profile: WebSessionRuntimeProfile,
     contexts: Vec<WebContext>,
     workers: Vec<WebWorker>,
@@ -150,6 +188,16 @@ struct WebSession {
     pending_work_instruction_turn: Option<PendingWorkInstructionTurn>,
     #[serde(skip)]
     runtime: WebSessionRuntime,
+}
+
+fn initial_mcp_revisions(server_ids: &[String]) -> (u64, u64) {
+    if server_ids.is_empty() {
+        (0, 0)
+    } else {
+        // MCP discovery may involve a slow or unavailable external process.
+        // Keep the desired selection pending until the next turn boundary.
+        (1, 0)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -178,7 +226,6 @@ struct WebSessionRuntime {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct WebSessionRuntimeProfile {
-    provider: String,
     model: String,
     api_protocol: String,
     response_protocol: String,
@@ -188,6 +235,7 @@ struct WebSessionRuntimeProfile {
     max_llm_output_tokens: u32,
     bash_approval: String,
     work_instructions: String,
+    api_key_configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,6 +303,23 @@ enum WireEvent {
         session_id: String,
         display_name: String,
     },
+    SessionDeleted {
+        session_id: String,
+    },
+    SessionRuntimeUpdated {
+        session_id: String,
+        runtime_profile: WebSessionRuntimeProfile,
+    },
+    SessionRuntimeConfigUpdated {
+        session_id: String,
+        key: String,
+        value: String,
+        runtime_profile: WebSessionRuntimeProfile,
+    },
+    SessionApiKeyRevealed {
+        session_id: String,
+        api_key: String,
+    },
     CoreTopic {
         turn_id: Option<String>,
         turn_event_id: Option<String>,
@@ -312,6 +377,15 @@ enum WireEvent {
         session_id: String,
         detail: ToolDetail,
     },
+    McpUpdated {
+        session_id: Option<String>,
+        servers: Vec<McpServerReport>,
+        enabled_server_ids: Vec<String>,
+    },
+    McpServerSecretsRevealed {
+        server_id: String,
+        values: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -331,6 +405,7 @@ struct ServerInfo {
     runtime_options: Vec<WebRuntimeOption>,
     session_env_defaults: BTreeMap<String, String>,
     workspace_dirs: Vec<String>,
+    mcp_servers: Vec<McpServerReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -372,7 +447,17 @@ enum ClientCommand {
         session_id: String,
         display_name: String,
     },
+    SessionApiKeyUpdate {
+        session_id: String,
+        api_key: String,
+    },
+    SessionApiKeyReveal {
+        session_id: String,
+    },
     SessionStop {
+        session_id: String,
+    },
+    SessionDelete {
         session_id: String,
     },
     TurnSubmit {
@@ -429,8 +514,33 @@ enum ClientCommand {
         key: String,
         value: String,
     },
+    SessionRuntimeUpdate {
+        session_id: String,
+        key: String,
+        value: String,
+    },
+    McpServerUpsert {
+        session_id: String,
+        config: McpServerConfig,
+    },
+    McpServerDelete {
+        server_id: String,
+    },
+    McpSessionToggle {
+        session_id: String,
+        server_id: String,
+        enabled: bool,
+    },
+    McpServerReconnect {
+        session_id: String,
+        server_id: String,
+    },
+    McpServerSecretsReveal {
+        server_id: String,
+    },
     MemSwitch {
-        space: String,
+        #[serde(alias = "space")]
+        path: String,
     },
 }
 
@@ -490,6 +600,7 @@ pub async fn run_from_env() -> Result<(), String> {
     } else {
         println!("Timem Web is ready at {local_url}");
     }
+    let _ = schedule_selected_session_mcp_refreshes(&state);
     if launch.open_browser && !launch.public_access {
         if should_auto_open_browser() {
             if let Err(error) = open_browser(&local_url) {
@@ -569,7 +680,7 @@ fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
             .map_err(|_| "worker_manager_poisoned".to_string())?;
         std::mem::take(&mut *manager)
     };
-    manager.shutdown_all()
+    manager.shutdown_all_detached()
 }
 
 fn build_router(state: AppState, port: u16) -> Router {
@@ -615,7 +726,7 @@ async fn upload_file(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    if !authorized_token_or_cookie(&state, query.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let result = async {
@@ -656,7 +767,7 @@ async fn static_asset(
     uri: Uri,
 ) -> Response {
     let token_from_query = query.token.as_deref() == Some(state.token.as_str());
-    if !token_from_query && !authorized_by_cookie(&state, &headers) {
+    if !authorized_token_or_cookie(&state, query.token.as_deref(), &headers) {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))],
@@ -727,7 +838,7 @@ async fn health(
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if !authorized(&state, &auth, &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({ "ok": true, "port": port })).into_response()
@@ -738,7 +849,7 @@ async fn snapshot(
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if !authorized(&state, &auth, &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(snapshot_for(&state, port)).into_response()
@@ -750,18 +861,53 @@ async fn websocket(
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if !authorized(&state, &auth, &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.on_upgrade(move |socket| websocket_session(socket, state, port))
 }
 
+#[cfg(test)]
 fn authorized(state: &AppState, auth: &AuthQuery, headers: &HeaderMap) -> bool {
     authorized_token_or_cookie(state, auth.token.as_deref(), headers)
 }
 
 fn authorized_token_or_cookie(state: &AppState, token: Option<&str>, headers: &HeaderMap) -> bool {
-    token == Some(state.token.as_str()) || authorized_by_cookie(state, headers)
+    match token {
+        Some(token) => token == state.token,
+        None => authorized_by_cookie(state, headers),
+    }
+}
+
+fn authorized_api_request(state: &AppState, token: Option<&str>, headers: &HeaderMap) -> bool {
+    authorized_token_or_cookie(state, token, headers) && request_origin_allowed(headers)
+}
+
+fn request_origin_allowed(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    origin_authority(origin).is_some_and(|authority| authority.eq_ignore_ascii_case(host.trim()))
+}
+
+fn origin_authority(origin: &str) -> Option<&str> {
+    let origin = origin.trim();
+    let scheme_end = origin.find("://")?;
+    let after_scheme = &origin[scheme_end + 3..];
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    (!authority.is_empty()).then_some(authority)
 }
 
 fn current_mem_state(state: &AppState) -> Result<WebMemState, String> {
@@ -800,6 +946,15 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
         }
     }
     let mut events = state.events.subscribe();
+    let (command_tx, command_rx) =
+        tokio_mpsc::channel::<ClientCommand>(BROWSER_COMMAND_QUEUE_CAPACITY);
+    let (command_result_tx, mut command_result_rx) = tokio_mpsc::unbounded_channel();
+    let command_state = state.clone();
+    let command_worker = tokio::spawn(run_ordered_blocking_queue(
+        command_rx,
+        command_result_tx,
+        move |command| handle_command(&command_state, port, command),
+    ));
     loop {
         tokio::select! {
             maybe_command = receiver.next() => {
@@ -813,12 +968,14 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
                         }
                         match serde_json::from_str::<ClientCommand>(&text) {
                             Ok(command) => {
-                                match handle_command(&state, port, command) {
-                                    Ok(Some(event)) => if send_event(&mut sender, &event).await.is_err() { break; },
-                                    Ok(None) => {}
-                                    Err(error) => if send_event(&mut sender, &WireEvent::HostError { message: error }).await.is_err() {
+                                if let Err(error) = command_tx.try_send(command) {
+                                    let message = match error {
+                                        tokio_mpsc::error::TrySendError::Full(_) => "browser_command_queue_full",
+                                        tokio_mpsc::error::TrySendError::Closed(_) => "browser_command_worker_stopped",
+                                    };
+                                    if send_event(&mut sender, &WireEvent::HostError { message: message.to_string() }).await.is_err() {
                                         break;
-                                    },
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -832,6 +989,19 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
                     _ => {}
                 }
             }
+            result = command_result_rx.recv() => {
+                match result {
+                    Some(Ok(Some(event))) => if send_event(&mut sender, &event).await.is_err() { break; },
+                    Some(Ok(None)) => {}
+                    Some(Err(error)) => if send_event(&mut sender, &WireEvent::HostError { message: error }).await.is_err() {
+                        break;
+                    },
+                    None => {
+                        let _ = send_event(&mut sender, &WireEvent::HostError { message: "browser_command_worker_stopped".to_string() }).await;
+                        break;
+                    }
+                }
+            }
             event = events.recv() => match event {
                 Ok(event) => if send_event(&mut sender, &event).await.is_err() { break; },
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -839,6 +1009,29 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
+        }
+    }
+    drop(command_tx);
+    command_worker.abort();
+}
+
+async fn run_ordered_blocking_queue<T, R, F>(
+    mut receiver: tokio_mpsc::Receiver<T>,
+    results: tokio_mpsc::UnboundedSender<Result<R, String>>,
+    handler: F,
+) where
+    T: Send + 'static,
+    R: Send + 'static,
+    F: Fn(T) -> Result<R, String> + Send + Sync + 'static,
+{
+    let handler = Arc::new(handler);
+    while let Some(item) = receiver.recv().await {
+        let handler = handler.clone();
+        let result = tokio::task::spawn_blocking(move || handler(item))
+            .await
+            .unwrap_or_else(|error| Err(format!("browser_command_worker_failed:{error}")));
+        if results.send(result).is_err() {
+            break;
         }
     }
 }
@@ -895,6 +1088,22 @@ fn handle_command(
                 display_name,
             }));
         }
+        ClientCommand::SessionApiKeyUpdate {
+            session_id,
+            api_key,
+        } => {
+            let runtime_profile = update_session_api_key(state, &session_id, api_key)?;
+            let _ = state.events.send(WireEvent::SessionRuntimeUpdated {
+                session_id,
+                runtime_profile,
+            });
+        }
+        ClientCommand::SessionApiKeyReveal { session_id } => {
+            return Ok(Some(WireEvent::SessionApiKeyRevealed {
+                api_key: session_api_key(state, &session_id)?,
+                session_id,
+            }));
+        }
         ClientCommand::SessionStop { session_id } => {
             let worker_ids = session_worker_ids(state, &session_id)?;
             let mut manager = state
@@ -904,6 +1113,27 @@ fn handle_command(
             for worker_id in worker_ids {
                 manager.request_shutdown(&worker_id)?;
             }
+        }
+        ClientCommand::SessionDelete { session_id } => {
+            let worker_ids = session_worker_ids(state, &session_id)?;
+            {
+                let mut manager = state
+                    .manager
+                    .lock()
+                    .map_err(|_| "worker_manager_poisoned")?;
+                for worker_id in worker_ids {
+                    manager.shutdown_worker(&worker_id)?;
+                }
+            }
+            current_session_store(state)?.delete_session(&session_id)?;
+            session_tool_repo(state, &session_id)?.delete_session_data()?;
+            state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned")?
+                .remove(&session_id)
+                .ok_or_else(|| "session_not_found".to_string())?;
+            return Ok(Some(WireEvent::SessionDeleted { session_id }));
         }
         ClientCommand::TurnSubmit {
             session_id,
@@ -1028,8 +1258,9 @@ fn handle_command(
             decision,
             payload,
         } => {
+            let always_allow = decision == "always_allow";
             let decision = match decision.as_str() {
-                "accept" => HostDecision::Accept,
+                "accept" | "always_allow" => HostDecision::Accept,
                 "decline" => HostDecision::Decline,
                 _ => return Err("invalid_topic_reply_decision".to_string()),
             };
@@ -1050,9 +1281,13 @@ fn handle_command(
             if !session_has_active_turn(state, &session_id)? {
                 return Ok(None);
             }
+            let is_user_approval = topic_name == CORE_TOPIC_USER_APPROVAL_REQUEST;
             let mut reply = TopicReply::new(session_id.clone(), topic_name, decision, payload);
             if let Some(request_id) = request_id {
                 reply = reply.with_request_id(request_id);
+            }
+            if always_allow && is_user_approval {
+                reply = reply.with_always_allow();
             }
             relay_topic_reply_to_requesting_worker(
                 state,
@@ -1060,6 +1295,9 @@ fn handle_command(
                 worker_id.as_deref(),
                 reply,
             )?;
+            if always_allow && is_user_approval {
+                switch_session_bash_approval(state, &session_id, BashApprovalMode::Approve)?;
+            }
             return match append_turn_user_entry(state, &session_id, "approval", approval_summary) {
                 Ok(turn) => Ok(Some(WireEvent::TurnUpdated { session_id, turn })),
                 Err(error) if error == "active_turn_not_found" => Ok(None),
@@ -1077,23 +1315,93 @@ fn handle_command(
                 .map_err(|_| "runtime_settings_poisoned".to_string())?;
             let _ = state.events.send(WireEvent::HostConfigUpdated {
                 key: report.key.to_string(),
-                value: report.value,
+                value: report.value.clone(),
                 session_env_defaults,
             });
+            // Propagate config change to all active sessions
+            let field = runtime_config_field_from_key(&key)?;
+            propagate_runtime_config_to_sessions(state, field, &report.value);
         }
-        ClientCommand::MemSwitch { space } => {
-            let snapshot = switch_mem_space(state, port, &space)?;
+        ClientCommand::SessionRuntimeUpdate {
+            session_id,
+            key,
+            value,
+        } => {
+            let value = nonempty_text(value, "runtime config value")?;
+            let (value, runtime_profile) =
+                update_session_runtime_setting(state, &session_id, &key, &value)?;
+            let _ = state.events.send(WireEvent::SessionRuntimeConfigUpdated {
+                session_id,
+                key,
+                value,
+                runtime_profile,
+            });
+        }
+        ClientCommand::McpServerUpsert { session_id, config } => {
+            let server_id = config.id.clone();
+            upsert_mcp_server(state, config)?;
+            enable_mcp_for_session(state, &session_id, true, Some(&server_id))?;
+            let _ = mark_sessions_using_mcp_server(state, &server_id)?;
+            schedule_mcp_server_refresh(state, &server_id)?;
+            persist_web_session(state, &session_id)?;
+            return Ok(Some(mcp_updated_event(state, Some(session_id))?));
+        }
+        ClientCommand::McpServerDelete { server_id } => {
+            delete_mcp_server(state, &server_id)?;
+            return Ok(Some(mcp_updated_event(state, None)?));
+        }
+        ClientCommand::McpSessionToggle {
+            session_id,
+            server_id,
+            enabled,
+        } => {
+            enable_mcp_for_session(state, &session_id, enabled, Some(&server_id))?;
+            if enabled {
+                schedule_mcp_server_refresh(state, &server_id)?;
+            }
+            persist_web_session(state, &session_id)?;
+            return Ok(Some(mcp_updated_event(state, Some(session_id))?));
+        }
+        ClientCommand::McpServerReconnect {
+            session_id,
+            server_id,
+        } => {
+            mark_session_mcp_changed(state, &session_id)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .mcp_runtime
+                .disconnect(&server_id);
+            schedule_mcp_server_refresh(state, &server_id)?;
+            return Ok(Some(mcp_updated_event(state, Some(session_id))?));
+        }
+        ClientCommand::McpServerSecretsReveal { server_id } => {
+            return Ok(Some(WireEvent::McpServerSecretsRevealed {
+                values: mcp_server_secret_values(state, &server_id)?,
+                server_id,
+            }));
+        }
+        ClientCommand::MemSwitch { path } => {
+            let snapshot = switch_mem_space(state, port, &path)?;
             let _ = state.events.send(WireEvent::Hello { snapshot });
         }
     }
     Ok(None)
 }
 
-fn switch_mem_space(state: &AppState, port: u16, space: &str) -> Result<WebSnapshot, String> {
-    let space = space.trim();
-    validate_web_space_name(space)?;
-    let current_space = current_mem_state(state)?.space;
-    if current_space == space {
+fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapshot, String> {
+    let requested_path = Path::new(path);
+    let next_mem = if requested_path.is_absolute() {
+        WebMemState::from_directory(requested_path)?
+    } else {
+        validate_web_space_name(path)?;
+        let data_root = current_mem_state(state)?.layout.data_root().to_path_buf();
+        WebMemState::new(data_root, path.to_string())?
+    };
+    let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
+    let next_path = absolute_path(next_mem.layout.space_dir());
+    if current_path == next_path {
         return Ok(snapshot_for(state, port));
     }
     let old_manager = {
@@ -1124,12 +1432,470 @@ fn switch_mem_space(state: &AppState, port: u16, space: &str) -> Result<WebSnaps
             .mem
             .lock()
             .map_err(|_| "mem_state_poisoned".to_string())?;
-        *mem = WebMemState::new(state.template.data_dir.clone(), space.to_string())?;
+        *mem = next_mem;
     }
     if restore_stored_sessions(state)? == 0 {
         let _ = create_session(state, None, None, BTreeMap::new())?;
     }
+    let _ = schedule_selected_session_mcp_refreshes(state);
     Ok(snapshot_for(state, port))
+}
+
+fn mcp_reports(mem: &WebMemState) -> Vec<McpServerReport> {
+    mem.mcp_configs
+        .iter()
+        .map(|config| {
+            mem.mcp_reports
+                .get(&config.id)
+                .cloned()
+                .unwrap_or_else(|| McpServerReport {
+                    config: config.clone(),
+                    state: if config.enabled {
+                        "disconnected"
+                    } else {
+                        "disabled"
+                    }
+                    .to_string(),
+                    error: None,
+                    tools: Vec::new(),
+                })
+        })
+        .map(redact_mcp_report)
+        .collect()
+}
+
+fn upsert_mcp_server(state: &AppState, mut config: McpServerConfig) -> Result<(), String> {
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    if let Some(existing) = mem.mcp_configs.iter().find(|item| item.id == config.id) {
+        merge_redacted_mcp_values(&mut config, existing);
+    }
+    if let Some(existing) = mem.mcp_configs.iter_mut().find(|item| item.id == config.id) {
+        *existing = config;
+    } else {
+        mem.mcp_configs.push(config);
+    }
+    mem.mcp_configs.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    mem.mcp_store.save(&mem.mcp_configs)
+}
+
+fn redact_mcp_report(mut report: McpServerReport) -> McpServerReport {
+    match &mut report.config.transport {
+        agent_core::mcp::McpTransportConfig::Stdio { env, .. } => redact_sensitive_map(env),
+        agent_core::mcp::McpTransportConfig::StreamableHttp { headers, .. } => {
+            redact_sensitive_map(headers)
+        }
+        agent_core::mcp::McpTransportConfig::Sse { headers, .. } => redact_sensitive_map(headers),
+    }
+    report
+}
+
+fn redact_sensitive_map(values: &mut BTreeMap<String, String>) {
+    for (key, value) in values {
+        if is_sensitive_mcp_key(key) {
+            *value = "****".to_string();
+        }
+    }
+}
+
+fn merge_redacted_mcp_values(config: &mut McpServerConfig, existing: &McpServerConfig) {
+    match (&mut config.transport, &existing.transport) {
+        (
+            agent_core::mcp::McpTransportConfig::Stdio { env, .. },
+            agent_core::mcp::McpTransportConfig::Stdio { env: old, .. },
+        )
+        | (
+            agent_core::mcp::McpTransportConfig::StreamableHttp { headers: env, .. },
+            agent_core::mcp::McpTransportConfig::StreamableHttp { headers: old, .. },
+        )
+        | (
+            agent_core::mcp::McpTransportConfig::Sse { headers: env, .. },
+            agent_core::mcp::McpTransportConfig::Sse { headers: old, .. },
+        ) => {
+            for (key, value) in env {
+                if value == "****" {
+                    if let Some(previous) = old.get(key) {
+                        *value = previous.clone();
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mcp_server_secret_values(
+    state: &AppState,
+    server_id: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    let config = mem
+        .mcp_configs
+        .iter()
+        .find(|config| config.id == server_id)
+        .ok_or_else(|| "mcp_server_not_found".to_string())?;
+    let values = match &config.transport {
+        agent_core::mcp::McpTransportConfig::Stdio { env, .. } => env,
+        agent_core::mcp::McpTransportConfig::StreamableHttp { headers, .. }
+        | agent_core::mcp::McpTransportConfig::Sse { headers, .. } => headers,
+    };
+    Ok(values
+        .iter()
+        .filter(|(key, _)| is_sensitive_mcp_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect())
+}
+
+fn is_sensitive_mcp_key(key: &str) -> bool {
+    let normalized = key.to_ascii_uppercase();
+    ["KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL"]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+fn delete_mcp_server(state: &AppState, server_id: &str) -> Result<(), String> {
+    let server_id = server_id.trim();
+    if server_id.is_empty() {
+        return Err("mcp_server_id_required".to_string());
+    }
+    {
+        let mut mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        mem.mcp_runtime.disconnect(server_id);
+        mem.mcp_configs.retain(|config| config.id != server_id);
+        mem.mcp_reports.remove(server_id);
+        mem.mcp_store.save(&mem.mcp_configs)?;
+    }
+    let session_ids = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let mut changed = Vec::new();
+        for session in sessions.values_mut() {
+            let before = session.mcp_server_ids.len();
+            session.mcp_server_ids.retain(|id| id != server_id);
+            if session.mcp_server_ids.len() != before {
+                session.mcp_config_revision = session.mcp_config_revision.saturating_add(1);
+                changed.push(session.session_id.clone());
+            }
+        }
+        changed
+    };
+    for session_id in session_ids {
+        persist_web_session(state, &session_id)?;
+    }
+    Ok(())
+}
+
+fn enable_mcp_for_session(
+    state: &AppState,
+    session_id: &str,
+    enabled: bool,
+    server_id: Option<&str>,
+) -> Result<(), String> {
+    let server_id = server_id.ok_or_else(|| "mcp_server_id_required".to_string())?;
+    if !current_mem_state(state)?
+        .mcp_configs
+        .iter()
+        .any(|config| config.id == server_id)
+    {
+        return Err("mcp_server_not_found".to_string());
+    }
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    let before = session.mcp_server_ids.clone();
+    if enabled {
+        if !session.mcp_server_ids.iter().any(|id| id == server_id) {
+            session.mcp_server_ids.push(server_id.to_string());
+            session.mcp_server_ids.sort();
+        }
+    } else {
+        session.mcp_server_ids.retain(|id| id != server_id);
+    }
+    if session.mcp_server_ids != before {
+        session.mcp_config_revision = session.mcp_config_revision.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn mark_session_mcp_changed(state: &AppState, session_id: &str) -> Result<(), String> {
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    session.mcp_config_revision = session.mcp_config_revision.saturating_add(1);
+    Ok(())
+}
+
+fn mark_sessions_using_mcp_server(
+    state: &AppState,
+    server_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let mut changed = Vec::new();
+    for session in sessions.values_mut() {
+        if session.mcp_server_ids.iter().any(|id| id == server_id) {
+            session.mcp_config_revision = session.mcp_config_revision.saturating_add(1);
+            changed.push(session.session_id.clone());
+        }
+    }
+    Ok(changed)
+}
+
+fn schedule_mcp_server_refresh(state: &AppState, server_id: &str) -> Result<bool, String> {
+    let (runtime, config, space) = {
+        let mut mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        let config = mem
+            .mcp_configs
+            .iter()
+            .find(|config| config.id == server_id)
+            .cloned()
+            .ok_or_else(|| "mcp_server_not_found".to_string())?;
+        if !config.enabled {
+            return Ok(false);
+        }
+        if mem
+            .mcp_reports
+            .get(server_id)
+            .is_some_and(|report| report.config == config && report.state == "connecting")
+        {
+            return Ok(false);
+        }
+        mem.mcp_reports.insert(
+            server_id.to_string(),
+            McpServerReport {
+                config: config.clone(),
+                state: "connecting".to_string(),
+                error: None,
+                tools: Vec::new(),
+            },
+        );
+        (mem.mcp_runtime.clone(), config, mem.space.clone())
+    };
+    let state = state.clone();
+    std::thread::Builder::new()
+        .name(format!("timem-mcp-connect-{}", config.id))
+        .spawn(move || {
+            let report = match runtime.connect(&config) {
+                Ok(tools) => McpServerReport {
+                    config: config.clone(),
+                    state: "connected".to_string(),
+                    error: None,
+                    tools,
+                },
+                Err(error) => McpServerReport {
+                    config: config.clone(),
+                    state: "error".to_string(),
+                    error: Some(error),
+                    tools: Vec::new(),
+                },
+            };
+            let connected = report.state == "connected";
+            let accepted = state.mem.lock().ok().is_some_and(|mut mem| {
+                if mem.space != space || !mem.mcp_configs.iter().any(|current| current == &config) {
+                    return false;
+                }
+                mem.mcp_reports.insert(config.id.clone(), report);
+                true
+            });
+            if !accepted {
+                runtime.disconnect(&config.id);
+                return;
+            }
+            let session_ids = if connected {
+                mark_sessions_using_mcp_server(&state, &config.id).unwrap_or_default()
+            } else {
+                state
+                    .sessions
+                    .lock()
+                    .ok()
+                    .map(|sessions| {
+                        sessions
+                            .values()
+                            .filter(|session| {
+                                session.mcp_server_ids.iter().any(|id| id == &config.id)
+                            })
+                            .map(|session| session.session_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            for session_id in session_ids {
+                if let Ok(event) = mcp_updated_event(&state, Some(session_id)) {
+                    let _ = state.events.send(event);
+                }
+            }
+        })
+        .map_err(|error| format!("mcp_refresh_spawn_failed:{error}"))?;
+    Ok(true)
+}
+
+fn schedule_selected_session_mcp_refreshes(state: &AppState) -> Result<usize, String> {
+    let selected = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .values()
+        .flat_map(|session| session.mcp_server_ids.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let enabled = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .mcp_configs
+        .iter()
+        .filter(|config| config.enabled && selected.contains(&config.id))
+        .map(|config| config.id.clone())
+        .collect::<Vec<_>>();
+    let mut scheduled = 0usize;
+    for server_id in enabled {
+        scheduled += usize::from(schedule_mcp_server_refresh(state, &server_id)?);
+    }
+    Ok(scheduled)
+}
+
+fn apply_pending_session_mcp(state: &AppState, session_id: &str) -> Result<bool, String> {
+    let pending = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.mcp_config_revision != session.applied_mcp_config_revision
+    };
+    if pending {
+        sync_session_mcp(state, session_id)?;
+    }
+    Ok(pending)
+}
+
+fn sync_session_mcp(state: &AppState, session_id: &str) -> Result<(), String> {
+    let (server_ids, worker_ids, target_revision) = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        (
+            session.mcp_server_ids.clone(),
+            session
+                .workers
+                .iter()
+                .map(|worker| worker.worker_id.clone())
+                .collect::<Vec<_>>(),
+            session.mcp_config_revision,
+        )
+    };
+    let (runtime, configs, cached_reports) = {
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        let configs = mem
+            .mcp_configs
+            .iter()
+            .filter(|config| config.enabled && server_ids.iter().any(|id| id == &config.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        (mem.mcp_runtime.clone(), configs, mem.mcp_reports.clone())
+    };
+    let mut tools = Vec::<McpTool>::new();
+    let mut refresh_ids = Vec::new();
+    for config in &configs {
+        let cached = cached_reports
+            .get(&config.id)
+            .filter(|report| report.config == *config && report.state == "connected")
+            .map(|report| report.tools.clone());
+        if let Some(discovered) = cached {
+            tools.extend(discovered);
+        } else {
+            refresh_ids.push(config.id.clone());
+        }
+    }
+    let base =
+        CapabilityRegistry::builtin_with_overlay_dir(state.template.data_dir.join("capabilities"))
+            .unwrap_or_else(|_| CapabilityRegistry::builtin());
+    let manager = state
+        .manager
+        .lock()
+        .map_err(|_| "worker_manager_poisoned".to_string())?;
+    for worker_id in worker_ids {
+        if let Some(handle) = manager.handle(&worker_id) {
+            handle.update_mcp(
+                base.clone(),
+                runtime.clone(),
+                configs.clone(),
+                tools.clone(),
+            )?;
+        }
+    }
+    drop(manager);
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        if session.mcp_config_revision == target_revision {
+            session.applied_mcp_config_revision = target_revision;
+        }
+    }
+    persist_web_session(state, session_id)?;
+    for server_id in refresh_ids {
+        let _ = schedule_mcp_server_refresh(state, &server_id)?;
+    }
+    Ok(())
+}
+
+fn mcp_updated_event(state: &AppState, session_id: Option<String>) -> Result<WireEvent, String> {
+    let servers = mcp_reports(&current_mem_state(state)?);
+    let enabled_server_ids = match session_id.as_deref() {
+        Some(session_id) => state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?
+            .get(session_id)
+            .map(|session| session.mcp_server_ids.clone())
+            .ok_or_else(|| "session_not_found".to_string())?,
+        None => Vec::new(),
+    };
+    Ok(WireEvent::McpUpdated {
+        session_id,
+        servers,
+        enabled_server_ids,
+    })
 }
 
 fn create_session(
@@ -1163,6 +1929,14 @@ fn create_session(
             .max()
             .map(|value| value.saturating_add(1))
             .unwrap_or(0);
+        let mcp_server_ids = current_mem_state(state)?
+            .mcp_configs
+            .into_iter()
+            .filter(|config| config.enabled)
+            .map(|config| config.id)
+            .collect::<Vec<_>>();
+        let (mcp_config_revision, applied_mcp_config_revision) =
+            initial_mcp_revisions(&mcp_server_ids);
         sessions.insert(
             session_id.clone(),
             WebSession {
@@ -1176,6 +1950,9 @@ fn create_session(
                 current_dir: current_dir.display().to_string(),
                 max_llm_input_tokens,
                 tools: tool_repo.list()?,
+                mcp_server_ids,
+                mcp_config_revision,
+                applied_mcp_config_revision,
                 runtime_profile,
                 contexts: Vec::new(),
                 workers: Vec::new(),
@@ -1213,8 +1990,12 @@ fn restore_stored_sessions(state: &AppState) -> Result<usize, String> {
     let stored_sessions = current_session_store(state)?.list_sessions()?;
     let mut restored = 0usize;
     for stored in stored_sessions {
-        if restore_stored_session(state, stored).is_ok() {
-            restored += 1;
+        let session_id = stored.session_id.clone();
+        match restore_stored_session(state, stored) {
+            Ok(()) => restored += 1,
+            Err(error) => eprintln!(
+                "[timem_web_session_restore_error] session_id={session_id:?} reason={error}"
+            ),
         }
     }
     Ok(restored)
@@ -1225,16 +2006,17 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
     if !current_dir.is_dir() {
         return Err("stored_session_workspace_not_found".to_string());
     }
-    // Legacy records stored the complete resolved runtime in `env`, which made
-    // restored sessions silently pin stale launch configuration. Only the new
-    // provenance-aware field represents explicit per-session overrides.
-    let env_overrides = stored.env_overrides.clone().unwrap_or_default();
-    let settings = state.template.session_settings(&env_overrides)?;
-    let session_env = state.template.session_env(&settings, &env_overrides);
+    let cached_env = sanitize_restored_session_env(if stored.env.is_empty() {
+        stored.env_overrides.clone().unwrap_or_default()
+    } else {
+        stored.env.clone()
+    });
+    let settings = state.template.session_settings(&cached_env)?;
+    let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
         settings,
         env: session_env,
-        env_overrides,
+        env_overrides: stored.env_overrides.clone().unwrap_or_default(),
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
@@ -1258,6 +2040,8 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
         let history_records = history_page.records;
         let messages = restored_messages_from_history_records(&history_records);
         let turns = restored_turns_from_history_records(&history_records);
+        let (mcp_config_revision, applied_mcp_config_revision) =
+            initial_mcp_revisions(&stored.mcp_server_ids);
         sessions.insert(
             stored.session_id.clone(),
             WebSession {
@@ -1272,6 +2056,9 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
                 current_dir: current_dir.display().to_string(),
                 max_llm_input_tokens,
                 tools: tool_repo.list()?,
+                mcp_server_ids: stored.mcp_server_ids.clone(),
+                mcp_config_revision,
+                applied_mcp_config_revision,
                 runtime_profile,
                 contexts: Vec::new(),
                 workers: Vec::new(),
@@ -1297,11 +2084,59 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
         state,
         &stored.session_id,
         current_dir,
-        Some(stored.display_name),
+        Some(stored.display_name.clone()),
         None,
         true,
     )?;
+    persist_restored_session_runtime_cache(state, &stored)?;
     Ok(())
+}
+
+fn persist_restored_session_runtime_cache(
+    state: &AppState,
+    stored: &StoredSession,
+) -> Result<(), String> {
+    let (profile, env, env_overrides) = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(&stored.session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        (
+            StoredSessionProfile {
+                model: session.runtime.settings.config.model.clone(),
+                api_protocol: session
+                    .runtime
+                    .settings
+                    .config
+                    .api_protocol
+                    .label()
+                    .to_string(),
+                response_protocol: session
+                    .runtime
+                    .settings
+                    .config
+                    .response_protocol
+                    .name()
+                    .to_string(),
+            },
+            session_cached_env_values(&session.runtime.settings),
+            session
+                .runtime
+                .env_overrides
+                .iter()
+                .filter(|(key, _)| key.as_str() != "TIMEM_API_KEY")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    };
+    let mut migrated = stored.clone();
+    migrated.profile = profile;
+    migrated.env = env;
+    migrated.env_overrides = Some(env_overrides);
+    current_session_store(state)?.upsert_session(&migrated)
 }
 
 fn restored_messages_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebChatMessage> {
@@ -1447,7 +2282,6 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
         updated_at_ms: now_ms_i64(),
         current_dir: session.current_dir.clone(),
         profile: StoredSessionProfile {
-            provider: session.runtime.settings.config.provider.clone(),
             model: session.runtime.settings.config.model.clone(),
             api_protocol: session
                 .runtime
@@ -1464,9 +2298,7 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
                 .name()
                 .to_string(),
         },
-        // Keep the legacy field empty. Resolved settings belong to the launch
-        // environment and must not become persistent per-session overrides.
-        env: BTreeMap::new(),
+        env: session_cached_env_values(&session.runtime.settings),
         env_overrides: Some(
             session
                 .runtime
@@ -1476,6 +2308,7 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
         ),
+        mcp_server_ids: session.mcp_server_ids.clone(),
         state: if session.state == "error" {
             StoredSessionState::Error
         } else if session.active_turn_id.is_some() || session.state == "working" {
@@ -1544,27 +2377,45 @@ fn try_append_turn_supplement(
         return Ok(None);
     }
     let worker_handle = primary_worker_handle(state, session_id)?;
-    let worker_supplement_text = text.clone();
+    let pending_attachments = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned")?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .attachments
+        .clone();
+    let mut worker_supplement_text = text.clone();
+    if let Some(context) = uploaded_files_context(&pending_attachments) {
+        worker_supplement_text.push_str("\n\n");
+        worker_supplement_text.push_str(&context);
+    }
+    if !worker_handle.try_add_user_supplement(worker_supplement_text) {
+        settle_closed_primary_turn(state, session_id)?;
+        return Ok(None);
+    }
     match append_turn_supplement_with_pending_attachments(state, session_id, text) {
-        Ok(turn) => {
-            let entry = turn.user_entries.last().cloned();
-            let mut supplement = entry
-                .as_ref()
-                .map(|entry| entry.text.clone())
-                .unwrap_or(worker_supplement_text);
-            if let Some(context) = entry
-                .as_ref()
-                .and_then(|entry| uploaded_files_context(&entry.attachments))
-            {
-                supplement.push_str("\n\n");
-                supplement.push_str(&context);
-            }
-            worker_handle.add_user_supplement(supplement);
-            Ok(Some(turn))
-        }
+        Ok(turn) => Ok(Some(turn)),
         Err(error) if error == "active_turn_not_found" => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn settle_closed_primary_turn(state: &AppState, session_id: &str) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while session_has_active_turn(state, session_id)? {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+            handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
+        }
+        if !session_has_active_turn(state, session_id)? {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("closed_turn_settle_timeout".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    Ok(())
 }
 
 fn create_context_with_worker(
@@ -1633,7 +2484,7 @@ fn attach_worker_to_session_context(
     parent_worker_id: Option<String>,
     primary: bool,
 ) -> Result<String, String> {
-    let (runtime, current_dir) = {
+    let (runtime, current_dir, mcp_server_ids) = {
         let sessions = state
             .sessions
             .lock()
@@ -1658,14 +2509,38 @@ fn attach_worker_to_session_context(
         if !context.worker_ids.is_empty() {
             return Err("session_context_worker_exists".to_string());
         }
-        (session.runtime.clone(), PathBuf::from(&context.current_dir))
+        (
+            session.runtime.clone(),
+            PathBuf::from(&context.current_dir),
+            session.mcp_server_ids.clone(),
+        )
     };
 
     let mem = current_mem_state(state)?;
-    let core =
+    let mut core =
         state
             .template
             .new_core_at(&mem, &current_dir, &runtime.settings, runtime.env.clone())?;
+    let mcp_configs = mem
+        .mcp_configs
+        .iter()
+        .filter(|config| config.enabled && mcp_server_ids.iter().any(|id| id == &config.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut mcp_tools = Vec::new();
+    for config in &mcp_configs {
+        if let Some(report) = mem
+            .mcp_reports
+            .get(&config.id)
+            .filter(|report| report.config == *config && report.state == "connected")
+        {
+            mcp_tools.extend(report.tools.clone());
+        }
+    }
+    let base =
+        CapabilityRegistry::builtin_with_overlay_dir(state.template.data_dir.join("capabilities"))
+            .unwrap_or_else(|_| CapabilityRegistry::builtin());
+    core.configure_mcp(base, mem.mcp_runtime.clone(), mcp_configs, mcp_tools)?;
     let workspace = state
         .template
         .workspace_at(&mem, &current_dir, runtime.env.clone());
@@ -1728,6 +2603,8 @@ fn attach_worker_to_session_context(
 }
 
 fn submit_turn(state: &AppState, session_id: &str, text: String) -> Result<WebTurn, String> {
+    validate_session_model_service_config(state, session_id)?;
+    apply_pending_session_mcp(state, session_id)?;
     let request = {
         let sessions = state
             .sessions
@@ -1889,6 +2766,241 @@ fn session_worker_handle(
         .ok_or_else(|| "session_worker_not_found".to_string())
 }
 
+fn switch_session_bash_approval(
+    state: &AppState,
+    session_id: &str,
+    mode: BashApprovalMode,
+) -> Result<(), String> {
+    // Update session runtime settings
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings.bash_approval_mode = mode;
+        session.runtime.env.insert(
+            "TIMEM_BASH_APPROVAL".to_string(),
+            agent_core::bash_approval_mode_label(mode).to_string(),
+        );
+        session.runtime_profile.bash_approval =
+            agent_core::bash_approval_mode_label(mode).to_string();
+    }
+    // Notify all workers in the session
+    let worker_ids = session_worker_ids(state, session_id)?;
+    let manager = state
+        .manager
+        .lock()
+        .map_err(|_| "worker_manager_poisoned")?;
+    for worker_id in &worker_ids {
+        if let Some(handle) = manager.handle(worker_id) {
+            let _ = handle.update_bash_approval(mode);
+        }
+    }
+    drop(manager);
+    persist_web_session(state, session_id)
+}
+
+fn update_session_api_key(
+    state: &AppState,
+    session_id: &str,
+    api_key: String,
+) -> Result<WebSessionRuntimeProfile, String> {
+    if api_key.len() > 8 * 1024 {
+        return Err("session_api_key_too_large".to_string());
+    }
+    if !api_key.is_empty() {
+        validate_api_key(&api_key).map_err(|error| format!("invalid_session_api_key:{error}"))?;
+    }
+    if session_has_active_turn(state, session_id)? {
+        return Err("session_api_key_update_while_working".to_string());
+    }
+
+    let worker_ids = session_worker_ids(state, session_id)?;
+    {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        for worker_id in &worker_ids {
+            manager
+                .handle(worker_id)
+                .ok_or_else(|| "session_worker_not_found".to_string())?
+                .update_api_key(api_key.clone())?;
+        }
+    }
+
+    let runtime_profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings.config.api_key = api_key.clone();
+        session
+            .runtime
+            .env
+            .insert("TIMEM_API_KEY".to_string(), api_key);
+        session.runtime_profile =
+            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok(runtime_profile)
+}
+
+fn session_api_key(state: &AppState, session_id: &str) -> Result<String, String> {
+    state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .map(|session| session.runtime.settings.config.api_key.clone())
+        .ok_or_else(|| "session_not_found".to_string())
+}
+
+fn update_session_runtime_setting(
+    state: &AppState,
+    session_id: &str,
+    key: &str,
+    value: &str,
+) -> Result<(String, WebSessionRuntimeProfile), String> {
+    if session_has_active_turn(state, session_id)? {
+        return Err("session_runtime_update_while_working".to_string());
+    }
+    let field = runtime_config_field_from_key(key)?;
+    let worker_ids = session_worker_ids(state, session_id)?;
+    let mut settings = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings.clone()
+    };
+    let effect = apply_runtime_config_value(
+        &mut settings.config,
+        &mut settings.bash_approval_mode,
+        &mut settings.work_instruction_mode,
+        field,
+        value,
+    )
+    .map_err(|error| format!("invalid_session_runtime_config:{error:?}"))?;
+    let report = agent_core::runtime_config_apply_report(
+        &settings.config,
+        settings.bash_approval_mode,
+        settings.work_instruction_mode,
+        field,
+        effect,
+    );
+
+    {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        for worker_id in &worker_ids {
+            manager
+                .handle(worker_id)
+                .ok_or_else(|| "session_worker_not_found".to_string())?
+                .update_runtime_config(field, report.value.clone())?;
+        }
+    }
+
+    let runtime_profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings = settings;
+        session
+            .runtime
+            .env
+            .extend(session_cached_env_values(&session.runtime.settings));
+        session.runtime_profile =
+            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.max_llm_input_tokens = session.runtime.settings.config.max_llm_input_tokens;
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok((report.value, runtime_profile))
+}
+
+fn propagate_runtime_config_to_sessions(
+    state: &AppState,
+    field: agent_core::RuntimeConfigField,
+    value: &str,
+) {
+    // Collect all session IDs and their worker IDs
+    let session_worker_pairs: Vec<(String, Vec<String>)> = {
+        let Ok(sessions) = state.sessions.lock() else {
+            return;
+        };
+        sessions
+            .iter()
+            .map(|(sid, session)| {
+                let worker_ids: Vec<String> = session
+                    .workers
+                    .iter()
+                    .map(|w| w.worker_id.clone())
+                    .collect();
+                (sid.clone(), worker_ids)
+            })
+            .collect()
+    };
+
+    // Update each session's runtime settings
+    {
+        let Ok(mut sessions) = state.sessions.lock() else {
+            return;
+        };
+        for (sid, _) in &session_worker_pairs {
+            if let Some(session) = sessions.get_mut(sid.as_str()) {
+                let settings = &mut session.runtime.settings;
+                let _ = agent_core::apply_runtime_config_value(
+                    &mut settings.config,
+                    &mut settings.bash_approval_mode,
+                    &mut settings.work_instruction_mode,
+                    field,
+                    value,
+                );
+                // Update the runtime_profile for UI display
+                session.runtime_profile =
+                    WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+                session
+                    .runtime
+                    .env
+                    .extend(session_cached_env_values(&session.runtime.settings));
+            }
+        }
+    }
+
+    // Notify all workers
+    let Ok(manager) = state.manager.lock() else {
+        return;
+    };
+    for (_, worker_ids) in &session_worker_pairs {
+        for worker_id in worker_ids {
+            if let Some(handle) = manager.handle(worker_id) {
+                let _ = handle.update_runtime_config(field, value.to_string());
+            }
+        }
+    }
+    drop(manager);
+    for (session_id, _) in &session_worker_pairs {
+        let _ = persist_web_session(state, session_id);
+    }
+}
+
 fn relay_topic_reply_to_requesting_worker(
     state: &AppState,
     session_id: &str,
@@ -2044,6 +3156,7 @@ fn submit_toolgen_turn(
     source_turn_id: &str,
     user_instruction: Option<String>,
 ) -> Result<WebTurn, String> {
+    validate_session_model_service_config(state, session_id)?;
     {
         let sessions = state
             .sessions
@@ -2071,6 +3184,7 @@ fn submit_toolgen_turn(
     let user_instruction = user_instruction
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    apply_pending_session_mcp(state, session_id)?;
     let turn = start_web_toolgen_turn(
         state,
         session_id,
@@ -2083,6 +3197,18 @@ fn submit_toolgen_turn(
         return Err(error);
     }
     Ok(turn)
+}
+
+fn validate_session_model_service_config(state: &AppState, session_id: &str) -> Result<(), String> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    validate_api_key(&session.runtime.settings.config.api_key)
+        .map_err(|error| format!("session_model_service_config_incomplete:{error}"))
 }
 
 fn start_web_toolgen_turn(
@@ -2528,12 +3654,25 @@ fn sanitize_upload_name(name: &str) -> Result<String, String> {
     }
 }
 
+fn sanitize_upload_session_component(session_id: &str) -> Result<&str, String> {
+    let valid = !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'));
+    if valid {
+        Ok(session_id)
+    } else {
+        Err("invalid_upload_session_id".to_string())
+    }
+}
+
 async fn store_upload(
     state: &AppState,
     session_id: &str,
     name: String,
     bytes: &[u8],
 ) -> Result<WebAttachment, String> {
+    let session_dir = sanitize_upload_session_component(session_id)?;
     let session_uploads = state
         .sessions
         .lock()
@@ -2546,7 +3685,11 @@ async fn store_upload(
         return Err("session_upload_limit_reached".to_string());
     }
     let id = unique_web_id("upload");
-    let base_dir = state.template.data_dir.join("web_uploads").join(session_id);
+    let base_dir = state
+        .template
+        .data_dir
+        .join("web_uploads")
+        .join(session_dir);
     tokio::fs::create_dir_all(&base_dir)
         .await
         .map_err(|_| "upload_directory_create_failed".to_string())?;
@@ -2916,15 +4059,6 @@ fn handle_scoped_worker_event(
                 json!({ "kind": "model_response", "round": round, "usage": usage, "runtime_phase": runtime_phase }),
             );
         }
-        CoreSessionWorkerEvent::ModelResponseDiscarded { round, reason } => {
-            emit_worker_activity(
-                state,
-                session_id,
-                context_id,
-                worker_id,
-                json!({ "kind": "model_response_discarded", "round": round, "reason": reason }),
-            );
-        }
         CoreSessionWorkerEvent::ModelRetry {
             attempt,
             max_attempts,
@@ -3133,6 +4267,9 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             runtime_options,
             session_env_defaults,
             workspace_dirs,
+            mcp_servers: current_mem_state(state)
+                .map(|mem| mcp_reports(&mem))
+                .unwrap_or_default(),
         },
         sessions,
     }
@@ -3143,17 +4280,47 @@ fn validate_web_space_name(space: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("mem_space_empty".to_string());
     }
+    if trimmed != space || trimmed.len() > 128 {
+        return Err("mem_space_invalid".to_string());
+    }
     if trimmed == "." || trimmed == ".." {
         return Err("mem_space_invalid".to_string());
     }
-    if trimmed.contains('/')
-        || trimmed.contains('\\')
-        || trimmed.contains("..")
+    if trimmed.contains("..")
         || Path::new(trimmed).is_absolute()
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
     {
         return Err("mem_space_must_be_name_not_path".to_string());
     }
     Ok(())
+}
+
+fn validate_web_mem_directory(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err("mem_path_empty".to_string());
+    }
+    if !path.is_absolute() {
+        return Err("mem_path_must_be_absolute".to_string());
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err("mem_path_invalid".to_string());
+    }
+    if path.as_os_str().to_string_lossy().len() > 4096 {
+        return Err("mem_path_invalid".to_string());
+    }
+    let space = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "mem_path_invalid".to_string())?;
+    validate_web_space_name(space).map_err(|_| "mem_path_invalid".to_string())?;
+    Ok(path.to_path_buf())
 }
 
 fn web_workspace_dirs(template: &WorkerTemplate) -> Vec<String> {
@@ -3203,7 +4370,6 @@ fn update_runtime_setting(
 fn runtime_config_field_from_key(key: &str) -> Result<agent_core::RuntimeConfigField, String> {
     Ok(match key {
         "TIMEM_MODEL" => agent_core::RuntimeConfigField::Model,
-        "TIMEM_GATEWAY_PROVIDER" => agent_core::RuntimeConfigField::GatewayProvider,
         "TIMEM_API_PROTOCOL" => agent_core::RuntimeConfigField::ApiProtocol,
         "TIMEM_BASE_URL" => agent_core::RuntimeConfigField::BaseUrl,
         "TIMEM_MAX_LLM_INPUT" => agent_core::RuntimeConfigField::MaxInput,
@@ -3216,14 +4382,10 @@ fn runtime_config_field_from_key(key: &str) -> Result<agent_core::RuntimeConfigF
 
 impl WorkerTemplate {
     fn from_environment(launch: &WebLaunchOptions) -> Result<Self, String> {
-        let env = std::env::vars().collect::<HashMap<_, _>>();
-        let config = provider_config_from_sources(&launch.provider_source(), &env)?;
-        let response_protocol = launch
-            .response_protocol
-            .as_deref()
-            .or_else(|| env.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str))
-            .map(ResponseProtocolKind::from_name)
-            .unwrap_or_default();
+        let mut env = std::env::vars().collect::<HashMap<_, _>>();
+        for key in RETIRED_SESSION_ENV_KEYS {
+            env.remove(*key);
+        }
         let space = launch
             .space
             .clone()
@@ -3234,6 +4396,27 @@ impl WorkerTemplate {
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(default_data_root);
+        let session_store =
+            SessionStore::new(RuntimeDataLayout::new(&data_dir, &space).memory_dir());
+        if let Ok(sessions) = session_store.list_sessions() {
+            if let Some(stored) = sessions.into_iter().find(|session| {
+                !session.session_id.trim().is_empty() && Path::new(&session.current_dir).is_dir()
+            }) {
+                let cached_env = sanitize_restored_session_env(if stored.env.is_empty() {
+                    stored.env_overrides.unwrap_or_default()
+                } else {
+                    stored.env
+                });
+                env.extend(cached_env);
+            }
+        }
+        let config = model_service_config_for_web_launch(launch, &env)?;
+        let response_protocol = launch
+            .response_protocol
+            .as_deref()
+            .or_else(|| env.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str))
+            .map(ResponseProtocolKind::from_name)
+            .unwrap_or_default();
         let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
         let workspace_dirs =
             load_workspace_dirs_from_path(&agent_core::workspace_config_file(&data_dir))
@@ -3242,7 +4425,7 @@ impl WorkerTemplate {
                 .collect();
         Ok(Self {
             settings: Arc::new(Mutex::new(RuntimeSettings {
-                config: ProviderConfig {
+                config: ModelServiceConfig {
                     response_protocol,
                     ..config
                 },
@@ -3327,7 +4510,7 @@ impl WorkerTemplate {
             .map_err(|_| "runtime_settings_poisoned")?
             .clone();
         for (key, value) in env_overrides {
-            if value.trim().is_empty() {
+            if value.trim().is_empty() && key != "TIMEM_API_KEY" {
                 return Err(format!("empty_session_env_value:{key}"));
             }
             if !SESSION_ENV_KEYS.contains(&key.as_str()) {
@@ -3335,17 +4518,16 @@ impl WorkerTemplate {
             }
         }
 
-        if let Some(provider) = env_overrides.get("TIMEM_GATEWAY_PROVIDER") {
+        if let Some(base_url) = env_overrides.get("TIMEM_BASE_URL") {
             apply_session_runtime_field(
                 &mut settings,
-                agent_core::RuntimeConfigField::GatewayProvider,
-                provider,
+                agent_core::RuntimeConfigField::BaseUrl,
+                base_url,
             )?;
         }
         for key in [
             "TIMEM_MODEL",
             "TIMEM_API_PROTOCOL",
-            "TIMEM_BASE_URL",
             "TIMEM_MAX_LLM_INPUT",
             "TIMEM_MAX_LLM_OUTPUT",
             "TIMEM_BASH_APPROVAL",
@@ -3358,6 +4540,13 @@ impl WorkerTemplate {
                     value,
                 )?;
             }
+        }
+        if let Some(base_url) = env_overrides.get("TIMEM_BASE_URL") {
+            apply_session_runtime_field(
+                &mut settings,
+                agent_core::RuntimeConfigField::BaseUrl,
+                base_url,
+            )?;
         }
         if let Some(value) = env_overrides.get("TIMEM_TIMEOUT") {
             settings.config.timeout_secs = value
@@ -3375,8 +4564,12 @@ impl WorkerTemplate {
             };
         }
         if let Some(value) = env_overrides.get("TIMEM_API_KEY") {
-            validate_provider_api_key(value).map_err(|_| "invalid_session_api_key".to_string())?;
-            settings.config.api_key = value.clone();
+            if value.is_empty() {
+                settings.config.api_key.clear();
+            } else {
+                validate_api_key(value).map_err(|_| "invalid_session_api_key".to_string())?;
+                settings.config.api_key = value.clone();
+            }
         }
         for key in [
             "TIMEM_ENABLE_THINKING",
@@ -3401,10 +4594,6 @@ impl WorkerTemplate {
     ) -> BTreeMap<String, String> {
         let mut env = self.env.clone();
         env.extend(env_overrides.clone());
-        env.insert(
-            "TIMEM_GATEWAY_PROVIDER".to_string(),
-            settings.config.provider.clone(),
-        );
         env.insert("TIMEM_MODEL".to_string(), settings.config.model.clone());
         env.insert(
             "TIMEM_API_PROTOCOL".to_string(),
@@ -3430,6 +4619,7 @@ impl WorkerTemplate {
             "TIMEM_MAX_LLM_OUTPUT".to_string(),
             settings.config.max_llm_output_tokens.to_string(),
         );
+        env.insert("TIMEM_API_KEY".to_string(), settings.config.api_key.clone());
         if let Some(value) = settings.config.openai_compatible.enable_thinking {
             env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
         }
@@ -3468,8 +4658,14 @@ impl WorkerTemplate {
     }
 }
 
+fn model_service_config_for_web_launch(
+    launch: &WebLaunchOptions,
+    env: &HashMap<String, String>,
+) -> Result<ModelServiceConfig, String> {
+    model_service_config_from_sources_allow_missing_api_key(&launch.model_service_source(), env)
+}
+
 const SESSION_ENV_KEYS: &[&str] = &[
-    "TIMEM_GATEWAY_PROVIDER",
     "TIMEM_MODEL",
     "TIMEM_API_PROTOCOL",
     "TIMEM_RESPONSE_PROTOCOL",
@@ -3484,6 +4680,15 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_REASONING_EFFORT",
     "TIMEM_STREAM",
 ];
+
+const RETIRED_SESSION_ENV_KEYS: &[&str] = &["TIMEM_GATEWAY_PROVIDER"];
+
+fn sanitize_restored_session_env(mut env: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    for key in RETIRED_SESSION_ENV_KEYS {
+        env.remove(*key);
+    }
+    env
+}
 
 fn apply_session_runtime_field(
     settings: &mut RuntimeSettings,
@@ -3504,7 +4709,6 @@ fn apply_session_runtime_field(
 impl WebSessionRuntimeProfile {
     fn from_settings(settings: &RuntimeSettings) -> Self {
         Self {
-            provider: settings.config.provider.clone(),
             model: settings.config.model.clone(),
             api_protocol: settings.config.api_protocol.label().to_string(),
             response_protocol: settings.config.response_protocol.name().to_string(),
@@ -3518,16 +4722,13 @@ impl WebSessionRuntimeProfile {
                 settings.work_instruction_mode,
             )
             .to_string(),
+            api_key_configured: !settings.config.api_key.is_empty(),
         }
     }
 }
 
 fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
     let mut env = BTreeMap::from([
-        (
-            "TIMEM_GATEWAY_PROVIDER".to_string(),
-            settings.config.provider.clone(),
-        ),
         ("TIMEM_MODEL".to_string(), settings.config.model.clone()),
         (
             "TIMEM_API_PROTOCOL".to_string(),
@@ -3575,13 +4776,18 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
     env
 }
 
+fn session_cached_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
+    let mut env = session_env_values(settings);
+    env.insert("TIMEM_API_KEY".to_string(), settings.config.api_key.clone());
+    env
+}
+
 #[derive(Debug)]
 struct WebLaunchOptions {
     port: Option<u16>,
     public_access: bool,
     public_host: Option<String>,
     space: Option<String>,
-    provider: Option<String>,
     api_protocol: Option<String>,
     response_protocol: Option<String>,
     api_key: Option<String>,
@@ -3603,7 +4809,6 @@ impl Default for WebLaunchOptions {
             public_access: false,
             public_host: None,
             space: None,
-            provider: None,
             api_protocol: None,
             response_protocol: None,
             api_key: None,
@@ -3652,7 +4857,6 @@ impl WebLaunchOptions {
                 }
                 "--public-host" => string(&mut options.public_host)?,
                 "--space" => string(&mut options.space)?,
-                "--gateway-provider" => string(&mut options.provider)?,
                 "--api-protocol" => string(&mut options.api_protocol)?,
                 "--response-protocol" => string(&mut options.response_protocol)?,
                 "--api-key" => string(&mut options.api_key)?,
@@ -3714,9 +4918,8 @@ impl WebLaunchOptions {
         Ok(options)
     }
 
-    fn provider_source(&self) -> ProviderConfigSource {
-        ProviderConfigSource {
-            provider: self.provider.clone(),
+    fn model_service_source(&self) -> ModelServiceConfigSource {
+        ModelServiceConfigSource {
             api_protocol: self.api_protocol.clone(),
             api_key: self.api_key.clone(),
             model: self.model.clone(),
@@ -3920,27 +5123,44 @@ fn nonempty_text(text: String, label: &str) -> Result<String, String> {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default auto-select\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --gateway-provider <name>    provider\n  --api-protocol <protocol>    provider wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             provider base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          provider timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default auto-select\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          model request timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {
-    let configured_host = configured_host
-        .map(str::trim)
-        .filter(|host| !host.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            std::env::var("TIMEM_PUBLIC_HOST")
-                .ok()
-                .map(|host| host.trim().to_string())
-                .filter(|host| !host.is_empty())
-        });
+    let configured_host = match configured_host {
+        Some(host) => {
+            let host = host.trim();
+            validate_public_host(host)?;
+            Some(host.to_string())
+        }
+        None => std::env::var("TIMEM_PUBLIC_HOST")
+            .ok()
+            .map(|host| host.trim().to_string())
+            .filter(|host| !host.is_empty()),
+    };
     let host = configured_host.or_else(detect_advertised_host)?;
+    validate_public_host(&host)?;
     let host = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]")
     } else {
         host
     };
     Some(format!("http://{host}:{port}/?token={token}"))
+}
+
+fn validate_public_host(host: &str) -> Option<()> {
+    let host = host.trim();
+    if host.is_empty() || host.len() > 253 {
+        return None;
+    }
+    if host.chars().any(|ch| {
+        ch.is_ascii_control()
+            || ch.is_ascii_whitespace()
+            || matches!(ch, '/' | '\\' | '?' | '#' | '@')
+    }) {
+        return None;
+    }
+    Some(())
 }
 
 fn detect_advertised_host() -> Option<String> {

@@ -1,13 +1,18 @@
 import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
-import { ArrowDown, Check, CheckCheck, ChevronRight, CircleStop, Copy, Cpu, FolderOpen, FolderTree, Gauge, LoaderCircle, Menu, Palette, Paperclip, PanelRight, Pencil, Plus, Search, Send, Settings2, Sparkles, Terminal, Wrench, X } from "lucide-react";
-import { Children, Dispatch, isValidElement, MutableRefObject, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Menu, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { Children, Dispatch, isValidElement, memo, MutableRefObject, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, clientId, Decision, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
-import { isNearScrollBottom, preservePrependScrollTop, ScrollMetrics } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn } from "./view_model";
+import { Activity, ChatMessage, ClientCommand, clientId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
+import { isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition } from "./scroll";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
+import { safeMarkdownUrl } from "./markdown_security";
+import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
+import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
+import { createFrameEventQueue } from "./frame_event_queue";
+import { claimQueuedMessage, COLLAPSED_QUEUE_LIMIT, QueuedMessage, queuedMessageKey, releaseQueuedMessageClaim, removeQueuedMessage, reorderQueuedMessages } from "./queued_messages";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -74,9 +79,7 @@ function TimemApp() {
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
-  // The activity feed is a diagnostic view. Keep the normal chat workspace focused.
-  const [showActivity, setShowActivity] = useState(false);
-  const [sidePanelTab, setSidePanelTab] = useState<"tools" | "activity">("tools");
+  const [showToolRepo, setShowToolRepo] = useState(false);
   const [toolSearchQuery, setToolSearchQuery] = useState("");
   const [toolSearchResults, setToolSearchResults] = useState<Record<string, ToolSummary[]>>({});
   const [pendingToolSearchKey, setPendingToolSearchKey] = useState("");
@@ -89,8 +92,10 @@ function TimemApp() {
   const [showMobileSessions, setShowMobileSessions] = useState(false);
   const [showRuntime, setShowRuntime] = useState(false);
   const [showAppearance, setShowAppearance] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
   const [showMemSwitch, setShowMemSwitch] = useState(false);
+  const [deleteSessionCandidate, setDeleteSessionCandidate] = useState<Session | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState("");
   const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(() => new Set());
   const [renameDraft, setRenameDraft] = useState("");
@@ -106,7 +111,12 @@ function TimemApp() {
   const [pendingAttachmentRemoveIds, setPendingAttachmentRemoveIds] = useState<Set<string>>(() => new Set());
   const [pendingDecisionKeys, setPendingDecisionKeys] = useState<Set<string>>(() => new Set());
   const [pendingRenameSessionIds, setPendingRenameSessionIds] = useState<Set<string>>(() => new Set());
+  const [pendingDeleteSessionIds, setPendingDeleteSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingRuntimeKeys, setPendingRuntimeKeys] = useState<Set<string>>(() => new Set());
+  const [pendingSessionCredentialIds, setPendingSessionCredentialIds] = useState<Set<string>>(() => new Set());
+  const [pendingMcpKeys, setPendingMcpKeys] = useState<Set<string>>(() => new Set());
+  const [revealedSessionApiKeys, setRevealedSessionApiKeys] = useState<Record<string, string>>({});
+  const [revealedMcpSecrets, setRevealedMcpSecrets] = useState<Record<string, Record<string, string>>>({});
   const [pendingHistorySessionIds, setPendingHistorySessionIds] = useState<Set<string>>(() => new Set());
   const [pendingUploadSessionIds, setPendingUploadSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingUploadFiles, setPendingUploadFiles] = useState<Record<string, { name: string; bytes: number }>>({});
@@ -116,7 +126,11 @@ function TimemApp() {
   const pendingAttachmentRemoveIdsRef = useRef<Set<string>>(new Set());
   const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
   const pendingRenameSessionIdsRef = useRef<Set<string>>(new Set());
+  const pendingDeleteSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingRuntimeKeysRef = useRef<Set<string>>(new Set());
+  const pendingSessionCredentialIdsRef = useRef<Set<string>>(new Set());
+  const pendingSessionApiKeyValuesRef = useRef<Map<string, string>>(new Map());
+  const pendingMcpKeysRef = useRef<Set<string>>(new Set());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
@@ -124,12 +138,14 @@ function TimemApp() {
   const newSessionButtonRef = useRef<HTMLButtonElement | null>(null);
   const appearanceButtonRef = useRef<HTMLButtonElement | null>(null);
   const appearancePanelRef = useRef<HTMLElement | null>(null);
+  const mcpButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mcpPanelRef = useRef<HTMLElement | null>(null);
   const runtimeButtonRef = useRef<HTMLButtonElement | null>(null);
   const runtimePanelRef = useRef<HTMLElement | null>(null);
   const mobileSessionButtonRef = useRef<HTMLButtonElement | null>(null);
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
-  const sidePanelButtonRef = useRef<HTMLButtonElement | null>(null);
-  const sidePanelRef = useRef<HTMLElement | null>(null);
+  const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);
+  const toolRepoPanelRef = useRef<HTMLElement | null>(null);
   const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   const activeMessages = activeSession?.messages ?? EMPTY_CHAT_MESSAGES;
@@ -151,17 +167,23 @@ function TimemApp() {
   const reportUiError = useCallback((title: string, detail: string, sessionId = activeSessionIdRef.current || "system") => {
     pushActivity({ id: clientId(), sessionId, tone: "error", title, detail, createdAt: Date.now() });
   }, [pushActivity]);
-  const closeSidePanel = useCallback(() => {
-    setShowActivity(false);
-    sidePanelButtonRef.current?.focus({ preventScroll: true });
+  const closeToolRepoPanel = useCallback(() => {
+    setShowToolRepo(false);
+    toolRepoButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeRuntimePanel = useCallback((restoreFocus = true) => {
     setShowRuntime(false);
+    setRevealedSessionApiKeys({});
     if (restoreFocus) runtimeButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
     setShowAppearance(false);
     if (restoreFocus) appearanceButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeMcpPanel = useCallback((restoreFocus = true) => {
+    setShowMcp(false);
+    setRevealedMcpSecrets({});
+    if (restoreFocus) mcpButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeMobileSidebar = useCallback((restoreFocus = true) => {
     setShowMobileSessions(false);
@@ -187,6 +209,11 @@ function TimemApp() {
   }, [appearance]);
 
   useEffect(() => {
+    setRevealedSessionApiKeys({});
+    setRevealedMcpSecrets({});
+  }, [activeSessionId]);
+
+  useEffect(() => {
     if (!showRuntime) return;
     runtimePanelRef.current?.focus({ preventScroll: true });
     const dismissOnOutsidePointer = (event: PointerEvent) => {
@@ -207,14 +234,14 @@ function TimemApp() {
   }, [closeRuntimePanel, showRuntime]);
 
   useEffect(() => {
-    if (!showActivity) return;
-    sidePanelRef.current?.focus({ preventScroll: true });
+    if (!showToolRepo) return;
+    toolRepoPanelRef.current?.focus({ preventScroll: true });
     const dismissOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeSidePanel();
+      if (event.key === "Escape") closeToolRepoPanel();
     };
     document.addEventListener("keydown", dismissOnEscape);
     return () => document.removeEventListener("keydown", dismissOnEscape);
-  }, [closeSidePanel, showActivity]);
+  }, [closeToolRepoPanel, showToolRepo]);
 
   useEffect(() => {
     if (!showMobileSessions) return;
@@ -245,6 +272,26 @@ function TimemApp() {
       document.removeEventListener("keydown", dismissOnEscape);
     };
   }, [closeAppearancePanel, showAppearance]);
+
+  useEffect(() => {
+    if (!showMcp) return;
+    mcpPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (mcpButtonRef.current?.contains(target) || mcpPanelRef.current?.contains(target)) return;
+      closeMcpPanel(false);
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMcpPanel();
+    };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [closeMcpPanel, showMcp]);
 
   useEffect(() => {
     if (new URLSearchParams(window.location.search).has("token")) {
@@ -280,7 +327,11 @@ function TimemApp() {
     pendingAttachmentRemoveIdsRef.current.clear();
     pendingDecisionKeysRef.current.clear();
     pendingRenameSessionIdsRef.current.clear();
+    pendingDeleteSessionIdsRef.current.clear();
     pendingRuntimeKeysRef.current.clear();
+    pendingSessionCredentialIdsRef.current.clear();
+    pendingSessionApiKeyValuesRef.current.clear();
+    pendingMcpKeysRef.current.clear();
     pendingHistorySessionIdsRef.current.clear();
     pendingUploadSessionIdsRef.current.clear();
     pendingToolgenRequestsRef.current.clear();
@@ -289,7 +340,12 @@ function TimemApp() {
     setPendingAttachmentRemoveIds(new Set());
     setPendingDecisionKeys(new Set());
     setPendingRenameSessionIds(new Set());
+    setPendingDeleteSessionIds(new Set());
     setPendingRuntimeKeys(new Set());
+    setPendingSessionCredentialIds(new Set());
+    setPendingMcpKeys(new Set());
+    setRevealedSessionApiKeys({});
+    setRevealedMcpSecrets({});
     setPendingHistorySessionIds(new Set());
     setPendingUploadSessionIds(new Set());
     setPendingUploadFiles({});
@@ -372,6 +428,48 @@ function TimemApp() {
       setSessions((current) => current.map((session) => session.session_id === event.session_id ? { ...session, display_name: event.display_name } : session));
       return;
     }
+    if (event.type === "session_deleted") {
+      removePendingKey(pendingDeleteSessionIdsRef, setPendingDeleteSessionIds, event.session_id);
+      setDeleteSessionCandidate((current) => current?.session_id === event.session_id ? null : current);
+      toolCountBySessionRef.current.delete(event.session_id);
+      setExpandedSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(event.session_id);
+        return next;
+      });
+      setDecisions((current) => current.filter((decision) => decision.event.session_id !== event.session_id));
+      setActivities((current) => current.filter((activity) => activity.sessionId !== event.session_id));
+      setSessions((current) => {
+        const remaining = current.filter((session) => session.session_id !== event.session_id);
+        setActiveSessionId((activeId) => resolveActiveSessionId(activeId, remaining));
+        return remaining;
+      });
+      return;
+    }
+    if (event.type === "session_runtime_updated") {
+      removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, event.session_id);
+      const savedApiKey = pendingSessionApiKeyValuesRef.current.get(event.session_id);
+      pendingSessionApiKeyValuesRef.current.delete(event.session_id);
+      setRevealedSessionApiKeys((current) => updateRevealedSessionApiKeys(current, event.session_id, savedApiKey));
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? { ...session, runtime_profile: event.runtime_profile }
+        : session));
+      return;
+    }
+    if (event.type === "session_runtime_config_updated") {
+      removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, `${event.session_id}:${event.key}`);
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? { ...session, runtime_profile: event.runtime_profile, max_llm_input_tokens: event.runtime_profile.max_llm_input_tokens }
+        : session));
+      const activity: Activity = { id: clientId(), sessionId: event.session_id, tone: "notice", title: "Session setting updated", detail: `${runtimeOptionLabel(event.key)}: ${event.value}`, createdAt: Date.now() };
+      pushActivity(activity);
+      return;
+    }
+    if (event.type === "session_api_key_revealed") {
+      removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, `reveal:${event.session_id}`);
+      setRevealedSessionApiKeys((current) => ({ ...current, [event.session_id]: event.api_key }));
+      return;
+    }
     if (event.type === "turn_updated") {
       const consumedAttachmentIds = new Set(event.turn.user_entries.flatMap((entry) => entry.attachments ?? []).map((attachment) => attachment.id));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
@@ -395,6 +493,26 @@ function TimemApp() {
       } : current);
       const activity: Activity = { id: clientId(), sessionId: "system", tone: "notice", title: "Runtime setting updated", detail: `${event.key}: ${event.value}`, createdAt: Date.now() };
       pushActivity(activity);
+      return;
+    }
+    if (event.type === "mcp_updated") {
+      pendingMcpKeysRef.current.clear();
+      setPendingMcpKeys(new Set());
+      setRevealedMcpSecrets({});
+      setServer((current) => current ? { ...current, mcp_servers: event.servers } : current);
+      if (event.session_id) {
+        setSessions((current) => current.map((session) => session.session_id === event.session_id
+          ? { ...session, mcp_server_ids: event.enabled_server_ids }
+          : session));
+      } else {
+        const available = new Set(event.servers.map((server) => server.config.id));
+        setSessions((current) => current.map((session) => ({ ...session, mcp_server_ids: session.mcp_server_ids.filter((id) => available.has(id)) })));
+      }
+      return;
+    }
+    if (event.type === "mcp_server_secrets_revealed") {
+      removePendingKey(pendingMcpKeysRef, setPendingMcpKeys, `reveal:${event.server_id}`);
+      setRevealedMcpSecrets((current) => ({ ...current, [event.server_id]: event.values }));
       return;
     }
     if (event.type === "file_uploaded") {
@@ -465,16 +583,22 @@ function TimemApp() {
         pushActivity(activity);
       }
       const turnEvent: WebTurnEvent = { event_id: event.turn_event_id ?? clientId(), source: "worker_activity", payload: event.event, created_at_ms: Date.now() };
-      setSessions((current) => current.map((session) => session.session_id === event.session_id ? appendTurnEvent(session, event.turn_id, turnEvent) : session));
+      const workerState = kind === "model_request"
+        ? "working"
+        : kind === "model_error"
+          ? "error"
+          : kind === "worker_stopped"
+            ? "stopped"
+            : kind === "subworker_turn_finished"
+              ? "ready"
+              : null;
+      setSessions((current) => current.map((session) => {
+        if (session.session_id !== event.session_id) return session;
+        const withEvent = appendTurnEvent(session, event.turn_id, turnEvent);
+        return workerState ? updateSessionWorkerState(withEvent, event.worker_id, workerState) : withEvent;
+      }));
       if (kind === "model_request") {
-        setSessions((current) => current.map((session) => session.session_id === event.session_id ? updateSessionWorkerState(session, event.worker_id, "working") : session));
         setDecisions((current) => clearDecisionsForWorker(current, event.session_id, event.worker_id));
-      } else if (kind === "model_error") {
-        setSessions((current) => current.map((session) => session.session_id === event.session_id ? updateSessionWorkerState(session, event.worker_id, "error") : session));
-      } else if (kind === "worker_stopped") {
-        setSessions((current) => current.map((session) => session.session_id === event.session_id ? updateSessionWorkerState(session, event.worker_id, "stopped") : session));
-      } else if (kind === "subworker_turn_finished") {
-        setSessions((current) => current.map((session) => session.session_id === event.session_id ? updateSessionWorkerState(session, event.worker_id, "ready") : session));
       }
       return;
     }
@@ -511,7 +635,7 @@ function TimemApp() {
         const ordinal = typeof item.ordinal === "number" ? item.ordinal : 0;
         setSessions((current) => current.some((session) => session.session_id === sessionId)
           ? current
-          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, tools: [], contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
+          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, tools: [], mcp_server_ids: [], contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
         setActiveSessionId((current) => current || sessionId);
       }
     }
@@ -538,7 +662,7 @@ function TimemApp() {
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (!showActivity || sidePanelTab !== "tools" || !activeSession) return;
+    if (!showToolRepo || !activeSession) return;
     const query = toolSearchQuery.trim();
     const searchKey = query ? `${activeSession.session_id}:${toolSearchQuery}` : "";
     setPendingToolSearchKey(searchKey);
@@ -549,7 +673,7 @@ function TimemApp() {
       }
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [activeSession?.session_id, showActivity, sidePanelTab, toolSearchQuery, sendCommand, reportUiError]);
+  }, [activeSession?.session_id, showToolRepo, toolSearchQuery, sendCommand, reportUiError]);
 
   useEffect(() => {
     const token = queryToken();
@@ -558,6 +682,9 @@ function TimemApp() {
     let retryAttempt = 0;
     let hasConnectedOnce = false;
     let disconnectNoticeShown = false;
+    const inboundEvents = createFrameEventQueue<WireEvent>({
+      consume: (events) => events.forEach(receive),
+    });
     const connect = () => {
       if (stopped) return;
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -598,12 +725,13 @@ function TimemApp() {
       };
       ws.onerror = () => setConnected(false);
       ws.onmessage = (message) => {
-        try { receive(JSON.parse(String(message.data)) as WireEvent); } catch { /* Ignore malformed transport data. */ }
+        try { inboundEvents.enqueue(JSON.parse(String(message.data)) as WireEvent); } catch { /* Ignore malformed transport data. */ }
       };
     };
     connect();
     return () => {
       stopped = true;
+      inboundEvents.dispose();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       socket.current?.close();
       socket.current = null;
@@ -703,15 +831,12 @@ function TimemApp() {
     onCancel: cancelActiveTurn,
   });
 
-  const sessionActivities = activities.filter((activity) => activity.sessionId === activeSession?.session_id || activity.sessionId === "system");
-  const sessionActivityCount = sessionActivities.length;
   const sessionDecisions = decisions.filter((decision) => decision.event.session_id === activeSession?.session_id);
   const visibleErrors = activities.filter((activity) => activity.tone === "error" && (activity.sessionId === activeSession?.session_id || activity.sessionId === "system"));
   const visibleError = visibleErrors[0];
   const visibleErrorText = visibleError ? `${visibleError.title}${visibleError.detail ? ` · ${visibleError.detail}` : ""}` : "";
   const visibleErrorCount = visibleErrors.length;
   const hiddenErrorCount = Math.max(0, visibleErrorCount - 1);
-  const errorDetailsLabel = visibleErrorCount === 1 ? "Show this error in Activity" : `Show ${visibleErrorCount} errors in Activity`;
   const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";
   const runtimeDisconnected = runtimeEverConnected && !connected;
   const runtimeUnavailable = runtimeDisconnected && reconnectAttempt >= 3;
@@ -723,23 +848,25 @@ function TimemApp() {
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
   const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);
-  const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem space";
+  const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem directory";
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
-  const headerModelLabel = activeSession?.runtime_profile ? `${activeSession.runtime_profile.provider}:${activeSession.runtime_profile.model}` : "";
+  const headerModelLabel = activeSession?.runtime_profile?.model ?? "";
   const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";
   const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";
-  const sidePanelLabel = `${showActivity ? "Close" : "Open"} session tools and activity${sessionActivityCount ? `, ${sessionActivityCount} updates` : ""}`;
+  const activeToolCount = activeSession?.tools.length ?? 0;
+  const toolRepoLabel = showToolRepo ? "Close ToolRepo" : `Open ToolRepo · ${activeToolCount} reusable tools`;
   const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="app-shell">
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
-        <div className="brand"><Sparkles size={18}/><span>Timem</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
+        <div className="brand"><img src="/timem_logo.png" alt="Timem logo" className="brand-logo"/><span>TIMEM</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
         <button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button>
         <nav className="session-list" aria-label="Sessions">
           {sessions.map((session) => {
             const renamingSession = pendingRenameSessionIds.has(session.session_id);
-            return <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""}`} aria-busy={renamingSession || undefined}>
+            const deletingSession = pendingDeleteSessionIds.has(session.session_id);
+            return <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
             <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked} onClick={() => setExpandedSessionIds((current) => {
               const next = new Set(current);
               if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id);
@@ -757,29 +884,48 @@ function TimemApp() {
                 if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); }
                 if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }
               }}
-            /> : <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.current_dir} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
-              {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name}>{session.display_name}</span><span className="session-cwd" title={session.current_dir}>{tailPath(session.current_dir)}</span>{renamingSession ? <span className="session-pending">Saving name...</span> : session.runtime_profile && <span className="session-profile" title={`${session.runtime_profile.provider}:${session.runtime_profile.model}`}>{session.runtime_profile.provider}:{session.runtime_profile.model}</span>}</span><span className="sr-only">Session state: {session.state}</span>
+            />: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.current_dir} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
+              {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub"><span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : session.runtime_profile && <span className="session-detail session-profile" title={session.runtime_profile.model}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{session.runtime_profile.model}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
             </button>}
-            {renamingSessionId !== session.session_id && <button type="button" className="session-rename" title={`Rename ${session.display_name}`} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked || renamingSession} onClick={() => beginRename(session)}><Pencil size={13}/></button>}
+            <button type="button" className={`session-delete ${deletingSession ? "deleting" : ""}`} title={`Delete ${session.display_name}`} aria-label={`Delete ${session.display_name}`} disabled={runtimeLocked || deletingSession} onClick={() => { setDeleteSessionCandidate(session); closeMobileSidebar(false); }}>{deletingSession ? <LoaderCircle size={14}/> : <Trash2 size={14}/>}</button>
           </div>{expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}</div>;
           })}
         </nav>
         <div className="sidebar-footer">
           <div className="connection-row" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span className="connection-label">{connectionLabel}</span></div>
-          <div className="mem-row" title={server?.mem?.memory_dir ?? ""}><span>mem</span><code>{server?.mem?.space ?? "…"}</code><button type="button" ref={memSwitchButtonRef} className="mem-switch-button" title={memSwitchTitle} aria-label={memSwitchTitle} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}>{pendingMemSwitch ? "Switching…" : "Switch"}</button></div>
+          <button type="button" ref={memSwitchButtonRef} className="mem-card" title={server?.mem?.space_dir ?? memSwitchTitle} aria-label={memSwitchTitle} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}><span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span><span className="mem-card-copy"><strong>Memory</strong><small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small></span><ChevronRight size={14} aria-hidden="true"/></button>
         </div>
       </aside>
       <main className="chat-shell">
         <header className="chat-header">
-          <span className="header-model" title={headerModelLabel}>{headerModelLabel}</span>
+          <div className="header-identity"><button type="button" ref={runtimeButtonRef} className={`header-model ${showRuntime ? "selected" : ""}`} title={runtimeLabel} aria-label={`${runtimeLabel}: ${headerModelLabel}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown size={12} aria-hidden="true"/></button><HeaderContextUsage session={activeSession}/></div>
           <div className="header-actions">
             <button type="button" ref={mobileSessionButtonRef} title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
-            <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowActivity(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true); }}><Palette size={17}/></button>
-            <button type="button" ref={runtimeButtonRef} title={runtimeLabel} aria-label={runtimeLabel} className={`icon-button ${showRuntime ? "selected" : ""}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowActivity(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><Settings2 size={17}/></button>
-            <button type="button" ref={sidePanelButtonRef} title={sidePanelLabel} aria-label={sidePanelLabel} className={`icon-button side-panel-button ${showActivity ? "selected" : ""}`} aria-expanded={showActivity} aria-controls="session-side-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); if (showActivity) closeSidePanel(); else setShowActivity(true); }}><PanelRight size={17}/>{sessionActivityCount > 0 && <span className="activity-count-badge" aria-hidden="true">{sessionActivityCount > 99 ? "99+" : sessionActivityCount}</span>}</button>
+            <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowMcp(false); setShowToolRepo(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true); }}><Palette size={17}/></button>
+            <button type="button" ref={mcpButtonRef} title="Manage MCP servers" aria-label="Manage MCP servers" className={`icon-button mcp-button ${showMcp ? "selected" : ""}`} aria-expanded={showMcp} aria-controls="mcp-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowToolRepo(false); if (showMcp) closeMcpPanel(); else setShowMcp(true); }}><Plug size={17}/>{(activeSession?.mcp_server_ids.length ?? 0) > 0 && <span className="mcp-enabled-dot" aria-hidden="true"/>}</button>
+            <button type="button" ref={toolRepoButtonRef} title={toolRepoLabel} aria-label={toolRepoLabel} className={`icon-button toolrepo-header-button ${showToolRepo ? "selected" : ""} ${toolCountPulseSessionId === activeSession?.session_id ? "count-pulse" : ""}`} aria-expanded={showToolRepo} aria-controls="toolrepo-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowMcp(false); if (showToolRepo) closeToolRepoPanel(); else setShowToolRepo(true); }}><Wrench size={17}/><span className="toolrepo-header-count" aria-hidden="true">{activeToolCount}</span></button>
           </div>
         </header>
-        {showAppearance && <AppearancePanel panelRef={appearancePanelRef} appearance={appearance} onChange={setAppearance} onClose={closeAppearancePanel}/>}
+        {showAppearance && (
+          <AppearancePanel
+            panelRef={appearancePanelRef}
+            appearance={appearance}
+            onChange={setAppearance}
+            onClose={closeAppearancePanel}
+          />
+        )}
+        {showMcp && <McpPanel
+          panelRef={mcpPanelRef}
+          servers={server?.mcp_servers ?? []}
+          session={activeSession}
+          pendingKeys={pendingMcpKeys}
+          revealedSecrets={revealedMcpSecrets}
+          onClose={closeMcpPanel}
+          onCommand={(key, command) => {
+            if (!connected || !addPendingKey(pendingMcpKeysRef, setPendingMcpKeys, key)) return;
+            if (!sendCommand(command)) removePendingKey(pendingMcpKeysRef, setPendingMcpKeys, key);
+          }}
+        />}
         {runtimeDisconnected && <div className="runtime-disconnect-banner" role="alert">
           <strong>{runtimeDisconnectedTitle}</strong>
           <span>{runtimeDisconnectedDetail}</span>
@@ -787,19 +933,35 @@ function TimemApp() {
         {visibleError && <div className="host-error-banner" role="alert">
           <span className="host-error-text" title={visibleErrorText}><strong>{visibleError.title}</strong>{visibleError.detail && <span className="host-error-detail"> · {visibleError.detail}</span>}{hiddenErrorCount > 0 && <em>{hiddenErrorCount} more hidden error{hiddenErrorCount === 1 ? "" : "s"}</em>}</span>
           <div className="host-error-actions">
-            <button type="button" className="host-error-details" title={errorDetailsLabel} aria-label={errorDetailsLabel} aria-controls="session-side-panel" aria-expanded={showActivity && sidePanelTab === "activity"} onClick={() => { setShowAppearance(false); setShowRuntime(false); setSidePanelTab("activity"); setShowActivity(true); }}>Details</button>
             {hiddenErrorCount > 0 && <button type="button" className="host-error-dismiss-all" title="Dismiss all visible errors" aria-label="Dismiss all visible errors" onClick={() => setActivities((current) => current.filter((activity) => activity.tone !== "error" || (activity.sessionId !== activeSession?.session_id && activity.sessionId !== "system")))}>Dismiss all</button>}
             <button type="button" className="icon-button" title={dismissErrorLabel} aria-label={dismissErrorLabel} onClick={() => setActivities((current) => current.filter((activity) => activity.id !== visibleError.id))}><X size={15}/></button>
           </div>
         </div>}
-        {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} pendingKeys={pendingRuntimeKeys} onUpdate={(key, value) => {
-          if (!addPendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, key)) return;
-          if (!sendCommand({ type: "runtime_update", key, value })) {
-            removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, key);
-            reportUiError("Runtime update failed", "Reconnect to Timem Web before applying runtime configuration.");
+        {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} session={activeSession} pendingKeys={new Set(activeSession ? Array.from(pendingRuntimeKeys).filter((key) => key.startsWith(`${activeSession.session_id}:`)).map((key) => key.slice(activeSession.session_id.length + 1)) : [])} credentialPending={!!activeSession && (pendingSessionCredentialIds.has(activeSession.session_id) || pendingSessionCredentialIds.has(`reveal:${activeSession.session_id}`))} onApiKeyUpdate={(apiKey) => {
+          if (!activeSession || !addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id)) return;
+          pendingSessionApiKeyValuesRef.current.set(activeSession.session_id, apiKey);
+          if (!sendCommand({ type: "session_api_key_update", session_id: activeSession.session_id, api_key: apiKey })) {
+            pendingSessionApiKeyValuesRef.current.delete(activeSession.session_id);
+            removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id);
+            reportUiError("API key update failed", "Reconnect to Timem Web before saving this Session credential.", activeSession.session_id);
+          }
+        }} revealedApiKey={activeSession ? revealedSessionApiKeys[activeSession.session_id] : undefined} onApiKeyReveal={() => {
+          if (!activeSession) return;
+          const key = `reveal:${activeSession.session_id}`;
+          if (!connected || !addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, key)) return;
+          if (!sendCommand({ type: "session_api_key_reveal", session_id: activeSession.session_id })) {
+            removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, key);
+            reportUiError("API key reveal failed", "Reconnect to Timem Web before revealing this Session credential.", activeSession.session_id);
+          }
+        }} onUpdate={(key, value) => {
+          if (!activeSession) return;
+          const pendingKey = `${activeSession.session_id}:${key}`;
+          if (!addPendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, pendingKey)) return;
+          if (!sendCommand({ type: "session_runtime_update", session_id: activeSession.session_id, key, value })) {
+            removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, pendingKey);
+            reportUiError("Runtime update failed", "Reconnect to Timem Web before applying this Session configuration.", activeSession.session_id);
           }
         }}/>}
-        <ContextUsageBar session={activeSession}/>
         <TimemThread
           activeSession={activeSession}
           completedTurnKey={completedTurnKey}
@@ -816,11 +978,8 @@ function TimemApp() {
           loadingHistory={activeSession ? pendingHistorySessionIds.has(activeSession.session_id) : false}
           onLoadMoreHistory={loadMoreHistory}
           onSend={sendText}
-          toolCount={activeSession?.tools.length ?? 0}
-          toolCountPulse={toolCountPulseSessionId === activeSession?.session_id}
           pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}
           toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}
-          onOpenToolRepo={() => { setShowAppearance(false); setShowRuntime(false); setSidePanelTab("tools"); setShowActivity(true); }}
           onRequestToolGen={(turnId) => {
             if (!activeSession || activeSession.state === "working" || runtimeLocked || hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)) return;
             setToolgenDialog({ sessionId: activeSession.session_id, turnId });
@@ -851,14 +1010,11 @@ function TimemApp() {
           }}
         />
       </main>
-      {showActivity && <button type="button" className="side-panel-backdrop" aria-label="Close session tools and activity" onClick={closeSidePanel}/>}
-      {showActivity && <SessionSidePanel
-        panelRef={sidePanelRef}
-        tab={sidePanelTab}
-        onTabChange={setSidePanelTab}
-        onClose={closeSidePanel}
+      {showToolRepo && <button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}/>}
+      {showToolRepo && <ToolRepoPanel
+        panelRef={toolRepoPanelRef}
+        onClose={closeToolRepoPanel}
         session={activeSession}
-        activities={sessionActivities}
         searchQuery={toolSearchQuery}
         searchPending={!!activeSession && pendingToolSearchKey === `${activeSession.session_id}:${toolSearchQuery}`}
         onSearchQueryChange={setToolSearchQuery}
@@ -866,11 +1022,6 @@ function TimemApp() {
         selectedTool={selectedTool}
         pendingToolDetailId={activeSession && pendingToolDetailKey.startsWith(`${activeSession.session_id}:`) ? pendingToolDetailKey.slice(activeSession.session_id.length + 1) : ""}
         pendingToolRenameIds={activeSession ? pendingToolIdsForSession(pendingToolRenameKeys, activeSession.session_id) : new Set()}
-        onClearActivities={() => {
-          const sessionId = activeSession?.session_id;
-          if (!sessionId) return;
-          setActivities((current) => current.filter((activity) => activity.sessionId !== sessionId));
-        }}
         onSelectTool={(toolId) => {
           if (selectedTool?.summary.tool_id === toolId) {
             setSelectedTool(null);
@@ -916,15 +1067,25 @@ function TimemApp() {
           reportUiError("Create session failed", "Reconnect to Timem Web before creating a new session.", "system");
         }
       }} />}
-      {showMemSwitch && <MemSwitchDialog current={server?.mem?.space ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }} onSwitch={(space) => {
+      {deleteSessionCandidate && <SessionDeleteDialog session={deleteSessionCandidate} pending={pendingDeleteSessionIds.has(deleteSessionCandidate.session_id)} onClose={() => {
+        if (!pendingDeleteSessionIdsRef.current.has(deleteSessionCandidate.session_id)) setDeleteSessionCandidate(null);
+      }} onConfirm={() => {
+        const sessionId = deleteSessionCandidate.session_id;
+        if (!addPendingKey(pendingDeleteSessionIdsRef, setPendingDeleteSessionIds, sessionId)) return;
+        if (!sendCommand({ type: "session_delete", session_id: sessionId })) {
+          removePendingKey(pendingDeleteSessionIdsRef, setPendingDeleteSessionIds, sessionId);
+          reportUiError("Delete session failed", "Reconnect to Timem Web before deleting this session.", sessionId);
+        }
+      }} />}
+      {showMemSwitch && <MemSwitchDialog current={server?.mem?.space_dir ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }} onSwitch={(path) => {
         setRenamingSessionId("");
         setRenameDraft("");
         setPendingMemSwitch(true);
-        if (sendCommand({ type: "mem_switch", space })) {
+        if (sendCommand({ type: "mem_switch", path })) {
           closeMemSwitchDialog();
         } else {
           setPendingMemSwitch(false);
-          reportUiError("Mem switch failed", "Reconnect to Timem Web before switching memory space.", "system");
+          reportUiError("Mem switch failed", "Reconnect to Timem Web before switching the mem directory.", "system");
         }
       }}
       />}
@@ -951,13 +1112,10 @@ function TimemApp() {
   </AssistantRuntimeProvider>;
 }
 
-function SessionSidePanel({ panelRef, tab, onTabChange, onClose, session, activities, searchQuery, searchPending, onSearchQueryChange, tools, selectedTool, pendingToolDetailId, pendingToolRenameIds, onClearActivities, onSelectTool, onCollapseTool, onRenameTool, onOpenTerminal }: {
+function ToolRepoPanel({ panelRef, onClose, session, searchQuery, searchPending, onSearchQueryChange, tools, selectedTool, pendingToolDetailId, pendingToolRenameIds, onSelectTool, onCollapseTool, onRenameTool, onOpenTerminal }: {
   panelRef: MutableRefObject<HTMLElement | null>;
-  tab: "tools" | "activity";
-  onTabChange: (tab: "tools" | "activity") => void;
   onClose: () => void;
   session: Session | undefined;
-  activities: Activity[];
   searchQuery: string;
   searchPending: boolean;
   onSearchQueryChange: (query: string) => void;
@@ -965,7 +1123,6 @@ function SessionSidePanel({ panelRef, tab, onTabChange, onClose, session, activi
   selectedTool: ToolDetail | null;
   pendingToolDetailId: string;
   pendingToolRenameIds: Set<string>;
-  onClearActivities: () => void;
   onSelectTool: (toolId: string) => boolean;
   onCollapseTool: () => void;
   onRenameTool: (toolId: string, newName: string) => boolean;
@@ -975,18 +1132,12 @@ function SessionSidePanel({ panelRef, tab, onTabChange, onClose, session, activi
   const [renameToolId, setRenameToolId] = useState("");
   const [renameValue, setRenameValue] = useState("");
   const [contextMenu, setContextMenu] = useState<{ toolId: string; x: number; y: number } | null>(null);
-  const toolsTabRef = useRef<HTMLButtonElement>(null);
-  const activityTabRef = useRef<HTMLButtonElement>(null);
   const contextMenuActionRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    const tabButton = tab === "tools" ? toolsTabRef.current : activityTabRef.current;
-    tabButton?.focus({ preventScroll: true });
-  }, [tab]);
   useEffect(() => {
     setRenameToolId("");
     setRenameValue("");
     setContextMenu(null);
-  }, [session?.session_id, tab]);
+  }, [session?.session_id]);
   useEffect(() => {
     setContextMenu(null);
   }, [searchQuery, sort, selectedTool?.summary.tool_id, tools.length]);
@@ -1032,28 +1183,12 @@ function SessionSidePanel({ panelRef, tab, onTabChange, onClose, session, activi
     : hasToolSearch
       ? "Try a different keyword, or clear search to show all saved tools."
       : "Use ToolGen on a completed task to preserve a reusable script here.";
-  const activityEmptyTitle = session ? "No activity yet" : "No active session";
-  const activityEmptyText = session
-    ? "Runtime updates will appear here while this session works."
-    : "Select or create a session to inspect runtime activity.";
-  const activityTabCount = activities.length > 99 ? "99+" : String(activities.length);
   const pendingToolDetailLabel = pendingTool ? `Loading ${pendingTool.name} tool directory` : "";
   const sortLabel = sort === "time" ? "recent update" : sort;
   const sortControlLabel = `Sort ToolRepo by ${sortLabel}`;
-  const switchSidePanelTabFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "ArrowLeft" || event.key === "Home") {
-      event.preventDefault();
-      onTabChange("tools");
-      toolsTabRef.current?.focus();
-    } else if (event.key === "ArrowRight" || event.key === "End") {
-      event.preventDefault();
-      onTabChange("activity");
-      activityTabRef.current?.focus();
-    }
-  };
-  return <aside id="session-side-panel" ref={panelRef} className="activity-panel session-side-panel" aria-label="Session tools and activity panel" tabIndex={-1}>
-    <header className="side-panel-header"><div className="side-panel-tabs" role="tablist" aria-label="Session side panel sections" onKeyDown={switchSidePanelTabFromKeyboard}><button ref={toolsTabRef} type="button" id="side-panel-tab-tools" role="tab" aria-label={`ToolRepo, ${session?.tools.length ?? 0} tools`} aria-controls="side-panel-tools" aria-selected={tab === "tools"} tabIndex={tab === "tools" ? 0 : -1} className={tab === "tools" ? "active" : ""} onClick={() => onTabChange("tools")}><FolderTree size={15}/>ToolRepo{session && <> <small aria-hidden="true">{session.tools.length}</small></>}</button><button ref={activityTabRef} type="button" id="side-panel-tab-activity" role="tab" aria-label={`Activity, ${activities.length} updates`} aria-controls="side-panel-activity" aria-selected={tab === "activity"} tabIndex={tab === "activity" ? 0 : -1} className={tab === "activity" ? "active" : ""} onClick={() => onTabChange("activity")}>Activity<small aria-hidden="true">{activityTabCount}</small></button></div><div className="side-panel-header-actions">{tab === "activity" && activities.length > 0 && <button type="button" className="side-panel-clear" title={`Clear ${activities.length} current session activity updates`} aria-label={`Clear ${activities.length} current session activity updates`} onClick={onClearActivities}>Clear</button>}<button type="button" className="icon-button" title="Close side panel" aria-label="Close side panel" onClick={onClose}><X size={16}/></button></div></header>
-    {tab === "activity" ? <div id="side-panel-activity" className="activity-list" role="tabpanel" aria-labelledby="side-panel-tab-activity">{activities.length === 0 ? <div className="activity-empty" aria-label={`${activityEmptyTitle}. ${activityEmptyText}`}><strong>{activityEmptyTitle}</strong><span>{activityEmptyText}</span></div> : activities.map((activity) => <ActivityListItem activity={activity} key={activity.id}/>)}</div> : <div id="side-panel-tools" className="toolrepo-panel" role="tabpanel" aria-labelledby="side-panel-tab-tools">
+  return <aside id="toolrepo-panel" ref={panelRef} className="toolrepo-side-panel session-side-panel" aria-label="ToolRepo" tabIndex={-1}>
+    <header className="side-panel-header"><div className="side-panel-title"><Wrench size={15}/><strong>ToolRepo</strong></div><button type="button" className="icon-button" title="Close ToolRepo" aria-label="Close ToolRepo" onClick={onClose}><X size={16}/></button></header>
+    <div className="toolrepo-panel">
       <div className="toolrepo-controls"><label className={searchPending ? "searching" : ""} aria-busy={searchPending}><Search size={14}/><input value={searchQuery} disabled={!session} onChange={(event) => onSearchQueryChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && searchQuery) { event.preventDefault(); event.stopPropagation(); onSearchQueryChange(""); } }} placeholder={session ? "Search names and code" : "Select a session first"} aria-label="Search ToolRepo"/>{searchPending && <span className="toolrepo-search-pending" aria-hidden="true"/>}{hasToolSearch && <button type="button" title="Clear ToolRepo search" aria-label="Clear ToolRepo search" onClick={() => onSearchQueryChange("")}><X size={13}/></button>}</label><select value={sort} disabled={!session} onChange={(event) => setSort(event.target.value as typeof sort)} title={sortControlLabel} aria-label={sortControlLabel}><option value="time">Recent</option><option value="type">Type</option><option value="language">Language</option></select></div>
       {session && <div className="toolrepo-result-count" aria-live="polite">{toolRepoResultText}</div>}
       {!sortedTools.length ? <div className={`toolrepo-empty ${searchPending ? "searching" : ""}`} aria-label={`${toolRepoEmptyTitle}. ${toolRepoEmptyText}`} aria-busy={searchPending || undefined}><Wrench size={20}/><strong>{toolRepoEmptyTitle}</strong><span>{toolRepoEmptyText}</span></div> : <div className="toolrepo-browser"><div className="toolrepo-list" role="tree">{sortedTools.map((tool) => {
@@ -1083,29 +1218,40 @@ function SessionSidePanel({ panelRef, tab, onTabChange, onClose, session, activi
       </div>})}</div>
       {pendingTool ? <section className="toolrepo-detail loading" aria-busy="true" aria-label={pendingToolDetailLabel}><header><div><strong title={pendingTool.name}>{pendingTool.name}</strong><code>Reading tool directory…</code></div><div className="toolrepo-detail-actions"><button type="button" className="toolrepo-detail-collapse" title={`Stop viewing ${pendingTool.name} details`} aria-label={`Stop viewing ${pendingTool.name} details`} onClick={onCollapseTool}>收起详情</button></div></header><div className="toolrepo-detail-loading" role="status" aria-live="polite" aria-label={pendingToolDetailLabel}><span className="toolrepo-search-pending" aria-hidden="true"/>Reading directory tree...</div></section> : selectedTool && <section className="toolrepo-detail"><header><div><strong title={selectedTool.summary.name}>{selectedTool.summary.name}</strong><code title={selectedTool.summary.synopsis}>{selectedTool.summary.synopsis}</code></div><div className="toolrepo-detail-actions"><button type="button" title="Open directory in terminal" aria-label="Open directory in terminal" onClick={() => onOpenTerminal(selectedTool.summary.tool_id)}><Terminal size={14}/></button><button type="button" className="toolrepo-detail-collapse" title="Collapse tool detail" aria-label="Collapse tool detail" onClick={onCollapseTool}>收起详情</button></div></header><div className="toolrepo-files" aria-label="Tool directory tree">{selectedTool.files.map((file) => <div key={file.path} title={`${file.path} · ${formatBytes(file.bytes)}`} style={{ paddingLeft: `${8 + Math.max(0, file.path.split("/").length - 1) * 12}px` }}><span>{file.path}</span><small>{formatBytes(file.bytes)}</small></div>)}</div></section>}
       </div>}
-    </div>}
+    </div>
     {contextMenu && <div className="toolrepo-context-menu" role="menu" aria-label="Tool actions" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onKeyDownCapture={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setContextMenu(null); } }}><button ref={contextMenuActionRef} type="button" role="menuitem" onClick={() => { onOpenTerminal(contextMenu.toolId); setContextMenu(null); }}><Terminal size={14}/>在命令行中打开目录</button></div>}
   </aside>;
 }
 
-function ActivityListItem({ activity }: { activity: Activity }) {
-  const [open, setOpen] = useState(false);
-  const mark = activity.tone === "thinking" ? "✦" : activity.tone === "action" ? "↳" : activity.tone === "warning" ? "⚠️" : activity.tone === "error" ? "×" : "i";
-  const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
-  if (!hasExpandableDetail) return <div className={`activity ${activity.tone}`}><span className="activity-mark">{mark}</span><div>{activity.title && <strong>{activity.title}</strong>}</div></div>;
-  const collapse = () => setOpen(false);
-  const summaryLabel = `${open ? "收起" : "展开"} Activity 详情${activity.title ? `：${activity.title}` : ""}`;
-  return <details className={`activity ${activity.tone}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary title={open ? "收起详情" : "展开详情"} aria-label={summaryLabel}><span className="activity-mark">{mark}</span><div>{activity.title && <strong>{activity.title}</strong>}<span className="activity-expand-label">{open ? "收起" : "展开"}</span></div></summary>
-    <div className="activity-body"><button type="button" className="activity-collapse top" title="Collapse activity details" aria-label="Collapse activity details" onClick={collapse}>收起详情</button>{activity.detail && <div className="activity-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}<button type="button" className="activity-collapse" title="Collapse activity details" aria-label="Collapse activity details" onClick={collapse}>收起详情</button></div>
-  </details>;
-}
-
 const MAX_RENDERED_TURN_EVENTS = 200;
-const INITIAL_RENDERED_TURNS = 24;
-const TURN_HISTORY_PAGE_SIZE = 24;
+const EMPTY_DECISIONS: Decision[] = [];
 
-function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, toolCount, toolCountPulse, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onOpenToolRepo, onRequestToolGen }: {
+const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen }: {
+  sessionId: string;
+  turns: WebTurn[];
+  decisionsByTurn: ReadonlyMap<string, Decision[]>;
+  sessionInteractionLocked: boolean;
+  pendingDecisionKeys: Set<string>;
+  pendingToolGenTurnIds: Set<string>;
+  toolGenSessionBusy: boolean;
+  onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
+  onRequestToolGen: (turnId: string) => void;
+}) {
+  return turns.map((turn) => <TurnInteraction
+    key={turn.turn_id}
+    sessionId={sessionId}
+    turn={turn}
+    decisions={decisionsByTurn.get(sessionTurnKey(sessionId, turn.turn_id)) ?? EMPTY_DECISIONS}
+    sessionInteractionLocked={sessionInteractionLocked}
+    pendingDecisionKeys={pendingDecisionKeys}
+    toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}
+    toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}
+    onDecisionReply={onDecisionReply}
+    onRequestToolGen={onRequestToolGen}
+  />);
+});
+
+function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen }: {
   activeSession: Session | undefined;
   completedTurnKey: string;
   sessionIds: string[];
@@ -1119,8 +1265,6 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
   uploadingAttachment: boolean;
   uploadingAttachmentFile?: { name: string; bytes: number };
   loadingHistory: boolean;
-  toolCount: number;
-  toolCountPulse: boolean;
   pendingToolGenTurnIds: Set<string>;
   toolGenSessionBusy: boolean;
   onLoadMoreHistory: (session: Session) => void;
@@ -1128,31 +1272,47 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
   onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
-  onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void;
-  onOpenToolRepo: () => void;
+  onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen: (turnId: string) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
+  const sessionScrollPositionsRef = useRef<Map<string, SessionScrollPosition>>(new Map());
+  const renderedSessionIdRef = useRef<string | undefined>(undefined);
+  const restoredSessionIdRef = useRef<string | undefined>(undefined);
   const followThreadLatest = useRef(true);
-  const [visibleTurnCount, setVisibleTurnCount] = useState(INITIAL_RENDERED_TURNS);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
+  const [queuedMessagesBySession, setQueuedMessagesBySession] = useState<Record<string, QueuedMessage[]>>({});
+  const queuedMessagesBySessionRef = useRef<Record<string, QueuedMessage[]>>({});
+  const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<Set<string>>(() => new Set());
+  const [draggedQueueMessageId, setDraggedQueueMessageId] = useState<string>();
+  const [editingQueuedMessage, setEditingQueuedMessage] = useState<{ sessionId: string; id: string; text: string }>();
+  const queuedDispatchSessionIdsRef = useRef<Set<string>>(new Set());
+  const queuedMessageClaimsRef = useRef<Set<string>>(new Set());
+  const [queuedMessageClaims, setQueuedMessageClaims] = useState<Set<string>>(() => new Set());
   const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());
   const submittingDraftStartedAtRef = useRef<Map<string, number>>(new Map());
   const [submittingDraftSessionIds, setSubmittingDraftSessionIds] = useState<Set<string>>(() => new Set());
+  const updateQueuedMessages = useCallback((update: (current: Record<string, QueuedMessage[]>) => Record<string, QueuedMessage[]>) => {
+    const next = update(queuedMessagesBySessionRef.current);
+    queuedMessagesBySessionRef.current = next;
+    setQueuedMessagesBySession(next);
+  }, []);
   const turns = activeSession?.turns ?? [];
   const activeSessionId = activeSession?.session_id;
   const draft = draftForSession(draftsBySession, activeSessionId);
+  const queuedMessages = activeSessionId ? queuedMessagesBySession[activeSessionId] ?? [] : [];
+  const queueExpanded = !!activeSessionId && expandedQueueSessionIds.has(activeSessionId);
+  const visibleQueuedMessages = queueExpanded ? queuedMessages : queuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
+  const hiddenQueuedMessageCount = Math.max(0, queuedMessages.length - COLLAPSED_QUEUE_LIMIT);
   const submittingDraft = !!activeSessionId && submittingDraftSessionIds.has(activeSessionId);
-  const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Send supplement" : "Send message";
+  const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Queue message" : "Send message";
   const lockedControlHint = sessionInteractionLocked ? sessionInteractionLockReason : "";
   const missingSessionHint = activeSession ? "" : "Create a session before using Timem";
   const uploadingAttachmentText = uploadingAttachmentFile ? `Uploading ${uploadingAttachmentFile.name}` : "Uploading file…";
-  const composerHint = missingSessionHint || lockedControlHint || (uploadingAttachment ? `${uploadingAttachmentText} · send is paused until it finishes` : activeSession?.state === "working" ? "Enter to add supplement · Shift+Enter for newline" : "Enter to send · Shift+Enter for newline");
+  const composerHint = missingSessionHint || lockedControlHint || (uploadingAttachment ? `${uploadingAttachmentText} · send is paused until it finishes` : activeSession?.state === "working" ? "Enter to queue · use 立即 to send during this turn" : "Enter to send · Shift+Enter for newline");
   const attachTitle = missingSessionHint || lockedControlHint || (uploadingAttachment ? uploadingAttachmentText : "Attach a file");
   const attachLabel = missingSessionHint || lockedControlHint || (uploadingAttachment ? uploadingAttachmentText : "Attach a file");
-  const toolRepoTitle = missingSessionHint || lockedControlHint || `Open ToolRepo · ${toolCount} tools`;
-  const toolRepoLabel = missingSessionHint || lockedControlHint || `Open ToolRepo with ${toolCount} tools`;
   const effectiveSendLabel = missingSessionHint || lockedControlHint || (submittingDraft ? "Sending…" : uploadingAttachment ? "Wait for file upload" : sendLabel);
   const attachedFileCount = activeSession?.attachments.length ?? 0;
   const attachmentSummary = attachedFileCount === 1 ? "1 file attached" : `${attachedFileCount} files attached`;
@@ -1160,30 +1320,73 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
     ? `${attachmentSummary}; ${uploadingAttachmentText}`
     : `Files attached to the next message; ${attachmentSummary}`;
   const composerHintId = `composer-hint-${activeSessionId || "empty"}`;
-  const hiddenTurnCount = Math.max(0, turns.length - visibleTurnCount);
   const canLoadStoredHistory = !!activeSession?.history_has_more && !!activeSession.history_before_cursor;
-  const visibleTurns = hiddenTurnCount > 0 ? turns.slice(-visibleTurnCount) : turns;
+  const decisionsByTurn = useMemo(() => groupDecisionsBySessionTurn(decisions), [decisions]);
   const historyButtonLabel = sessionInteractionLocked
     ? `${sessionInteractionLockReason} · earlier history is locked`
     : loadingHistory
       ? "Loading earlier history…"
-      : hiddenTurnCount > 0
-        ? `Load ${Math.min(TURN_HISTORY_PAGE_SIZE, hiddenTurnCount)} earlier tasks`
-        : `Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks`;
+      : `Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks`;
   const latestTurn = turns.at(-1);
   const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
   const liveSessionKey = sessionIds.join("\u0000");
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
 
-  useEffect(() => setVisibleTurnCount(INITIAL_RENDERED_TURNS), [activeSession?.session_id]);
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    renderedSessionIdRef.current = activeSessionId;
+    if (!viewport || !activeSessionId) return;
+    const position = sessionScrollPositionsRef.current.get(activeSessionId);
+    followThreadLatest.current = position?.followLatest ?? true;
+    restoredSessionIdRef.current = activeSessionId;
+    const previousBehavior = viewport.style.scrollBehavior;
+    viewport.style.scrollBehavior = "auto";
+    viewport.scrollTop = restoreSessionScrollTop(position, viewport.scrollHeight);
+    viewport.style.scrollBehavior = previousBehavior;
+  }, [activeSessionId]);
 
   useEffect(() => {
     setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
+    updateQueuedMessages((current) => Object.fromEntries(Object.entries(current).filter(([sessionId]) => sessionIds.includes(sessionId))));
+    setExpandedQueueSessionIds((current) => new Set(Array.from(current).filter((sessionId) => sessionIds.includes(sessionId))));
+    setEditingQueuedMessage((current) => current && sessionIds.includes(current.sessionId) ? current : undefined);
+    for (const sessionId of Array.from(queuedDispatchSessionIdsRef.current)) {
+      if (!sessionIds.includes(sessionId)) queuedDispatchSessionIdsRef.current.delete(sessionId);
+    }
+    for (const key of Array.from(queuedMessageClaimsRef.current)) {
+      if (!sessionIds.some((sessionId) => key.startsWith(`${sessionId}\u0000`))) queuedMessageClaimsRef.current.delete(key);
+    }
+    setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
     if (pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)) {
       setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     }
-  }, [liveSessionKey]);
+  }, [liveSessionKey, updateQueuedMessages]);
+
+  useEffect(() => {
+    if (!activeSessionId || !activeSession) return;
+    if (activeSession.state === "working") {
+      queuedDispatchSessionIdsRef.current.delete(activeSessionId);
+      return;
+    }
+    const next = queuedMessagesBySessionRef.current[activeSessionId]?.[0];
+    if (!next || sessionInteractionLocked || editingQueuedMessage?.sessionId === activeSessionId || queuedDispatchSessionIdsRef.current.has(activeSessionId)) return;
+    if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSessionId, queuedMessagesBySessionRef.current[activeSessionId] ?? [], next.id)) return;
+    setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+    queuedDispatchSessionIdsRef.current.add(activeSessionId);
+    if (!onSend(next.text)) {
+      queuedDispatchSessionIdsRef.current.delete(activeSessionId);
+      releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSessionId, next.id);
+      setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+      return;
+    }
+    updateQueuedMessages((current) => ({
+      ...current,
+      [activeSessionId]: (current[activeSessionId] ?? []).filter((message) => message.id !== next.id),
+    }));
+    releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSessionId, next.id);
+    setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+  }, [activeSession, activeSessionId, editingQueuedMessage?.sessionId, onSend, queuedMessagesBySession, sessionInteractionLocked, updateQueuedMessages]);
 
   useEffect(() => {
     if (!completedTurnKey || !activeSessionId || !completedTurnKey.startsWith(`${activeSessionId}:`)) return;
@@ -1210,14 +1413,18 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
     if (!viewport || !previous) return;
     viewport.scrollTop = preservePrependScrollTop(previous, viewport.scrollHeight);
     previousScrollMetrics.current = null;
-  }, [visibleTurnCount, turns.length]);
+  }, [turns.length]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || !latestTurn?.turn_id) return;
+    if (restoredSessionIdRef.current === activeSessionId) {
+      restoredSessionIdRef.current = undefined;
+      return;
+    }
     followThreadLatest.current = true;
     viewport.scrollTop = viewport.scrollHeight;
-  }, [latestTurn?.turn_id]);
+  }, [activeSessionId, latestTurn?.turn_id]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -1227,27 +1434,30 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
 
   const loadEarlierTurns = () => {
     if (sessionInteractionLocked) return;
-    if (hiddenTurnCount === 0 && (!activeSession || !canLoadStoredHistory || loadingHistory)) return;
+    if (!activeSession || !canLoadStoredHistory || loadingHistory) return;
     if (viewportRef.current) {
       previousScrollMetrics.current = {
         scrollTop: viewportRef.current.scrollTop,
         scrollHeight: viewportRef.current.scrollHeight,
       };
     }
-    if (hiddenTurnCount > 0) {
-      setVisibleTurnCount((count) => Math.min(turns.length, count + TURN_HISTORY_PAGE_SIZE));
-    } else if (activeSession) {
-      setVisibleTurnCount((count) => count + TURN_HISTORY_PAGE_SIZE);
-      onLoadMoreHistory(activeSession);
-    }
+    onLoadMoreHistory(activeSession);
   };
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
     const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
     if (reserved === null) return;
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
-    submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());
-    const sent = onSend(reserved.text);
+    const queueInstead = activeSession?.session_id === reserved.sessionId && activeSession.state === "working";
+    if (queueInstead) {
+      updateQueuedMessages((current) => ({
+        ...current,
+        [reserved.sessionId]: [...(current[reserved.sessionId] ?? []), { id: clientId(), text: reserved.text, createdAtMs: Date.now() }],
+      }));
+    } else {
+      submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());
+    }
+    const sent = queueInstead || onSend(reserved.text);
     // Release the synchronous deduplication lock before publishing the React state
     // snapshot. Calling the mutating helper inside a deferred state updater would
     // leave the next lock snapshot stale and keep the composer stuck on Sending.
@@ -1257,46 +1467,94 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
   };
 
+  const toggleQueuedMessages = () => {
+    if (!activeSessionId) return;
+    setExpandedQueueSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(activeSessionId)) next.delete(activeSessionId);
+      else next.add(activeSessionId);
+      return next;
+    });
+  };
+
+  const dropQueuedMessage = (targetId: string) => {
+    if (!activeSessionId || !draggedQueueMessageId) return;
+    updateQueuedMessages((current) => ({
+      ...current,
+      [activeSessionId]: reorderQueuedMessages(current[activeSessionId] ?? [], draggedQueueMessageId, targetId, queuedMessageClaimsRef.current, activeSessionId),
+    }));
+    setDraggedQueueMessageId(undefined);
+  };
+
+  const saveQueuedMessageEdit = () => {
+    const edit = editingQueuedMessage;
+    const text = edit?.text.trim();
+    if (!edit || !text) return;
+    updateQueuedMessages((current) => ({
+      ...current,
+      [edit.sessionId]: queuedMessageClaimsRef.current.has(queuedMessageKey(edit.sessionId, edit.id))
+        ? current[edit.sessionId] ?? []
+        : (current[edit.sessionId] ?? []).map((message) => message.id === edit.id ? { ...message, text } : message),
+    }));
+    setEditingQueuedMessage(undefined);
+  };
+
   return <ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">
     <ThreadPrimitive.Viewport
       ref={viewportRef}
       className="chat-scroll aui-thread-viewport"
-      autoScroll
-      scrollToBottomOnInitialize
-      scrollToBottomOnThreadSwitch
+      autoScroll={false} scrollToBottomOnInitialize={false} scrollToBottomOnRunStart={false} scrollToBottomOnThreadSwitch={false}
       onScroll={(event) => {
         followThreadLatest.current = isNearScrollBottom({
           scrollTop: event.currentTarget.scrollTop,
           scrollHeight: event.currentTarget.scrollHeight,
           clientHeight: event.currentTarget.clientHeight,
         });
-        if (!sessionInteractionLocked && event.currentTarget.scrollTop <= 48 && (hiddenTurnCount > 0 || canLoadStoredHistory)) loadEarlierTurns();
+        if (activeSessionId) sessionScrollPositionsRef.current.set(activeSessionId, {
+          scrollTop: event.currentTarget.scrollTop,
+          followLatest: followThreadLatest.current,
+        });
       }}
     >
       {(activeSession?.turns.length ?? 0) === 0 &&
         <div className="welcome"><Sparkles size={24}/><h2>{welcomeTitle}</h2><p>{welcomeText}</p></div>
       }
-      {(hiddenTurnCount > 0 || canLoadStoredHistory) && <button type="button" className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" aria-busy={loadingHistory || undefined} disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory && <LoaderCircle size={13} aria-hidden="true"/>}<span>{historyButtonLabel}</span></button>}
-      {visibleTurns.map((turn) => <TurnInteraction
-        key={turn.turn_id}
+      {canLoadStoredHistory && <button type="button" className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" aria-busy={loadingHistory || undefined} disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory && <LoaderCircle size={13} aria-hidden="true"/>}<span>{historyButtonLabel}</span></button>}
+      <VisibleTurnList
         sessionId={activeSession?.session_id ?? ""}
-        turn={turn}
-        decisions={decisions.filter((decision) => decision.turnId === turn.turn_id)}
+        turns={turns}
+        decisionsByTurn={decisionsByTurn}
         sessionInteractionLocked={sessionInteractionLocked}
         pendingDecisionKeys={pendingDecisionKeys}
-        toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}
-        toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}
+        pendingToolGenTurnIds={pendingToolGenTurnIds}
+        toolGenSessionBusy={toolGenSessionBusy}
         onDecisionReply={onDecisionReply}
         onRequestToolGen={onRequestToolGen}
-      />)}
+      />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
+        {!!activeSession && queuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"}`} aria-label={`${queuedMessages.length} queued message${queuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>上一条完成后自动发送</small>{hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${queuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}</header><div className="queued-message-items">{visibleQueuedMessages.map((message) => {
+          const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
+          const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
+          const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));
+          return <article className={`queued-message ${editing ? "editing" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span>{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.text}>{message.text}</p>}<div>{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title="立即发送为当前任务的补充" disabled={claimed || activeSession.state !== "working" || sessionInteractionLocked || isCancelling} onClick={() => {
+          if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSession.session_id, queuedMessagesBySession[activeSession.session_id] ?? [], message.id)) return;
+          setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+          if (!onSend(message.text)) {
+            releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSession.session_id, message.id);
+            setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+            return;
+          }
+          updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).filter((candidate) => candidate.id !== message.id) }));
+          releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSession.session_id, message.id);
+          setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+        }}>{claimed ? "发送中…" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>;
+        })}</div></section>}
         {!!activeSession && (!!activeSession.attachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{activeSession.attachments.map((attachment) => {
           const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);
           const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `${sessionInteractionLockReason} · cannot remove ${attachment.name}` : `Remove ${attachment.name}`;
           return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removeLabel} aria-label={removeLabel} aria-busy={removing || undefined} disabled={removing || sessionInteractionLocked} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
         })}</div>}
-        {activeSession && <div className="composer-cwd" title={activeSession.current_dir} aria-label={`Current working directory: ${activeSession.current_dir}`}><FolderOpen size={13} aria-hidden="true"/><span>{tailPath(activeSession.current_dir, 64)}</span></div>}
         <form className="composer" onSubmit={(event) => { event.preventDefault(); submitDraft(); }}>
           <textarea
             value={draft}
@@ -1313,34 +1571,58 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
               }
             }}
           />
-          <div className="composer-actions"><span id={composerHintId} role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`toolrepo-toggle ${toolCountPulse ? "count-pulse" : ""}`} type="button" title={toolRepoTitle} aria-label={toolRepoLabel} disabled={!activeSession || sessionInteractionLocked} onClick={onOpenToolRepo}><Wrench size={17}/><span>{toolCount}</span></button><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void onCancel()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
+          <div className="composer-actions"><span className="composer-cwd-inline" title={activeSession?.current_dir}>{activeSession && <><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></>}</span><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void onCancel()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
   </ThreadPrimitive.Root>;
 }
 
-function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, onDecisionReply, onRequestToolGen }: { sessionId: string; turn: WebTurn; decisions: Decision[]; sessionInteractionLocked: boolean; pendingDecisionKeys: Set<string>; toolGenPending: boolean; toolGenBlocked: boolean; onDecisionReply: (decision: Decision, reply: "accept" | "decline") => void; onRequestToolGen: (turnId: string) => void }) {
+type TurnInteractionProps = {
+  sessionId: string;
+  turn: WebTurn;
+  decisions: Decision[];
+  sessionInteractionLocked: boolean;
+  pendingDecisionKeys: Set<string>;
+  toolGenPending: boolean;
+  toolGenBlocked: boolean;
+  onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
+  onRequestToolGen: (turnId: string) => void;
+};
+
+const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, onDecisionReply, onRequestToolGen }: TurnInteractionProps) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
   const previousUpdateCount = useRef(turn.events.length + decisions.length);
+  const previousTurnState = useRef(turn.state);
   const [pendingUpdates, setPendingUpdates] = useState(0);
-  const [showCompletedWork, setShowCompletedWork] = useState(true);
-  const lifecycleEvents = coalesceActionLifecycle(turn.events);
-  const visibleEvents = lifecycleEvents.slice(-MAX_RENDERED_TURN_EVENTS);
-  const persistentToolGenEvents = visibleEvents.filter((event) => {
+  const lifecycleEvents = useMemo(() => coalesceActionLifecycle(turn.events), [turn.events]);
+  const visibleEvents = useMemo(() => lifecycleEvents.slice(-MAX_RENDERED_TURN_EVENTS), [lifecycleEvents]);
+  const processActivities = useMemo(() => lifecycleEvents
+    .map((event) => activityFromTurnEvent(event, turn.turn_id))
+    .filter((activity): activity is Activity => activity !== null), [lifecycleEvents, turn.turn_id]);
+  const persistentToolGenEvents = useMemo(() => visibleEvents.filter((event) => {
     const activity = activityFromTurnEvent(event, turn.turn_id);
     return activity?.kind === "toolgen" && activity.toolgen_phase === "published";
-  });
-  const persistentToolGenEventIds = new Set(persistentToolGenEvents.map((event) => event.event_id));
-  const scrollEvents = visibleEvents.filter((event) => !persistentToolGenEventIds.has(event.event_id));
+  }), [turn.turn_id, visibleEvents]);
+  const persistentToolGenEventIds = useMemo(() => new Set(persistentToolGenEvents.map((event) => event.event_id)), [persistentToolGenEvents]);
+  const scrollEvents = useMemo(() => visibleEvents.filter((event) => !persistentToolGenEventIds.has(event.event_id)), [persistentToolGenEventIds, visibleEvents]);
   const omitted = lifecycleEvents.length - visibleEvents.length;
-  const hasVisibleProcess = visibleEvents.some((event) => activityFromTurnEvent(event, turn.turn_id) !== null) || decisions.length > 0 || turn.state === "working";
+  const hasVisibleProcess = processActivities.length > 0 || decisions.length > 0 || turn.state === "working";
+  const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
+  const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
+  const [showCompletedWork, setShowCompletedWork] = useState(() => !interruptedByUser && (turn.state === "working" || !hasOnlyFreeTalk));
   const isToolGenTurn = turn.turn_id.startsWith("web_toolgen_turn_")
     || turn.user_entries.some((entry) => entry.kind === "toolgen_instruction")
     || turn.events.some((event) => (event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen");
-  const canCollapseCompletedWork = turn.state !== "working" && !!turn.final_answer;
+  const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);
   const showWorkStream = !canCollapseCompletedWork || showCompletedWork;
+
+  useEffect(() => {
+    const wasWorking = previousTurnState.current === "working";
+    previousTurnState.current = turn.state;
+    if (wasWorking && turn.state !== "working" && (hasOnlyFreeTalk || interruptedByUser)) setShowCompletedWork(false);
+  }, [hasOnlyFreeTalk, interruptedByUser, turn.state]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -1364,34 +1646,53 @@ function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked,
     setPendingUpdates(0);
   };
 
-  return <article className="turn-interaction" data-turn-id={turn.turn_id}>
-    {!!turn.user_entries.length && <section className="turn-user-frame">
-      <div className="turn-user-content">{turn.user_entries.map((entry, index) => <div className={`turn-user-entry ${entry.kind}`} key={`${entry.created_at_ms}-${index}`}>
+  return <article className={`turn-interaction ${turn.state === "working" ? "active" : "completed"}`} data-turn-id={turn.turn_id}>
+    {!!turn.user_entries.filter((e) => e.kind !== "approval").length && <section className="turn-user-frame">
+      <div className="turn-user-content">{turn.user_entries.filter((e) => e.kind !== "approval").map((entry, index) => <div className={`turn-user-entry ${entry.kind}`} key={`${entry.created_at_ms}-${index}`}>
         {entry.kind === "supplement" && <span>[补充]</span>}
-        {entry.kind === "approval" && <span>[审批]</span>}
         <MarkdownContent text={entry.text}/>
         {!!entry.attachments?.length && <div className="turn-entry-attachments">{entry.attachments.map((attachment) => <span key={attachment.id} title={attachment.path}><Paperclip size={13}/><i aria-hidden="true">:</i><b>{attachment.name}</b><small>{formatBytes(attachment.bytes)}</small></span>)}</div>}
       </div>)}</div>
     </section>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}>
-      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading"><span className={`working-chip${isToolGenTurn ? " toolgen-working" : ""}${turn.state !== "working" ? ` completed-work-title${isToolGenTurn ? " toolgen-completed-title" : ""}` : ""}`} role={turn.state === "working" ? "status" : undefined} aria-live={turn.state === "working" ? "polite" : undefined}>{turn.state === "working" ? isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/> : <CheckCheck size={11}/>} {turn.state === "working" ? isToolGenTurn ? "Generating tools…" : "working" : isToolGenTurn ? "ToolGen" : "Thought/Action"}</span>{canCollapseCompletedWork && <button type="button" className="work-collapse-toggle" title={showCompletedWork ? "Hide completed work details" : "Show completed work details"} aria-label={showCompletedWork ? "Hide completed work details" : "Show completed work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}>{showCompletedWork ? "Hide" : "Show"}</button>}</div>}
-      {showWorkStream && <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
-        const remaining = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight;
-        followLatest.current = remaining < 36;
-        if (followLatest.current) setPendingUpdates(0);
-      }}>
-        {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>}
-        {scrollEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>)}
-        {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
-        {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
-        {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>}
+      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading">{canCollapseCompletedWork ? <button type="button" className={`working-chip work-title-chip completed-work-title work-collapse-toggle${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? " toolgen-working toolgen-completed-title" : ""}`} title={showCompletedWork ? "Hide work details" : "Show work details"} aria-label={showCompletedWork ? "Hide work details" : "Show work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/><CheckCheck size={11}/>{isToolGenTurn ? "ToolGen" : "Thought/Action"}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button> : <span className={`working-chip work-title-chip active-work-title${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>}{isToolGenTurn ? "Generating tools…" : "working"}</span>}</div>}
+      {showWorkStream && <div className="turn-work-panel">
+        <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
+          const remaining = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight;
+          followLatest.current = remaining < 36;
+          if (followLatest.current) setPendingUpdates(0);
+        }}>
+          {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>}
+          {scrollEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>)}
+          {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
+          {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
+          {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>}
+        </div>
+        {pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13} aria-hidden="true"/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
       </div>}
-      {showWorkStream && pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13} aria-hidden="true"/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
     </section>}
     {persistentToolGenEvents.length > 0 && <div className="turn-persistent-toolgen" aria-label="ToolGen result">{persistentToolGenEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>)}</div>}
     {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}/>}
     {!turn.final_answer && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
   </article>;
+}, areTurnInteractionPropsEqual);
+
+function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: TurnInteractionProps) {
+  if (
+    previous.sessionId !== next.sessionId
+    || previous.turn !== next.turn
+    || previous.sessionInteractionLocked !== next.sessionInteractionLocked
+    || previous.toolGenPending !== next.toolGenPending
+    || previous.toolGenBlocked !== next.toolGenBlocked
+    || previous.onDecisionReply !== next.onDecisionReply
+    || previous.onRequestToolGen !== next.onRequestToolGen
+    || previous.decisions.length !== next.decisions.length
+  ) return false;
+  return previous.decisions.every((decision, index) => {
+    const nextDecision = next.decisions[index];
+    return decision === nextDecision
+      && previous.pendingDecisionKeys.has(decisionKey(decision)) === next.pendingDecisionKeys.has(decisionKey(nextDecision));
+  });
 }
 
 function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, onToolGen }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void }) {
@@ -1407,18 +1708,17 @@ function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked,
   </section>;
 }
 
-function ContextUsageBar({ session }: { session: Session | undefined }) {
+function HeaderContextUsage({ session }: { session: Session | undefined }) {
   const usage = session ? sessionContextUsage(session) : undefined;
   const limit = session?.max_llm_input_tokens || undefined;
-  const ratio = usage && limit ? Math.min(100, Math.ceil((usage.prompt_tokens ?? 0) * 100 / limit)) : 0;
+  const ratio = limit ? Math.min(100, Math.ceil((usage?.prompt_tokens ?? 0) * 100 / limit)) : 0;
   const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";
-  const contextUsageLabel = usage && limit
-    ? `Context usage ${ratio}% · ${formatTokens(usage.prompt_tokens)} / ${formatTokens(limit)} input tokens`
+  const contextUsageLabel = limit
+    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens`
     : "Context usage waiting for runtime usage";
-  return <section className={`context-usage-bar ${level}`} title={contextUsageLabel} aria-label={contextUsageLabel}>
-    <span>Context</span><strong>{formatTokens(usage?.prompt_tokens) ?? "—"}{limit ? ` / ${formatTokens(limit)}` : ""}</strong>
-    <div className="context-usage-meter" aria-hidden="true"><span style={{ width: `${ratio}%` }}/></div><small>{usage && limit ? `${ratio}%` : "waiting for usage"}</small>
-  </section>;
+  return <span className={`header-context ${level}`} title={contextUsageLabel} aria-label={contextUsageLabel}>
+    <span aria-hidden="true">· ctx</span><span className="header-context-meter" aria-hidden="true"><span style={{ width: `${ratio}%` }}/></span><span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span>
+  </span>;
 }
 
 function LiveTurnUsage({ turn }: { turn: WebTurn }) {
@@ -1458,6 +1758,7 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 function ToolActivity({ activity }: { activity: Activity }) {
   const status = activity.tool_status || "running";
   const running = status === "running" || status === "background_running";
+  const bashActivity = activity.tool_name === "run_bash";
   const [open, setOpen] = useState(true);
   const invocationPreview = toolInvocationPreview(activity);
   const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
@@ -1470,10 +1771,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
     {activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}
     {!hasExpandableDetail && invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}
   </>;
-  if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${running ? "running" : "settled"}`} aria-busy={running || undefined}>
+  if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>
     {summaryContent}
   </div>;
-  return <details className={`tool-activity ${running ? "running" : "settled"}`} aria-busy={running || undefined} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details className={`tool-activity ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary title={open ? "收起工具详情" : "展开工具详情"} aria-label={summaryLabel}>
       {summaryContent}
       <ChevronRight className="tool-activity-chevron" size={14}/>
@@ -1522,17 +1823,24 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
   </section>;
 }
 
-function MarkdownContent({ text }: { text: string }) {
+const MarkdownContent = memo(function MarkdownContent({ text }: { text: string }) {
   return <div className="markdown-body"><ReactMarkdown
     remarkPlugins={[remarkGfm]}
     rehypePlugins={[rehypeHighlight]}
     components={{
-      a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer"/>,
+      a: ({ node: _node, href, ...props }) => {
+        const safeHref = safeMarkdownUrl(href);
+        return safeHref ? <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer"/> : <span {...props}/>;
+      },
+      img: ({ node: _node, src, alt, ...props }) => {
+        const safeSrc = safeMarkdownUrl(src);
+        return safeSrc ? <img {...props} src={safeSrc} alt={alt ?? ""}/> : null;
+      },
       pre: CodeBlock,
       table: ({ node: _node, ...props }) => <div className="table-scroll" role="region" tabIndex={0} aria-label="Scrollable table. Use horizontal scroll to inspect all columns."><table {...props}/></div>,
     }}
   >{text}</ReactMarkdown></div>;
-}
+});
 
 function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {
   const child = Children.count(children) === 1 ? Children.only(children) : null;
@@ -1616,15 +1924,106 @@ function textFromNode(node: React.ReactNode): string {
   return "";
 }
 
+function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, onClose, onCommand }: {
+  panelRef: MutableRefObject<HTMLElement | null>;
+  servers: McpServerReport[];
+  session: Session | undefined;
+  pendingKeys: Set<string>;
+  revealedSecrets: Record<string, Record<string, string>>;
+  onClose: () => void;
+  onCommand: (key: string, command: ClientCommand) => void;
+}) {
+  const [editing, setEditing] = useState<McpServerConfig | null>(null);
+  const enabled = new Set(session?.mcp_server_ids ?? []);
+  const startNew = () => setEditing({
+    id: "",
+    name: "",
+    enabled: true,
+    transport: { type: "stdio", command: "", args: [], env: {} },
+    request_timeout_ms: 30000,
+  });
+  return <section id="mcp-panel" ref={panelRef} className="mcp-panel" role="dialog" aria-modal="false" aria-label="MCP servers" tabIndex={-1}>
+    <header><div><span className="eyebrow">MCP</span><h2><strong className="mcp-session-name">{session?.display_name ?? "Current session"}</strong> 's Capabilities</h2></div><button type="button" className="icon-button" title="Close MCP panel" aria-label="Close MCP panel" onClick={onClose}><X size={16}/></button></header>
+    {editing ? <McpEditor config={editing} pending={pendingKeys.has(`save:${editing.id || "new"}`)} revealPending={!!editing.id && pendingKeys.has(`reveal:${editing.id}`)} revealedSecrets={editing.id ? revealedSecrets[editing.id] : undefined} onReveal={() => editing.id && onCommand(`reveal:${editing.id}`, { type: "mcp_server_secrets_reveal", server_id: editing.id })} onCancel={() => setEditing(null)} onSave={(config) => {
+      if (!session) return;
+      const key = `save:${config.id || "new"}`;
+      onCommand(key, { type: "mcp_server_upsert", session_id: session.session_id, config });
+      setEditing(null);
+    }}/> : <>
+      <div className="mcp-list">{servers.length === 0 ? <div className="mcp-empty"><Plug size={20}/><strong>No MCP servers</strong><span>Add local stdio, Streamable HTTP, or legacy SSE.</span></div> : servers.map((server) => {
+        const active = enabled.has(server.config.id);
+        const pending = Array.from(pendingKeys).some((key) => key.endsWith(`:${server.config.id}`));
+        const connectionState = !active ? "disabled" : server.state === "connected" ? "connected" : server.state === "error" || !!server.error ? "failed" : "connecting";
+        const connectionLabel = connectionState === "connected" ? "Connected" : connectionState === "failed" ? "Enabled, connection failed" : connectionState === "connecting" ? "Enabled, connecting" : "Disabled";
+        return <article className={`mcp-server ${connectionState}`} key={server.config.id}>
+          <div className="mcp-server-main"><div><strong>{server.config.name}</strong><small>{mcpEndpoint(server.config)}</small></div><button type="button" role="switch" aria-checked={active} aria-label={`${active ? "Disable" : "Enable"} ${server.config.name} for this session`} className={`mcp-session-toggle ${connectionState}`} title={`${connectionLabel} · click to ${active ? "disable" : "enable"}`} disabled={!session || pending} onClick={() => session && onCommand(`toggle:${server.config.id}`, { type: "mcp_session_toggle", session_id: session.session_id, server_id: server.config.id, enabled: !active })}><span className="mcp-port-glyph" aria-hidden="true"><span className="mcp-port-node left"/><span className="mcp-port-link"/><span className="mcp-port-node right"/>{connectionState === "failed" && <X className="mcp-port-failure" size={10}/>}</span></button></div>
+          <div className="mcp-server-meta"><span>{mcpTransportLabel(server.config.transport)}</span><span>{connectionLabel}</span><span>{server.tools.length} tool{server.tools.length === 1 ? "" : "s"}</span>{server.error && <span className="mcp-error" title={server.error}>{server.error}</span>}</div>
+          <div className="mcp-server-actions"><button type="button" title="Reconnect and refresh tools" aria-label={`Reconnect ${server.config.name}`} disabled={!session || pending} onClick={() => session && onCommand(`reconnect:${server.config.id}`, { type: "mcp_server_reconnect", session_id: session.session_id, server_id: server.config.id })}><RefreshCw size={13}/></button><button type="button" title="Edit server" aria-label={`Edit ${server.config.name}`} disabled={pending} onClick={() => setEditing(server.config)}><Pencil size={13}/></button><button type="button" className="danger" title="Delete server" aria-label={`Delete ${server.config.name}`} disabled={pending} onClick={() => window.confirm(`Delete MCP server “${server.config.name}”? This removes it from every session in the current mem.`) && onCommand(`delete:${server.config.id}`, { type: "mcp_server_delete", server_id: server.config.id })}><Trash2 size={13}/></button></div>
+        </article>;
+      })}</div>
+      <button type="button" className="mcp-add" disabled={!session} onClick={startNew}><Plus size={15}/> Add MCP server</button>
+    </>}
+  </section>;
+}
+
+function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, onCancel, onSave }: { config: McpServerConfig; pending: boolean; revealPending: boolean; revealedSecrets?: Record<string, string>; onReveal: () => void; onCancel: () => void; onSave: (config: McpServerConfig) => void }) {
+  const [draft, setDraft] = useState(config);
+  const [transportType, setTransportType] = useState<McpTransport["type"]>(config.transport.type);
+  const [transportDrafts, setTransportDrafts] = useState(() => createMcpTransportDrafts(config.transport));
+  const [showSecrets, setShowSecrets] = useState(false);
+  const transport = transportDrafts[transportType];
+  const valid = draft.name.trim() && (transport.type === "stdio" ? transport.command.trim() : transport.url.trim());
+  useEffect(() => {
+    if (!revealedSecrets) return;
+    setTransportDrafts((current) => ({
+      stdio: { ...current.stdio, env: mergeMcpSecrets(current.stdio.env, revealedSecrets) },
+      streamable_http: { ...current.streamable_http, headers: mergeMcpSecrets(current.streamable_http.headers, revealedSecrets) },
+      sse: { ...current.sse, headers: mergeMcpSecrets(current.sse.headers, revealedSecrets) },
+    }));
+    setShowSecrets(true);
+  }, [revealedSecrets]);
+  const toggleSecrets = () => {
+    if (showSecrets) setShowSecrets(false);
+    else if (revealedSecrets) setShowSecrets(true);
+    else onReveal();
+  };
+  return <form className="mcp-editor" onSubmit={(event) => {
+    event.preventDefault();
+    if (!valid) return;
+    const id = draft.id || draft.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || `server_${clientId()}`;
+    onSave({ ...draft, id, transport });
+  }}>
+    <fieldset className="mcp-transport"><legend>Transport</legend><div>{(["stdio", "streamable_http", "sse"] as const).map((type) => <button type="button" aria-pressed={transportType === type} className={transportType === type ? "active" : ""} key={type} onClick={() => setTransportType(type)}>{mcpTransportLabel({ type } as McpTransport)}</button>)}</div><p>{transportType === "stdio" ? "Launch a local MCP process and communicate over stdin/stdout." : transportType === "streamable_http" ? "Recommended remote transport. One MCP endpoint may return JSON or an SSE stream." : "Compatibility mode for older servers with an SSE endpoint and a separate POST endpoint."}</p></fieldset>
+    <label>Name<input autoFocus value={draft.name} placeholder="GitHub" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label>
+    {draft.id && <label>Server ID<input value={draft.id} disabled/></label>}
+    {transport.type === "stdio" ? <>
+      <label>Command<input value={transport.command} placeholder="npx" onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, command: event.target.value } }))}/></label>
+      <label>Arguments<textarea rows={3} value={transport.args.join("\n")} placeholder={"-y\n@modelcontextprotocol/server-filesystem\n/path"} onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, args: nonemptyLines(event.target.value) } }))}/><small>One argument per line. Spaces stay inside that argument.</small></label>
+      <div className="mcp-secret-field"><div className="mcp-secret-heading"><span>Environment</span>{draft.id && <button type="button" className="icon-button" title={showSecrets ? "Hide sensitive environment values" : "Reveal sensitive environment values"} aria-label={showSecrets ? "Hide sensitive environment values" : "Reveal sensitive environment values"} disabled={revealPending} onClick={toggleSecrets}>{showSecrets ? <EyeOff size={14}/> : <Eye size={14}/>}</button>}</div><textarea aria-label="Environment" rows={3} value={mapLines(showSecrets ? transport.env : maskSensitiveMcpValues(transport.env))} placeholder="KEY=value" onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, env: parseMapLines(event.target.value) } }))}/></div>
+    </> : <>
+      <label>{transport.type === "sse" ? "SSE URL" : "MCP endpoint URL"}<input value={transport.url} placeholder={transport.type === "sse" ? "https://example.com/sse" : "https://example.com/mcp"} onChange={(event) => setTransportDrafts((current) => ({ ...current, [transport.type]: { ...current[transport.type], url: event.target.value } }))}/></label>
+      <div className="mcp-secret-field"><div className="mcp-secret-heading"><span>Headers</span>{draft.id && <button type="button" className="icon-button" title={showSecrets ? "Hide sensitive headers" : "Reveal sensitive headers"} aria-label={showSecrets ? "Hide sensitive headers" : "Reveal sensitive headers"} disabled={revealPending} onClick={toggleSecrets}>{showSecrets ? <EyeOff size={14}/> : <Eye size={14}/>}</button>}</div><textarea aria-label="Headers" rows={3} value={mapLines(showSecrets ? transport.headers : maskSensitiveMcpValues(transport.headers))} placeholder="Authorization=Bearer ${MCP_TOKEN}" onChange={(event) => setTransportDrafts((current) => ({ ...current, [transport.type]: { ...current[transport.type], headers: parseMapLines(event.target.value) } }))}/><small>One header per line as Name=value. Environment references use ${"${NAME}"}.</small></div>
+    </>}
+    <label>Request timeout (ms)<input type="number" min={1} value={draft.request_timeout_ms} onChange={(event) => setDraft({ ...draft, request_timeout_ms: Math.max(1, Number(event.target.value) || 1) })}/></label>
+    <div className="mcp-editor-actions"><button type="button" className="secondary" disabled={pending} onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!valid || pending}>{pending ? <LoaderCircle size={14}/> : <Plug size={14}/>} Save and connect</button></div>
+  </form>;
+}
+
+function nonemptyLines(value: string) { return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean); }
+function mcpEndpoint(config: McpServerConfig) { return config.transport.type === "stdio" ? config.transport.command : config.transport.url; }
+function parseMapLines(value: string) { return Object.fromEntries(value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => { const index = line.indexOf("="); return index < 0 ? [line, ""] : [line.slice(0, index).trim(), line.slice(index + 1)]; }).filter(([key]) => key)); }
+function mapLines(value: Record<string, string>) { return Object.entries(value).map(([key, item]) => `${key}=${item}`).join("\n"); }
+
 function AppearancePanel({ panelRef, appearance, onChange, onClose }: { panelRef: MutableRefObject<HTMLElement | null>; appearance: Appearance; onChange: (appearance: Appearance) => void; onClose: () => void }) {
   const update = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onChange({ ...appearance, [key]: value });
   const descriptionId = "appearance-panel-description";
   return <>
     <div className="appearance-dismiss" aria-hidden="true" onClick={onClose}/>
     <section id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}>
-      <header><div><span className="eyebrow">APPEARANCE</span><h2>Reading preferences</h2><p id={descriptionId}>Adjust theme, font, and message text size for this browser.</p></div><button type="button" className="icon-button" aria-label="Close appearance settings" onClick={onClose}><X size={16}/></button></header>
+      <header><div><span className="eyebrow">APPEARANCE</span><h2>Reading preferences</h2><p id={descriptionId}>Adjust theme, language fonts, and message text size for this browser.</p></div><button type="button" className="icon-button" aria-label="Close appearance settings" onClick={onClose}><X size={16}/></button></header>
       <fieldset><legend>Theme</legend><div className="segmented-control">{(["dark", "light"] as const).map((theme) => <button type="button" title={`Use ${theme} theme`} className={appearance.theme === theme ? "active" : ""} aria-pressed={appearance.theme === theme} key={theme} onClick={() => update("theme", theme)}>{theme === "dark" ? "Dark" : "Light"}</button>)}</div></fieldset>
-      <fieldset><legend>Font</legend><div className="appearance-options">{(["system", "serif", "mono"] as const).map((font) => <button type="button" title={`Use ${font} font for chat reading`} className={`${font}-sample ${appearance.font === font ? "active" : ""}`} aria-pressed={appearance.font === font} key={font} onClick={() => update("font", font)}>{font === "system" ? "System" : font === "serif" ? "Serif" : "Mono"}<small>Aa</small></button>)}</div></fieldset>
+      <fieldset className="appearance-role-fonts"><legend>User</legend><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.userChineseFont} aria-label="User Chinese font" onChange={(event) => update("userChineseFont", event.target.value as Appearance["userChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.userFont} aria-label="User other language font" onChange={(event) => update("userFont", event.target.value as Appearance["userFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.userBold} onChange={(event) => update("userBold", event.target.checked)}/><span>粗体</span></label></fieldset>
+      <fieldset className="appearance-role-fonts"><legend>Agent</legend><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.agentChineseFont} aria-label="Agent Chinese font" onChange={(event) => update("agentChineseFont", event.target.value as Appearance["agentChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.agentFont} aria-label="Agent other language font" onChange={(event) => update("agentFont", event.target.value as Appearance["agentFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.agentBold} onChange={(event) => update("agentBold", event.target.checked)}/><span>粗体</span></label></fieldset>
       <fieldset><legend>Text size</legend><div className="segmented-control text-size-control">{(["small", "medium", "large"] as const).map((size) => <button type="button" title={`Use ${size === "medium" ? "default" : size} text size`} className={appearance.textSize === size ? "active" : ""} aria-pressed={appearance.textSize === size} key={size} onClick={() => update("textSize", size)}>{size === "small" ? "Small" : size === "medium" ? "Default" : "Large"}</button>)}</div></fieldset>
     </section>
   </>;
@@ -1704,25 +2103,102 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function RuntimePanel({ panelRef, server, pendingKeys, onUpdate }: { panelRef: MutableRefObject<HTMLElement | null>; server: Snapshot["server"] | null; pendingKeys: Set<string>; onUpdate: (key: string, value: string) => void }) {
+function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPending, revealedApiKey, onUpdate, onApiKeyUpdate, onApiKeyReveal }: {
+  panelRef: MutableRefObject<HTMLElement | null>;
+  server: Snapshot["server"] | null;
+  session?: Session;
+  pendingKeys: Set<string>;
+  credentialPending: boolean;
+  revealedApiKey?: string;
+  onUpdate: (key: string, value: string) => void;
+  onApiKeyUpdate: (apiKey: string) => void;
+  onApiKeyReveal: () => void;
+}) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  useEffect(() => setDrafts({}), [server?.runtime_options]);
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
+  const autoRevealSessionRef = useRef("");
+  const previousCredentialPending = useRef(credentialPending);
+  const keyConfigured = session?.runtime_profile?.api_key_configured ?? false;
+  const sessionWorking = session?.state === "working";
+  const runtimeOptions = useMemo(
+    () => sessionRuntimeOptions(session?.runtime_profile, server?.runtime_options ?? []),
+    [server?.runtime_options, session?.runtime_profile],
+  );
+  useEffect(() => setDrafts({}), [session?.session_id]);
+  useEffect(() => setDrafts((current) => reconcileRuntimeDrafts(current, runtimeOptions)), [runtimeOptions]);
+  useEffect(() => {
+    setApiKeyDraft("");
+    setShowApiKey(false);
+    autoRevealSessionRef.current = "";
+  }, [session?.session_id]);
+  useEffect(() => {
+    if (revealedApiKey === undefined) return;
+    setApiKeyDraft(revealedApiKey);
+    setShowApiKey(false);
+  }, [revealedApiKey]);
+  useEffect(() => {
+    if (previousCredentialPending.current && !credentialPending && revealedApiKey === undefined) {
+      setApiKeyDraft("");
+      setShowApiKey(false);
+    }
+    previousCredentialPending.current = credentialPending;
+  }, [credentialPending, revealedApiKey]);
+  useEffect(() => {
+    const sessionId = session?.session_id;
+    if (!shouldAutoRevealSessionApiKey({ sessionId, configured: keyConfigured, revealedApiKey, pending: credentialPending, requestedSessionId: autoRevealSessionRef.current })) return;
+    if (!sessionId) return;
+    autoRevealSessionRef.current = sessionId;
+    onApiKeyReveal();
+  }, [credentialPending, keyConfigured, onApiKeyReveal, revealedApiKey, session?.session_id]);
   if (!server) return <section id="runtime-panel" ref={panelRef} className="runtime-card" tabIndex={-1}><Cpu size={16}/><span>Loading runtime settings…</span></section>;
-  const pendingRuntimeLabel = pendingKeys.size ? `Applying runtime setting${pendingKeys.size === 1 ? "" : "s"}: ${Array.from(pendingKeys).join(", ")}` : "";
+  const pendingRuntimeLabel = pendingKeys.size ? `Applying runtime setting${pendingKeys.size === 1 ? "" : "s"}: ${Array.from(pendingKeys).map(runtimeOptionLabel).join(", ")}` : "";
   const bindLabel = `${server.bind_host || "127.0.0.1"}:${server.port}`;
-  return <section id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/>{bindLabel}</span>{server.public_access && <span>public · token required</span>}</div><p>Changes apply to newly created sessions. Existing sessions retain their current runtime configuration.</p><div className="runtime-options">{server.runtime_options.map((option) => {
+  const apiKeyDirty = revealedApiKey === undefined ? apiKeyDraft.length > 0 : apiKeyDraft !== revealedApiKey;
+  const canSaveApiKey = !!session && apiKeyDirty && !credentialPending && !sessionWorking;
+  const toggleApiKey = () => {
+    if (showApiKey) setShowApiKey(false);
+    else if (revealedApiKey !== undefined || !keyConfigured || apiKeyDraft.length > 0) setShowApiKey(true);
+    else onApiKeyReveal();
+  };
+  return <section id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/>{bindLabel}</span>{server.public_access && <span>public · token required</span>}</div>
+    <div className="session-credential-settings">
+      <div className="session-credential-heading"><KeyRound size={15}/><div><strong>Session API key</strong><small>{session ? session.display_name : "Create or select a session first"}</small></div></div>
+      <div className="session-credential-control"><div className="secret-input"><input type={showApiKey ? "text" : "password"} value={apiKeyDraft} autoComplete="new-password" spellCheck={false} aria-label="API key for current session" placeholder={credentialPending && keyConfigured ? "Loading API key…" : "Enter API key"} disabled={!session || credentialPending || sessionWorking} onChange={(event) => setApiKeyDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && canSaveApiKey) { event.preventDefault(); onApiKeyUpdate(apiKeyDraft); } }}/><button type="button" title={showApiKey ? "Hide API key" : "Show API key"} aria-label={showApiKey ? "Hide API key" : "Show API key"} disabled={!session || credentialPending || sessionWorking} onClick={toggleApiKey}>{showApiKey ? <EyeOff size={15}/> : <Eye size={15}/>}</button></div><button type="button" className="primary compact" disabled={!canSaveApiKey} onClick={() => onApiKeyUpdate(apiKeyDraft)}>{credentialPending ? "Working…" : "Save key"}</button></div>
+      {sessionWorking && <small className="session-credential-note">Finish or stop the active task before changing credentials.</small>}
+    </div>
+    <p>{session ? `Runtime settings for ${session.display_name}. Changes apply only to this Session.` : "Create or select a Session to configure its runtime."}</p><div className="runtime-options">{runtimeOptions.map((option) => {
     const value = drafts[option.key] ?? option.value;
     const pending = pendingKeys.has(option.key);
     const dirty = value !== option.value;
-    const inputLabel = `${option.key} current value`;
-    const applyLabel = pending ? `Applying ${option.key}` : dirty ? `Apply ${option.key}` : `${option.key} has no changes`;
+    const optionLabel = runtimeOptionLabel(option.key);
+    const inputLabel = `${optionLabel} current value`;
+    const applyLabel = pending ? `Applying ${optionLabel}` : dirty ? `Apply ${optionLabel}` : `${optionLabel} has no changes`;
     const resetDraft = () => setDrafts((current) => { const { [option.key]: _removed, ...rest } = current; return rest; });
-    return <label key={option.key}><span>{option.key}</span><div><input value={value} title={inputLabel} aria-label={inputLabel} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending) { event.preventDefault(); onUpdate(option.key, value); } if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); } }}/>{dirty && <button type="button" className="secondary compact runtime-reset" title={`Reset ${option.key} to current value`} aria-label={`Reset ${option.key} to current value`} disabled={pending} onClick={resetDraft}>Reset</button>}<button type="button" className="secondary compact" title={applyLabel} aria-label={applyLabel} disabled={pending || !dirty} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
-  })}</div>{pendingRuntimeLabel && <p className="runtime-pending-status" role="status" aria-live="polite">{pendingRuntimeLabel}</p>}</section>;
+    const options = runtimeSelectOptions(option.key);
+    return <label key={option.key}><span>{optionLabel}</span><div>{options ? <select value={value} title={inputLabel} aria-label={inputLabel} disabled={pending || sessionWorking} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending && !sessionWorking) { event.preventDefault(); onUpdate(option.key, value); } if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); } }}>{options.map((choice) => <option value={choice} key={choice}>{choice}</option>)}</select> : <input value={value} title={inputLabel} aria-label={inputLabel} disabled={pending || sessionWorking} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending && !sessionWorking) { event.preventDefault(); onUpdate(option.key, value); } if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); } }}/>} {dirty && <button type="button" className="secondary compact runtime-reset" title={`Reset ${optionLabel} to current value`} aria-label={`Reset ${optionLabel} to current value`} disabled={pending} onClick={resetDraft}>Reset</button>}<button type="button" className="secondary compact" title={applyLabel} aria-label={applyLabel} disabled={pending || !dirty || sessionWorking} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
+  })}</div>{(pendingRuntimeLabel || credentialPending) && <p className="runtime-pending-status" role="status" aria-live="polite">{credentialPending ? "Saving the Session API key…" : pendingRuntimeLabel}</p>}</section>;
+}
+
+function runtimeSelectOptions(key: string): readonly string[] | null {
+  switch (key) {
+    case "TIMEM_API_PROTOCOL":
+      return ["openai-compatible", "openai-responses", "anthropic"];
+    case "TIMEM_RESPONSE_PROTOCOL":
+      return ["xml", "json", "markdown"];
+    case "TIMEM_BASH_APPROVAL":
+      return ["approve", "ask"];
+    case "TIMEM_WORK_INSTRUCTIONS":
+      return ["silent", "ask", "off"];
+    case "TIMEM_ENABLE_THINKING":
+    case "TIMEM_STREAM":
+      return ["true", "false"];
+    default:
+      return null;
+  }
 }
 
 const SESSION_RUNTIME_FIELDS = [
-  ["TIMEM_GATEWAY_PROVIDER", "Provider", "text"],
   ["TIMEM_MODEL", "Model", "text"],
   ["TIMEM_API_PROTOCOL", "API protocol", "api_protocol"],
   ["TIMEM_RESPONSE_PROTOCOL", "Response protocol", "response_protocol"],
@@ -1761,6 +2237,18 @@ function NewSessionDialog({ workspaces, runtimeDefaults, creating, memSwitching,
   return <div className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2></div><button type="button" className="icon-button" title="Close create session" aria-label="Close create session" disabled={creating} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Choose a workspace and optional runtime overrides for this session.</p>{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}<div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/></label><label>Workspace<select value={workspaceDir} disabled={creating || workspaces.length === 0} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.length === 0 ? <option value="">No workspace available</option> : workspaces.map((workspace) => <option value={workspace} key={workspace} title={workspace}>{tailPath(workspace, 64)}</option>)}</select></label>{workspaces.length === 0 && <p className="mem-hint">No workspace is available from the runtime snapshot. Reconnect Timem Web or check the host workspace configuration.</p>}<details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span><div className="session-runtime-control">{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option><option value="markdown">markdown</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : kind === "boolean" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "false"}</option><option value="true">true</option><option value="false">false</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>} {env[key] !== undefined && <button type="button" className="session-runtime-reset" title={`Reset ${label} to inherited value`} aria-label={`Reset ${label} to inherited value`} disabled={creating} onClick={() => resetEnv(key)}>Reset</button>}</div></label>)}</div></details></div><div className="decision-actions"><button type="button" className="secondary" disabled={creating} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${creating ? "sending" : ""}`} disabled={!canCreateSession} onClick={submit}>{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}</button></div></section></div>;
 }
 
+function SessionDeleteDialog({ session, pending, onClose, onConfirm }: {
+  session: Session;
+  pending: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const descriptionId = "delete-session-dialog-description";
+  const statusId = "delete-session-dialog-status";
+  const closeIfIdle = () => { if (!pending) onClose(); };
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss delete session confirmation" onClick={closeIfIdle}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${session.display_name}`} aria-describedby={pending ? `${descriptionId} ${statusId}` : descriptionId} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">DELETE SESSION</span><h2>Delete “{session.display_name}”?</h2></div><button type="button" className="icon-button" title="Close delete session confirmation" aria-label="Close delete session confirmation" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>This permanently deletes the session, its stored task history, settings, and session tools. {session.state === "working" && "Current work will be stopped."} This cannot be undone.</p>{pending && <p id={statusId} className="session-delete-status" role="status" aria-live="polite">Stopping workers and deleting session…</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`danger ${pending ? "sending" : ""}`} disabled={pending} onClick={onConfirm}>{pending ? <LoaderCircle size={16}/> : <Trash2 size={15}/>} {pending ? "Deleting…" : "Delete session"}</button></div></section></div>;
+}
+
 function ToolGenDialog({ pending, onClose, onSubmit }: { pending: boolean; onClose: () => void; onSubmit: (text: string) => void }) {
   const [instruction, setInstruction] = useState("");
   const closeIfIdle = () => { if (!pending) onClose(); };
@@ -1775,25 +2263,25 @@ function MemSwitchDialog({ current, pending, onClose, onSwitch }: {
   current: string;
   pending: boolean;
   onClose: () => void;
-  onSwitch: (space: string) => void;
+  onSwitch: (path: string) => void;
 }) {
-  const [space, setSpace] = useState(current);
-  const cleaned = space.trim();
-  const invalid = !cleaned || cleaned === "." || cleaned === ".." || cleaned.includes("/") || cleaned.includes("\\") || cleaned.includes("..");
+  const [path, setPath] = useState(current);
+  const cleaned = path.trim();
+  const invalid = !cleaned;
   const validationText = pending
-    ? "Switching mem space…"
+    ? "Switching mem directory…"
     : invalid
-      ? "Use a simple mem space name without slashes or '..'."
+      ? "Enter an absolute mem directory path on the Timem host."
       : cleaned === current
-        ? "This is the current mem space."
+        ? "This is the current mem directory."
         : "";
   const closeIfIdle = () => { if (!pending) onClose(); };
   const descriptionId = "mem-switch-dialog-description";
   const statusId = "mem-switch-dialog-status";
   const describedBy = validationText ? `${descriptionId} ${statusId}` : descriptionId;
-  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss mem switch" onClick={closeIfIdle}><section className="decision-modal session-modal mem-switch-modal" role="dialog" aria-modal="true" aria-label="Switch memory space" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">MEM SPACE</span><h2>Switch memory space</h2></div><button type="button" className="icon-button" title="Close mem switch" aria-label="Close mem switch" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Switching mem stops current workers, swaps out current sessions, then loads sessions from the selected mem space.</p><label>Mem space<input autoFocus value={space} disabled={pending} placeholder=".test_mem" onChange={(event) => setSpace(event.target.value)} onKeyDown={(event) => {
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss mem switch" onClick={closeIfIdle}><section className="decision-modal session-modal mem-switch-modal" role="dialog" aria-modal="true" aria-label="Switch memory directory" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">MEM DIRECTORY</span><h2>Switch mem directory</h2></div><button type="button" className="icon-button" title="Close mem switch" aria-label="Close mem switch" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Switching mem stops current workers, swaps out current sessions, then loads sessions from the selected directory.</p><label>Mem directory<input autoFocus value={path} disabled={pending} placeholder="/absolute/path/to/.test_mem" onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => {
     if (event.key === "Enter" && !event.nativeEvent.isComposing && !pending && !invalid) { event.preventDefault(); onSwitch(cleaned); }
-  }}/></label><p className="mem-hint">Use a space name, not a filesystem path. Examples: <code>.test_mem</code>, <code>project_a</code>.</p>{validationText && <p id={statusId} className="mem-validation" role="status" aria-live="polite">{validationText}</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${pending ? "sending" : ""}`} disabled={pending || invalid || cleaned === current} title={validationText || "Switch mem"} aria-label={validationText || "Switch mem"} onClick={() => onSwitch(cleaned)}>{pending && <LoaderCircle size={16}/>} {pending ? "Switching…" : "Switch mem"}</button></div></section></div>;
+  }}/></label><p className="mem-hint">Use an absolute directory path on the machine running Timem Web.</p>{validationText && <p id={statusId} className="mem-validation" role="status" aria-live="polite">{validationText}</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${pending ? "sending" : ""}`} disabled={pending || invalid || cleaned === current} title={validationText || "Switch mem"} aria-label={validationText || "Switch mem"} onClick={() => onSwitch(cleaned)}>{pending && <LoaderCircle size={16}/>} {pending ? "Switching…" : "Switch mem"}</button></div></section></div>;
 }
 
 function toolKey(sessionId: string, toolId: string) {
@@ -1833,16 +2321,18 @@ function removeToolgenRequestsForSession(pending: ReadonlySet<string>, sessionId
   return new Set(Array.from(pending).filter((key) => !key.startsWith(prefix)));
 }
 
-function InlineDecision({ decision, pending, locked, position, total, onReply }: { decision: Decision; pending: boolean; locked: boolean; position: number; total: number; onReply: (decision: "accept" | "decline") => void }) {
+function InlineDecision({ decision, pending, locked, position, total, onReply }: { decision: Decision; pending: boolean; locked: boolean; position: number; total: number; onReply: (decision: "accept" | "decline" | "always_allow") => void }) {
   const disabled = pending || locked;
   const status = pending ? "Sending decision…" : locked ? "Session interaction is temporarily locked." : "";
-  const declineLabel = pending ? "Decline is waiting for the current reply to finish" : locked ? "Decision is locked while the session changes" : "Decline this runtime request";
-  const acceptLabel = pending ? "Sending decision" : locked ? "Decision is locked while the session changes" : "Accept this runtime request";
+  const canAlwaysAllow = decision.event.topic.name === "core.user.approval.request";
+  const denyLabel = pending ? "Waiting for the current reply to finish" : locked ? "Decision is locked while the session changes" : "Deny this runtime request";
+  const allowLabel = pending ? "Sending decision" : locked ? "Decision is locked while the session changes" : "Allow this runtime request";
+  const alwaysAllowLabel = pending ? "Sending decision" : locked ? "Decision is locked while the session changes" : "Allow and stop asking for this session";
   return <section className="inline-decision" aria-label="Decision required" aria-busy={pending}>
     <div className="inline-decision-heading"><span className="eyebrow">RUNTIME REQUEST{total > 1 ? ` · ${position} OF ${total}` : ""}</span><h2>{decision.title}</h2></div>
     <pre>{decision.detail}</pre>
     {status && <span className="inline-decision-status" role="status" aria-live="polite">{status}</span>}
-    <div className="decision-actions"><button type="button" className="secondary" title={declineLabel} aria-label={declineLabel} disabled={disabled} onClick={() => onReply("decline")}>Decline</button><button type="button" className={`primary ${pending ? "sending" : ""}`} title={acceptLabel} aria-label={acceptLabel} disabled={disabled} onClick={() => onReply("accept")}>{pending ? <LoaderCircle size={16}/> : <Check size={16}/>} {pending ? "Sending…" : "Continue"}</button></div>
+    <div className="decision-actions"><button type="button" className="secondary" title={denyLabel} aria-label={denyLabel} disabled={disabled} onClick={() => onReply("decline")}>Deny</button><button type="button" className="primary" title={allowLabel} aria-label={allowLabel} disabled={disabled} onClick={() => onReply("accept")}>Allow</button>{canAlwaysAllow && <button type="button" className="primary always-allow" title={alwaysAllowLabel} aria-label={alwaysAllowLabel} disabled={disabled} onClick={() => onReply("always_allow")}>Always Allow</button>}</div>
   </section>;
 }
 

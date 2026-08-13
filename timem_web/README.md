@@ -17,7 +17,7 @@ cargo run -p timem_web
 - Generates a per-process access token for HTTP/WebSocket requests.
 - Opens the authenticated local page when a local graphical session is detected;
   SSH/headless sessions print the URL without launching a browser.
-- Keeps provider calls, prompt building, memory, tools, and response parsing in
+- Keeps model calls, prompt building, memory, tools, and response parsing in
   `agent_core`.
 
 ## Sessions
@@ -25,7 +25,7 @@ cargo run -p timem_web
 A Web Session owns a runtime profile/env snapshot plus its Context and Worker
 registries. Today the UI creates one default Context and one primary Worker per
 Session, but the host already routes child-worker topics through the primary
-conversation. Different Sessions can use different model/provider settings.
+conversation. Different Sessions can use different model service settings.
 
 Session state, chat history, and resume metadata are persisted through
 `agent_core::session_store` so Shell and Web can continue the same mem-space
