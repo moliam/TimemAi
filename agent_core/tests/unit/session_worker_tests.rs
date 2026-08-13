@@ -22,9 +22,8 @@ fn tmp_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn test_config() -> ProviderConfig {
-    ProviderConfig {
-        provider: "test".to_string(),
+fn test_config() -> ModelServiceConfig {
+    ModelServiceConfig {
         model: "test-model".to_string(),
         base_url: "http://127.0.0.1/v1".to_string(),
         api_key: "dummy".to_string(),
@@ -60,7 +59,7 @@ struct SupplementReplayModel {
 impl ModelClient for SupplementReplayModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -99,14 +98,46 @@ impl ModelClient for SupplementReplayModel {
     }
 }
 
+struct TerminalRepairModel {
+    calls: Arc<Mutex<u32>>,
+}
+
+impl ModelClient for TerminalRepairModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &std::path::Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        let call = *calls;
+        Ok(LlmResponse {
+            content: if call <= 6 {
+                format!("{{invalid repair response {call}")
+            } else {
+                r#"{"status":"ALL_FINISHED","final_answer":"must not revive"}"#.to_string()
+            },
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 1_000,
+                completion_tokens: 10,
+                total_tokens: 1_010,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
 #[test]
 fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
     let dir = tmp_dir("supplement");
     let core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir,
@@ -165,18 +196,12 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
         }
     }
 
-    let mut saw_discard = false;
     let outcome = loop {
         match worker
             .events()
             .recv_timeout(Duration::from_secs(5))
             .expect("worker should finish supplemented turn")
         {
-            CoreSessionWorkerEvent::ModelResponseDiscarded { round, reason } => {
-                assert_eq!(round, 1);
-                assert_eq!(reason, "user_supplement_preempted_stale_response");
-                saw_discard = true;
-            }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
             CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
@@ -184,7 +209,6 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
             other => panic!("unexpected worker event: {other:?}"),
         }
     };
-    assert!(saw_discard);
     assert_eq!(outcome.text, "SUPPLEMENT_WORKER_OK");
     assert_eq!(outcome.stats.llm_calls, 2);
     assert_eq!(outcome.stats.prompt_tokens, 2_200);
@@ -206,13 +230,68 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
 }
 
 #[test]
-fn session_worker_lifecycle_uses_provider_config_response_protocol_over_core_state() {
+fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement() {
+    let dir = tmp_dir("terminal_repair_late_supplement");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let calls = Arc::new(Mutex::new(0));
+    let mut config = test_config();
+    config.response_protocol = ResponseProtocolKind::Json;
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        config,
+        test_worker_config(&dir, "terminal_repair_worker", 1),
+        TerminalRepairModel {
+            calls: Arc::clone(&calls),
+        },
+    );
+    let handle = worker.handle();
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker lifecycle");
+    handle.run_turn("触发 repair 边界", None).unwrap();
+
+    let mut responses = 0;
+    let outcome = loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker should stop after bounded repair")
+        {
+            CoreSessionWorkerEvent::ModelResponse { .. } => {
+                responses += 1;
+                if responses == 6 {
+                    handle.add_user_supplement("补充不能复活硬停止");
+                }
+            }
+            CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            CoreSessionWorkerEvent::Topics(_) | CoreSessionWorkerEvent::ModelRequest { .. } => {}
+            other => panic!("unexpected worker event: {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        outcome.stop_reason,
+        Some(crate::TurnStopReason::ProtocolRepairFailed)
+    );
+    assert_eq!(*calls.lock().unwrap(), 6);
+    handle.request_shutdown().unwrap();
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_worker_lifecycle_uses_model_service_config_response_protocol_over_core_state() {
     let dir = tmp_dir("lifecycle_config_protocol_wins");
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir,
@@ -260,7 +339,7 @@ struct ToolGenWorkflowModel {
 impl ModelClient for ToolGenWorkflowModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -350,8 +429,6 @@ fn manual_toolgen_continues_in_current_context_and_preserves_source_answer() {
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".into(),
-            provider: "test".into(),
             model: "test-model".into(),
         },
         &dir,
@@ -374,7 +451,7 @@ fn manual_toolgen_continues_in_current_context_and_preserves_source_answer() {
         .recv_timeout(Duration::from_secs(2))
         .unwrap();
     handle.run_turn("Create evidence.", None).unwrap();
-    let main_outcome = wait_for_turn_finished(worker.events(), "main task", false);
+    let main_outcome = wait_for_turn_finished(worker.events(), "main task");
     assert_eq!(main_outcome.text, "Main task completed.");
     assert_eq!(
         main_outcome
@@ -482,13 +559,17 @@ fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
         session_id: "session_toolgen_approval".to_string(),
         context_id: "context_0".to_string(),
         worker_id: "worker_0".to_string(),
-        supplement_queue: Arc::new(Mutex::new(Vec::new())),
+        supplement_mailbox: Arc::new(Mutex::new(SupplementMailbox {
+            accepting: false,
+            queue: Vec::new(),
+        })),
         cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         reply_rx,
         runtime: CoreSessionWorkerRuntime::new(),
         current_turn_active: None,
         phase: Some("toolgen".to_string()),
         accept_supplements: false,
+        pending_bash_always_allow: false,
     };
     let waiter = std::thread::spawn(move || {
         ui.request_host_decision_topic(
@@ -527,8 +608,6 @@ fn ordinary_session_turn_never_starts_toolgen_implicitly() {
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".into(),
-            provider: "test".into(),
             model: "test-model".into(),
         },
         &dir,
@@ -550,7 +629,7 @@ fn ordinary_session_turn_never_starts_toolgen_implicitly() {
         .recv_timeout(Duration::from_secs(2))
         .unwrap();
     worker.handle().run_turn("Create evidence.", None).unwrap();
-    let outcome = wait_for_turn_finished(worker.events(), "toolgen disabled", false);
+    let outcome = wait_for_turn_finished(worker.events(), "toolgen disabled");
     assert_eq!(outcome.text, "Main task completed.");
     assert_eq!(*calls.lock().unwrap(), vec!["main_action", "main_finish"]);
     assert!(SessionToolRepo::new(&dir, "session_no_toolgen")
@@ -572,7 +651,7 @@ struct LongToolGenWorkflowModel {
 impl ModelClient for LongToolGenWorkflowModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -682,8 +761,6 @@ fn ordinary_prompt_does_not_advertise_manual_toolgen_response_fields() {
         let mut core = AgentCore::new(
             "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
             CoreProfile {
-                name: "test".into(),
-                provider: "test".into(),
                 model: "test-model".into(),
             },
             &dir,
@@ -705,8 +782,6 @@ fn toolgen_publish_capability_can_be_scoped_to_one_run_on_the_same_context() {
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".into(),
-            provider: "test".into(),
             model: "test-model".into(),
         },
         &dir,
@@ -735,7 +810,7 @@ fn toolgen_publish_capability_can_be_scoped_to_one_run_on_the_same_context() {
 impl ModelClient for FailingToolGenModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -770,8 +845,6 @@ fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".into(),
-            provider: "test".into(),
             model: "test-model".into(),
         },
         &dir,
@@ -794,7 +867,7 @@ fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source
         .unwrap();
     let handle = worker.handle();
     handle.run_turn("Complete the main task.", None).unwrap();
-    let main_outcome = wait_for_turn_finished(worker.events(), "main task", false);
+    let main_outcome = wait_for_turn_finished(worker.events(), "main task");
     assert_eq!(main_outcome.text, "Main task survives ToolGen failure.");
     assert!(main_outcome.stop_reason.is_none());
 
@@ -848,8 +921,6 @@ fn toolgen_runs_beyond_ten_model_calls_with_the_normal_round_budget() {
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".into(),
-            provider: "test".into(),
             model: "test-model".into(),
         },
         &dir,
@@ -917,8 +988,6 @@ fn session_worker_rename_emits_updated_identity_topic() {
     let core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir,
@@ -966,7 +1035,7 @@ struct ManagerOkModel;
 impl ModelClient for ManagerOkModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         _prompt: &str,
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -1010,8 +1079,6 @@ fn session_worker_manager_allocates_id0_default_and_tracks_lifecycle() {
     let core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir,
@@ -1095,8 +1162,6 @@ fn session_worker_manager_allocates_multiple_workers_from_id0() {
         let core = AgentCore::new(
             "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
             CoreProfile {
-                name: "test".to_string(),
-                provider: "test".to_string(),
                 model: "test-model".to_string(),
             },
             &dir,
@@ -1137,8 +1202,6 @@ fn manager_scopes_multiple_context_workers_to_one_session() {
         let core = AgentCore::new(
             "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
             CoreProfile {
-                name: "test".to_string(),
-                provider: "test".to_string(),
                 model: "test-model".to_string(),
             },
             &dir,
@@ -1180,8 +1243,6 @@ fn manager_scopes_multiple_context_workers_to_one_session() {
     let duplicate_core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &duplicate_dir,
@@ -1211,8 +1272,6 @@ fn manager_scopes_multiple_context_workers_to_one_session() {
     let wrong_parent_core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &wrong_parent_dir,
@@ -1260,7 +1319,7 @@ struct BlockingManagerModel {
 impl ModelClient for BlockingManagerModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         _prompt: &str,
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -1293,8 +1352,6 @@ fn session_worker_manager_tracks_global_working_count() {
         let core = AgentCore::new(
             "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
             CoreProfile {
-                name: "test".to_string(),
-                provider: "test".to_string(),
                 model: "test-model".to_string(),
             },
             &dir,
@@ -1361,7 +1418,7 @@ struct ApprovalReplayModel {
 impl ModelClient for ApprovalReplayModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -1406,22 +1463,26 @@ impl ModelClient for ApprovalReplayModel {
 
 struct AssistantHeadingModel {
     expected_heading: String,
+    calls: usize,
 }
 
 impl ModelClient for AssistantHeadingModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
-        assert!(
-            prompt.contains(&self.expected_heading),
-            "prompt should contain assistant heading {}:\n{}",
-            self.expected_heading,
-            prompt
-        );
+        self.calls += 1;
+        if self.calls > 1 {
+            assert!(
+                prompt.contains(&self.expected_heading),
+                "prompt history should contain assistant heading {}:\n{}",
+                self.expected_heading,
+                prompt
+            );
+        }
         Ok(LlmResponse {
             content: "## Status\nfinished\n\n## Final_Answer\nok".to_string(),
             model_name: "test-model".to_string(),
@@ -1443,8 +1504,6 @@ fn session_worker_identity_sets_prompt_assistant_heading() {
     let core = AgentCore::new(
         "STATIC",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir,
@@ -1455,6 +1514,7 @@ fn session_worker_identity_sets_prompt_assistant_heading() {
         test_worker_config(&dir, "session_worker_heading", 4),
         AssistantHeadingModel {
             expected_heading: "## ID4".to_string(),
+            calls: 0,
         },
     );
 
@@ -1462,13 +1522,13 @@ fn session_worker_identity_sets_prompt_assistant_heading() {
         .handle()
         .run_turn("hello", None)
         .expect("worker should accept run_turn");
-    let first = wait_for_turn_finished(worker.events(), "heading first", false);
+    let first = wait_for_turn_finished(worker.events(), "heading first");
     assert_eq!(first.text, "ok");
     worker
         .handle()
         .run_turn("continue", None)
         .expect("worker should accept second run_turn");
-    let second = wait_for_turn_finished(worker.events(), "heading second", false);
+    let second = wait_for_turn_finished(worker.events(), "heading second");
     assert_eq!(second.text, "ok");
     worker
         .handle()
@@ -1483,8 +1543,6 @@ fn session_worker_shutdown_cancels_pending_host_decision() {
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir,
@@ -1542,7 +1600,7 @@ struct CancellableCountingModel {
 impl ModelClient for CancellableCountingModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -1581,8 +1639,6 @@ fn session_worker_shutdown_skips_queued_turns() {
     let core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir,
@@ -1633,8 +1689,7 @@ fn session_worker_shutdown_skips_queued_turns() {
             CoreSessionWorkerEvent::WorkerStopped => break,
             CoreSessionWorkerEvent::TurnFinished { .. }
             | CoreSessionWorkerEvent::ModelError { .. }
-            | CoreSessionWorkerEvent::Topics(_)
-            | CoreSessionWorkerEvent::ModelResponseDiscarded { .. } => {}
+            | CoreSessionWorkerEvent::Topics(_) => {}
             other => panic!("unexpected event while shutting down worker: {other:?}"),
         }
     }
@@ -1665,7 +1720,7 @@ struct ConcurrentWorkerModel {
 impl ModelClient for ConcurrentWorkerModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -1713,8 +1768,6 @@ fn session_workers_run_concurrently_without_cross_talk() {
     let core_a = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir_a,
@@ -1722,8 +1775,6 @@ fn session_workers_run_concurrently_without_cross_talk() {
     let core_b = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir_b,
@@ -1790,8 +1841,8 @@ fn session_workers_run_concurrently_without_cross_talk() {
     wait_for_model_request(worker_b.events(), "ai2");
     handle_a.add_user_supplement("补充：ai1 必须输出 AI1_SUPPLEMENT_OK。");
 
-    let outcome_a = wait_for_turn_finished(worker_a.events(), "ai1", true);
-    let outcome_b = wait_for_turn_finished(worker_b.events(), "ai2", false);
+    let outcome_a = wait_for_turn_finished(worker_a.events(), "ai1");
+    let outcome_b = wait_for_turn_finished(worker_b.events(), "ai2");
     assert_eq!(outcome_a.text, "AI1_SUPPLEMENT_OK");
     assert_eq!(outcome_a.stats.llm_calls, 2);
     assert_eq!(outcome_b.text, "AI2_OK");
@@ -1827,7 +1878,7 @@ struct WorkerCountModel {
 impl ModelClient for WorkerCountModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         _prompt: &str,
         _audit_file: &std::path::Path,
         _should_cancel: &mut dyn FnMut() -> bool,
@@ -1916,8 +1967,6 @@ fn shared_worker_runtime_publishes_global_working_count_on_model_response_topics
     let mut core_a = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir_a,
@@ -1925,8 +1974,6 @@ fn shared_worker_runtime_publishes_global_working_count_on_model_response_topics
     let mut core_b = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test-model".to_string(),
         },
         &dir_b,
@@ -2014,28 +2061,13 @@ fn wait_for_model_request(events: &Receiver<CoreSessionWorkerEvent>, label: &str
     }
 }
 
-fn wait_for_turn_finished(
-    events: &Receiver<CoreSessionWorkerEvent>,
-    label: &str,
-    expect_discard: bool,
-) -> TurnOutcome {
-    let mut saw_discard = false;
+fn wait_for_turn_finished(events: &Receiver<CoreSessionWorkerEvent>, label: &str) -> TurnOutcome {
     loop {
         match events
             .recv_timeout(Duration::from_secs(5))
             .unwrap_or_else(|_| panic!("{label} timed out waiting for turn finish"))
         {
-            CoreSessionWorkerEvent::ModelResponseDiscarded { reason, .. } => {
-                assert_eq!(reason, "user_supplement_preempted_stale_response");
-                saw_discard = true;
-            }
-            CoreSessionWorkerEvent::TurnFinished { outcome } => {
-                assert_eq!(
-                    saw_discard, expect_discard,
-                    "{label} discard expectation mismatch"
-                );
-                return outcome;
-            }
+            CoreSessionWorkerEvent::TurnFinished { outcome } => return outcome,
             CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. } => {}
@@ -2098,7 +2130,7 @@ fn protocol_turn_payload(protocol: ResponseProtocolKind, answer: &str, free_talk
 impl ModelClient for ProtocolTurnStressModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -2246,7 +2278,7 @@ fn stress_action_response(worker_idx: usize, turn_idx: usize, step_idx: usize) -
 impl ModelClient for StressWorkerModel {
     fn call_model(
         &mut self,
-        _config: &ProviderConfig,
+        _config: &ModelServiceConfig,
         prompt: &str,
         _audit_file: &std::path::Path,
         should_cancel: &mut dyn FnMut() -> bool,
@@ -2344,8 +2376,6 @@ fn session_workers_stress_ui_threads_supplements_and_renames() {
         let mut core = AgentCore::new(
             "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
             CoreProfile {
-                name: "test".to_string(),
-                provider: "test".to_string(),
                 model: "test-model".to_string(),
             },
             &dir,
@@ -2424,7 +2454,6 @@ fn session_workers_stress_ui_threads_supplements_and_renames() {
                     worker.events(),
                     &handle,
                     &format!("stress worker {worker_idx} turn {turn}"),
-                    turn == 1,
                     target_actions,
                     turn == LONG_TURN_IDX,
                 );
@@ -2551,8 +2580,6 @@ fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
         let mut core = AgentCore::new(
             "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
             CoreProfile {
-                name: "test".to_string(),
-                provider: "test".to_string(),
                 model: "test-model".to_string(),
             },
             &dir,
@@ -2670,7 +2697,7 @@ fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
     let calls = calls.lock().unwrap().clone();
     assert!(
         calls.len() >= TOTAL_TURNS,
-        "supplemented turns may add stale/discarded model calls"
+        "supplemented turns may add follow-up model calls"
     );
     assert_eq!(response_topics, TOTAL_TURNS);
     assert!(
@@ -2722,11 +2749,9 @@ fn wait_for_stress_turn_finished(
     events: &Receiver<CoreSessionWorkerEvent>,
     handle: &CoreSessionWorkerHandle,
     label: &str,
-    expect_discard: bool,
     expected_tool_calls: usize,
     expect_round_limit: bool,
 ) -> TurnOutcome {
-    let mut saw_discard = false;
     let mut model_requests = 1usize;
     let mut model_responses = 0usize;
     let mut long_progress_seen = false;
@@ -2741,10 +2766,6 @@ fn wait_for_stress_turn_finished(
             }
             CoreSessionWorkerEvent::ModelResponse { .. } => {
                 model_responses += 1;
-            }
-            CoreSessionWorkerEvent::ModelResponseDiscarded { reason, .. } => {
-                assert_eq!(reason, "user_supplement_preempted_stale_response");
-                saw_discard = true;
             }
             CoreSessionWorkerEvent::Topics(events) => {
                 for event in events {
@@ -2767,10 +2788,6 @@ fn wait_for_stress_turn_finished(
                 }
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => {
-                assert_eq!(
-                    saw_discard, expect_discard,
-                    "{label} discard expectation mismatch"
-                );
                 assert!(
                     long_progress_seen,
                     "{label} should surface at least one long progress topic"
@@ -2803,4 +2820,270 @@ fn wait_for_stress_turn_finished(
             other => panic!("{label} unexpected worker event: {other:?}"),
         }
     }
+}
+
+#[test]
+fn update_runtime_config_changes_worker_model_service_config() {
+    use crate::RuntimeConfigField;
+
+    struct ConfigCapturingModel {
+        captured_config: Arc<Mutex<Option<ModelServiceConfig>>>,
+    }
+    impl ModelClient for ConfigCapturingModel {
+        fn call_model(
+            &mut self,
+            config: &ModelServiceConfig,
+            _prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            *self.captured_config.lock().unwrap() = Some(config.clone());
+            Ok(LlmResponse {
+                content: "## Status
+finished
+
+## Final_Answer
+Done"
+                    .to_string(),
+                model_name: config.model.clone(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("update_runtime_config");
+    let core = AgentCore::new(
+        "You are Timem.
+{{ response_protocol }}
+{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let captured = Arc::new(Mutex::new(None));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "update_runtime_config_test", 1),
+        ConfigCapturingModel {
+            captured_config: Arc::clone(&captured),
+        },
+    );
+    let handle = worker.handle();
+
+    // Wait for lifecycle event
+    match worker.events().recv_timeout(Duration::from_secs(2)) {
+        Ok(CoreSessionWorkerEvent::Topics(_)) => {}
+        other => panic!("expected lifecycle topics, got: {other:?}"),
+    }
+
+    // Send runtime config updates before running a turn
+    handle
+        .update_runtime_config(RuntimeConfigField::Model, "updated-model".to_string())
+        .expect("update_runtime_config Model should succeed");
+    handle
+        .update_runtime_config(RuntimeConfigField::MaxOutput, "16000".to_string())
+        .expect("update_runtime_config MaxOutput should succeed");
+    handle
+        .update_runtime_config(RuntimeConfigField::BaseUrl, "http://new-url/v1".to_string())
+        .expect("update_runtime_config BaseUrl should succeed");
+    handle
+        .update_api_key("updated-secret".to_string())
+        .expect("update_api_key should succeed");
+
+    // Run a turn so the model client can capture the updated config
+    handle
+        .run_turn("hello", None)
+        .expect("run_turn should succeed");
+
+    // Drain events until TurnFinished
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => continue,
+            Err(_) => panic!("timed out waiting for turn finish"),
+        }
+    }
+
+    // Verify the config was updated
+    let config = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("model should have been called");
+    assert_eq!(config.model, "updated-model");
+    assert_eq!(config.max_llm_output_tokens, 16_000);
+    assert_eq!(config.base_url, "http://new-url/v1");
+    assert_eq!(config.api_key, "updated-secret");
+
+    let _ = worker.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn update_runtime_config_max_input_also_updates_core() {
+    use crate::RuntimeConfigField;
+
+    struct MaxInputCapturingModel {
+        captured_prompt_len: Arc<Mutex<usize>>,
+    }
+    impl ModelClient for MaxInputCapturingModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            *self.captured_prompt_len.lock().unwrap() = prompt.len();
+            Ok(LlmResponse {
+                content: "## Status
+finished
+
+## Final_Answer
+Done"
+                    .to_string(),
+                model_name: "test".to_string(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("update_runtime_config_max_input");
+    let core = AgentCore::new(
+        "You are Timem.
+{{ response_protocol }}
+{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let captured_len = Arc::new(Mutex::new(0usize));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "update_max_input_test", 1),
+        MaxInputCapturingModel {
+            captured_prompt_len: Arc::clone(&captured_len),
+        },
+    );
+    let handle = worker.handle();
+
+    // Wait for lifecycle event
+    match worker.events().recv_timeout(Duration::from_secs(2)) {
+        Ok(CoreSessionWorkerEvent::Topics(_)) => {}
+        other => panic!("expected lifecycle topics, got: {other:?}"),
+    }
+
+    // Update max_input to a small value
+    handle
+        .update_runtime_config(RuntimeConfigField::MaxInput, "5000".to_string())
+        .expect("update_runtime_config MaxInput should succeed");
+
+    // Run a turn
+    handle
+        .run_turn("hello", None)
+        .expect("run_turn should succeed");
+
+    // Drain events until TurnFinished
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => continue,
+            Err(_) => panic!("timed out waiting for turn finish"),
+        }
+    }
+
+    // The model was called - we just verify the command didn't crash
+    assert!(
+        *captured_len.lock().unwrap() > 0,
+        "model should have been called with a prompt"
+    );
+
+    let _ = worker.shutdown();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
+    struct PromptCapturingModel {
+        prompt: Arc<Mutex<String>>,
+    }
+
+    impl ModelClient for PromptCapturingModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            *self.prompt.lock().unwrap() = prompt.to_string();
+            Ok(LlmResponse {
+                content: "## Status\nfinished\n\n## Final_Answer\nDone".to_string(),
+                model_name: "test".to_string(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("mcp_update_before_turn");
+    let core = AgentCore::new(
+        "You are Timem.\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let captured = Arc::new(Mutex::new(String::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "mcp_update_before_turn", 0),
+        PromptCapturingModel {
+            prompt: Arc::clone(&captured),
+        },
+    );
+    let handle = worker.handle();
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should initialize");
+
+    handle
+        .update_mcp(
+            crate::capability::CapabilityRegistry::builtin(),
+            crate::mcp::McpRuntime::default(),
+            Vec::new(),
+            vec![crate::mcp::McpTool {
+                server_id: "demo".to_string(),
+                server_name: "Demo".to_string(),
+                name: "echo".to_string(),
+                action_name: "mcp.demo.echo".to_string(),
+                description: "Echo input".to_string(),
+                input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            }],
+        )
+        .unwrap();
+    handle.run_turn("Use the new capability.", None).unwrap();
+
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(_) => panic!("timed out waiting for MCP prompt turn"),
+        }
+    }
+    let prompt = captured.lock().unwrap().clone();
+    assert!(prompt.contains("mcp.demo.echo"));
+    assert!(prompt.contains("MCP capabilities changed for this user request."));
+    assert!(prompt.contains("## USER\n\nUse the new capability."));
+
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -697,8 +697,6 @@ fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
 #[test]
 fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
     let profile = CoreProfile {
-        name: "test".to_string(),
-        provider: "aliyun".to_string(),
         model: "qwen-plus".to_string(),
     };
 
@@ -745,8 +743,6 @@ fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
                 "event": "initialized",
                 "version": env!("CARGO_PKG_VERSION"),
                 "profile": {
-                    "name": "test",
-                    "provider": "aliyun",
                     "model": "qwen-plus",
                 },
                 "response_protocol": "markdown",
@@ -774,8 +770,6 @@ fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
 #[test]
 fn core_lifecycle_topic_round_trips_worker_identity_workspace_and_context() {
     let profile = CoreProfile {
-        name: "test".to_string(),
-        provider: "local".to_string(),
         model: "fake".to_string(),
     };
     let identity = CoreSessionWorkerIdentity::new(
@@ -793,7 +787,7 @@ fn core_lifecycle_topic_round_trips_worker_identity_workspace_and_context() {
     workspace.current_dir = Some(PathBuf::from("/tmp/project"));
     workspace
         .env
-        .insert("TIMEM_GATEWAY_PROVIDER".to_string(), "local".to_string());
+        .insert("TIMEM_API_PROTOCOL".to_string(), "anthropic".to_string());
     workspace.env.insert(
         "TIMEM_API_KEY".to_string(),
         "sk-lifecycle-secret".to_string(),
@@ -835,8 +829,8 @@ fn core_lifecycle_topic_round_trips_worker_identity_workspace_and_context() {
         crate::redaction::REDACTED
     );
     assert_eq!(
-        event.payload["workspace"]["env"]["TIMEM_GATEWAY_PROVIDER"],
-        "local"
+        event.payload["workspace"]["env"]["TIMEM_API_PROTOCOL"],
+        "anthropic"
     );
     assert!(
         !event
@@ -970,7 +964,7 @@ fn stopped_turn_summary_is_structured_and_ui_neutral() {
     };
     let stops = [
         TurnStopSummary::cancelled_by_user(),
-        TurnStopSummary::model_error("provider_network_error"),
+        TurnStopSummary::model_error("model_network_error"),
         TurnStopSummary::output_limit_stopped_by_user(10_000, usage.clone()),
         TurnStopSummary::round_limit_stopped_by_user(50, usage.clone(), Some(usage)),
     ];
@@ -982,7 +976,7 @@ fn stopped_turn_summary_is_structured_and_ui_neutral() {
     assert_eq!(
         stops[1].detail,
         TurnStopDetail::ModelError {
-            error: "provider_network_error".to_string()
+            error: "model_network_error".to_string()
         }
     );
     assert_eq!(

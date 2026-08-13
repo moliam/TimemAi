@@ -16,8 +16,6 @@ fn publish_action_returns_ready_only_after_runtime_self_test() {
     let mut core = AgentCore::new(
         "prompt",
         CoreProfile {
-            name: "test".to_string(),
-            provider: "test".to_string(),
             model: "test".to_string(),
         },
         &root,
@@ -68,13 +66,12 @@ fn publish_action_uses_structured_approval_before_executing_self_test() {
     let mut core = AgentCore::new(
         "prompt",
         CoreProfile {
-            name: "test".into(),
-            provider: "test".into(),
             model: "test".into(),
         },
         &root,
     );
     core.set_tool_repo_session_id("session-approval");
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
     let draft = core.tool_repo().create_draft().unwrap();
     let action = ParsedAction {
         action: "toolgen".into(),

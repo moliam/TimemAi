@@ -57,8 +57,8 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
     if lower == "cancelled_by_user" {
         return false;
     }
-    if lower.starts_with("provider_network_error")
-        || lower.starts_with("provider_timeout")
+    if lower.starts_with("model_network_error")
+        || lower.starts_with("model_timeout")
         || lower.starts_with("curl_failed")
         || lower.contains("curl:")
         || lower.contains("http2 framing")
@@ -68,7 +68,7 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
     {
         return true;
     }
-    if let Some(status_text) = lower.strip_prefix("provider_http_") {
+    if let Some(status_text) = lower.strip_prefix("model_http_") {
         let status: u16 = status_text
             .chars()
             .take_while(|ch| ch.is_ascii_digit())
@@ -92,7 +92,7 @@ pub fn is_model_input_too_large_error(error: &str) -> bool {
     lower.contains("argument list too long")
         || lower.contains("os error 7")
         || lower.contains("e2big")
-        || lower.starts_with("provider_http_413")
+        || lower.starts_with("model_http_413")
         || lower.contains("context_length_exceeded")
         || lower.contains("maximum context length")
         || lower.contains("max context length")

@@ -6,7 +6,6 @@ use std::time::Duration;
 fn profiler_token_cards_render_aggregated_core_data() {
     let mut profiler = RuntimeProfiler::default();
     profiler.record_model_wait(
-        "aliyun",
         "qwen-plus",
         &UsageStats {
             llm_calls: 1,
@@ -19,7 +18,6 @@ fn profiler_token_cards_render_aggregated_core_data() {
         Duration::from_millis(500),
     );
     profiler.record_model_wait(
-        "aliyun",
         "qwen-plus",
         &UsageStats {
             llm_calls: 1,
@@ -33,7 +31,7 @@ fn profiler_token_cards_render_aggregated_core_data() {
     );
     profiler.record_turn(Duration::from_millis(2000), Duration::from_millis(1500));
 
-    let profile = profiler.models().get("aliyun:qwen-plus").unwrap();
+    let profile = profiler.models().get("qwen-plus").unwrap();
     assert_eq!(profile.llm_calls, 2);
     assert_eq!(profile.input_tokens, 1500);
     assert_eq!(profile.output_tokens, 500);
@@ -50,7 +48,7 @@ fn profiler_token_cards_render_aggregated_core_data() {
     );
     let report = render_prof_report_data(&report);
     assert!(report.contains("\x1b[1m▸ Token 监控（per model）\x1b[0m"));
-    assert!(report.contains("  aliyun:qwen-plus"));
+    assert!(report.contains("  qwen-plus"));
     assert!(report.contains("│─ calls: 2  ||  kvc hit rate(⌁): 53.3%"));
     assert!(report.contains("└─ ▲1.5K (⌁800 / ✚200)  ▼500  |  sec/▼1K: 3 s"));
     assert!(report.contains("53.3%"));
@@ -61,7 +59,6 @@ fn profiler_token_cards_render_aggregated_core_data() {
 fn profiler_report_renderer_uses_core_data_without_collecting_files() {
     let mut profiler = RuntimeProfiler::default();
     profiler.record_model_wait(
-        "test",
         "model",
         &UsageStats {
             llm_calls: 1,
@@ -84,7 +81,7 @@ fn profiler_report_renderer_uses_core_data_without_collecting_files() {
     });
 
     let rendered = render_prof_report_data(&report);
-    assert!(rendered.contains("test:model"));
+    assert!(rendered.contains("model"));
     assert!(rendered.contains("calls: 1"));
     assert!(rendered.contains("kvc hit rate(⌁): 25%"));
     assert!(rendered.contains("durable_mem: 2 条, 42 B"));
@@ -97,7 +94,6 @@ fn profiler_report_renderer_uses_core_data_without_collecting_files() {
 fn profiler_token_cards_keep_compact_structure_across_models() {
     let mut profiler = RuntimeProfiler::default();
     profiler.record_model_wait(
-        "a",
         "short",
         &UsageStats {
             llm_calls: 12,
@@ -109,7 +105,6 @@ fn profiler_token_cards_keep_compact_structure_across_models() {
         Duration::from_millis(100),
     );
     profiler.record_model_wait(
-        "aliyun",
         "very-long-model-name",
         &UsageStats {
             llm_calls: 1,

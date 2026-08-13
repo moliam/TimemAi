@@ -18,6 +18,7 @@ pub mod audit;
 pub mod capability;
 #[path = "../../resources/capabilities/tools/capmgr.rs"]
 pub mod capmgr;
+pub mod mcp;
 pub use capability::CapabilityHostProfile;
 use capability::CapabilityRegistry;
 pub mod config_edit;
@@ -29,15 +30,15 @@ pub mod executor;
 pub mod host;
 #[path = "../../resources/capabilities/tools/memmgr.rs"]
 pub mod memmgr;
+pub mod model_api;
+pub mod model_service_config;
+pub mod model_transport;
 mod notification;
 pub mod profiler;
 pub mod prompt_cache;
 pub mod prompt_components;
 pub mod prompt_render;
 pub mod prompt_spec;
-pub mod provider;
-pub mod provider_config;
-pub mod provider_transport;
 pub mod redaction;
 pub mod response_protocol;
 pub mod retry_policy;
@@ -106,6 +107,21 @@ pub use host::{
     CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
+pub use model_api::{
+    build_model_request, default_api_protocol, default_base_url, default_model,
+    interpret_model_http_response, is_default_base_url, is_default_model, model_http_error_message,
+    model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
+    parse_model_response, plan_structured_output, prepare_model_http_request,
+    prepare_model_request, prompt_cache_plan_audit, ApiProtocol, ModelCacheControl,
+    ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole, ModelServiceConfig,
+    OpenAiCompatibleOptions, PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
+};
+pub use model_service_config::{
+    apply_openai_compatible_env_value, model_service_config_from_sources,
+    model_service_config_from_sources_allow_missing_api_key, validate_api_key, LocalLLMKeyFile,
+    ModelServiceConfigSource,
+};
+pub use model_transport::{call_model, call_model_with_cancel, HttpModelClient};
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};
 pub use profiler::{
@@ -119,22 +135,6 @@ pub use prompt_cache::{
     PromptBlockRole, PromptParts,
 };
 pub use prompt_components::{PromptComponent, PromptComponentRole};
-pub use provider::{
-    build_provider_request, default_api_protocol_for_provider, default_base_url_for_provider,
-    default_model_for_provider, interpret_provider_http_response, is_default_base_url_for_provider,
-    is_default_model_for_provider, known_default_base_url_for_provider, parse_api_protocol,
-    parse_provider_response, plan_structured_output, prepare_provider_http_request,
-    prepare_provider_request, prompt_cache_plan_audit, provider_http_error_message,
-    provider_prompt_blocks, provider_request_audit_event, provider_response_audit_event,
-    ApiProtocol, OpenAiCompatibleOptions, PreparedProviderHttpRequest, PreparedProviderRequest,
-    ProviderCacheControl, ProviderConfig, ProviderHttpResponseInterpretation, ProviderPromptBlock,
-    ProviderPromptRole, StructuredOutputHint,
-};
-pub use provider_config::{
-    apply_openai_compatible_env_value, provider_config_from_sources, validate_provider_api_key,
-    LocalLLMKeyFile, ProviderConfigSource,
-};
-pub use provider_transport::{call_model, call_model_with_cancel, ProviderModelClient};
 pub use redaction::{redact_value, REDACTED};
 pub use response_protocol::ResponseProtocolKind;
 use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};
@@ -192,16 +192,16 @@ pub use workspace::{
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT: u32 = 95;
 const PROMPT_DELTA_RENDER_OVERHEAD_TOKENS: u32 = 64;
+const MAX_MCP_COMPACT_NOTE_CHARS: usize = 8_000;
+const MAX_MCP_COMPACT_ACTIONS: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreProfile {
-    pub name: String,
-    pub provider: String,
     pub model: String,
 }
 impl CoreProfile {
     pub fn label(&self) -> String {
-        format!("{}:{}:{}", self.name, self.provider, self.model)
+        self.model.clone()
     }
 }
 
@@ -637,6 +637,12 @@ pub trait ActionRuntime {
     ) -> LongRunningCommandDecision {
         LongRunningCommandDecision::Continue
     }
+
+    /// Returns true if the host signaled "always allow" during the last approval.
+    /// The flag is consumed (reset to false) on each call.
+    fn take_bash_always_allow(&mut self) -> bool {
+        false
+    }
 }
 
 pub(crate) struct CancelOnlyActionRuntime<'a> {
@@ -823,6 +829,9 @@ pub struct AgentCore {
     rendered_static_prompt: String,
     profile: CoreProfile,
     pub(crate) capabilities: CapabilityRegistry,
+    mcp_runtime: mcp::McpRuntime,
+    mcp_servers: BTreeMap<String, mcp::McpServerConfig>,
+    mcp_tools: BTreeMap<String, mcp::McpTool>,
     response_protocol: ResponseProtocolKind,
     pub(crate) memory: FileMemoryStore,
     pub(crate) scratch: FileScratchStore,
@@ -887,6 +896,9 @@ impl AgentCore {
             rendered_static_prompt,
             profile,
             capabilities,
+            mcp_runtime: mcp::McpRuntime::default(),
+            mcp_servers: BTreeMap::new(),
+            mcp_tools: BTreeMap::new(),
             response_protocol,
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
@@ -906,7 +918,7 @@ impl AgentCore {
             repair_attempts: 0,
             last_repair_issue: None,
             pending_approval: None,
-            bash_approval_mode: BashApprovalMode::Ask,
+            bash_approval_mode: BashApprovalMode::Approve,
             current_action_turn_id: None,
             current_session_id: None,
             current_action_user_question: String::new(),
@@ -1173,7 +1185,7 @@ impl AgentCore {
     }
     pub fn configure_runtime_from_host(
         &mut self,
-        config: &ProviderConfig,
+        config: &ModelServiceConfig,
         bash_approval_mode: BashApprovalMode,
     ) {
         self.set_max_llm_input_tokens(config.max_llm_input_tokens);
@@ -1181,7 +1193,7 @@ impl AgentCore {
     }
     pub fn apply_runtime_config_update(
         &mut self,
-        config: &mut ProviderConfig,
+        config: &mut ModelServiceConfig,
         bash_approval_mode: &mut BashApprovalMode,
         work_instruction_mode: &mut WorkInstructionLoadMode,
         field: RuntimeConfigField,
@@ -1223,6 +1235,124 @@ impl AgentCore {
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
         self.capabilities = capabilities.without_tool("toolgen");
         self.refresh_rendered_static_prompt();
+    }
+
+    pub fn configure_mcp(
+        &mut self,
+        base_capabilities: CapabilityRegistry,
+        runtime: mcp::McpRuntime,
+        servers: Vec<mcp::McpServerConfig>,
+        tools: Vec<mcp::McpTool>,
+    ) -> Result<(), String> {
+        self.capabilities = base_capabilities
+            .with_mcp_tools(&tools)?
+            .without_tool("toolgen");
+        self.mcp_runtime = runtime;
+        self.mcp_servers = servers
+            .into_iter()
+            .map(|server| (server.id.clone(), server))
+            .collect();
+        self.mcp_tools = tools
+            .into_iter()
+            .map(|tool| (tool.action_name.clone(), tool))
+            .collect();
+        self.refresh_rendered_static_prompt();
+        Ok(())
+    }
+
+    pub fn apply_mcp_update(
+        &mut self,
+        base_capabilities: CapabilityRegistry,
+        runtime: mcp::McpRuntime,
+        servers: Vec<mcp::McpServerConfig>,
+        tools: Vec<mcp::McpTool>,
+    ) -> Result<bool, String> {
+        let previous = self.mcp_tools.clone();
+        self.configure_mcp(base_capabilities, runtime, servers, tools)?;
+        if previous == self.mcp_tools {
+            return Ok(false);
+        }
+
+        let previous_names = previous.keys().cloned().collect::<BTreeSet<_>>();
+        let current_names = self.mcp_tools.keys().cloned().collect::<BTreeSet<_>>();
+        let added = current_names
+            .difference(&previous_names)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = previous_names
+            .difference(&current_names)
+            .cloned()
+            .collect::<Vec<_>>();
+        let updated = current_names
+            .intersection(&previous_names)
+            .filter(|name| previous.get(*name) != self.mcp_tools.get(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut lines = vec!["MCP capabilities changed for this user request.".to_string()];
+        if !added.is_empty() {
+            lines.push(format!("Newly available actions: {}.", added.join(", ")));
+        }
+        if !updated.is_empty() {
+            lines.push(format!(
+                "Updated action definitions: {}.",
+                updated.join(", ")
+            ));
+        }
+        if !removed.is_empty() {
+            lines.push(format!(
+                "Actions no longer available: {}.",
+                removed.join(", ")
+            ));
+        }
+        lines.push("Use only actions in the current capability catalog.".to_string());
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "mcp_capability_update",
+            lines.join("\n"),
+            "mcp_runtime",
+        );
+        Ok(true)
+    }
+
+    fn active_mcp_compact_note(&self) -> Option<String> {
+        if self.mcp_tools.is_empty() {
+            return None;
+        }
+
+        let total = self.mcp_tools.len();
+        let mut note =
+            format!("Active MCP capabilities after context compaction ({total} actions):");
+        let mut shown = 0usize;
+        for tool in self.mcp_tools.values().take(MAX_MCP_COMPACT_ACTIONS) {
+            let server_name = tool
+                .server_name
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let line = format!("\n- {} ({server_name})", tool.action_name);
+            if note
+                .chars()
+                .count()
+                .saturating_add(line.chars().count())
+                .saturating_add(256)
+                > MAX_MCP_COMPACT_NOTE_CHARS
+            {
+                break;
+            }
+            note.push_str(&line);
+            shown += 1;
+        }
+        if shown < total {
+            note.push_str(&format!(
+                "\n- {} additional active MCP actions are omitted from this compact reminder.",
+                total - shown
+            ));
+        }
+        note.push_str(
+            "\nThese actions remain available. Refer to the current capability catalog for complete argument definitions.",
+        );
+        Some(note)
     }
     pub(crate) fn enable_toolgen_capability(&mut self) -> Result<(), String> {
         self.capabilities.enable_toolgen()?;
@@ -1479,9 +1609,14 @@ impl AgentCore {
         if text.is_empty() {
             return None;
         }
-        self.append_slice_to_latest_delta("user_supplement".to_string(), text.to_string());
+        self.submit_prompt_component(
+            PromptComponentRole::user(),
+            "user_supplement",
+            text,
+            "user_input",
+        );
         Some(CoreStep::NeedModel {
-            prompt: self.render_prompt(),
+            prompt: self.build_next_prompt(),
             rounds_remaining: self.remaining_rounds(),
         })
     }
@@ -1493,7 +1628,7 @@ impl AgentCore {
         session: &str,
         turn_id: &str,
     ) -> Option<CoreStep> {
-        let mut step = None;
+        let mut added = false;
         for supplement in supplements {
             let supplement = supplement.trim();
             if supplement.is_empty() {
@@ -1503,9 +1638,18 @@ impl AgentCore {
                 audit_file,
                 &user_supplement_audit_event(session, turn_id, supplement),
             );
-            step = self.append_user_supplement(supplement);
+            self.submit_prompt_component(
+                PromptComponentRole::user(),
+                "user_supplement",
+                supplement,
+                "user_input",
+            );
+            added = true;
         }
-        step
+        added.then(|| CoreStep::NeedModel {
+            prompt: self.build_next_prompt(),
+            rounds_remaining: self.remaining_rounds(),
+        })
     }
 
     pub fn apply_model_response(&mut self, response: LlmResponse) -> CoreStep {
@@ -1628,6 +1772,7 @@ impl AgentCore {
             &self.current_session_id(),
             &compact_delta_ids,
         );
+        let mut active_mcp_compact_note = self.active_mcp_compact_note();
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
@@ -1675,7 +1820,13 @@ impl AgentCore {
                 let estimated_after_tokens = self
                     .dynamic_context_summary()
                     .estimated_tokens
-                    .saturating_add(estimate_prompt_tokens(&compact.summary));
+                    .saturating_add(estimate_prompt_tokens(&compact.summary))
+                    .saturating_add(
+                        active_mcp_compact_note
+                            .as_deref()
+                            .map(estimate_prompt_tokens)
+                            .unwrap_or_default(),
+                    );
                 runtime.on_core_topic_events(&[host::context_compact_topic_event(
                     self.current_session_id(),
                     estimated_before_tokens,
@@ -1702,6 +1853,9 @@ impl AgentCore {
                 ));
                 slices.push(("result_of_llm_action".to_string(), shrink_result));
                 slices.push(self.cwd_note_slice());
+                if let Some(note) = active_mcp_compact_note.take() {
+                    slices.push(("context_compacted".to_string(), note));
+                }
             } else {
                 slices.push((
                     "result_of_llm_action".to_string(),
@@ -1839,7 +1993,7 @@ impl AgentCore {
         })
     }
 
-    pub fn record_discarded_model_response_usage(&mut self, usage: &UsageStats) {
+    pub fn record_unapplied_model_response_usage(&mut self, usage: &UsageStats) {
         self.current_round += 1;
         self.current_stats.add(usage);
         self.last_observed_prompt_tokens =
@@ -2211,6 +2365,11 @@ impl AgentCore {
         pending.continuation = None;
         if approved_by_user {
             approved.push((current_index, pending));
+            // If the host signaled "always allow", update bash approval mode
+            // before processing subsequent actions in this parallel group.
+            if runtime.take_bash_always_allow() {
+                self.bash_approval_mode = BashApprovalMode::Approve;
+            }
         } else {
             let result = self.denied_approval_result(&pending);
             self.record_pending_approval_audit(&pending, false, &result);
@@ -2368,7 +2527,7 @@ impl AgentCore {
     #[allow(clippy::too_many_arguments)]
     pub fn resolve_output_expansion_with_audit(
         &self,
-        config: &mut ProviderConfig,
+        config: &mut ModelServiceConfig,
         request: OutputExpansionRequest,
         should_expand: bool,
         usage: UsageStats,
@@ -2402,7 +2561,7 @@ impl AgentCore {
             &self.rendered_static_prompt,
             &self.deltas,
             &self.assistant_speaker_name,
-            self.response_protocol.lang_format(),
+            self.response_protocol.suite().response_shape_hint(),
         )
     }
 
@@ -2563,7 +2722,7 @@ impl AgentCore {
             &self.rendered_static_prompt,
             &deltas,
             &self.assistant_speaker_name,
-            self.response_protocol.lang_format(),
+            self.response_protocol.suite().response_shape_hint(),
         )
     }
 
@@ -2861,43 +3020,6 @@ impl AgentCore {
         );
     }
 
-    fn append_slice_to_latest_delta(&mut self, prompt_type: String, text: String) {
-        if self.deltas.is_empty() {
-            self.append_delta(vec![(prompt_type, text)]);
-            return;
-        }
-        let Some(delta) = self.deltas.last_mut() else {
-            return;
-        };
-        let time_ms = now_ms();
-        let chunks = split_text_for_prompt_slices(&text, PROMPT_SLICE_TEXT_LIMIT);
-        for chunk in chunks {
-            let slice_index = delta.slices.len() + 1;
-            delta.slices.push(PromptSlice {
-                delta_id: delta.delta_id.clone(),
-                slice_id: format!(
-                    "ps_{}_s{:03}",
-                    delta.delta_id.trim_start_matches("pd_"),
-                    slice_index
-                ),
-                prompt_type: prompt_type.clone(),
-                time_ms,
-                text: chunk,
-                slice_index,
-                slice_count: 0,
-            });
-        }
-        let slice_count = delta.slices.len();
-        for (idx, slice) in delta.slices.iter_mut().enumerate() {
-            slice.slice_index = idx + 1;
-            slice.slice_count = slice_count;
-            slice.slice_id = format!(
-                "ps_{}_s{:03}",
-                delta.delta_id.trim_start_matches("pd_"),
-                idx + 1
-            );
-        }
-    }
     fn consume_shrink_review_if_needed(
         &mut self,
         incoming_prompt_tokens: u32,
@@ -3325,6 +3447,7 @@ impl AgentCore {
             Err(err) => {
                 let result = format!("Action result: {}\nerror: {}", action.action, err);
                 self.record_action_audit(&action_for_audit, "completed", Some(&result));
+                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
                 return ActionExecution::Completed(result);
             }
         };
@@ -3337,6 +3460,7 @@ impl AgentCore {
                 action.action, issue
             );
             self.record_action_audit(&action_for_audit, "invalid_input", Some(&result));
+            self.emit_action_finish_topic(&action_for_audit, &result, runtime);
             return ActionExecution::Completed(result);
         }
         if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
@@ -3344,10 +3468,38 @@ impl AgentCore {
             self.record_action_audit(&action_for_audit, "completed", Some(&result));
             return ActionExecution::Completed(result);
         }
+        if let executor::ExecutorTarget::Mcp {
+            server_id,
+            tool_name,
+        } = &executor_target
+        {
+            self.current_stats.tool_calls += 1;
+            let result = match self.mcp_servers.get(server_id) {
+                Some(config) => self
+                    .mcp_runtime
+                    .call_tool(config, tool_name, &action.raw_input)
+                    .unwrap_or_else(|error| {
+                        format!(
+                            "Action result: {}\nstatus: failed\nerror: {}",
+                            action.action, error
+                        )
+                    }),
+                None => format!(
+                    "Action result: {}\nstatus: failed\nerror: mcp_server_not_enabled",
+                    action.action
+                ),
+            };
+            self.record_action_audit(&action_for_audit, "completed", Some(&result));
+            self.emit_action_finish_topic(&action_for_audit, &result, runtime);
+            return ActionExecution::Completed(result);
+        }
         let dispatch_name = match &executor_target {
             executor::ExecutorTarget::Builtin { binding_name } => binding_name.as_str(),
             executor::ExecutorTarget::Command { .. } => {
                 unreachable!("command target returned early")
+            }
+            executor::ExecutorTarget::Mcp { .. } => {
+                unreachable!("MCP target returned early")
             }
         };
         self.current_stats.tool_calls += 1;

@@ -28,7 +28,6 @@ fn weekday_labels_handle_unknown_values() {
 fn supporting_context_formats_host_supplied_runtime_identity() {
     let context = format_supporting_context(
         SupportingContextInput {
-            provider: "aliyun",
             model: "qwen-plus",
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
@@ -38,7 +37,7 @@ fn supporting_context_formats_host_supplied_runtime_identity() {
 
     assert_eq!(
             context,
-            "provider: aliyun, model: qwen-plus\nruntime: timem_native_shell\nrun_bash_target: user_local_machine\nruntime_time: 2026-07-04 09:08:07 local_time, weekday=周六/Saturday"
+            "model: qwen-plus\nruntime: timem_native_shell\nrun_bash_target: user_local_machine\nruntime_time: 2026-07-04 09:08:07 local_time, weekday=周六/Saturday"
         );
 }
 
@@ -46,7 +45,6 @@ fn supporting_context_formats_host_supplied_runtime_identity() {
 fn turn_supporting_context_combines_runtime_and_additional_context() {
     let context = turn_supporting_context(
         SupportingContextInput {
-            provider: "aliyun",
             model: "qwen-plus",
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
@@ -54,7 +52,7 @@ fn turn_supporting_context_combines_runtime_and_additional_context() {
         Some("  work instructions\nworkspace refs  "),
     );
 
-    assert!(context.contains("provider: aliyun, model: qwen-plus"));
+    assert!(context.contains("model: qwen-plus"));
     assert!(context.contains("\n\nwork instructions\nworkspace refs"));
     assert!(!context.contains("  work instructions"));
 }

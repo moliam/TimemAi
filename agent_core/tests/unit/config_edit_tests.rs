@@ -1,9 +1,8 @@
 use super::*;
 use crate::ApiProtocol;
 
-fn test_config() -> ProviderConfig {
-    ProviderConfig {
-        provider: "aliyun".to_string(),
+fn test_config() -> ModelServiceConfig {
+    ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -54,6 +53,10 @@ fn runtime_option_sources_follow_option_env_default_precedence() {
 
 #[test]
 fn stale_bash_approval_aliases_fall_back_to_ask() {
+    assert_eq!(
+        bash_approval_mode_from_sources(None, &HashMap::new()),
+        BashApprovalMode::Approve
+    );
     assert_eq!(
         bash_approval_mode_from_sources(Some("never"), &HashMap::new()),
         BashApprovalMode::Ask
@@ -254,8 +257,6 @@ fn config_apply_errors_are_structured_and_ui_neutral() {
     let debug = format!(
         "{:?}",
         [
-            RuntimeConfigApplyError::EmptyGatewayProvider,
-            RuntimeConfigApplyError::CustomGatewayRequiresBaseUrl,
             RuntimeConfigApplyError::InvalidApiProtocol,
             RuntimeConfigApplyError::InvalidTokenCount {
                 field: RuntimeConfigField::MaxOutput,
@@ -273,7 +274,7 @@ fn config_apply_errors_are_structured_and_ui_neutral() {
 }
 
 #[test]
-fn gateway_provider_update_keeps_dependent_defaults_consistent() {
+fn api_protocol_update_changes_only_a_default_base_url() {
     let mut config = test_config();
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
@@ -282,23 +283,12 @@ fn gateway_provider_update_keeps_dependent_defaults_consistent() {
         &mut config,
         &mut bash,
         &mut work,
-        RuntimeConfigField::GatewayProvider,
+        RuntimeConfigField::ApiProtocol,
         "anthropic",
     )
     .unwrap();
-    assert_eq!(config.provider, "anthropic");
     assert_eq!(config.api_protocol, ApiProtocol::Anthropic);
     assert_eq!(config.base_url, "https://api.anthropic.com");
-
-    let err = apply_runtime_config_value(
-        &mut config,
-        &mut bash,
-        &mut work,
-        RuntimeConfigField::GatewayProvider,
-        "private",
-    )
-    .unwrap_err();
-    assert_eq!(err, RuntimeConfigApplyError::CustomGatewayRequiresBaseUrl);
 
     apply_runtime_config_value(
         &mut config,
@@ -308,14 +298,15 @@ fn gateway_provider_update_keeps_dependent_defaults_consistent() {
         "https://private.example/v1",
     )
     .unwrap();
+
     apply_runtime_config_value(
         &mut config,
         &mut bash,
         &mut work,
-        RuntimeConfigField::GatewayProvider,
-        "private",
+        RuntimeConfigField::ApiProtocol,
+        "openai-responses",
     )
     .unwrap();
-    assert_eq!(config.provider, "private");
+    assert_eq!(config.api_protocol, ApiProtocol::OpenAiResponses);
     assert_eq!(config.base_url, "https://private.example/v1");
 }

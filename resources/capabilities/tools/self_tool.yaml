@@ -23,7 +23,7 @@ prompt_input: |
 prompt_result: |
   Returns current runtime env values, memory/audit paths, or Timem about
   information. Sensitive env requests return sensitive_env_denied. Env writes
-  update the current process only; model/provider config may still need /config
+  update the current process only; model service config may still need /config
   or restart. Memory path env writes return protected_env_denied because those
   resources are selected at startup. about_me also returns project/star info,
   current process id, current directory, and executable path. cwd chg_cwd returns

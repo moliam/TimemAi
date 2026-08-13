@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn profiler_aggregates_tokens_by_model_and_wait_time() {
     let mut profiler = RuntimeProfiler::default();
     profiler.record_model_wait(
-        "aliyun",
         "qwen-plus",
         &UsageStats {
             llm_calls: 1,
@@ -18,7 +17,6 @@ fn profiler_aggregates_tokens_by_model_and_wait_time() {
         Duration::from_millis(500),
     );
     profiler.record_model_wait(
-        "aliyun",
         "qwen-plus",
         &UsageStats {
             llm_calls: 1,
@@ -32,7 +30,7 @@ fn profiler_aggregates_tokens_by_model_and_wait_time() {
     );
     profiler.record_turn(Duration::from_millis(2000), Duration::from_millis(1500));
 
-    let profile = profiler.models().get("aliyun:qwen-plus").unwrap();
+    let profile = profiler.models().get("qwen-plus").unwrap();
     assert_eq!(profile.llm_calls, 2);
     assert_eq!(profile.input_tokens, 1500);
     assert_eq!(profile.output_tokens, 500);
@@ -50,7 +48,7 @@ fn profiler_aggregates_tokens_by_model_and_wait_time() {
         action_audit_bytes: 0,
     });
     assert_eq!(report.models.len(), 1);
-    assert_eq!(report.models[0].model, "aliyun:qwen-plus");
+    assert_eq!(report.models[0].model, "qwen-plus");
     assert_eq!(report.models[0].cached_tokens, 800);
     assert_eq!(report.model_wait, Duration::from_millis(1500));
     assert_eq!(report.local_work, Duration::from_millis(500));
@@ -150,7 +148,6 @@ fn runtime_profile_report_collects_storage_and_raw_profile_data() {
 
     let mut profiler = RuntimeProfiler::default();
     profiler.record_model_wait(
-        "test",
         "model",
         &UsageStats {
             llm_calls: 1,
@@ -163,7 +160,7 @@ fn runtime_profile_report_collects_storage_and_raw_profile_data() {
 
     let report = runtime_profile_report(&profiler, &memory_dir, &api_audit, &action_audit);
     assert_eq!(report.models.len(), 1);
-    assert_eq!(report.models[0].model, "test:model");
+    assert_eq!(report.models[0].model, "model");
     assert_eq!(report.storage.durable_entries, 2);
     assert!(report.storage.api_audit_bytes > 0);
 
@@ -207,7 +204,7 @@ fn profile_report_keeps_raw_storage_and_zero_output_data() {
 #[test]
 fn profile_metrics_are_core_owned_and_ui_neutral() {
     let profile = ModelProfileReport {
-        model: "provider:model".to_string(),
+        model: "model".to_string(),
         llm_calls: 3,
         input_tokens: 1_500,
         output_tokens: 500,

@@ -1,7 +1,7 @@
 # agent_core module boundary
 
 `agent_core` is the reusable Timem runtime. It owns agent state, prompt/context
-management, provider payload/transport, capability registration, tool execution
+management, model service payload/transport, capability registration, tool execution
 coordination, memory access, retry policy, and structured topic events.
 
 Before changing this module, also read the repository-level `AGENTS.md`.
@@ -9,18 +9,26 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 ## Belongs here
 
 - Protocol-neutral runtime data structures and algorithms.
-- Provider request/response adapters and cache planning.
-- Provider wire-request planning and transport, including endpoint, headers,
+- Model request/response adapters and cache planning.
+- Model API wire-request planning and transport, including endpoint, headers,
   payload shape, cache-control fields, structured-output fields, HTTP execution,
   response parsing, and audit redaction metadata. Hosts should not rebuild
-  provider protocol details, execute provider HTTP, or reinterpret provider HTTP
+  model API protocol details, execute model HTTP, or reinterpret model HTTP
   response semantics.
 - Model retry policy, retry decision data, and model-call outcome accounting.
-  Provider I/O belongs behind the core/provider boundary. Hosts may surface
+  Model service I/O belongs behind the core/model service boundary. Hosts may surface
   waiting/cancellation UX, but should not redefine retryability or retry
   metadata.
 - Capability and tool registries, including validation data loaded from
   resources.
+- MCP client transport, server discovery, namespaced dynamic tool registration,
+  and `tools/call` execution. The response-protocol parser remains generic: it
+  parses the registered action name and JSON arguments, while the MCP server is
+  authoritative for its full JSON Schema validation. MCP failures are bounded
+  action evidence, never response-protocol repair; failed transports are evicted
+  so a late response or dead connection cannot contaminate later calls. Applying a host-requested MCP update
+  compares complete tool definitions and submits one `SYSTEM` capability-change
+  component only when the model-visible capability set actually changed.
 - Built-in action dispatch by registered action/binding name. Core may route a
   manifest-backed builtin action to its callback through
   `resources/capabilities/tools/registry.rs`, but concrete option parsing and
@@ -50,6 +58,10 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   for prompt assembly order and must not be rendered into the model prompt.
 - Active-turn context updates such as user supplements entered while a model
   turn is in progress, including their prompt-slice insertion and audit events.
+- Active-turn focus reminders. Core measures each turn's active time separately
+  and, at ten-minute intervals, submits one randomly selected SYSTEM reminder
+  before the next model request. Host-decision wait time is excluded and long
+  blocking calls are not interrupted merely to deliver a reminder.
 - Host-decision results once chosen by the UI, such as applying user approval
   decisions to pending actions and recording their runtime audit events.
 - Round-limit decisions after the host chooses continue/stop, including audit
@@ -70,11 +82,21 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   structured turn input. Core consumes these values when assembling model
   context; reusable runtime loops should not hard-code a terminal host identity.
 - Memory, scratch, raw chat, context shrink/compact, and conflict handling.
+  A successful compact re-injects one bounded SYSTEM snapshot of currently
+  applied MCP actions when any are active; pending host configuration and MCP
+  secrets are never included.
 - Cross-host Session persistence schemas. Core owns `StoredSession`,
   `ChatHistoryRecord`, history paging, and resume-notice format so Shell, Web,
   iOS, and future hosts share one JSONL history contract. The first resume
   layer stores session metadata and raw chat/event records, not live
   Worker/Context execution state.
+  The metadata includes the effective allowlisted TIMEM runtime environment so
+  hosts can resume model service configuration. The local Session index may contain
+  an API key and must be owner-only; secrets must never be copied into history,
+  prompts, topics, snapshots, or audit records.
+  Session persistence includes the MCP server ids enabled for that Session;
+  server definitions and credentials remain in the active mem and are not
+  embedded in chat history or topic payloads.
 - Session ToolRepo persistence and ToolGen retrospective execution. Core owns
   Session-scoped draft/published paths, manifest/tree validation, bounded
   self-tests, atomic publication/update, repository search/detail/rename data,
@@ -156,10 +178,10 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   hosts own localized/user-facing wording for those fields.
 - Failure diagnostics and repair issues as structured observability data. Core
   should preserve machine-readable causes such as protocol issue names,
-  provider errors, truncation flags, request ids, and stop summaries for audit
+  model service errors, truncation flags, request ids, and stop summaries for audit
   and host rendering, but it should not turn those causes into localized
   terminal/app copy. Strings are valid core outputs when the string itself is
-  data, such as model/user-visible answer text, paths, ids, provider messages,
+  data, such as model/user-visible answer text, paths, ids, model service messages,
   or diagnostic reason codes.
 - Topic/event/request structures and fields. Core owns their stable semantic
   contract; host UIs subscribe to them, understand their public fields, and
@@ -168,10 +190,10 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   public fields such as action kind, final answer, progress report, diagnostic
   reason, status metadata, and request ids. Do not collapse those into a single
   untyped text field when the semantic distinction matters.
-- Provider/model transport belongs behind core's provider boundary. The current
-  implementation may use HTTP/curl internally, but that is a core/provider
+- Model service/model transport belongs behind core's model service boundary. The current
+  implementation may use HTTP/curl internally, but that is a core/model service
   responsibility, not a shell UI responsibility. The intended chain is
-  `host UI -> agent_core -> provider -> LLM`.
+  `host UI -> agent_core -> model service -> LLM`.
 - Cross-language topic wire contracts. `CoreTopicEvent` payload field names are
   part of the shared core/UI boundary for Rust, Swift, web, and process IPC
   hosts. Rust typed accessors are host bindings over that wire contract, not a
@@ -215,7 +237,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   layout, but should not redefine the underlying metric calculations.
 - Retry status semantics, including attempt defaults and countdown remaining
   time calculations. Hosts may choose wording and layout for retry messages.
-- Runtime configuration application, including validation, provider/model/token
+- Runtime configuration application, including validation, model service/token
   field updates, and any resulting core state changes such as context-window or
   bash-approval policy updates.
 - Host startup/runtime configuration synchronization. Hosts may collect env/CLI

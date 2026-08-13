@@ -1,9 +1,8 @@
 use super::*;
 use crate::ApiProtocol;
 
-fn config(provider: &str) -> ProviderConfig {
-    ProviderConfig {
-        provider: provider.to_string(),
+fn config() -> ModelServiceConfig {
+    ModelServiceConfig {
         model: "qwen-plus".to_string(),
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
         api_key: "secret".to_string(),
@@ -29,7 +28,7 @@ fn input() -> RuntimeConfigReportInput {
 
 #[test]
 fn config_report_is_ui_neutral_and_groups_effective_values() {
-    let report = runtime_config_report(&config("aliyun"), input());
+    let report = runtime_config_report(&config(), input());
     let debug = format!("{report:?}");
     for forbidden in ["\x1b[", "▶", "Add..."] {
         assert!(
@@ -42,11 +41,11 @@ fn config_report_is_ui_neutral_and_groups_effective_values() {
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Model)
     ));
     assert!(matches!(
-        report.items[5],
+        report.items[4],
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Runtime)
     ));
     assert!(matches!(
-        report.items[10],
+        report.items[9],
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Data)
     ));
     assert!(report.items.iter().any(|item| matches!(
@@ -72,8 +71,8 @@ fn config_report_is_ui_neutral_and_groups_effective_values() {
 }
 
 #[test]
-fn config_report_marks_provider_overrides_as_not_default_only_for_known_defaults() {
-    let mut known = config("aliyun");
+fn config_report_marks_model_and_base_url_overrides_as_not_default() {
+    let mut known = config();
     known.model = "aws-claude-sonnet-4-6".to_string();
     known.base_url = "https://example.invalid/v1".to_string();
     let report = runtime_config_report(&known, input());
@@ -84,18 +83,5 @@ fn config_report_marks_provider_overrides_as_not_default_only_for_known_defaults
     assert!(report.items.iter().any(|item| matches!(
         item,
         RuntimeConfigReportItem::Row(row) if row.key == "TIMEM_BASE_URL" && row.not_default
-    )));
-
-    let mut custom = config("private");
-    custom.model = "aws-claude-sonnet-4-6".to_string();
-    custom.base_url = "https://example.invalid/v1".to_string();
-    let report = runtime_config_report(&custom, input());
-    assert!(report.items.iter().any(|item| matches!(
-        item,
-        RuntimeConfigReportItem::Row(row) if row.key == "TIMEM_MODEL" && !row.not_default
-    )));
-    assert!(report.items.iter().any(|item| matches!(
-        item,
-        RuntimeConfigReportItem::Row(row) if row.key == "TIMEM_BASE_URL" && !row.not_default
     )));
 }

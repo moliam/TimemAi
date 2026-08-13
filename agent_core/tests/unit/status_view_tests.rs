@@ -3,7 +3,6 @@ use super::*;
 #[test]
 fn runtime_status_snapshot_groups_retry_state_for_host_rendering() {
     let snapshot = RuntimeStatusSnapshot {
-        provider: "test".to_string(),
         model: "test-model".to_string(),
         intent: "thinking".to_string(),
         memory_activity: CoreMemoryActivity::None,
@@ -16,7 +15,7 @@ fn runtime_status_snapshot_groups_retry_state_for_host_rendering() {
         max_llm_input_tokens: 100_000,
         retry: Some(RuntimeRetryStatus {
             until_epoch_ms: Some(123),
-            error: Some("provider_network_error".to_string()),
+            error: Some("model_network_error".to_string()),
             attempt: Some(1),
             max_attempts: Some(5),
         }),
@@ -25,7 +24,7 @@ fn runtime_status_snapshot_groups_retry_state_for_host_rendering() {
     let retry = snapshot.retry.as_ref().unwrap();
     assert_eq!(retry.attempt, Some(1));
     assert_eq!(retry.max_attempts, Some(5));
-    assert_eq!(retry.error.as_deref(), Some("provider_network_error"));
+    assert_eq!(retry.error.as_deref(), Some("model_network_error"));
 }
 
 #[test]
@@ -43,7 +42,6 @@ fn runtime_active_elapsed_excludes_paused_time_and_saturates() {
 #[test]
 fn runtime_status_snapshot_keeps_memory_activity_structured_for_host_rendering() {
     let snapshot = RuntimeStatusSnapshot {
-        provider: "test".to_string(),
         model: "test-model".to_string(),
         intent: "query memory".to_string(),
         memory_activity: CoreMemoryActivity::Read,
@@ -87,7 +85,7 @@ fn host_status_message_is_structured_and_ui_neutral() {
 fn runtime_retry_status_view_applies_defaults_and_countdown() {
     let retry = RuntimeRetryStatus {
         until_epoch_ms: Some(12_300),
-        error: Some(" provider_network_error ".to_string()),
+        error: Some(" model_network_error ".to_string()),
         attempt: Some(2),
         max_attempts: Some(7),
     };
@@ -95,7 +93,7 @@ fn runtime_retry_status_view_applies_defaults_and_countdown() {
     assert_eq!(view.remaining_secs, 3);
     assert_eq!(view.attempt, 2);
     assert_eq!(view.max_attempts, 7);
-    assert_eq!(view.error.as_deref(), Some("provider_network_error"));
+    assert_eq!(view.error.as_deref(), Some("model_network_error"));
 
     let retry = RuntimeRetryStatus {
         until_epoch_ms: None,

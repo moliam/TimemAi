@@ -142,7 +142,7 @@ impl SelfToolState {
         self.env.insert(key.to_string(), value.to_string());
         std::env::set_var(key, value);
         format!(
-            "Action result: self_tool\ntype: env\nop: write\nkey: {key}\nstatus: updated_current_process_env\nnote: Model/provider config changes may still require /config or restart to take effect."
+            "Action result: self_tool\ntype: env\nop: write\nkey: {key}\nstatus: updated_current_process_env\nnote: Model service config changes may still require /config or restart to take effect."
         )
     }
 

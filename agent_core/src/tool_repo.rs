@@ -105,6 +105,14 @@ impl SessionToolRepo {
         self.root().join(".drafts")
     }
 
+    pub fn delete_session_data(&self) -> Result<(), String> {
+        if self.session_root.exists() {
+            fs::remove_dir_all(&self.session_root)
+                .map_err(|error| format!("session_toolrepo_remove_failed:{error}"))?;
+        }
+        Ok(())
+    }
+
     pub fn create_draft(&self) -> Result<PathBuf, String> {
         let lock = repo_lock(&self.root());
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

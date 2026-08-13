@@ -2,7 +2,7 @@
 
 `timem_shell` is the terminal host for Timem. It owns CLI parsing, environment
 collection, terminal input, menus, rendering, and shell-only convenience
-commands. It delegates reusable runtime behavior and model/provider transport
+commands. It delegates reusable runtime behavior and model transport
 to `agent_core`.
 
 Before changing this module, also read the repository-level `AGENTS.md`.
@@ -67,7 +67,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   match public core enums and fields such as `TurnStopDetail` to choose terminal
   copy/layout; those fields are the shared protocol, not opaque internals.
 - Terminal wording for structured failure diagnostics. Shell may render
-  protocol repair failures, provider errors, truncation flags, and other
+  protocol repair failures, model service errors, truncation flags, and other
   core-provided observability fields as localized user-facing copy, while core
   keeps those causes machine-readable for audit and other hosts.
 - Terminal rendering of stopped-turn messages. The turn loop should return
@@ -103,8 +103,8 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   should come from core-owned data.
 - Terminal-side cancellation and interaction while a model turn is running.
   Shell may signal cancellation through core APIs, but it must not implement
-  provider HTTP/curl, provider endpoint/header/body construction, cache-control
-  protocol, or provider response/error interpretation.
+  model HTTP/curl, model service endpoint/header/body construction, cache-control
+  protocol, or model response/error interpretation.
 - Terminal-side approval UI for model-requested tools such as `run_bash`.
   Shell may render the request and collect the user's choice, but it must not
   execute the command, shape stdout/stderr evidence, decide tool semantics, or
@@ -129,8 +129,8 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 ## Does not belong here
 
 - Model response protocol parsing rules.
-- Provider/model transport, including HTTP/curl execution, SDK calls, provider
-  payload construction, provider response interpretation, and provider
+- Model transport, including HTTP/curl execution, SDK calls, model API payload
+  construction, response interpretation, and service-specific
   cache-control details.
 - Parsing raw model responses to infer Thought / Action UI events; core must
   emit structured topic events for those events.
@@ -148,7 +148,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   action evidence, but must not manage those jobs itself.
 - Long-command process waiting and cancellation. Shell may prompt the user for
   a decision, but core owns the process lifecycle and resulting prompt evidence.
-- Memory conflict logic, context shrink/compact algorithms, provider cache
+- Memory conflict logic, context shrink/compact algorithms, model service cache
   planning, or retry policy.
 - Runtime configuration validation or reusable configuration side effects, such
   as changing context-window state or bash-approval policy in core.
@@ -179,9 +179,9 @@ than building a separate terminal-specific runtime loop. Shell remains
 responsible for terminal input/rendering; the worker/core owns session state,
 model/action loop, topic emission, and request correlation.
 
-The intended call chain is `timem_shell UI -> agent_core -> provider -> LLM`.
-Shell should not insert a transport adapter between UI and provider. If provider
-transport needs to change, change the core/provider boundary first.
+The intended call chain is `timem_shell UI -> agent_core -> model service -> LLM`.
+Shell should not insert a transport adapter between UI and model service. If model service
+transport needs to change, change the core/model service boundary first.
 
 Shell may expose core functions as shell-specific commands such as `/prof`,
 `/config`, or `/workspace`, but those commands should return or render

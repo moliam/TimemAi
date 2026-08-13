@@ -53,25 +53,28 @@ fn cache_planner_keeps_one_delta_as_one_addressable_block() {
 fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer("XML", "Ai3")
+            crate::prompt_render::formatted_response_trailer(
+                "one-root label <response>...</response>",
+                "Ai3",
+            )
         );
 
     let parts = prompt_parts_from_rendered_prompt(&prompt);
     assert!(parts.new_delta.contains("delta1"));
     assert!(!parts
         .new_delta
-        .contains("Now please continue your ID's response part"));
+        .contains("Now please fulfill your response part"));
 
     let blocks = plan_prompt_cache(&prompt);
     assert_eq!(blocks.len(), 3);
     assert!(blocks[1].text.contains("delta1"));
     assert!(!blocks[1]
         .text
-        .contains("Now please continue your ID's response part"));
+        .contains("Now please fulfill your response part"));
     assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
     assert_eq!(
         blocks[2].text,
-        "Now please continue your ID's response part in XML as required in protocol:\n## Ai3"
+        "Now please fulfill your response part like one-root label <response>...</response>:"
     );
     assert_eq!(blocks[2].cache, CacheControl::None);
 }
@@ -80,7 +83,10 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
 fn temporary_repair_delta_is_not_cache_controlled() {
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## SYSTEM\nrepair\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer("Markdown", "TIMEM_ASSISTANT")
+            crate::prompt_render::formatted_response_trailer(
+                "one Markdown response with one state branch",
+                "TIMEM_ASSISTANT",
+            )
         );
 
     let blocks = plan_prompt_cache(&prompt);
