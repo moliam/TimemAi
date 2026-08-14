@@ -39,6 +39,12 @@ It installs:
 - `timem`: thin wrapper for the terminal UI
 - `timem-web`: local browser UI with embedded production assets
 
+Binary updates are installed with an atomic file replacement. This allows
+`./install.sh` to update an installation even while an older `timem-web`
+process is still running, without invalidating the executable inode used by
+that process on macOS. Restart the old process to use the newly installed
+version.
+
 Release users do not need Node.js or a separate assistant-ui checkout. Node/pnpm
 are only needed for frontend development.
 
