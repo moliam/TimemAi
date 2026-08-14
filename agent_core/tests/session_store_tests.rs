@@ -3,6 +3,26 @@ use agent_core::session_store::{
     read_history_page_from_path, ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole,
     SessionResumeNotice, SessionStore, StoredSessionProfile, StoredSessionState,
 };
+
+#[test]
+fn chat_history_message_command_id_round_trips_for_exactly_once_recovery() {
+    let record = ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 1,
+        kind: Some("task".to_string()),
+        command_id: Some("command_1".to_string()),
+        delivery_state: None,
+        content: "run once".to_string(),
+    };
+    let encoded = serde_json::to_string(&record).unwrap();
+    let decoded: ChatHistoryRecord = serde_json::from_str(&encoded).unwrap();
+    assert!(matches!(
+        decoded,
+        ChatHistoryRecord::Message { command_id: Some(command_id), .. }
+            if command_id == "command_1"
+    ));
+}
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,6 +67,8 @@ fn message(turn: usize) -> ChatHistoryRecord {
         turn_id: format!("turn_{turn}"),
         created_at_ms: turn as i64,
         kind: None,
+        command_id: None,
+        delivery_state: None,
         content: format!("message {turn}"),
     }
 }
@@ -64,6 +86,8 @@ fn chat_history_records_round_trip_as_jsonl() {
             turn_id: "turn_1".to_string(),
             created_at_ms: 10,
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: "hello".to_string(),
         },
         ChatHistoryRecord::Event {
@@ -118,6 +142,8 @@ fn chat_history_user_entry_kind_is_optional_and_round_trips() {
         turn_id: "turn_1".to_string(),
         created_at_ms: 10,
         kind: None,
+        command_id: None,
+        delivery_state: None,
         content: "plain task".to_string(),
     };
     let text = serde_json::to_string(&without_kind).unwrap();
@@ -128,6 +154,8 @@ fn chat_history_user_entry_kind_is_optional_and_round_trips() {
         turn_id: "turn_1".to_string(),
         created_at_ms: 11,
         kind: Some("supplement".to_string()),
+        command_id: None,
+        delivery_state: None,
         content: "extra instruction".to_string(),
     };
     let value = serde_json::to_value(&with_kind).unwrap();
@@ -317,6 +345,8 @@ fn history_pages_never_restore_a_supplement_without_its_turn_task() {
             turn_id: "turn_long".to_string(),
             created_at_ms: 1,
             kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
             content: "original milestone request".to_string(),
         },
         ChatHistoryRecord::Event {
@@ -332,6 +362,8 @@ fn history_pages_never_restore_a_supplement_without_its_turn_task() {
             turn_id: "turn_long".to_string(),
             created_at_ms: 3,
             kind: Some("supplement".to_string()),
+            command_id: None,
+            delivery_state: None,
             content: "还有一个 tar_log，下面是 clp 压缩的日志".to_string(),
         },
         ChatHistoryRecord::Event {
@@ -347,6 +379,8 @@ fn history_pages_never_restore_a_supplement_without_its_turn_task() {
             turn_id: "turn_latest".to_string(),
             created_at_ms: 5,
             kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
             content: "latest task".to_string(),
         },
     ];

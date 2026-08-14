@@ -735,6 +735,8 @@ fn append_shell_history_message(
             turn_id: turn_id.to_string(),
             created_at_ms: now_ms_i64(),
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: content.to_string(),
         },
     );

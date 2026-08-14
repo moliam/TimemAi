@@ -53,6 +53,10 @@ pub enum ChatHistoryRecord {
         created_at_ms: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery_state: Option<ChatCommandDeliveryState>,
         content: String,
     },
     Event {
@@ -64,6 +68,13 @@ pub enum ChatHistoryRecord {
         #[serde(flatten)]
         extra: BTreeMap<String, Value>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCommandDeliveryState {
+    Recorded,
+    CoreAccepted,
 }
 
 impl ChatHistoryRecord {
@@ -550,6 +561,8 @@ pub fn chat_history_prompt_format_hint(path: &Path) -> String {
         turn_id: "...".to_string(),
         created_at_ms: 123,
         kind: None,
+        command_id: None,
+        delivery_state: None,
         content: "...".to_string(),
     };
     let event = ChatHistoryRecord::Event {
