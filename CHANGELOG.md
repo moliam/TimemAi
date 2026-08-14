@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
+
+## [1.1.2] - 2026-08-14
 
 ### Fixed
 
@@ -12,12 +14,13 @@
   diagnostic backups before a safe cache reset or valid-record repair.
 - Reuse an authenticated URL across repeated page opens for the lifetime of one
   Host, and continuously verify clean shutdown plus immediate restart in CI.
+- Run performance thresholds against optimized release binaries and
+  synchronize process-cancellation tests on actual child startup so public
+  macOS and Linux CI results do not depend on shared-runner scheduling speed.
 
 All notable changes to TimemAi are tracked here. This project follows a
 pragmatic Keep a Changelog style: newest changes first, with release sections
 for tagged versions and an `Unreleased` section for work not yet tagged.
-
-## [Unreleased]
 
 ## [1.1.1] - 2026-08-14
 
