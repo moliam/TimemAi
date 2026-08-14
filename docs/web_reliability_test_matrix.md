@@ -34,6 +34,7 @@ socket write from an accepted command and from a durable committed effect.
 | Supplement then final | Accept a supplement while the model is finalizing. | Finalization consumes it in another model round or atomically hands it back as a queued next task. |
 | Final then immediate | Click **immediate** after final state is committed but before UI receives it. | Host classifies by its authoritative turn generation, creating a new task rather than writing to a finished turn. |
 | Process crash | Crash after command persistence and before Core handoff. | Recovery replays the durable host outbox into Core without duplicating the user entry. |
+| Multi-Session restore | Restore four Sessions concurrently, each with one task and ordered supplements. | All four Sessions enter Core in parallel as isolated atomic batches; no prompt, command ID, completion, or delivery state crosses Session scope. |
 | Persistence failure | Fail history/session persistence after validation. | No `committed` ack is emitted and no irreversible Core effect is started. |
 | Two browser tabs | Issue mutations against one session from separate sockets. | Per-session revision/order is authoritative at the host; stale mutations are rejected or serialized. |
 | Memory-space switch | Accept work on another socket while switching memory spaces. | The switch is an epoch barrier: it rejects active work, prevents new acceptance, and no old-epoch command can execute against the new space. |
@@ -46,15 +47,24 @@ history entry:
 
 - `recorded`: user text and `command_id` are durable, but Core delivery is not
   yet proven;
-- `enqueued`: Core owns the item, keyed by the same stable ID;
-- `consumed`: Core incorporated it into a model round or returned it to the
-  Host as explicitly unconsumed.
+- `core_accepted`: the current Core worker has accepted the item, keyed by the
+  same stable ID. This is a process-local delivery fact, not proof that an
+  external tool side effect completed.
 
-After a process crash, `recorded` and `enqueued` items must be redelivered with
-the same ID. Core must deduplicate that ID when it has already consumed it.
+After a process crash, unfinished `recorded` and `core_accepted` items must be
+redelivered with the same ID. A restored task and its ordered supplements are
+redelivered as one atomic initial batch so an immediately final model response
+cannot close the mailbox between task and supplement recovery. Core deduplicates
+IDs within one process; recovery intentionally favors not losing the user's
+work.
 Finding `command_id` in chat history alone must not turn a retry into
 `committed`, because a crash can occur after the history write and before the
 mailbox enqueue (or after turn creation and before `run_turn`).
+
+Strict exactly-once behavior cannot be promised for an irreversible external
+tool side effect across a process or machine crash. Such tools must provide
+their own idempotency key or reconciliation contract. Timem's recoverable turn
+delivery is at-least-once at that boundary.
 
 A terminal dedup-record write failure after a domain effect is also not a
 `rejected` command: rejection promises that no effect happened. Keep ownership
@@ -124,24 +134,12 @@ also use the authoritative publication path. A direct result may still be sent
 for latency, but it cannot be the only notification because other connected
 tabs and reconnecting clients must converge.
 
-## Known pre-hardening failures
+## Historical failures protected by regression tests
 
-- The server sends the initial snapshot before subscribing to the broadcast
-  channel, leaving a snapshot-to-subscribe loss window.
-- Browser commands have no durable ownership boundary; disconnect aborts the
-  per-socket command worker and may discard queued accepted work.
-- Command results and Core broadcasts use independent select branches and have
-  no shared sequence, so a turn event can arrive before its `TurnUpdated`.
-- Queued UI messages are removed immediately after `WebSocket.send()`.
-- Reconnect clears UI decisions, while the snapshot does not reconstruct every
-  outstanding Core request.
-- A structured Core stop closes and drains the supplement mailbox; the current
-  caller discards those unconsumed messages even if the host already recorded
-  them as active-turn supplements.
-- Command ordering is per WebSocket, not per session across WebSockets.
-- A persisted turn `command_id` currently conflates visible history with proof
-  of Core delivery, leaving a crash window that can acknowledge never-executed
-  work.
-- Memory-space switching checks for active sessions before the switch but does
-  not yet exclude commands accepted concurrently on another socket or queued
-  under the old memory epoch.
+The suite keeps explicit regressions for the earlier snapshot/subscription gap,
+socket-disconnect command loss, uncorrelated command results, premature UI queue
+deletion, missing reconnect decisions, discarded late supplements, cross-socket
+Session reordering, history-before-Core crash windows, and memory-switch races.
+Removing the durable outbox, correlated acknowledgements, Core delivery state,
+sequenced event journal, FIFO Session lanes, or memory epoch barrier requires a
+replacement that passes the same cases.

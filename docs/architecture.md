@@ -11,14 +11,18 @@ protocol.
 Timem is now a multi-host local agent:
 
 - `timem` is the native terminal host.
-- `timem-web` is a loopback-only browser host with an assistant-ui frontend.
+- `timem-web` is an authenticated local-first browser host with an assistant-ui
+  frontend. It binds loopback by default and exposes non-loopback HTTP only
+  through the explicit `--public` mode.
 - Both hosts run the same `agent_core` and use the same memory/session store.
 
-### 1.0 Product Boundary
+### 1.1 Product Boundary
 
-Version 1.0 promotes `timem-web` from an auxiliary host to a first-class
-browser interface. The Web host owns browser transport and presentation, while
-the core remains the single source of truth for agent behavior:
+Version 1.1 makes `timem-web` the recommended interface. The shortest supported
+path is to run `timem-web`, then configure the selected Session in the browser.
+The Web host owns authenticated transport and Session orchestration, the Web UI
+owns presentation and recoverable browser intent, and the core remains the
+single source of truth for agent behavior:
 
 ```text
 Browser / assistant-ui
@@ -37,12 +41,29 @@ agent_core
         +-- session workers and cross-host resume
 ```
 
-The Web-specific 1.0 surface includes multi-session profiles, paged history,
+The Web surface includes per-Session model/API configuration, multi-session
+profiles, paged history,
 attachments, active-turn supplements, inline decisions, live action lifecycle
 rows, reconnect/runtime-exit states, context-compact visualization, Markdown
 rendering, syntax highlighting, responsive layout, and final usage telemetry.
 These are host renderings of core data; they must not be reimplemented as a
 second model service, prompt, memory, or action runtime.
+
+Version 1.1 also defines a durable browser/Host/Core delivery boundary:
+
+- user mutations carry stable `command_id` values and move through correlated
+  `accepted`, `committed`, or `rejected` acknowledgements;
+- the browser retains pending intent until authoritative commit instead of
+  treating `WebSocket.send()` as delivery;
+- authoritative UI events are journaled per memory space with monotonic
+  `event_seq` values and replayed from a client cursor after reconnect;
+- commands are FIFO within a Session while independent Sessions may work in
+  parallel, and memory-space changes use an epoch barrier;
+- API keys and MCP secrets remain request-scoped direct replies and never enter
+  snapshots, semantic event journals, prompts, history, or audit.
+
+The executable contract for these invariants is
+[`web_reliability_test_matrix.md`](web_reliability_test_matrix.md).
 
 The split is intentional. Core owns reusable behavior and emits structured
 events. Hosts own presentation, input, and host-only ergonomics. A feature that

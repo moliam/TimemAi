@@ -1,12 +1,14 @@
 # timem_web Module Boundary
 
-`timem_web` is a local host adapter. It binds a loopback HTTP/WebSocket server,
-owns browser authentication, maps browser commands to `agent_core` session
-worker handles, and forwards the canonical core topic wire payload unchanged.
+`timem_web` is a local-first host adapter. It binds a loopback HTTP/WebSocket
+server by default, allows an explicit authenticated `--public` bind, owns
+browser authentication, maps browser commands to `agent_core` session worker
+handles, and forwards the canonical core topic wire payload unchanged.
 
 It may contain:
 
-- HTTP/WebSocket lifecycle, localhost port selection, and per-process access tokens.
+- HTTP/WebSocket lifecycle, local port selection, explicit public-bind policy,
+  and per-process access tokens.
 - Session worker orchestration and browser-facing snapshots.
 - Per-session runtime-profile collection and safe projection. The host copies
   global defaults when a Session is created, keeps secrets server-side, and
@@ -25,6 +27,21 @@ It may contain:
   pool; filesystem/session work must never stop the WebSocket loop from
   forwarding core topics. Queue overflow is rejected explicitly rather than
   growing memory without bound.
+- Reliable mutation ownership. Browser mutations carry a stable `command_id`;
+  the Host durably reserves it and returns correlated `accepted`, `committed`,
+  or `rejected` acknowledgements. A lost terminal acknowledgement must replay
+  the recorded result without repeating the domain effect. Same-Session
+  mutations are FIFO across sockets, independent Sessions may execute in
+  parallel, and global mutations exclude Session mutations through the global
+  barrier.
+- Durable semantic event publication. Authoritative mutations and Core topics
+  are appended to the active memory space's sequenced event journal before
+  broadcast. Reconnecting clients resume after `event_seq`; journal lag is
+  repaired immediately from disk. Request-scoped queries, acknowledgements,
+  validation errors, and secret reveals remain direct and outside the journal.
+  Memory-space switching changes Session state, command deduplication, and the
+  event journal under one epoch barrier so old accepted work cannot execute in
+  the new space.
 - Per-session browser upload storage and attachment metadata. Uploaded bytes
   remain host-local; the host only contributes their paths as session context.
 - Host-only settings and UI command validation.
