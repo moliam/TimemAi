@@ -69,6 +69,11 @@ checks. If a dimension is not applicable, record that residual decision in
   path.
 - Real TTY smoke: compiled release binary driven through a pseudo terminal for
   input/editor/menu behavior.
+- Web runtime smoke: compiled release Web binary exercised through authenticated
+  HTTP, cookie reopen, API, and WebSocket paths in both default loopback and
+  explicit public mode, including clean shutdown, same-port restart, and token
+  rotation. Real cross-machine browser evidence supplements but never replaces
+  this CI gate.
 - Real TTY stress: compiled release binary driven through a pseudo terminal
   while a fake model service causes repeated model/action redraws, long
   Thought/Action rows, and mid-turn user supplements.
