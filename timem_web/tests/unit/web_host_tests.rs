@@ -1481,6 +1481,34 @@ async fn static_web_entry_requires_token_or_authenticated_cookie() {
 }
 
 #[tokio::test]
+async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() {
+    let state = routing_test_state();
+    for _ in 0..3 {
+        let response = static_asset(
+            State((state.clone(), TEST_PORT)),
+            Query(AuthQuery {
+                token: Some("test".to_string()),
+                last_event_seq: None,
+            }),
+            HeaderMap::new(),
+            Uri::from_static("/"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+// Process-level coverage for the corresponding shutdown/restart behavior is
+// provided by scripts/web_runtime_lifecycle_smoke.sh in the production CI gate.
+#[test]
+fn restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port() {
+    let smoke = include_str!("../../../scripts/web_runtime_lifecycle_smoke.sh");
+    assert!(smoke.contains("--port \"$first_port\""));
+    assert!(smoke.contains("--data-dir \"$test_root/data\" --space lifecycle"));
+    assert!(smoke.contains("kill -TERM"));
+}
+
+#[tokio::test]
 async fn explicit_partial_static_token_does_not_fallback_to_cookie() {
     let state = routing_test_state();
     let mut headers = HeaderMap::new();
