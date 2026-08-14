@@ -1,3 +1,4 @@
+use crate::MemGuard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -142,6 +143,8 @@ impl SessionResumeNotice {
 pub struct SessionStore {
     root: PathBuf,
     history_indexes: Arc<Mutex<BTreeMap<PathBuf, HistoryIndex>>>,
+    index_lock: Arc<Mutex<()>>,
+    guard: MemGuard,
 }
 
 #[derive(Debug, Clone)]
@@ -160,9 +163,12 @@ struct HistoryIndexEntry {
 
 impl SessionStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref().to_path_buf();
         Self {
-            root: root.as_ref().to_path_buf(),
+            guard: MemGuard::for_memory_dir(&root),
+            root,
             history_indexes: Arc::new(Mutex::new(BTreeMap::new())),
+            index_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -185,34 +191,36 @@ impl SessionStore {
     }
 
     pub fn upsert_session(&self, session: &StoredSession) -> Result<(), String> {
-        fs::create_dir_all(self.sessions_dir()).map_err(|_| "session_dir_create_failed")?;
-        restrict_session_path_permissions(&self.sessions_dir(), true)?;
-        let mut sessions = self.list_sessions()?;
-        if let Some(existing) = sessions
-            .iter_mut()
-            .find(|existing| existing.session_id == session.session_id)
-        {
-            *existing = session.clone();
-        } else {
-            sessions.push(session.clone());
-        }
-        sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(self.index_path())
-            .map_err(|_| "session_index_open_failed")?;
-        restrict_session_path_permissions(&self.index_path(), false)?;
-        for session in sessions {
-            let line =
-                serde_json::to_string(&session).map_err(|_| "session_record_serialize_failed")?;
-            writeln!(file, "{line}").map_err(|_| "session_index_write_failed")?;
-        }
-        Ok(())
+        let _index_lock = self
+            .index_lock
+            .lock()
+            .map_err(|_| "session_index_lock_poisoned".to_string())?;
+        self.guard.with_write(|| {
+            fs::create_dir_all(self.sessions_dir()).map_err(|_| "session_dir_create_failed")?;
+            restrict_session_path_permissions(&self.sessions_dir(), true)?;
+            let mut sessions = self.list_sessions_unlocked()?;
+            if let Some(existing) = sessions
+                .iter_mut()
+                .find(|existing| existing.session_id == session.session_id)
+            {
+                *existing = session.clone();
+            } else {
+                sessions.push(session.clone());
+            }
+            sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
+            self.write_sessions_unlocked(&sessions)
+        })?
     }
 
     pub fn list_sessions(&self) -> Result<Vec<StoredSession>, String> {
+        let _index_lock = self
+            .index_lock
+            .lock()
+            .map_err(|_| "session_index_lock_poisoned".to_string())?;
+        self.guard.with_read(|| self.list_sessions_unlocked())?
+    }
+
+    fn list_sessions_unlocked(&self) -> Result<Vec<StoredSession>, String> {
         let path = self.index_path();
         if !path.exists() {
             return Ok(Vec::new());
@@ -246,35 +254,58 @@ impl SessionStore {
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
-        let mut sessions = self.list_sessions()?;
-        let original_len = sessions.len();
-        sessions.retain(|session| session.session_id != session_id);
-        if sessions.len() == original_len {
-            return Err("session_not_found".to_string());
+        let _index_lock = self
+            .index_lock
+            .lock()
+            .map_err(|_| "session_index_lock_poisoned".to_string())?;
+        self.guard.with_write(|| {
+            let mut sessions = self.list_sessions_unlocked()?;
+            let original_len = sessions.len();
+            sessions.retain(|session| session.session_id != session_id);
+            if sessions.len() == original_len {
+                return Err("session_not_found".to_string());
+            }
+            self.write_sessions_unlocked(&sessions)?;
+            let history_path = self.history_path_for_session(session_id);
+            self.history_indexes
+                .lock()
+                .map_err(|_| "chat_history_index_poisoned")?
+                .remove(&history_path);
+            let session_dir = history_path
+                .parent()
+                .ok_or_else(|| "session_data_path_invalid".to_string())?;
+            if session_dir.exists() {
+                fs::remove_dir_all(session_dir).map_err(|_| "session_data_remove_failed")?;
+            }
+            Ok(())
+        })?
+    }
+
+    fn write_sessions_unlocked(&self, sessions: &[StoredSession]) -> Result<(), String> {
+        let index_path = self.index_path();
+        let temporary = index_path.with_extension("jsonl.tmp");
+        let mut options = OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(self.index_path())
+        let mut file = options
+            .open(&temporary)
             .map_err(|_| "session_index_open_failed")?;
-        restrict_session_path_permissions(&self.index_path(), false)?;
         for session in sessions {
             let line =
-                serde_json::to_string(&session).map_err(|_| "session_record_serialize_failed")?;
+                serde_json::to_string(session).map_err(|_| "session_record_serialize_failed")?;
             writeln!(file, "{line}").map_err(|_| "session_index_write_failed")?;
         }
-        let history_path = self.history_path_for_session(session_id);
-        self.history_indexes
-            .lock()
-            .map_err(|_| "chat_history_index_poisoned")?
-            .remove(&history_path);
-        let session_dir = history_path
-            .parent()
-            .ok_or_else(|| "session_data_path_invalid".to_string())?;
-        if session_dir.exists() {
-            fs::remove_dir_all(session_dir).map_err(|_| "session_data_remove_failed")?;
-        }
+        file.sync_all().map_err(|_| "session_index_sync_failed")?;
+        fs::rename(&temporary, &index_path).map_err(|_| "session_index_replace_failed")?;
+        restrict_session_path_permissions(&index_path, false)?;
+        #[cfg(unix)]
+        fs::File::open(self.sessions_dir())
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| "session_index_dir_sync_failed")?;
         Ok(())
     }
 

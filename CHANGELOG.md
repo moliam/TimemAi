@@ -6,6 +6,13 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- Serialized Session index read-modify-write operations across threads and
+  processes, and replaced the index atomically after a durable write. Concurrent
+  Web Sessions can no longer observe a truncated JSONL index or overwrite one
+  another's Session record.
+
 ## [1.1.0] - 2026-08-14
 
 ### Added

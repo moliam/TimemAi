@@ -47,6 +47,7 @@ required_patterns=(
   "forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough"
   "memory_update_concurrent_same_version_conflicts_allow_only_one_winner"
   "mem_guard_keeps_concurrent_memory_updates_from_losing_records"
+  "concurrent_session_store_instances_never_expose_partial_or_lose_index_records"
   "run_bash_can_start_and_poll_background_job"
   "timeout_job_is_reported_running_and_model_can_kill_by_pid"
   "running_job_list_is_injected_when_discard_references_running_job_delta"

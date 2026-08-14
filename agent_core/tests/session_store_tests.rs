@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -481,6 +482,54 @@ fn stored_sessions_are_host_agnostic_and_sorted_by_recent_update() {
     assert_eq!(sessions[0].mcp_server_ids, vec!["github", "filesystem"]);
     assert_eq!(sessions[1].session_id, "session_shell");
     assert_eq!(sessions[1].state, StoredSessionState::Interrupted);
+}
+
+#[test]
+fn concurrent_session_store_instances_never_expose_partial_or_lose_index_records() {
+    const WRITERS: usize = 4;
+    const UPDATES: usize = 12;
+    let root = tmp_dir("concurrent_index");
+    let barrier = Arc::new(Barrier::new(WRITERS + 1));
+    let mut workers = Vec::new();
+
+    for ordinal in 0..WRITERS {
+        let root = root.clone();
+        let barrier = barrier.clone();
+        workers.push(std::thread::spawn(move || {
+            let store = SessionStore::new(&root);
+            barrier.wait();
+            for update in 0..UPDATES {
+                let mut session = new_stored_session(
+                    format!("session_{ordinal}"),
+                    format!("Session {ordinal} update {update}"),
+                    "/tmp/project",
+                    profile(),
+                    store.history_path_for_session(&format!("session_{ordinal}")),
+                );
+                session.updated_at_ms = (update * WRITERS + ordinal) as i64;
+                store.upsert_session(&session).unwrap();
+                assert!(store.list_sessions().is_ok());
+            }
+        }));
+    }
+
+    barrier.wait();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let sessions = SessionStore::new(&root).list_sessions().unwrap();
+    assert_eq!(sessions.len(), WRITERS);
+    for ordinal in 0..WRITERS {
+        let session = sessions
+            .iter()
+            .find(|session| session.session_id == format!("session_{ordinal}"))
+            .unwrap();
+        assert_eq!(
+            session.display_name,
+            format!("Session {ordinal} update {}", UPDATES - 1)
+        );
+    }
 }
 
 #[test]
