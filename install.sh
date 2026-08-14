@@ -173,6 +173,19 @@ build_release_binary() {
   fi
 }
 
+install_binary_atomically() {
+  local source="$1"
+  local destination="$2"
+  local temporary
+
+  temporary="$(mktemp "${destination}.tmp.XXXXXX")"
+  if ! cp "$source" "$temporary" || ! chmod 755 "$temporary" || ! mv -f "$temporary" "$destination"; then
+    rm -f "$temporary"
+    echo "error: failed to install $destination atomically." >&2
+    return 1
+  fi
+}
+
 main() {
   OS_KIND="$(detect_os)"
   ensure_build_dependencies "$OS_KIND"
@@ -182,8 +195,8 @@ main() {
   build_release_binary
 
   mkdir -p "$INSTALL_DIR"
-  cp "$ROOT_DIR/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
-  cp "$ROOT_DIR/target/release/$WEB_BIN_NAME" "$INSTALL_DIR/$WEB_BIN_NAME"
+  install_binary_atomically "$ROOT_DIR/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  install_binary_atomically "$ROOT_DIR/target/release/$WEB_BIN_NAME" "$INSTALL_DIR/$WEB_BIN_NAME"
 
   cat > "$INSTALL_DIR/$COMMAND_NAME" <<SH
 #!/usr/bin/env bash

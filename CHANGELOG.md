@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Install release binaries by atomic replacement so rerunning `./install.sh`
+  while `timem-web` is active does not leave the installed macOS executable
+  terminating immediately with `SIGKILL`.
+
 All notable changes to TimemAi are tracked here. This project follows a
 pragmatic Keep a Changelog style: newest changes first, with release sections
 for tagged versions and an `Unreleased` section for work not yet tagged.
