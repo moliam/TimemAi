@@ -5,14 +5,17 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, clientId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
+import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { createFrameEventQueue } from "./frame_event_queue";
-import { claimQueuedMessage, COLLAPSED_QUEUE_LIMIT, QueuedMessage, queuedMessageKey, releaseQueuedMessageClaim, removeQueuedMessage, reorderQueuedMessages } from "./queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
+import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
+import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
+import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -101,6 +104,7 @@ function TimemApp() {
   const [renameDraft, setRenameDraft] = useState("");
   const [server, setServer] = useState<Snapshot["server"] | null>(null);
   const socket = useRef<WebSocket | null>(null);
+  const sessionsRef = useRef<Session[]>([]);
   const activeSessionIdRef = useRef("");
   const toolSearchQueryRef = useRef("");
   const selectedToolRef = useRef<ToolDetail | null>(null);
@@ -122,6 +126,15 @@ function TimemApp() {
   const [pendingUploadFiles, setPendingUploadFiles] = useState<Record<string, { name: string; bytes: number }>>({});
   const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
   const [completedTurnKey, setCompletedTurnKey] = useState("");
+  const [commandAcks, setCommandAcks] = useState<Record<string, Extract<WireEvent, { type: "command_ack" }>>>({});
+  const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
+    setCommandAcks((current) => Object.fromEntries(Object.entries(current).filter(([commandId]) => !commandIds.has(commandId))));
+  }, []);
+  const commandOutboxRef = useRef<CommandOutboxItem[]>([]);
+  const commandOutboxScopeRef = useRef("");
+  const eventCursorRef = useRef(0);
+  const eventCursorScopeRef = useRef("");
+  const semanticDeliveryRef = useRef(false);
   const creatingSessionRef = useRef(false);
   const pendingAttachmentRemoveIdsRef = useRef<Set<string>>(new Set());
   const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
@@ -148,6 +161,7 @@ function TimemApp() {
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
   const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
+  sessionsRef.current = sessions;
   const activeMessages = activeSession?.messages ?? EMPTY_CHAT_MESSAGES;
   const pushActivity = useCallback((activity: Activity) => {
     setActivities((current) => {
@@ -299,10 +313,47 @@ function TimemApp() {
     }
   }, []);
 
-  const sendCommand = useCallback((command: ClientCommand) => {
-    if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return false;
-    socket.current.send(JSON.stringify(command));
-    return true;
+  const sendCommand = useCallback((command: ClientCommand, requestedCommandId?: string) => {
+    const reliable = commandNeedsReliableDelivery(command);
+    let wireCommand: ClientCommand | CommandWithId = command;
+    if (reliable) {
+      const commandId = requestedCommandId ?? clientId("command");
+      const next = addCommandToOutbox(commandOutboxRef.current, command, commandId);
+      const item = next.find((candidate) => candidate.commandId === commandId);
+      if (!item || (commandMayPersist(command) && !saveCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, item))) return false;
+      commandOutboxRef.current = next;
+      wireCommand = { ...command, command_id: commandId };
+    }
+    if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return reliable;
+    try {
+      socket.current.send(JSON.stringify(wireCommand));
+      return true;
+    } catch {
+      return reliable;
+    }
+  }, [snapshotReady]);
+
+  useEffect(() => {
+    if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return;
+    for (const item of commandOutboxRef.current) {
+      try { socket.current.send(JSON.stringify(item.command)); } catch { break; }
+    }
+  }, [snapshotReady]);
+
+  useEffect(() => {
+    const syncCrossTabOutbox = (event: StorageEvent) => {
+      const scope = commandOutboxScopeRef.current;
+      if (!scope || !event.key?.startsWith(`${commandOutboxStorageKey(scope)}:`)) return;
+      const stored = loadCommandOutbox(window.localStorage, scope);
+      const memoryOnly = commandOutboxRef.current.filter((item) => !commandMayPersist(item.command));
+      commandOutboxRef.current = [...stored, ...memoryOnly.filter((item) => !stored.some((candidate) => candidate.commandId === item.commandId))];
+      if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return;
+      for (const item of stored) {
+        try { socket.current.send(JSON.stringify(item.command)); } catch { break; }
+      }
+    };
+    window.addEventListener("storage", syncCrossTabOutbox);
+    return () => window.removeEventListener("storage", syncCrossTabOutbox);
   }, [snapshotReady]);
 
   const addPendingKey = useCallback((ref: MutableRefObject<Set<string>>, setState: Dispatch<SetStateAction<Set<string>>>, key: string) => {
@@ -407,12 +458,74 @@ function TimemApp() {
     setActiveSessionId((current) => resolveActiveSessionId(current, snapshot.sessions));
   }, []);
 
-  const receive = useCallback((event: WireEvent) => {
+  const receive = useCallback(function receiveWireEvent(event: WireEvent, fromSemantic = false) {
+    if (!fromSemantic) {
+      if (event.type === "hello") {
+        // A reconnect may intentionally target an older Host, so Hello resets
+        // rather than only ever enabling this connection-level capability.
+        semanticDeliveryRef.current = enablesSemanticDelivery(event);
+      } else if (enablesSemanticDelivery(event)) {
+        semanticDeliveryRef.current = true;
+      }
+      if (!shouldReduceTopLevelWireEvent(event, semanticDeliveryRef.current)) return;
+    }
+    if (event.type === "semantic_event") {
+      if (event.event.type === "semantic_event" || event.event.type === "hello") {
+        reportUiError("Invalid runtime event", `Event ${event.event_seq} contains an invalid nested ${event.event.type} envelope.`);
+        socket.current?.close();
+        return;
+      }
+      const sequenceState = classifyEventSequence(eventCursorRef.current, event.event_seq);
+      if (sequenceState === "duplicate") return;
+      if (sequenceState === "gap") {
+        reportUiError("Runtime event gap", `Expected event ${eventCursorRef.current + 1}, received ${event.event_seq}. Reconnecting to replay missing events.`);
+        socket.current?.close();
+        return;
+      }
+      receiveWireEvent(event.event, true);
+      eventCursorRef.current = event.event_seq;
+      saveEventCursor(window.sessionStorage, eventCursorScopeRef.current, event.event_seq);
+      return;
+    }
+    if (event.type === "command_ack") {
+      if (event.command_id.startsWith("queued-")) {
+        setCommandAcks((current) => ({ ...current, [event.command_id]: event }));
+      }
+      if (event.status === "accepted") {
+        commandOutboxRef.current = acceptOutboxCommand(commandOutboxRef.current, event.command_id);
+        const accepted = commandOutboxRef.current.find((item) => item.commandId === event.command_id);
+        if (accepted && commandMayPersist(accepted.command)) saveCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, accepted);
+      } else {
+        commandOutboxRef.current = finishOutboxCommand(commandOutboxRef.current, event.command_id);
+        removeCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, event.command_id);
+        if (event.status === "rejected") {
+          reportUiError("Command rejected", event.error || "The runtime rejected this command.");
+        }
+      }
+      return;
+    }
     if (event.type === "hello") {
+      const scope = reliableStorageScope(window.location.origin, event.snapshot.server.mem.space_dir);
+      let reconnectForReplay = false;
+      if (eventCursorScopeRef.current !== scope) {
+        const previousScope = eventCursorScopeRef.current;
+        const restoredCursor = loadEventCursor(window.sessionStorage, scope);
+        const resolved = resolveHelloEventCursor(previousScope, scope, restoredCursor, event.event_cursor, event.event_replay_floor);
+        eventCursorScopeRef.current = scope;
+        eventCursorRef.current = resolved.cursor;
+        reconnectForReplay = resolved.reconnectForReplay;
+        saveEventCursor(window.sessionStorage, scope, eventCursorRef.current);
+      }
+      if (commandOutboxScopeRef.current !== scope) {
+        commandOutboxScopeRef.current = scope;
+        commandOutboxRef.current = loadCommandOutbox(window.localStorage, scope);
+        setCommandAcks({});
+      }
       clearAllPendingCommands();
-      setDecisions([]);
+      setDecisions(decisionsFromSessions(event.snapshot.sessions));
       applySnapshot(event.snapshot);
       setSnapshotReady(true);
+      if (reconnectForReplay) queueMicrotask(() => socket.current?.close());
       return;
     }
     if (event.type === "session_created") {
@@ -639,7 +752,7 @@ function TimemApp() {
         setActiveSessionId((current) => current || sessionId);
       }
     }
-  }, [applySnapshot, clearAllPendingCommands, pushActivity, removePendingKey]);
+  }, [applySnapshot, clearAllPendingCommands, pushActivity, removePendingKey, reportUiError]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -683,13 +796,16 @@ function TimemApp() {
     let hasConnectedOnce = false;
     let disconnectNoticeShown = false;
     const inboundEvents = createFrameEventQueue<WireEvent>({
-      consume: (events) => events.forEach(receive),
+      consume: (events) => events.forEach((event) => receive(event)),
     });
     const connect = () => {
       if (stopped) return;
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
-      const ws = new WebSocket(`${scheme}://${window.location.host}/ws${tokenQuery}`);
+      const query = new URLSearchParams();
+      if (token) query.set("token", token);
+      if (eventCursorRef.current > 0) query.set("last_event_seq", String(eventCursorRef.current));
+      const queryString = query.size > 0 ? `?${query.toString()}` : "";
+      const ws = new WebSocket(`${scheme}://${window.location.host}/ws${queryString}`);
       socket.current = ws;
       ws.onopen = () => {
         hasConnectedOnce = true;
@@ -738,27 +854,31 @@ function TimemApp() {
     };
   }, [pushActivity, receive]);
 
-  const sendText = useCallback((text: string): boolean => {
+  const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string): boolean => {
+    const targetSession = sessionsRef.current.find((session) => session.session_id === sessionId);
     const decision = composerSendDecision(
-      activeSession,
+      targetSession,
       text,
-      activeSession ? cancellingSessionIds.current.has(activeSession.session_id) : false,
+      targetSession ? cancellingSessionIds.current.has(targetSession.session_id) : false,
       pendingMemSwitch,
     );
     if (decision.kind === "skip") {
-      if (decision.reason === "cancelling" && activeSession) {
-        pushActivity({ id: clientId(), sessionId: activeSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() });
+      if (decision.reason === "cancelling" && targetSession) {
+        pushActivity({ id: clientId(), sessionId: targetSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() });
       } else if (decision.reason === "mem_switching") {
-        pushActivity({ id: clientId(), sessionId: activeSession?.session_id ?? "system", tone: "notice", title: "Switching mem", detail: "Wait for the new mem space to load before sending another message.", createdAt: Date.now() });
+        pushActivity({ id: clientId(), sessionId: targetSession?.session_id ?? "system", tone: "notice", title: "Switching mem", detail: "Wait for the new mem space to load before sending another message.", createdAt: Date.now() });
       }
       return false;
     }
-    if (!sendCommand(decision.command)) {
+    if (!sendCommand(decision.command, commandId)) {
       pushActivity({ id: clientId(), sessionId: decision.command.session_id, tone: "error", title: "Runtime unavailable", detail: "Timem Web runtime is not connected. Restart timem-web and reopen the authenticated URL before sending another message.", createdAt: Date.now() });
       return false;
     }
     return decision.clearDraftOnSuccess;
-  }, [activeSession, pendingMemSwitch, pushActivity, sendCommand]);
+  }, [pendingMemSwitch, pushActivity, sendCommand]);
+  const sendText = useCallback((text: string, commandId?: string) => activeSession
+    ? sendTextForSession(activeSession.session_id, text, commandId)
+    : false, [activeSession, sendTextForSession]);
 
   const uploadFile = useCallback(async (file: File) => {
     if (!activeSession || pendingMemSwitch) return;
@@ -964,7 +1084,11 @@ function TimemApp() {
         }}/>}
         <TimemThread
           activeSession={activeSession}
+          sessions={sessions}
           completedTurnKey={completedTurnKey}
+          commandAcks={commandAcks}
+          onConsumeCommandAcks={consumeCommandAcks}
+          reliableStorageScope={server ? reliableStorageScope(window.location.origin, server.mem.space_dir) : ""}
           sessionIds={sessions.map((session) => session.session_id)}
           sessionInteractionLocked={runtimeLocked}
           sessionInteractionLockReason={sessionInteractionLockReason}
@@ -978,6 +1102,7 @@ function TimemApp() {
           loadingHistory={activeSession ? pendingHistorySessionIds.has(activeSession.session_id) : false}
           onLoadMoreHistory={loadMoreHistory}
           onSend={sendText}
+          onSendForSession={sendTextForSession}
           pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}
           toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}
           onRequestToolGen={(turnId) => {
@@ -1251,9 +1376,13 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisi
   />);
 });
 
-function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen }: {
+function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen }: {
   activeSession: Session | undefined;
+  sessions: Session[];
   completedTurnKey: string;
+  commandAcks: Record<string, Extract<WireEvent, { type: "command_ack" }>>;
+  onConsumeCommandAcks: (commandIds: ReadonlySet<string>) => void;
+  reliableStorageScope: string;
   sessionIds: string[];
   sessionInteractionLocked: boolean;
   sessionInteractionLockReason: string;
@@ -1268,7 +1397,8 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
   pendingToolGenTurnIds: Set<string>;
   toolGenSessionBusy: boolean;
   onLoadMoreHistory: (session: Session) => void;
-  onSend: (text: string) => boolean;
+  onSend: (text: string, commandId?: string) => boolean;
+  onSendForSession: (sessionId: string, text: string, commandId?: string) => boolean;
   onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
@@ -1283,7 +1413,7 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
   const followThreadLatest = useRef(true);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
   const [queuedMessagesBySession, setQueuedMessagesBySession] = useState<Record<string, QueuedMessage[]>>({});
-  const queuedMessagesBySessionRef = useRef<Record<string, QueuedMessage[]>>({});
+  const queuedMessagesBySessionRef = useRef<Record<string, QueuedMessage[]>>(queuedMessagesBySession);
   const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<Set<string>>(() => new Set());
   const [draggedQueueMessageId, setDraggedQueueMessageId] = useState<string>();
   const [editingQueuedMessage, setEditingQueuedMessage] = useState<{ sessionId: string; id: string; text: string }>();
@@ -1294,10 +1424,12 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
   const submittingDraftStartedAtRef = useRef<Map<string, number>>(new Map());
   const [submittingDraftSessionIds, setSubmittingDraftSessionIds] = useState<Set<string>>(() => new Set());
   const updateQueuedMessages = useCallback((update: (current: Record<string, QueuedMessage[]>) => Record<string, QueuedMessage[]>) => {
-    const next = update(queuedMessagesBySessionRef.current);
+    const previous = queuedMessagesBySessionRef.current;
+    const next = update(previous);
+    if (!reliableStorageScope || !saveQueuedMessages(window.localStorage, reliableStorageScope, next, previous)) return;
     queuedMessagesBySessionRef.current = next;
     setQueuedMessagesBySession(next);
-  }, []);
+  }, [reliableStorageScope]);
   const turns = activeSession?.turns ?? [];
   const activeSessionId = activeSession?.session_id;
   const draft = draftForSession(draftsBySession, activeSessionId);
@@ -1347,6 +1479,37 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
   }, [activeSessionId]);
 
   useEffect(() => {
+    if (!reliableStorageScope) return;
+    const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
+    queuedMessagesBySessionRef.current = restored;
+    queuedMessageClaimsRef.current.clear();
+    queuedDispatchSessionIdsRef.current.clear();
+    setQueuedMessageClaims(new Set());
+    setQueuedMessagesBySession(restored);
+  }, [reliableStorageScope]);
+
+  useEffect(() => {
+    const syncCrossTabQueues = (event: StorageEvent) => {
+      if (!reliableStorageScope || !event.key?.startsWith(`${queuedMessagesStorageKey(reliableStorageScope)}:`)) return;
+      const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
+      queuedMessagesBySessionRef.current = restored;
+      for (const [sessionId, messages] of Object.entries(restored)) {
+        if (messages.some((message) => message.deliveryError)) queuedDispatchSessionIdsRef.current.delete(sessionId);
+      }
+      for (const key of Array.from(queuedMessageClaimsRef.current)) {
+        if (!Object.entries(restored).some(([sessionId, messages]) => messages.some((message) => queuedMessageKey(sessionId, message.id) === key))) {
+          queuedMessageClaimsRef.current.delete(key);
+        }
+      }
+      setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+      setQueuedMessagesBySession(restored);
+    };
+    window.addEventListener("storage", syncCrossTabQueues);
+    return () => window.removeEventListener("storage", syncCrossTabQueues);
+  }, [reliableStorageScope]);
+
+  useEffect(() => {
+    if (sessionIds.length === 0) return;
     setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
     updateQueuedMessages((current) => Object.fromEntries(Object.entries(current).filter(([sessionId]) => sessionIds.includes(sessionId))));
     setExpandedQueueSessionIds((current) => new Set(Array.from(current).filter((sessionId) => sessionIds.includes(sessionId))));
@@ -1364,29 +1527,63 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
   }, [liveSessionKey, updateQueuedMessages]);
 
   useEffect(() => {
-    if (!activeSessionId || !activeSession) return;
-    if (activeSession.state === "working") {
-      queuedDispatchSessionIdsRef.current.delete(activeSessionId);
-      return;
+    let nextQueues = queuedMessagesBySessionRef.current;
+    const appliedCommandIds = new Set<string>();
+    const matchedSessionByCommand = new Map<string, string>();
+    const rejectedSessionIds = new Set<string>();
+    for (const ack of Object.values(commandAcks)) {
+      if (ack.status === "accepted") continue;
+      const result = applyQueuedMessagesAck(nextQueues, ack.command_id, ack.status, ack.error, clientId("queued"));
+      if (!result.matchedSessionId) continue;
+      appliedCommandIds.add(ack.command_id);
+      matchedSessionByCommand.set(ack.command_id, result.matchedSessionId);
+      if (ack.status === "rejected") rejectedSessionIds.add(result.matchedSessionId);
+      nextQueues = result.queues;
     }
-    const next = queuedMessagesBySessionRef.current[activeSessionId]?.[0];
-    if (!next || sessionInteractionLocked || editingQueuedMessage?.sessionId === activeSessionId || queuedDispatchSessionIdsRef.current.has(activeSessionId)) return;
-    if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSessionId, queuedMessagesBySessionRef.current[activeSessionId] ?? [], next.id)) return;
+    if (appliedCommandIds.size === 0) return;
+    if (!reliableStorageScope || !saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current)) return;
+    queuedMessagesBySessionRef.current = nextQueues;
+    setQueuedMessagesBySession(nextQueues);
+    for (const [commandId, sessionId] of matchedSessionByCommand) {
+      releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, commandId);
+    }
     setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-    queuedDispatchSessionIdsRef.current.add(activeSessionId);
-    if (!onSend(next.text)) {
-      queuedDispatchSessionIdsRef.current.delete(activeSessionId);
-      releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSessionId, next.id);
+    for (const sessionId of rejectedSessionIds) queuedDispatchSessionIdsRef.current.delete(sessionId);
+    onConsumeCommandAcks(appliedCommandIds);
+  }, [commandAcks, onConsumeCommandAcks, reliableStorageScope]);
+
+  useEffect(() => {
+    if (sessionInteractionLocked) return;
+    for (const session of sessions) {
+      if (session.state === "working") {
+        queuedDispatchSessionIdsRef.current.delete(session.session_id);
+      }
+    }
+    const dispatches = selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId);
+    for (const { sessionId, message: next } of dispatches) {
+      if (!claimQueuedMessage(queuedMessageClaimsRef.current, sessionId, queuedMessagesBySessionRef.current[sessionId] ?? [], next.id)) continue;
+      queuedDispatchSessionIdsRef.current.add(sessionId);
+      if (!onSendForSession(sessionId, next.text, next.id)) {
+        queuedDispatchSessionIdsRef.current.delete(sessionId);
+        releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, next.id);
+        updateQueuedMessages((current) => ({
+          ...current,
+          [sessionId]: (current[sessionId] ?? []).map((message) => message.id === next.id
+            ? { ...message, deliveryError: "消息尚未安全保存，请检查浏览器存储后重试" }
+            : message),
+        }));
+      }
+    }
+    setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+  }, [editingQueuedMessage?.sessionId, onSendForSession, queuedMessagesBySession, sessionInteractionLocked, sessions, updateQueuedMessages]);
+
+  useEffect(() => {
+    if (!completedTurnKey) return;
+    const sessionId = completedTurnKey.slice(0, completedTurnKey.indexOf(":"));
+    if (queuedDispatchSessionIdsRef.current.delete(sessionId)) {
       setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-      return;
     }
-    updateQueuedMessages((current) => ({
-      ...current,
-      [activeSessionId]: (current[activeSessionId] ?? []).filter((message) => message.id !== next.id),
-    }));
-    releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSessionId, next.id);
-    setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-  }, [activeSession, activeSessionId, editingQueuedMessage?.sessionId, onSend, queuedMessagesBySession, sessionInteractionLocked, updateQueuedMessages]);
+  }, [completedTurnKey]);
 
   useEffect(() => {
     if (!completedTurnKey || !activeSessionId || !completedTurnKey.startsWith(`${activeSessionId}:`)) return;
@@ -1448,16 +1645,12 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
     const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
     if (reserved === null) return;
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
-    const queueInstead = activeSession?.session_id === reserved.sessionId && activeSession.state === "working";
-    if (queueInstead) {
-      updateQueuedMessages((current) => ({
-        ...current,
-        [reserved.sessionId]: [...(current[reserved.sessionId] ?? []), { id: clientId(), text: reserved.text, createdAtMs: Date.now() }],
-      }));
-    } else {
-      submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());
-    }
-    const sent = queueInstead || onSend(reserved.text);
+    const nextQueues = {
+      ...queuedMessagesBySessionRef.current,
+      [reserved.sessionId]: [...(queuedMessagesBySessionRef.current[reserved.sessionId] ?? []), { id: clientId("queued"), text: reserved.text, createdAtMs: Date.now() }],
+    };
+    const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
+    if (sent) updateQueuedMessages(() => nextQueues);
     // Release the synchronous deduplication lock before publishing the React state
     // snapshot. Calling the mutating helper inside a deferred state updater would
     // leave the next lock snapshot stale and keep the composer stuck on Sending.
@@ -1494,7 +1687,7 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
       ...current,
       [edit.sessionId]: queuedMessageClaimsRef.current.has(queuedMessageKey(edit.sessionId, edit.id))
         ? current[edit.sessionId] ?? []
-        : (current[edit.sessionId] ?? []).map((message) => message.id === edit.id ? { ...message, text } : message),
+        : (current[edit.sessionId] ?? []).map((message) => message.id === edit.id ? { ...message, text, deliveryError: undefined } : message),
     }));
     setEditingQueuedMessage(undefined);
   };
@@ -1537,18 +1730,17 @@ function TimemThread({ activeSession, completedTurnKey, sessionIds, sessionInter
           const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
           const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
           const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));
-          return <article className={`queued-message ${editing ? "editing" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span>{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.text}>{message.text}</p>}<div>{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title="立即发送为当前任务的补充" disabled={claimed || activeSession.state !== "working" || sessionInteractionLocked || isCancelling} onClick={() => {
+          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span>{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</p>}<div>{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
           if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSession.session_id, queuedMessagesBySession[activeSession.session_id] ?? [], message.id)) return;
           setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-          if (!onSend(message.text)) {
+          if (!onSend(message.text, message.id)) {
             releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSession.session_id, message.id);
             setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+            updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: "消息尚未安全保存，请检查浏览器存储后重试" } : candidate) }));
             return;
           }
-          updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).filter((candidate) => candidate.id !== message.id) }));
-          releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSession.session_id, message.id);
-          setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-        }}>{claimed ? "发送中…" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>;
+          if (message.deliveryError) updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: undefined } : candidate) }));
+        }}>{claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>;
         })}</div></section>}
         {!!activeSession && (!!activeSession.attachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{activeSession.attachments.map((attachment) => {
           const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);

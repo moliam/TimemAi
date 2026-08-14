@@ -4,7 +4,86 @@ export type QueuedMessage = {
   id: string;
   text: string;
   createdAtMs: number;
+  deliveryError?: string;
 };
+
+const STORAGE_PREFIX = "timem-web-queued-messages:v2";
+const MAX_STORED_QUEUE_ITEMS = 2_000;
+const MAX_STORED_MESSAGE_BYTES = 1024 * 1024;
+
+export function queuedMessagesStorageKey(scope: string, messageId?: string) {
+  const base = `${STORAGE_PREFIX}:${encodeURIComponent(scope)}`;
+  return messageId === undefined ? base : `${base}:${encodeURIComponent(messageId)}`;
+}
+
+type StoredQueuedMessage = { sessionId: string; position: number; message: QueuedMessage };
+
+function parseStoredQueuedMessage(raw: string | null): StoredQueuedMessage | null {
+  try {
+    if (!raw || raw.length > MAX_STORED_MESSAGE_BYTES) return null;
+    const value = JSON.parse(raw) as Partial<StoredQueuedMessage>;
+    const message = value?.message;
+    return typeof value?.sessionId === "string"
+      && typeof value.position === "number"
+      && !!message
+      && typeof message.id === "string"
+      && typeof message.text === "string"
+      && typeof message.createdAtMs === "number"
+      && (message.deliveryError === undefined || typeof message.deliveryError === "string")
+      ? value as StoredQueuedMessage
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function loadQueuedMessages(storage: Pick<Storage, "length" | "key" | "getItem">, scope: string): Record<string, QueuedMessage[]> {
+  const prefix = `${queuedMessagesStorageKey(scope)}:`;
+  const records: StoredQueuedMessage[] = [];
+  for (let index = 0; index < storage.length && records.length < MAX_STORED_QUEUE_ITEMS; index += 1) {
+    const key = storage.key(index);
+    if (!key?.startsWith(prefix)) continue;
+    const record = parseStoredQueuedMessage(storage.getItem(key));
+    if (record && queuedMessagesStorageKey(scope, record.message.id) === key) records.push(record);
+  }
+  records.sort((left, right) => left.position - right.position || left.message.createdAtMs - right.message.createdAtMs || left.message.id.localeCompare(right.message.id));
+  const queues: Record<string, QueuedMessage[]> = {};
+  for (const record of records) (queues[record.sessionId] ??= []).push(record.message);
+  return queues;
+}
+
+export function saveQueuedMessages(
+  storage: Pick<Storage, "setItem" | "removeItem">,
+  scope: string,
+  messages: Record<string, QueuedMessage[]>,
+  previous: Readonly<Record<string, readonly QueuedMessage[]>> = {},
+) {
+  const mutations: Array<{ type: "set"; key: string; value: string } | { type: "remove"; key: string }> = [];
+  try {
+    const nextIds = new Set(Object.values(messages).flat().map((message) => message.id));
+    for (const oldMessage of Object.values(previous).flat()) {
+      if (!nextIds.has(oldMessage.id)) mutations.push({ type: "remove", key: queuedMessagesStorageKey(scope, oldMessage.id) });
+    }
+    for (const [sessionId, queue] of Object.entries(messages)) {
+      queue.forEach((message, position) => mutations.push({
+        type: "set",
+        key: queuedMessagesStorageKey(scope, message.id),
+        value: JSON.stringify({ sessionId, position, message } satisfies StoredQueuedMessage),
+      }));
+    }
+    // Write the complete next state before removing obsolete records. A quota
+    // failure therefore preserves every previously durable queued message.
+    for (const mutation of mutations) {
+      if (mutation.type === "set") storage.setItem(mutation.key, mutation.value);
+    }
+    for (const mutation of mutations) {
+      if (mutation.type === "remove") storage.removeItem(mutation.key);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export type QueuedMessageClaims = Set<string>;
 
@@ -27,6 +106,49 @@ export function claimQueuedMessage(
 
 export function releaseQueuedMessageClaim(claims: QueuedMessageClaims, sessionId: string, messageId: string) {
   return claims.delete(queuedMessageKey(sessionId, messageId));
+}
+
+export function applyQueuedMessageAck(
+  messages: readonly QueuedMessage[],
+  messageId: string,
+  status: "accepted" | "committed" | "rejected",
+  error: string | undefined,
+  replacementId: string,
+) {
+  if (status === "accepted") return [...messages];
+  if (status === "committed") return messages.filter((message) => message.id !== messageId);
+  return messages.map((message) => message.id === messageId
+    ? { ...message, id: replacementId, deliveryError: error || "发送失败，请重试" }
+    : message);
+}
+
+export function applyQueuedMessagesAck(
+  queues: Readonly<Record<string, readonly QueuedMessage[]>>,
+  messageId: string,
+  status: "accepted" | "committed" | "rejected",
+  error: string | undefined,
+  replacementId: string,
+) {
+  let matchedSessionId: string | undefined;
+  const next = Object.fromEntries(Object.entries(queues).map(([sessionId, messages]) => {
+    if (!messages.some((message) => message.id === messageId)) return [sessionId, [...messages]];
+    matchedSessionId = sessionId;
+    return [sessionId, applyQueuedMessageAck(messages, messageId, status, error, replacementId)];
+  }));
+  return { queues: next, matchedSessionId };
+}
+
+export function selectQueuedDispatches(
+  sessions: readonly { session_id: string; state: string }[],
+  queues: Readonly<Record<string, readonly QueuedMessage[]>>,
+  dispatchingSessionIds: ReadonlySet<string>,
+  editingSessionId?: string,
+) {
+  return sessions.flatMap((session) => {
+    if (session.state === "working" || dispatchingSessionIds.has(session.session_id) || editingSessionId === session.session_id) return [];
+    const message = queues[session.session_id]?.[0];
+    return message && !message.deliveryError ? [{ sessionId: session.session_id, message }] : [];
+  });
 }
 
 export function removeQueuedMessage(
