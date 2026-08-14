@@ -2351,6 +2351,8 @@ fn shell_can_resume_web_style_session_history() {
                 turn_id: "turn_web_1".to_string(),
                 created_at_ms: 2,
                 kind: None,
+                command_id: None,
+                delivery_state: None,
                 content: "web user question".to_string(),
             },
         )
@@ -2379,6 +2381,8 @@ fn shell_can_resume_web_style_session_history() {
                 turn_id: "turn_web_1".to_string(),
                 created_at_ms: 4,
                 kind: None,
+                command_id: None,
+                delivery_state: None,
                 content: "web final answer".to_string(),
             },
         )

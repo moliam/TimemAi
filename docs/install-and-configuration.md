@@ -42,6 +42,24 @@ It installs:
 Release users do not need Node.js or a separate assistant-ui checkout. Node/pnpm
 are only needed for frontend development.
 
+## Recommended Start: Timem Web
+
+Start the installed Web host with one command:
+
+```bash
+timem-web
+```
+
+The authenticated local UI opens without requiring credentials at process
+startup. Click the current model name in the upper-left header and configure
+the API key, model, API protocol, Base URL, and token limits for the selected
+Session. Configuration is Session-owned: changing one Session does not change
+another Session's endpoint or model.
+
+Use environment variables below when supplying defaults for new Sessions,
+running the terminal UI, or automating startup. They are optional for opening
+and configuring Timem Web.
+
 ## Env Files
 
 Timem reads process environment variables. It does not load env files

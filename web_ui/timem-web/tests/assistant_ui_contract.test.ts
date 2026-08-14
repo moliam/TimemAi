@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 const appearanceSource = readFileSync(new URL("../src/appearance.ts", import.meta.url), "utf8");
+const preloadSource = readFileSync(new URL("../src/preload.ts", import.meta.url), "utf8");
 const viewModelSource = readFileSync(new URL("../src/view_model.ts", import.meta.url), "utf8");
 const protocolSource = readFileSync(new URL("../src/protocol.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
@@ -718,16 +719,16 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("blocks send while cancellation is still in flight", () => {
-    const start = source.indexOf("const sendText = useCallback");
+    const start = source.indexOf("const sendTextForSession = useCallback");
     const end = source.indexOf("const uploadFile = useCallback", start);
     const sendText = source.slice(start, end);
-    expect(sendText).toContain("cancellingSessionIds.current.has(activeSession.session_id)");
+    expect(sendText).toContain("cancellingSessionIds.current.has(targetSession.session_id)");
     expect(sendText).toContain("Cancellation in progress");
     expect(sendText).toContain("return false;");
   });
 
   it("keeps sending enabled during a working turn by bypassing assistant-ui Send", () => {
-    const start = source.indexOf("const sendText = useCallback");
+    const start = source.indexOf("const sendTextForSession = useCallback");
     const end = source.indexOf("const uploadFile = useCallback", start);
     const sendText = source.slice(start, end);
     expect(source).toContain("composerSendDecision");
@@ -746,7 +747,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());");
     expect(source).toContain("reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession)");
     expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent)");
-    expect(source).toContain("const sent = queueInstead || onSend(reserved.text);");
+    expect(source).toContain("const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);");
+    expect(source).toContain("if (sent) updateQueuedMessages(() => nextQueues);");
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
     expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
     expect(source).toContain("pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)");
@@ -802,10 +804,10 @@ describe("assistant-ui thread integration", () => {
     const helloEnd = source.indexOf('if (event.type === "session_created")', helloStart);
     const helloBranch = source.slice(helloStart, helloEnd);
     expect(helloBranch).toContain("clearAllPendingCommands();");
-    expect(helloBranch).toContain("setDecisions([]);");
+    expect(helloBranch).toContain("setDecisions(decisionsFromSessions(event.snapshot.sessions));");
     expect(helloBranch).toContain("applySnapshot(event.snapshot);");
     expect(helloBranch).toContain("setSnapshotReady(true);");
-    expect(source).toContain('if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return false;');
+    expect(source).toContain('if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return reliable;');
     expect(source).toContain("hasConnectedOnce = true;");
     expect(source).toContain("disconnectNoticeShown = false;");
     expect(source).toContain("retryAttempt = 0;");
@@ -1173,10 +1175,13 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.turn-user-entry { font-family: var(--user-other-font), var(--user-chinese-font), sans-serif; font-weight: var(--user-font-weight); }');
     expect(styles).toContain('.turn-assistant-frame, .turn-final-delivery { font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-weight: var(--agent-font-weight); }');
     expect(styles).toContain(':root[data-text-size="large"]');
-    expect(html).toContain('localStorage.getItem("timem-web-appearance-v1")');
-    expect(html).toContain('document.documentElement.dataset.theme');
-    expect(html).toContain('document.documentElement.dataset.userChineseFont');
-    expect(html).toContain('document.documentElement.dataset.agentChineseFont');
+    expect(html).toContain('<script type="module" src="/src/preload.ts"></script>');
+    expect(html).not.toContain("<script>\n");
+    expect(preloadSource).toContain("applyAppearance(loadAppearance())");
+    expect(appearanceSource).toContain('window.localStorage.getItem(APPEARANCE_STORAGE_KEY)');
+    expect(appearanceSource).toContain('root.dataset.theme = appearance.theme');
+    expect(appearanceSource).toContain('root.dataset.userChineseFont = appearance.userChineseFont');
+    expect(appearanceSource).toContain('root.dataset.agentChineseFont = appearance.agentChineseFont');
   });
 
   it("keeps the active session label readable in light theme after style overrides", () => {
@@ -1291,7 +1296,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('activeSession?.state === "working" ? "Queue message" : "Send message"');
     expect(source).toContain('className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"}`}');
     expect(source).toContain('className="queued-message-supplement"');
-    expect(source).toContain('claimed ? "发送中…" : "立即"');
+    expect(source).toContain('claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"');
     expect(source).toContain('title={effectiveSendLabel} aria-label={effectiveSendLabel}');
     expect(source).not.toContain('>Supplement</span>');
   });
@@ -1313,17 +1318,17 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("releaseQueuedMessageClaim(queuedMessageClaimsRef.current");
     expect(source).toContain("queuedMessagesBySessionRef.current");
     expect(source).toContain("removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current");
-    expect(source).toContain("disabled={claimed || activeSession.state !== \"working\"");
+    expect(source).toContain('disabled={claimed || (!message.deliveryError && activeSession.state !== "working")');
     expect(source).toContain('aria-busy={claimed || undefined}');
-    expect(source).toContain('claimed ? "发送中…" : "立即"');
+    expect(source).toContain('claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"');
     expect(styles).toContain(".queued-message.sending");
   });
 
   it("lets queued messages be re-edited without changing their queue position", () => {
     expect(source).toContain('className="queued-message-edit"');
     expect(source).toContain('className="queued-message-editor" autoFocus');
-    expect(source).toContain("message.id === edit.id ? { ...message, text } : message");
-    expect(source).toContain('editingQueuedMessage?.sessionId === activeSessionId');
+    expect(source).toContain("message.id === edit.id ? { ...message, text, deliveryError: undefined } : message");
+    expect(source).toContain('selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId)');
     expect(source).toContain(">保存</button>");
     expect(source).toContain(">取消</button>");
     expect(styles).toContain(".queued-message-editor");
@@ -1344,8 +1349,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('if (event.turn.state !== "working") setCompletedTurnKey(`${event.session_id}:${event.turn.turn_id}`);');
     expect(source).toContain('completedTurnKey.startsWith(`${activeSessionId}:`)');
     expect(source).toContain('releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)');
-    expect(source).toContain('submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());');
-    expect(source).toContain('latestActiveTurn.created_at_ms < startedAt');
+    expect(source).toContain('applyQueuedMessagesAck(nextQueues, ack.command_id, ack.status, ack.error, clientId("queued"))');
+    expect(source).toContain('releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, commandId);');
   });
 
   it("shows long current directories by their tail while preserving the full path tooltip", () => {
@@ -1363,17 +1368,20 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const TOKEN_STORAGE_KEY = "timem-web-access-token";');
     expect(source).toContain("window.sessionStorage.setItem(TOKEN_STORAGE_KEY, query)");
     expect(source).toContain("window.history.replaceState");
-    expect(source).toContain('const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";');
-    expect(source).toContain('new WebSocket(`${scheme}://${window.location.host}/ws${tokenQuery}`)');
+    expect(source).toContain('if (token) query.set("token", token);');
+    expect(source).toContain('if (eventCursorRef.current > 0) query.set("last_event_seq", String(eventCursorRef.current));');
+    expect(source).toContain('saveEventCursor(window.sessionStorage');
+    expect(source).toContain('loadEventCursor(window.sessionStorage');
+    expect(source).toContain('new WebSocket(`${scheme}://${window.location.host}/ws${queryString}`)');
     expect(source).not.toContain("Access token missing");
     expect(source).not.toContain("if (!token) {\n      setActivities");
   });
 
   it("does not create an optimistic ghost turn when the WebSocket send fails", () => {
-    const start = source.indexOf("const sendText = useCallback");
+    const start = source.indexOf("const sendTextForSession = useCallback");
     const end = source.indexOf("const uploadFile = useCallback", start);
     const sendText = source.slice(start, end);
-    expect(sendText).toContain("if (!sendCommand(decision.command))");
+    expect(sendText).toContain("if (!sendCommand(decision.command, commandId))");
     expect(sendText).not.toContain("setSessions((current)");
     expect(sendText).toContain("return false;");
     expect(source).toContain("const nextDrafts = finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent);");
@@ -1532,7 +1540,7 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("uses the shared worker-aware decision key for inline request pending state", () => {
-    expect(source).toContain("decisionKey, draftForSession");
+    expect(source).toContain("decisionKey, decisionsFromSessions, draftForSession");
     expect(source).toContain("pendingDecisionKeys.has(decisionKey(decision))");
     expect(source).not.toContain("function decisionKey(decision: Decision)");
     expect(viewModelSource).toContain("decision.event.context_id ?? \"\"");

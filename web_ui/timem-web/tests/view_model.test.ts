@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -65,6 +65,31 @@ const actionEvent = (
 });
 
 describe("web topic view model", () => {
+  it("reconstructs unresolved decisions from a working snapshot turn", () => {
+    const waiting = topic("core.request", { request_id: "req-1", request: { command: "git status" } }, "waiting_user");
+    const active = session("session_1");
+    active.state = "working";
+    active.turns = [{
+      ...turn("turn_1"),
+      state: "working",
+      events: [
+        { event_id: "wait-1", source: "core_topic", payload: waiting as unknown as Record<string, unknown>, created_at_ms: 2 },
+        { event_id: "wait-duplicate", source: "core_topic", payload: waiting as unknown as Record<string, unknown>, created_at_ms: 3 },
+      ],
+    }];
+    const decisions = decisionsFromSessions([active]);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].turnId).toBe("turn_1");
+    expect(decisions[0].event.payload.request_id).toBe("req-1");
+  });
+
+  it("does not resurrect decisions from completed turns", () => {
+    const waiting = topic("core.request", { request_id: "req-old" }, "waiting_user");
+    const completed = session("session_1");
+    completed.turns = [{ ...turn("turn_1", "finished"), events: [{ event_id: "wait", source: "core_topic", payload: waiting as unknown as Record<string, unknown>, created_at_ms: 2 }] }];
+    expect(decisionsFromSessions([completed])).toEqual([]);
+  });
+
   it("defaults completed work to collapsed only when its process contains free talk alone", () => {
     const freeTalk = activityFromTopic(topic("core.model.response", { free_talk: "Simple reasoning." }));
     const action = activityFromTopic(topic("core.action", { action: "run_bash", status: "completed", input: { cmd: "pwd" } }));

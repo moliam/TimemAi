@@ -19,6 +19,17 @@ It may contain:
 - Frame-budgeted, order-preserving inbound event batching; memoized turn
   subtrees; and browser layout/paint containment for completed offscreen turns.
   These presentation optimizations must not drop or reorder semantic events.
+- A durable browser command outbox for non-idempotent mutations. The UI assigns
+  one stable `command_id`, keeps user content until the matching committed
+  acknowledgement, and retries the same ID after reconnect. Accepted commands
+  remain owned and cannot be silently replaced by editing, deleting, reordering,
+  switching Session, or another tab.
+- Per-tab semantic event cursors and strict sequenced delivery. In cursor mode,
+  authoritative state is reduced only from `semantic_event` envelopes; raw
+  legacy duplicates are ignored. The cursor advances only after the reducer
+  applies the event, and a gap forces replay instead of speculative skipping.
+  Browser storage records are bounded, scoped by origin/memory space/Session,
+  and must never persist API keys or MCP secrets.
 
 It must not contain:
 
