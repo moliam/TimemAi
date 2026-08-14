@@ -38,6 +38,12 @@ close, and that a stopped runtime can immediately restart with the same data and
 port. A restart intentionally rotates the token; the newly printed URL is the
 credential for the new Host process.
 
+The automated `scripts/web_public_runtime_smoke.sh` runs the same lifecycle in
+explicit public mode. It verifies the advertised host, `0.0.0.0` bind report,
+missing/invalid-token rejection, HttpOnly cookie reopen, authenticated API and
+WebSocket hello, clean shutdown, same-port restart, and token rotation. A real
+cross-machine browser row remains required when changing public networking.
+
 ## Terminal Emulator Matrix
 
 Run the release binary in each target terminal when changing input, paste,
@@ -101,6 +107,7 @@ Acceptance:
 | 2026-07-21 | working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake model server through OpenAI Responses wire protocol | Rebuilt `timem-web`, started `scripts/fake_openai_server.py`, opened authenticated Web UI, submitted one simple task, then stopped the Web host and inspected the still-open page. | Passed: default XML response completed without protocol repair, final answer and token telemetry rendered, composer stayed docked with no horizontal overflow, and after Web host shutdown the page showed `Runtime exited` plus restart guidance while disabling the composer. |
 | 2026-07-21 | `1.0` working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake OpenAI-compatible model service | Browser UX smoke on `timem-web --no-open`: authenticated startup, connected baseline, one user turn, final answer telemetry, desktop overflow check, 390px mobile overflow/composer check, then Web host shutdown while the page stayed open. | Passed: Session0, cwd, mem, and `Runtime connected` rendered; final answer and token telemetry appeared; desktop and 390px views had no horizontal overflow; composer stayed visible and enabled while runtime was connected; after shutdown, the page showed `Runtime exited` / `Restart timem-web` and disabled the composer. |
 | 2026-08-14 | `00f50e6` / `v1.1.0` | macOS arm64, Codex in-app Chromium browser, isolated temporary data root | Timem Web release review: authenticated keyless startup, desktop 1280px and mobile 390x844 layout, selected-Session model settings opened from the model name, API key/model/protocol/Base URL controls, Escape close/focus restoration, context indicator placement, composer bounds, and browser console inspection. | Passed: no horizontal overflow at either viewport, settings remained fully reachable, model label used the intended compact typography, context usage stayed adjacent, Escape restored focus, composer remained in bounds, and the console contained no warning or error. |
+| 2026-08-14 | `v1.1.2` | Ubuntu 22.04 x86_64 Host at `10.125.112.83`, macOS in-app Chromium client | Cross-machine `timem-web --public` smoke from the published tag: unauthenticated/invalid-token HTTP, authenticated page and asset fetch, HttpOnly cookie reopen, two simultaneous browser tabs, WebSocket connected state, Session-scoped runtime setting apply/restore, graceful Host stop, locked disconnected UI, same-data/same-port restart, and token rotation. | Passed: the Host listened on `0.0.0.0`; missing/invalid credentials returned 401; authenticated HTTP, assets, health, and UI loaded; both reopened tabs reached `Runtime connected`; remote Session configuration was acknowledged and restored; stopped pages disabled mutation controls with restart guidance; the restarted Host restored Session0/CWD, rejected the old token, and accepted only the new URL. |
 
 Rows not covered by this local smoke remain explicit manual release work:
 Safari, Firefox, iTerm2, Terminal.app, tmux, SSH, clean-machine install, and

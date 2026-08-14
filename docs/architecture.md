@@ -257,9 +257,11 @@ shell-only shortcut.
 
 ### `timem_web/`
 
-`timem_web` is a local host adapter, not a second agent runtime. It binds only
-to `127.0.0.1`, authenticates API and WebSocket access with a per-process token,
-embeds the production frontend, and maps browser commands to public
+`timem_web` is a local-first host adapter, not a second agent runtime. It binds
+to `127.0.0.1` by default and binds to `0.0.0.0` only after the explicit
+`--public` option. Browser, API, upload, and WebSocket access remain protected
+by one per-process token in either mode. The host embeds the production
+frontend and maps browser commands to public
 `agent_core` worker/session interfaces. It preserves session and request ids on
 every topic, assigns stable event ids, and keeps one bounded host-side turn
 envelope for the task text, supplements, approvals, process events, final answer,
