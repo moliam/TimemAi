@@ -1,3 +1,4 @@
+mod event_journal;
 mod server;
 
 #[tokio::main]

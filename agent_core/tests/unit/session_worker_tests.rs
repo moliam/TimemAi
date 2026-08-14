@@ -7,6 +7,79 @@ use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Instant;
 
+#[test]
+fn failed_durable_supplement_append_releases_command_id_for_retry() {
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+    let handle = CoreSessionWorkerHandle {
+        command_tx,
+        supplement_mailbox: Arc::new(Mutex::new(SupplementMailbox {
+            accepting: true,
+            queue: Vec::new(),
+        })),
+        cancel_requested: Arc::new(AtomicBool::new(false)),
+        shutdown_requested: Arc::new(AtomicBool::new(false)),
+        reply_tx,
+        accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
+    };
+
+    assert_eq!(
+        handle.try_add_user_supplement_with_command_id_after(
+            "first",
+            Some("supplement-command".to_string()),
+            || Err("persist failed".to_string()),
+        ),
+        Err("persist failed".to_string())
+    );
+    assert!(handle.accepted_command_ids.lock().unwrap().is_empty());
+    assert!(handle
+        .try_add_user_supplement_with_command_id_after(
+            "retry",
+            Some("supplement-command".to_string()),
+            || Ok(()),
+        )
+        .unwrap());
+    assert_eq!(handle.supplement_mailbox.lock().unwrap().queue.len(), 1);
+}
+
+#[test]
+fn recovered_turn_batch_rejects_duplicate_ids_and_rolls_back_closed_send() {
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    drop(command_rx);
+    let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+    let handle = CoreSessionWorkerHandle {
+        command_tx,
+        supplement_mailbox: Arc::new(Mutex::new(SupplementMailbox {
+            accepting: false,
+            queue: Vec::new(),
+        })),
+        cancel_requested: Arc::new(AtomicBool::new(false)),
+        shutdown_requested: Arc::new(AtomicBool::new(false)),
+        reply_tx,
+        accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
+    };
+    assert_eq!(
+        handle.run_turn_batch_with_command_ids(
+            "task",
+            None,
+            Some("same".to_string()),
+            vec![("supplement".to_string(), Some("same".to_string()))],
+        ),
+        Err("core_command_batch_duplicate_id".to_string())
+    );
+    assert!(handle.accepted_command_ids.lock().unwrap().is_empty());
+    assert_eq!(
+        handle.run_turn_batch_with_command_ids(
+            "task",
+            None,
+            Some("task-id".to_string()),
+            vec![("supplement".to_string(), Some("supplement-id".to_string()))],
+        ),
+        Err("core_session_worker_stopped".to_string())
+    );
+    assert!(handle.accepted_command_ids.lock().unwrap().is_empty());
+}
+
 fn tmp_dir(name: &str) -> PathBuf {
     let mut dir = std::env::temp_dir();
     dir.push(format!(
@@ -56,6 +129,34 @@ struct SupplementReplayModel {
     calls: Arc<Mutex<u32>>,
 }
 
+struct ImmediateFinalPromptCaptureModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ModelClient for ImmediateFinalPromptCaptureModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        Ok(LlmResponse {
+            content: "## Status\nfinished\n\n## Final_Answer\nIMMEDIATE_FINAL".to_string(),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 1_000,
+                completion_tokens: 10,
+                total_tokens: 1_010,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
 impl ModelClient for SupplementReplayModel {
     fn call_model(
         &mut self,
@@ -95,6 +196,98 @@ impl ModelClient for SupplementReplayModel {
             },
             truncated: false,
         })
+    }
+}
+
+#[test]
+fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_mailbox() {
+    let dir = tmp_dir("atomic_initial_supplement_batch");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "atomic_initial_supplement_batch", 1),
+        ImmediateFinalPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .run_turn_batch_with_command_ids(
+            "primary request",
+            None,
+            Some("primary-command".to_string()),
+            vec![
+                (
+                    "first restored supplement".to_string(),
+                    Some("supplement-command-1".to_string()),
+                ),
+                (
+                    "second restored supplement".to_string(),
+                    Some("supplement-command-2".to_string()),
+                ),
+            ],
+        )
+        .expect("worker should atomically accept the restored batch");
+
+    let mut accepted = Vec::new();
+    let outcome = loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("immediate model should finish the batched turn")
+        {
+            CoreSessionWorkerEvent::CommandAccepted { command_id } => accepted.push(command_id),
+            CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            CoreSessionWorkerEvent::Topics(_)
+            | CoreSessionWorkerEvent::ModelRequest { .. }
+            | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+            other => panic!("unexpected worker event: {other:?}"),
+        }
+    };
+
+    assert_eq!(outcome.text, "IMMEDIATE_FINAL");
+    assert_eq!(
+        accepted,
+        vec![
+            "primary-command",
+            "supplement-command-1",
+            "supplement-command-2"
+        ]
+    );
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(
+        prompts.len(),
+        1,
+        "the initial batch should precede model I/O"
+    );
+    assert!(prompts[0].contains("primary request"));
+    assert!(prompts[0].contains("first restored supplement"));
+    assert!(prompts[0].contains("second restored supplement"));
+
+    handle.request_shutdown().unwrap();
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should stop")
+        {
+            CoreSessionWorkerEvent::WorkerStopped => break,
+            CoreSessionWorkerEvent::Topics(_) => {}
+            other => panic!("unexpected event while stopping worker: {other:?}"),
+        }
     }
 }
 
@@ -258,6 +451,7 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
     handle.run_turn("触发 repair 边界", None).unwrap();
 
     let mut responses = 0;
+    let mut unconsumed_supplements = Vec::new();
     let outcome = loop {
         match worker
             .events()
@@ -270,6 +464,9 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
                     handle.add_user_supplement("补充不能复活硬停止");
                 }
             }
+            CoreSessionWorkerEvent::UnconsumedSupplements { supplements } => {
+                unconsumed_supplements.extend(supplements);
+            }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
             CoreSessionWorkerEvent::Topics(_) | CoreSessionWorkerEvent::ModelRequest { .. } => {}
             other => panic!("unexpected worker event: {other:?}"),
@@ -281,6 +478,11 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
         Some(crate::TurnStopReason::ProtocolRepairFailed)
     );
     assert_eq!(*calls.lock().unwrap(), 6);
+    assert_eq!(
+        unconsumed_supplements,
+        vec!["补充不能复活硬停止".to_string()],
+        "a supplement accepted before a hard stop must be returned to the host before TurnFinished"
+    );
     handle.request_shutdown().unwrap();
     worker.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(dir);

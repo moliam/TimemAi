@@ -5,7 +5,7 @@ use crate::{
     ResponseProtocolKind, RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail,
     TurnUi, UsageStats,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -158,6 +158,12 @@ impl Drop for WorkingWorkerGuard {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum CoreSessionWorkerEvent {
+    /// The worker has dequeued the durable Host intent. This is deliberately
+    /// separate from the Host successfully writing the user entry: only this
+    /// event permits the Host to terminally acknowledge delivery to Core.
+    CommandAccepted {
+        command_id: String,
+    },
     Topics(Vec<CoreTopicEvent>),
     ModelRequest {
         round: u32,
@@ -176,6 +182,9 @@ pub enum CoreSessionWorkerEvent {
     ModelError {
         error: String,
     },
+    UnconsumedSupplements {
+        supplements: Vec<String>,
+    },
     TurnFinished {
         outcome: TurnOutcome,
     },
@@ -186,9 +195,12 @@ enum CoreSessionWorkerCommand {
     RunTurn {
         input: String,
         additional_context: Option<String>,
+        command_id: Option<String>,
+        initial_supplements: Vec<QueuedSupplement>,
     },
     RunToolGen {
         request: ToolGenRequest,
+        command_id: Option<String>,
     },
     Rename {
         display_name: String,
@@ -215,7 +227,12 @@ enum CoreSessionWorkerCommand {
 #[derive(Default)]
 struct SupplementMailbox {
     accepting: bool,
-    queue: Vec<String>,
+    queue: Vec<QueuedSupplement>,
+}
+
+struct QueuedSupplement {
+    text: String,
+    command_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -225,6 +242,7 @@ pub struct CoreSessionWorkerHandle {
     cancel_requested: Arc<AtomicBool>,
     shutdown_requested: Arc<AtomicBool>,
     reply_tx: Sender<TopicReply>,
+    accepted_command_ids: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl CoreSessionWorkerHandle {
@@ -233,8 +251,53 @@ impl CoreSessionWorkerHandle {
         input: impl Into<String>,
         additional_context: Option<String>,
     ) -> Result<(), String> {
+        self.run_turn_with_command_id(input, additional_context, None)
+    }
+
+    pub fn run_turn_with_command_id(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+    ) -> Result<(), String> {
+        self.run_turn_batch_with_command_ids(input, additional_context, command_id, Vec::new())
+    }
+
+    pub fn run_turn_batch_with_command_ids(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        supplements: Vec<(String, Option<String>)>,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
+        }
+        let mut batch_command_ids = command_id.iter().cloned().collect::<Vec<_>>();
+        batch_command_ids.extend(
+            supplements
+                .iter()
+                .filter_map(|(_, command_id)| command_id.clone()),
+        );
+        let unique_ids = batch_command_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if unique_ids.len() != batch_command_ids.len() {
+            return Err("core_command_batch_duplicate_id".to_string());
+        }
+        {
+            let mut accepted = self
+                .accepted_command_ids
+                .lock()
+                .map_err(|_| "core_command_dedup_poisoned".to_string())?;
+            if command_id
+                .as_ref()
+                .is_some_and(|command_id| accepted.contains(command_id))
+            {
+                return Ok(());
+            }
+            if batch_command_ids.iter().any(|id| accepted.contains(id)) {
+                return Err("core_command_batch_id_conflict".to_string());
+            }
+            accepted.extend(batch_command_ids.iter().cloned());
         }
         self.cancel_requested.store(false, Ordering::SeqCst);
         self.open_supplement_mailbox();
@@ -243,26 +306,61 @@ impl CoreSessionWorkerHandle {
             .send(CoreSessionWorkerCommand::RunTurn {
                 input: input.into(),
                 additional_context,
+                command_id: command_id.clone(),
+                initial_supplements: supplements
+                    .into_iter()
+                    .map(|(text, command_id)| QueuedSupplement { text, command_id })
+                    .collect(),
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
             self.close_supplement_mailbox();
+            if let Ok(mut accepted) = self.accepted_command_ids.lock() {
+                for command_id in &batch_command_ids {
+                    accepted.remove(command_id);
+                }
+            }
         }
         result
     }
 
     pub fn run_toolgen(&self, request: ToolGenRequest) -> Result<(), String> {
+        self.run_toolgen_with_command_id(request, None)
+    }
+
+    pub fn run_toolgen_with_command_id(
+        &self,
+        request: ToolGenRequest,
+        command_id: Option<String>,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
+        }
+        if let Some(command_id) = command_id.as_ref() {
+            let mut accepted = self
+                .accepted_command_ids
+                .lock()
+                .map_err(|_| "core_command_dedup_poisoned".to_string())?;
+            if !accepted.insert(command_id.clone()) {
+                return Ok(());
+            }
         }
         self.cancel_requested.store(false, Ordering::SeqCst);
         self.open_supplement_mailbox();
         let result = self
             .command_tx
-            .send(CoreSessionWorkerCommand::RunToolGen { request })
+            .send(CoreSessionWorkerCommand::RunToolGen {
+                request,
+                command_id: command_id.clone(),
+            })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
             self.close_supplement_mailbox();
+            if let Some(command_id) = command_id.as_ref() {
+                if let Ok(mut accepted) = self.accepted_command_ids.lock() {
+                    accepted.remove(command_id);
+                }
+            }
         }
         result
     }
@@ -274,10 +372,79 @@ impl CoreSessionWorkerHandle {
                 if !mailbox.accepting {
                     return false;
                 }
-                mailbox.queue.push(supplement.into());
+                mailbox.queue.push(QueuedSupplement {
+                    text: supplement.into(),
+                    command_id: None,
+                });
                 true
             })
             .unwrap_or(false)
+    }
+
+    /// Runs the Host's durable append while holding the supplement boundary.
+    /// This prevents Core from closing the mailbox between Host persistence and
+    /// enqueue, without making Core depend on the Host's storage implementation.
+    pub fn try_add_user_supplement_after<F>(
+        &self,
+        supplement: impl Into<String>,
+        before_enqueue: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let mut mailbox = self
+            .supplement_mailbox
+            .lock()
+            .map_err(|_| "supplement_mailbox_poisoned".to_string())?;
+        if !mailbox.accepting {
+            return Ok(false);
+        }
+        before_enqueue()?;
+        mailbox.queue.push(QueuedSupplement {
+            text: supplement.into(),
+            command_id: None,
+        });
+        Ok(true)
+    }
+
+    pub fn try_add_user_supplement_with_command_id_after<F>(
+        &self,
+        supplement: impl Into<String>,
+        command_id: Option<String>,
+        before_enqueue: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let mut mailbox = self
+            .supplement_mailbox
+            .lock()
+            .map_err(|_| "supplement_mailbox_poisoned".to_string())?;
+        if !mailbox.accepting {
+            return Ok(false);
+        }
+        if let Some(command_id) = command_id.as_ref() {
+            let mut accepted = self
+                .accepted_command_ids
+                .lock()
+                .map_err(|_| "core_command_dedup_poisoned".to_string())?;
+            if !accepted.insert(command_id.clone()) {
+                return Ok(true);
+            }
+        }
+        if let Err(error) = before_enqueue() {
+            if let Some(command_id) = command_id.as_ref() {
+                if let Ok(mut accepted) = self.accepted_command_ids.lock() {
+                    accepted.remove(command_id);
+                }
+            }
+            return Err(error);
+        }
+        mailbox.queue.push(QueuedSupplement {
+            text: supplement.into(),
+            command_id,
+        });
+        Ok(true)
     }
 
     pub fn add_user_supplement(&self, supplement: impl Into<String>) {
@@ -742,12 +909,14 @@ impl CoreSessionWorker {
         let supplement_mailbox = Arc::new(Mutex::new(SupplementMailbox::default()));
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let accepted_command_ids = Arc::new(Mutex::new(BTreeSet::new()));
         let handle = CoreSessionWorkerHandle {
             command_tx,
             supplement_mailbox: Arc::clone(&supplement_mailbox),
             cancel_requested: Arc::clone(&cancel_requested),
             shutdown_requested: Arc::clone(&shutdown_requested),
             reply_tx,
+            accepted_command_ids,
         };
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();
@@ -801,7 +970,18 @@ impl CoreSessionWorker {
                     CoreSessionWorkerCommand::RunTurn {
                         mut input,
                         mut additional_context,
+                        command_id,
+                        initial_supplements,
                     } => {
+                        if !initial_supplements.is_empty() {
+                            if let Ok(mut mailbox) = ui.supplement_mailbox.lock() {
+                                mailbox.queue.extend(initial_supplements);
+                            }
+                        }
+                        if let Some(command_id) = command_id {
+                            let _ = event_tx
+                                .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                        }
                         let context_id = identity.context_id.clone();
                         let outcome = {
                             let working = runtime.begin_worker_turn();
@@ -826,7 +1006,14 @@ impl CoreSessionWorker {
                                     // A structured stop is a hard boundary. Late supplements are
                                     // already retained by the host turn UI, but must not bypass
                                     // cancellation, repair, or runtime-failure limits here.
-                                    let _ = ui.close_supplements_for_main_context();
+                                    let supplements = ui.close_supplements_for_main_context();
+                                    if !supplements.is_empty() {
+                                        let _ = event_tx.send(
+                                            CoreSessionWorkerEvent::UnconsumedSupplements {
+                                                supplements,
+                                            },
+                                        );
+                                    }
                                     break main_outcome;
                                 }
                                 let supplements = ui.take_or_close_supplements_for_main_context();
@@ -845,7 +1032,14 @@ impl CoreSessionWorker {
                         };
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                     }
-                    CoreSessionWorkerCommand::RunToolGen { request } => {
+                    CoreSessionWorkerCommand::RunToolGen {
+                        request,
+                        command_id,
+                    } => {
+                        if let Some(command_id) = command_id {
+                            let _ = event_tx
+                                .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                        }
                         let working = runtime.begin_worker_turn();
                         ui.current_turn_active = Some(working.active_handle());
                         let toolgen_runner = ToolGenRunner {
@@ -1086,7 +1280,12 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                 model_client,
             );
             if current.stop_summary.is_some() {
-                let _ = ui.close_supplements_for_main_context();
+                let supplements = ui.close_supplements_for_main_context();
+                if !supplements.is_empty() {
+                    let _ = ui
+                        .event_tx
+                        .send(CoreSessionWorkerEvent::UnconsumedSupplements { supplements });
+                }
                 break current;
             }
             let supplements = ui.take_or_close_supplements_for_main_context();
@@ -1176,7 +1375,7 @@ impl TurnUi for WorkerTurnUi {
         }
         self.supplement_mailbox
             .lock()
-            .map(|mut mailbox| std::mem::take(&mut mailbox.queue))
+            .map(|mut mailbox| self.accept_queued_supplements(std::mem::take(&mut mailbox.queue)))
             .unwrap_or_default()
     }
 
@@ -1281,6 +1480,20 @@ impl TurnUi for WorkerTurnUi {
 }
 
 impl WorkerTurnUi {
+    fn accept_queued_supplements(&self, queued: Vec<QueuedSupplement>) -> Vec<String> {
+        queued
+            .into_iter()
+            .map(|queued| {
+                if let Some(command_id) = queued.command_id {
+                    let _ = self
+                        .event_tx
+                        .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                }
+                queued.text
+            })
+            .collect()
+    }
+
     fn take_or_close_supplements_for_main_context(&mut self) -> Vec<String> {
         self.supplement_mailbox
             .lock()
@@ -1289,7 +1502,7 @@ impl WorkerTurnUi {
                 if supplements.is_empty() {
                     mailbox.accepting = false;
                 }
-                supplements
+                self.accept_queued_supplements(supplements)
             })
             .unwrap_or_default()
     }
@@ -1299,7 +1512,7 @@ impl WorkerTurnUi {
             .lock()
             .map(|mut mailbox| {
                 mailbox.accepting = false;
-                std::mem::take(&mut mailbox.queue)
+                self.accept_queued_supplements(std::mem::take(&mut mailbox.queue))
             })
             .unwrap_or_default()
     }

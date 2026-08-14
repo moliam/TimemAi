@@ -1182,6 +1182,8 @@ button:disabled { cursor: not-allowed; }
 .queued-message-drag:hover { background: #424242; color: #bcbcbc; }
 .queued-message-order { width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; background: #424242; color: #aaa; font-size: 9px; font-weight: 700; }
 .queued-message p { min-width: 0; margin: 0; overflow: hidden; color: #ddd; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.queued-message-error { display: block; overflow: hidden; color: #f0a19a; font-size: 10px; font-weight: 500; text-overflow: ellipsis; }
+.queued-message.delivery-error { border-color: color-mix(in srgb, #d85c52 48%, #404040); }
 .queued-message.editing { align-items: start; }
 .queued-message-editor { min-width: 0; min-height: 58px; max-height: 132px; resize: vertical; border: 1px solid #505050; border-radius: 7px; padding: 7px 8px; outline: 0; background: #272727; color: #e4e4e4; font: 12px/1.45 var(--ui-font); }
 .queued-message-editor:focus { border-color: #63889b; box-shadow: 0 0 0 2px #63889b22; }
@@ -1201,6 +1203,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .queued-message-drag:hover { background: #edf1f3; color: #536870; }
 :root[data-theme="light"] .queued-message-order { background: #e6ecef; color: #5f727b; }
 :root[data-theme="light"] .queued-message p { color: #27343a; }
+:root[data-theme="light"] .queued-message-error { color: #a53d35; }
 :root[data-theme="light"] .queued-message-editor { border-color: #c7d1d6; background: #f8fafb; color: #27343a; }
 :root[data-theme="light"] .queued-message-editor:focus { border-color: #5e899c; }
 :root[data-theme="light"] .queued-message button { color: #5f7782; }
@@ -1394,4 +1397,19 @@ button:disabled { cursor: not-allowed; }
 
 .code-block .hljs-deletion {
   color: var(--markdown-code-deletion);
+}
+html,
+body {
+  min-height: 100%;
+}
+
+.app-loading {
+  box-sizing: border-box;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  font: 15px/1.5 system-ui, sans-serif;
+  color: #425466;
+  background: #f6f8fa;
 }

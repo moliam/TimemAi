@@ -47,6 +47,7 @@ required_patterns=(
   "forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough"
   "memory_update_concurrent_same_version_conflicts_allow_only_one_winner"
   "mem_guard_keeps_concurrent_memory_updates_from_losing_records"
+  "concurrent_session_store_instances_never_expose_partial_or_lose_index_records"
   "run_bash_can_start_and_poll_background_job"
   "timeout_job_is_reported_running_and_model_can_kill_by_pid"
   "running_job_list_is_injected_when_discard_references_running_job_delta"
@@ -275,12 +276,57 @@ feature_doc_required=(
   "every new feature"
   "F32"
   "Local Web host and assistant-ui experience"
+  "F37"
+  "Reliable Web command and event delivery"
   "docs/manual-release-smoke.md"
 )
 
 for pattern in "${feature_doc_required[@]}"; do
   if ! search_fixed "$pattern" "$feature_doc"; then
     echo "missing required feature management item: $pattern" >&2
+    exit 1
+  fi
+done
+
+reliability_doc="docs/web_reliability_test_matrix.md"
+if [ ! -f "$reliability_doc" ]; then
+  echo "missing Web delivery reliability contract: $reliability_doc" >&2
+  exit 1
+fi
+
+reliability_doc_required=(
+  "command_id"
+  "core_accepted"
+  "event_seq"
+  "Sequenced journal integration"
+  "Strict exactly-once behavior cannot be promised"
+  "four Sessions"
+)
+
+for pattern in "${reliability_doc_required[@]}"; do
+  if ! search_fixed "$pattern" "$reliability_doc"; then
+    echo "missing required Web reliability item: $pattern" >&2
+    exit 1
+  fi
+done
+
+release_management_doc="docs/release-management.md"
+if [ ! -f "$release_management_doc" ]; then
+  echo "missing release management document: $release_management_doc" >&2
+  exit 1
+fi
+
+release_management_required=(
+  "Never move or overwrite a published tag"
+  "scripts/version_consistency_check.sh"
+  "Ubuntu and macOS"
+  'run `timem-web`'
+  'pull request from the release branch into `main`'
+)
+
+for pattern in "${release_management_required[@]}"; do
+  if ! search_fixed "$pattern" "$release_management_doc"; then
+    echo "missing required release management item: $pattern" >&2
     exit 1
   fi
 done

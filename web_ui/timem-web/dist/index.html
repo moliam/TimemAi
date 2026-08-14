@@ -5,43 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
     <title>Timem</title>
-    <script>
-      try {
-        const saved = JSON.parse(localStorage.getItem("timem-web-appearance-v1") || "{}");
-        document.documentElement.dataset.theme = saved.theme === "dark" || saved.theme === "light"
-          ? saved.theme
-          : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-        const legacyFont = ["system", "serif", "mono"].includes(saved.font) ? saved.font : "system";
-        const legacyChineseFont = saved.chineseFont === "sans" ? "heiti"
-          : saved.chineseFont === "serif" ? "songti"
-          : ["system", "heiti", "kaiti", "songti"].includes(saved.chineseFont) ? saved.chineseFont : "system";
-        document.documentElement.dataset.userFont = ["system", "serif", "mono"].includes(saved.userFont) ? saved.userFont : legacyFont;
-        document.documentElement.dataset.userChineseFont = ["system", "heiti", "kaiti", "songti"].includes(saved.userChineseFont) ? saved.userChineseFont : legacyChineseFont;
-        document.documentElement.dataset.userBold = String(typeof saved.userBold === "boolean" ? saved.userBold : false);
-        document.documentElement.dataset.agentFont = ["system", "serif", "mono"].includes(saved.agentFont) ? saved.agentFont : legacyFont;
-        document.documentElement.dataset.agentChineseFont = ["system", "heiti", "kaiti", "songti"].includes(saved.agentChineseFont) ? saved.agentChineseFont : legacyChineseFont;
-        document.documentElement.dataset.agentBold = String(typeof saved.agentBold === "boolean" ? saved.agentBold : false);
-        document.documentElement.dataset.textSize = ["small", "medium", "large"].includes(saved.textSize) ? saved.textSize : "medium";
-      } catch (_) {
-        document.documentElement.dataset.theme = "dark";
-        document.documentElement.dataset.userFont = "system";
-        document.documentElement.dataset.userChineseFont = "system";
-        document.documentElement.dataset.userBold = "false";
-        document.documentElement.dataset.agentFont = "system";
-        document.documentElement.dataset.agentChineseFont = "system";
-        document.documentElement.dataset.agentBold = "false";
-        document.documentElement.dataset.textSize = "medium";
-      }
-    </script>
-    <script type="module" crossorigin src="/assets/index-C-DnG4nI.js"></script>
+    <script type="module" crossorigin src="/assets/index-DjKHrCsm.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/assistantUi-eG9OPbTi.js">
     <link rel="modulepreload" crossorigin href="/assets/markdown-CGwoqA8S.js">
     <link rel="modulepreload" crossorigin href="/assets/highlighting-C7uSrgmk.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-n_SVvyOR.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-DNhexuXB.css">
   </head>
   <body>
     <div id="root">
-      <div style="box-sizing:border-box;min-height:100vh;display:grid;place-items:center;padding:24px;font:15px/1.5 system-ui,sans-serif;color:#425466;background:#f6f8fa">
+      <div class="app-loading">
         Timem is loading...
       </div>
     </div>

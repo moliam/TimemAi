@@ -7,10 +7,971 @@ use agent_core::{
     CORE_TOPIC_MODEL_RESPONSE,
 };
 use std::sync::atomic::AtomicUsize;
+use std::sync::Condvar;
 use std::thread;
 use std::time::{Duration, Instant};
 
 const TEST_PORT: u16 = 12345;
+
+#[test]
+fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
+    let reliable: BrowserCommand = serde_json::from_value(json!({
+        "type": "turn_cancel", "session_id": "session_a", "command_id": "cancel_1"
+    }))
+    .unwrap();
+    assert_eq!(reliable.command_id.as_deref(), Some("cancel_1"));
+    let legacy: BrowserCommand = serde_json::from_value(json!({
+        "type": "turn_cancel", "session_id": "session_a"
+    }))
+    .unwrap();
+    assert!(legacy.command_id.is_none());
+    let ack = serde_json::to_value(command_ack(
+        "cancel_1",
+        CommandAckStatus::Rejected,
+        Some("browser_command_queue_full".to_string()),
+    ))
+    .unwrap();
+    assert_eq!(ack["command_id"], "cancel_1");
+    assert_eq!(ack["status"], "rejected");
+}
+
+#[test]
+fn production_semantic_envelope_has_one_sequence_and_one_nested_event() {
+    let envelope = semantic_event_envelope(
+        42,
+        serde_json::to_value(WireEvent::SessionRenamed {
+            session_id: "session_a".to_string(),
+            display_name: "Renamed".to_string(),
+        })
+        .unwrap(),
+    );
+    let wire = serde_json::to_value(envelope).unwrap();
+    assert_eq!(wire["type"], "semantic_event");
+    assert_eq!(wire["event_seq"], 42);
+    assert_eq!(wire["event"]["type"], "session_renamed");
+    assert_eq!(wire["event"]["session_id"], "session_a");
+    assert!(wire.get("session_id").is_none());
+}
+
+#[test]
+fn reliable_mutation_returns_only_ack_while_authoritative_result_is_enveloped() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "ENVELOPE_ONLY_MUTATION");
+    let command_id = "rename_envelope_only";
+    assert!(reserve_command_dedup(&state, command_id).unwrap().is_none());
+    let completion = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: Some(command_id.to_string()),
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            command: ClientCommand::SessionRename {
+                session_id: session_id.clone(),
+                display_name: "Envelope only".to_string(),
+            },
+        },
+    );
+    assert!(
+        completion.event.is_none(),
+        "mutation must not be sent as raw direct event"
+    );
+    assert!(matches!(
+        completion.ack,
+        Some(WireEvent::CommandAck {
+            status: CommandAckStatus::Committed,
+            ..
+        })
+    ));
+    let journal = state.event_journal.lock().unwrap().replay_after(0).unwrap();
+    let entry = journal.last().unwrap();
+    let envelope = serde_json::to_value(semantic_event_envelope(
+        entry.event_seq,
+        entry.event.clone(),
+    ))
+    .unwrap();
+    assert_eq!(envelope["type"], "semantic_event");
+    assert_eq!(envelope["event"]["type"], "session_renamed");
+    assert_eq!(envelope["event"]["session_id"], session_id);
+}
+
+#[test]
+fn lagged_live_receiver_can_recover_the_durable_tail_without_a_future_event() {
+    let state = routing_test_state();
+    let mut receiver = state.events.subscribe();
+    let count = EVENT_CHANNEL_CAPACITY + 17;
+    for ordinal in 0..count {
+        publish_semantic(
+            &state,
+            WireEvent::SessionRenamed {
+                session_id: "session_a".to_string(),
+                display_name: format!("rename-{ordinal}"),
+            },
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(broadcast::error::TryRecvError::Lagged(_))
+    ));
+
+    // No additional broadcast is required to wake recovery: observing Lagged
+    // itself is the trigger, and the journal already contains the exact tail.
+    let replay = state.event_journal.lock().unwrap().replay_after(0).unwrap();
+    assert_eq!(replay.len(), count);
+    assert_eq!(replay.first().unwrap().event_seq, 1);
+    assert_eq!(replay.last().unwrap().event_seq, count as u64);
+}
+
+#[test]
+fn command_dedup_terminal_result_survives_restart_without_persisting_secrets() {
+    let dir = std::env::temp_dir().join(unique_web_id("command_dedup_test"));
+    let path = dir.join("dedup.json");
+    let mut cache = CommandDedupCache::default();
+    assert!(cache.reserve("rename_1").is_none());
+    cache.finish(
+        "rename_1",
+        CommandDedupState::Committed {
+            event: None,
+            serialized_event: durable_command_result(&WireEvent::SessionRenamed {
+                session_id: "session_a".to_string(),
+                display_name: "Durable".to_string(),
+            }),
+        },
+    );
+    cache.save(&path).unwrap();
+    assert!(matches!(
+        CommandDedupCache::load(&path).unwrap().reserve("rename_1"),
+        Some(CommandDedupState::Committed {
+            serialized_event: Some(_),
+            ..
+        })
+    ));
+    assert!(durable_command_result(&WireEvent::SessionApiKeyRevealed {
+        session_id: "session_a".to_string(),
+        api_key: "secret".to_string(),
+    })
+    .is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn concurrent_same_command_id_has_one_executor_but_distinct_ids_both_execute() {
+    let cache = Arc::new(Mutex::new(CommandDedupCache::default()));
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let threads = (0..8)
+        .map(|_| {
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            let executions = Arc::clone(&executions);
+            thread::spawn(move || {
+                barrier.wait();
+                if cache.lock().unwrap().reserve("same_id").is_none() {
+                    executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(cache.lock().unwrap().reserve("different_id_a").is_none());
+    assert!(cache.lock().unwrap().reserve("different_id_b").is_none());
+}
+
+#[test]
+fn command_lanes_serialize_one_session_without_globally_serializing_other_sessions() {
+    let state = routing_test_state();
+    let command = |session_id: &str| ClientCommand::TurnCancel {
+        session_id: session_id.to_string(),
+    };
+    let (_, session_a_first) = command_lane(&state, &command("session_a")).unwrap();
+    let (_, session_a_second) = command_lane(&state, &command("session_a")).unwrap();
+    let (_, session_b) = command_lane(&state, &command("session_b")).unwrap();
+    assert!(Arc::ptr_eq(&session_a_first, &session_a_second));
+    assert!(!Arc::ptr_eq(&session_a_first, &session_b));
+
+    let held_a = session_a_first
+        .enter(session_a_first.issue().unwrap())
+        .unwrap();
+    assert_eq!(session_a_second.state.lock().unwrap().serving_ticket, 0);
+    let held_b = session_b.enter(session_b.issue().unwrap()).unwrap();
+    drop(held_b);
+    drop(held_a);
+    assert!(session_a_second
+        .enter(session_a_second.issue().unwrap())
+        .is_ok());
+}
+
+#[test]
+fn completed_command_lanes_are_reclaimed_without_removing_a_lane_with_pending_tickets() {
+    let state = routing_test_state();
+    for ordinal in 0..256 {
+        let command = ClientCommand::TurnCancel {
+            session_id: format!("ephemeral-session-{ordinal}"),
+        };
+        let (key, lane) = command_lane(&state, &command).unwrap();
+        let accepted = AcceptedCommandLane {
+            key,
+            ticket: lane.issue().unwrap(),
+            lane: Arc::clone(&lane),
+            lanes: Arc::clone(&state.command_lanes),
+        };
+        let guard = lane.enter(accepted.ticket).unwrap();
+        drop(guard);
+        drop(lane);
+        drop(accepted);
+    }
+    assert!(
+        state.command_lanes.lock().unwrap().is_empty(),
+        "completed one-shot session IDs must not grow the lane map forever"
+    );
+
+    let command = ClientCommand::TurnCancel {
+        session_id: "shared-pending-session".to_string(),
+    };
+    let (first_key, lane) = command_lane(&state, &command).unwrap();
+    let first = AcceptedCommandLane {
+        key: first_key,
+        ticket: lane.issue().unwrap(),
+        lane: Arc::clone(&lane),
+        lanes: Arc::clone(&state.command_lanes),
+    };
+    let (second_key, same_lane) = command_lane(&state, &command).unwrap();
+    let second = AcceptedCommandLane {
+        key: second_key,
+        ticket: same_lane.issue().unwrap(),
+        lane: Arc::clone(&same_lane),
+        lanes: Arc::clone(&state.command_lanes),
+    };
+    assert!(Arc::ptr_eq(&lane, &same_lane));
+    let first_guard = lane.enter(first.ticket).unwrap();
+    drop(first_guard);
+    drop(first);
+    assert_eq!(
+        state.command_lanes.lock().unwrap().len(),
+        1,
+        "the map must retain the FIFO lane while a later accepted ticket exists"
+    );
+    let second_guard = same_lane.enter(second.ticket).unwrap();
+    drop(second_guard);
+    drop(lane);
+    drop(same_lane);
+    drop(second);
+    assert!(state.command_lanes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn ticket_lane_is_fifo_even_when_a_later_waiter_is_scheduled_aggressively() {
+    let lane = Arc::new(TicketCommandLane::default());
+    let held = lane.enter(lane.issue().unwrap()).unwrap();
+    let (order_tx, order_rx) = std::sync::mpsc::channel();
+
+    let first = {
+        let lane = Arc::clone(&lane);
+        let order_tx = order_tx.clone();
+        thread::spawn(move || {
+            let ticket = lane.issue().unwrap();
+            let _guard = lane.enter(ticket).unwrap();
+            order_tx.send("first").unwrap();
+        })
+    };
+    while lane.state.lock().unwrap().next_ticket < 2 {
+        thread::yield_now();
+    }
+    let second = {
+        let lane = Arc::clone(&lane);
+        thread::spawn(move || {
+            let ticket = lane.issue().unwrap();
+            let _guard = lane.enter(ticket).unwrap();
+            order_tx.send("second").unwrap();
+        })
+    };
+    while lane.state.lock().unwrap().next_ticket < 3 {
+        thread::yield_now();
+    }
+    drop(held);
+
+    assert_eq!(order_rx.recv().unwrap(), "first");
+    assert_eq!(order_rx.recv().unwrap(), "second");
+    first.join().unwrap();
+    second.join().unwrap();
+}
+
+#[test]
+fn skipped_queue_full_ticket_does_not_block_the_next_accepted_command() {
+    let lane = Arc::new(TicketCommandLane::default());
+    let first_ticket = lane.issue().unwrap();
+    let rejected_ticket = lane.issue().unwrap();
+    let next_ticket = lane.issue().unwrap();
+    let first = lane.enter(first_ticket).unwrap();
+    lane.skip(rejected_ticket).unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let waiter_lane = Arc::clone(&lane);
+    let waiter = thread::spawn(move || {
+        let _guard = waiter_lane.enter(next_ticket).unwrap();
+        entered_tx.send(()).unwrap();
+    });
+    assert!(entered_rx.try_recv().is_err());
+    drop(first);
+    entered_rx.recv().unwrap();
+    waiter.join().unwrap();
+}
+
+#[test]
+fn global_writer_waits_for_all_session_readers_and_blocks_new_readers() {
+    let barrier = Arc::new(RwLock::new(()));
+    let reader_a = barrier.read().unwrap();
+    let reader_b = barrier.read().unwrap();
+    let (writer_entered_tx, writer_entered_rx) = std::sync::mpsc::channel();
+    let (writer_release_tx, writer_release_rx) = std::sync::mpsc::channel();
+    let writer_barrier = Arc::clone(&barrier);
+    let writer = thread::spawn(move || {
+        let _writer = writer_barrier.write().unwrap();
+        writer_entered_tx.send(()).unwrap();
+        writer_release_rx.recv().unwrap();
+    });
+
+    assert!(writer_entered_rx.try_recv().is_err());
+    drop(reader_a);
+    assert!(writer_entered_rx.try_recv().is_err());
+    drop(reader_b);
+    writer_entered_rx.recv().unwrap();
+    assert!(barrier.try_read().is_err());
+    writer_release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    assert!(barrier.read().is_ok());
+}
+
+#[test]
+fn queued_command_from_old_mem_epoch_is_rejected_before_domain_execution() {
+    let state = routing_test_state();
+    *state.mem_epoch.write().unwrap() = 2;
+    let completion = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: None,
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            command: ClientCommand::SessionRename {
+                session_id: "session_a".to_string(),
+                display_name: "must not run".to_string(),
+            },
+        },
+    );
+    assert_eq!(
+        completion.legacy_error.as_deref(),
+        Some("command_mem_epoch_stale")
+    );
+    assert_ne!(
+        state.sessions.lock().unwrap()["session_a"].display_name,
+        "must not run"
+    );
+}
+
+#[test]
+fn terminal_persist_failure_never_reports_an_applied_effect_as_rejected() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "TERMINAL_PERSIST_FAILURE");
+    let command_id = "rename_terminal_persist_failure";
+    assert!(reserve_command_dedup(&state, command_id).unwrap().is_none());
+    let blocker = std::env::temp_dir().join(unique_web_id("dedup_parent_blocker"));
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    state.mem.lock().unwrap().layout = RuntimeDataLayout::new(&blocker, ".blocked");
+
+    let completion = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: Some(command_id.to_string()),
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            command: ClientCommand::SessionRename {
+                session_id: session_id.clone(),
+                display_name: "Applied despite terminal journal failure".to_string(),
+            },
+        },
+    );
+    assert!(matches!(
+        completion.ack,
+        Some(WireEvent::CommandAck {
+            status: CommandAckStatus::Accepted,
+            error: Some(ref error),
+            ..
+        }) if error.starts_with("command_terminal_persist_pending:")
+    ));
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id].display_name,
+        "Applied despite terminal journal failure"
+    );
+    let _ = std::fs::remove_file(blocker);
+}
+
+#[test]
+fn accepted_record_survives_restart_as_uncertain_instead_of_reexecuting() {
+    let dir = std::env::temp_dir().join(unique_web_id("uncertain_restart"));
+    let path = dir.join("dedup.json");
+    let mut before_crash = CommandDedupCache::default();
+    assert!(before_crash.reserve("uncertain_non_idempotent").is_none());
+    before_crash.save(&path).unwrap();
+
+    let mut after_restart = CommandDedupCache::load(&path).unwrap();
+    assert!(matches!(
+        after_restart.reserve("uncertain_non_idempotent"),
+        Some(CommandDedupState::Accepted)
+    ));
+    assert_eq!(after_restart.records.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn all_accepted_command_cache_is_bounded_instead_of_evicting_ownership() {
+    let state = routing_test_state();
+    {
+        let mut cache = state.command_dedup.lock().unwrap();
+        for ordinal in 0..COMMAND_DEDUP_CAPACITY {
+            assert!(cache.reserve(&format!("accepted_{ordinal}")).is_none());
+        }
+    }
+
+    assert!(matches!(
+        reserve_command_dedup(&state, "one_too_many"),
+        Err(error) if error == "command_dedup_capacity_exhausted"
+    ));
+    let cache = state.command_dedup.lock().unwrap();
+    assert_eq!(cache.records.len(), COMMAND_DEDUP_CAPACITY);
+    assert!(cache.records.contains_key("accepted_0"));
+    assert!(!cache.records.contains_key("one_too_many"));
+}
+
+#[test]
+fn core_acceptance_ack_is_correlated_live_control_not_semantic_journal_data() {
+    let state = routing_test_state();
+    let command_id = "core_acceptance_control_ack";
+    start_web_turn_with_command_id(
+        &state,
+        "session_a",
+        "durable command awaiting Core",
+        Some(command_id),
+    )
+    .unwrap();
+    assert!(reserve_command_dedup(&state, command_id).unwrap().is_none());
+    let cursor = state.event_journal.lock().unwrap().cursor();
+    let mut live = state.events.subscribe();
+
+    mark_core_command_accepted(&state, "session_a", command_id);
+
+    let event = live.try_recv().unwrap();
+    assert!(matches!(
+        event,
+        WireEvent::CommandAck {
+            command_id: ref actual,
+            status: CommandAckStatus::Committed,
+            ..
+        } if actual == command_id
+    ));
+    assert!(state
+        .event_journal
+        .lock()
+        .unwrap()
+        .replay_after(cursor)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "DELIVERY_REPLAY");
+    let command_id = "turn_submit_crash_window";
+    let first = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "perform exactly once",
+        Some(command_id),
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.turns.last_mut().unwrap().user_entries[0].delivery_state =
+            Some(ChatCommandDeliveryState::CoreAccepted);
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .turns
+            .last()
+            .unwrap()
+            .user_entries[0]
+            .delivery_state,
+        Some(ChatCommandDeliveryState::CoreAccepted)
+    );
+
+    let replay = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some(command_id),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "perform exactly once".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::TurnUpdated { turn, .. } = replay else {
+        panic!("replay should return the original domain result")
+    };
+    assert_eq!(turn.turn_id, first.turn_id);
+    assert_eq!(state.sessions.lock().unwrap()[&session_id].turns.len(), 1);
+}
+
+#[test]
+fn restore_redrives_unfinished_core_accepted_intent_into_the_new_worker() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "RESTORE_CORE_ACCEPTED");
+    let command_id = "accepted_before_process_crash";
+    let turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "must resume after process restart",
+        Some(command_id),
+    )
+    .unwrap();
+    append_turn_supplement_with_pending_attachments(
+        &state,
+        &session_id,
+        "first supplement recorded before crash".to_string(),
+        Some("restore_supplement_1"),
+    )
+    .unwrap();
+    append_turn_supplement_with_pending_attachments(
+        &state,
+        &session_id,
+        "second supplement recorded before crash".to_string(),
+        Some("restore_supplement_2"),
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        for entry in &mut session.turns.last_mut().unwrap().user_entries {
+            entry.delivery_state = Some(ChatCommandDeliveryState::CoreAccepted);
+        }
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    assert!(state.sessions.lock().unwrap()[&session_id]
+        .turns
+        .last()
+        .unwrap()
+        .user_entries
+        .iter()
+        .all(|entry| entry.delivery_state == Some(ChatCommandDeliveryState::CoreAccepted)));
+
+    resume_unfinished_core_command_after_restore(&state, &session_id).unwrap();
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .active_turn_id
+            .as_deref(),
+        Some(turn.turn_id.as_str())
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
+            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+        }
+        if state.sessions.lock().unwrap()[&session_id]
+            .turns
+            .last()
+            .unwrap()
+            .final_answer
+            .as_deref()
+            == Some("RESTORE_CORE_ACCEPTED")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "restored CoreAccepted intent was not re-driven"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn four_sessions_restore_task_and_supplements_as_parallel_isolated_atomic_batches() {
+    const SESSION_COUNT: usize = 4;
+    let state = routing_test_state();
+    let model_barrier = Arc::new(std::sync::Barrier::new(SESSION_COUNT));
+    let sessions = (0..SESSION_COUNT)
+        .map(|ordinal| {
+            let name = format!("RESTORE_PARALLEL_{ordinal}");
+            let prompts = Arc::new(Mutex::new(Vec::new()));
+            let session_id = register_restore_barrier_worker(
+                &state,
+                name.clone(),
+                Arc::clone(&model_barrier),
+                Arc::clone(&prompts),
+            );
+            start_web_turn_with_command_id(
+                &state,
+                &session_id,
+                &format!("{name}_TASK"),
+                Some(&format!("{name}_TASK_COMMAND")),
+            )
+            .unwrap();
+            for supplement in 0..2 {
+                append_turn_supplement_with_pending_attachments(
+                    &state,
+                    &session_id,
+                    format!("{name}_SUPPLEMENT_{supplement}"),
+                    Some(&format!("{name}_SUPPLEMENT_COMMAND_{supplement}")),
+                )
+                .unwrap();
+            }
+            {
+                let mut sessions = state.sessions.lock().unwrap();
+                let session = sessions.get_mut(&session_id).unwrap();
+                for entry in &mut session.turns.last_mut().unwrap().user_entries {
+                    entry.delivery_state = Some(ChatCommandDeliveryState::CoreAccepted);
+                }
+                session.active_turn_id = None;
+                session.state = "ready".to_string();
+            }
+            (session_id, name, prompts)
+        })
+        .collect::<Vec<_>>();
+
+    let callers = sessions
+        .iter()
+        .map(|(session_id, _, _)| {
+            let state = state.clone();
+            let session_id = session_id.clone();
+            thread::spawn(move || resume_unfinished_core_command_after_restore(&state, &session_id))
+        })
+        .collect::<Vec<_>>();
+    for caller in callers {
+        caller.join().unwrap().unwrap();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
+            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+        }
+        let all_finished = {
+            let stored = state.sessions.lock().unwrap();
+            sessions.iter().all(|(session_id, name, _)| {
+                stored[session_id]
+                    .turns
+                    .last()
+                    .and_then(|turn| turn.final_answer.as_deref())
+                    == Some(format!("{name}_FINAL").as_str())
+            })
+        };
+        if all_finished {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "parallel restore did not complete; model barrier would expose global serialization"
+        );
+        thread::yield_now();
+    }
+
+    let stored = state.sessions.lock().unwrap();
+    for (session_id, name, prompts) in &sessions {
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(
+            prompts.len(),
+            1,
+            "restored batch should need one model call"
+        );
+        let prompt = &prompts[0];
+        assert!(prompt.contains(&format!("{name}_TASK")));
+        assert!(prompt.contains(&format!("{name}_SUPPLEMENT_0")));
+        assert!(prompt.contains(&format!("{name}_SUPPLEMENT_1")));
+        for (_, other_name, _) in &sessions {
+            if other_name != name {
+                assert!(
+                    !prompt.contains(other_name),
+                    "restored prompt leaked another session"
+                );
+            }
+        }
+        let turn = stored[session_id].turns.last().unwrap();
+        assert_eq!(
+            turn.final_answer.as_deref(),
+            Some(format!("{name}_FINAL").as_str())
+        );
+        assert_eq!(turn.user_entries.len(), 3);
+        assert_eq!(
+            turn.user_entries
+                .iter()
+                .filter_map(|entry| entry.command_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("{name}_TASK_COMMAND"),
+                format!("{name}_SUPPLEMENT_COMMAND_0"),
+                format!("{name}_SUPPLEMENT_COMMAND_1"),
+            ]
+        );
+        assert!(turn
+            .user_entries
+            .iter()
+            .all(|entry| entry.delivery_state == Some(ChatCommandDeliveryState::CoreAccepted)));
+    }
+    drop(stored);
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+fn force_session_history_persistence_failure(state: &AppState, label: &str) -> PathBuf {
+    let blocker = std::env::temp_dir().join(unique_web_id(label));
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    state.mem.lock().unwrap().session_store = SessionStore::new(&blocker);
+    blocker
+}
+
+#[test]
+fn failed_new_turn_persistence_rolls_back_all_in_memory_state() {
+    let state = routing_test_state();
+    let attachment = WebAttachment {
+        id: "rollback_attachment".to_string(),
+        name: "evidence.txt".to_string(),
+        path: "/tmp/evidence.txt".to_string(),
+        bytes: 8,
+    };
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .attachments
+        .push(attachment.clone());
+    let before = state.sessions.lock().unwrap()["session_a"].clone();
+    let blocker = force_session_history_persistence_failure(&state, "turn_persist_blocker");
+
+    assert!(start_web_turn_with_command_id(
+        &state,
+        "session_a",
+        "must not become a ghost turn",
+        Some("failed_turn_command"),
+    )
+    .is_err());
+
+    let after = &state.sessions.lock().unwrap()["session_a"];
+    assert_eq!(after.active_turn_id, before.active_turn_id);
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.turns.len(), before.turns.len());
+    assert_eq!(after.messages.len(), before.messages.len());
+    assert_eq!(after.attachments, vec![attachment]);
+    let _ = std::fs::remove_file(blocker);
+}
+
+#[test]
+fn failed_supplement_persistence_restores_entry_and_pending_attachments() {
+    let state = routing_test_state();
+    let turn = start_web_turn(&state, "session_a", "existing task").unwrap();
+    let attachment = WebAttachment {
+        id: "supplement_rollback_attachment".to_string(),
+        name: "late.txt".to_string(),
+        path: "/tmp/late.txt".to_string(),
+        bytes: 4,
+    };
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .attachments
+        .push(attachment.clone());
+    let blocker = force_session_history_persistence_failure(&state, "supplement_persist_blocker");
+
+    assert!(append_turn_supplement_with_pending_attachments(
+        &state,
+        "session_a",
+        "must not become a ghost supplement".to_string(),
+        Some("failed_supplement_command"),
+    )
+    .is_err());
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions["session_a"];
+    assert_eq!(
+        session.active_turn_id.as_deref(),
+        Some(turn.turn_id.as_str())
+    );
+    assert_eq!(session.turns.last().unwrap().user_entries.len(), 1);
+    assert_eq!(session.attachments, vec![attachment]);
+    drop(sessions);
+    let _ = std::fs::remove_file(blocker);
+}
+
+#[test]
+fn same_id_racing_across_sockets_has_one_owner_and_distinct_ids_all_execute() {
+    const CONNECTIONS: usize = 12;
+    let cache = Arc::new(Mutex::new(CommandDedupCache::default()));
+    let barrier = Arc::new(std::sync::Barrier::new(CONNECTIONS));
+    let same_id_owners = Arc::new(AtomicUsize::new(0));
+    let distinct_id_owners = Arc::new(AtomicUsize::new(0));
+    let threads = (0..CONNECTIONS)
+        .map(|connection| {
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            let same_id_owners = Arc::clone(&same_id_owners);
+            let distinct_id_owners = Arc::clone(&distinct_id_owners);
+            thread::spawn(move || {
+                barrier.wait();
+                let mut cache = cache.lock().unwrap();
+                if cache.reserve("same_command_from_every_socket").is_none() {
+                    same_id_owners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                // Payload equality is irrelevant. A distinct command ID means
+                // a distinct user intent and must not be content-deduplicated.
+                if cache.reserve(&format!("distinct_{connection}")).is_none() {
+                    distinct_id_owners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    assert_eq!(same_id_owners.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        distinct_id_owners.load(std::sync::atomic::Ordering::SeqCst),
+        CONNECTIONS
+    );
+}
+
+#[test]
+fn lost_terminal_ack_retry_replays_result_without_a_second_handler_effect() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "ACK_LOSS_RETRY");
+    let command_id = "rename_with_lost_ack";
+    assert!(reserve_command_dedup(&state, command_id).unwrap().is_none());
+    let completion = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: Some(command_id.to_string()),
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            command: ClientCommand::SessionRename {
+                session_id: session_id.clone(),
+                display_name: "Committed once".to_string(),
+            },
+        },
+    );
+    assert!(matches!(
+        completion.ack,
+        Some(WireEvent::CommandAck {
+            status: CommandAckStatus::Committed,
+            ..
+        })
+    ));
+    // Simulate losing both the direct result and terminal ack. Retrying the
+    // same ID must see the cache and must never execute handle_command again.
+    let replay = reserve_command_dedup(&state, command_id).unwrap().unwrap();
+    assert!(matches!(replay, CommandDedupState::Committed { .. }));
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id].display_name,
+        "Committed once"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_after_acceptance_does_not_abort_queued_commands() {
+    let (command_tx, command_rx) = tokio_mpsc::channel(2);
+    let (result_tx, result_rx) = tokio_mpsc::unbounded_channel();
+    let handled = Arc::new(AtomicUsize::new(0));
+    let handled_worker = Arc::clone(&handled);
+    let worker = tokio::spawn(run_ordered_blocking_queue(
+        command_rx,
+        result_tx,
+        move |_: usize| {
+            handled_worker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+    ));
+    command_tx.send(1).await.unwrap();
+    command_tx.send(2).await.unwrap();
+    drop(result_rx);
+    drop(command_tx);
+    worker.await.unwrap();
+    assert_eq!(handled.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn command_results_from_different_sockets_may_reorder_but_keep_their_ids() {
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (slow_tx, slow_rx) = tokio_mpsc::channel(1);
+    let (slow_result_tx, mut slow_result_rx) = tokio_mpsc::unbounded_channel();
+    let slow_gate = Arc::clone(&gate);
+    let slow_worker = tokio::spawn(run_ordered_blocking_queue(
+        slow_rx,
+        slow_result_tx,
+        move |command_id: String| {
+            let (released, wake) = &*slow_gate;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            Ok(command_id)
+        },
+    ));
+
+    let (fast_tx, fast_rx) = tokio_mpsc::channel(1);
+    let (fast_result_tx, mut fast_result_rx) = tokio_mpsc::unbounded_channel();
+    let fast_worker = tokio::spawn(run_ordered_blocking_queue(
+        fast_rx,
+        fast_result_tx,
+        |command_id: String| Ok(command_id),
+    ));
+
+    slow_tx.send("socket_a_command".to_string()).await.unwrap();
+    fast_tx.send("socket_b_command".to_string()).await.unwrap();
+    assert_eq!(
+        fast_result_rx.recv().await.unwrap().unwrap(),
+        "socket_b_command"
+    );
+    assert!(slow_result_rx.try_recv().is_err());
+
+    {
+        let (released, wake) = &*gate;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+    }
+    assert_eq!(
+        slow_result_rx.recv().await.unwrap().unwrap(),
+        "socket_a_command"
+    );
+    drop(slow_tx);
+    drop(fast_tx);
+    slow_worker.await.unwrap();
+    fast_worker.await.unwrap();
+}
 
 #[tokio::test]
 async fn ordered_browser_command_worker_keeps_async_runtime_responsive_and_results_ordered() {
@@ -369,34 +1330,41 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     assert!(public.server.public_access);
     assert!(!authorized(
         &state,
-        &AuthQuery { token: None },
-        &HeaderMap::new()
-    ));
-    assert!(!authorized(
-        &state,
         &AuthQuery {
-            token: Some("wrong".to_string())
+            token: None,
+            last_event_seq: None
         },
         &HeaderMap::new()
     ));
     assert!(!authorized(
         &state,
         &AuthQuery {
-            token: Some("te".to_string())
+            token: Some("wrong".to_string()),
+            last_event_seq: None,
         },
         &HeaderMap::new()
     ));
     assert!(!authorized(
         &state,
         &AuthQuery {
-            token: Some("test-extra".to_string())
+            token: Some("te".to_string()),
+            last_event_seq: None,
+        },
+        &HeaderMap::new()
+    ));
+    assert!(!authorized(
+        &state,
+        &AuthQuery {
+            token: Some("test-extra".to_string()),
+            last_event_seq: None,
         },
         &HeaderMap::new()
     ));
     assert!(authorized(
         &state,
         &AuthQuery {
-            token: Some("test".to_string())
+            token: Some("test".to_string()),
+            last_event_seq: None,
         },
         &HeaderMap::new()
     ));
@@ -408,13 +1376,17 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     );
     assert!(authorized(
         &state,
-        &AuthQuery { token: None },
+        &AuthQuery {
+            token: None,
+            last_event_seq: None
+        },
         &cookie_headers
     ));
     assert!(!authorized(
         &state,
         &AuthQuery {
-            token: Some("te".to_string())
+            token: Some("te".to_string()),
+            last_event_seq: None,
         },
         &cookie_headers
     ));
@@ -426,7 +1398,10 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     );
     assert!(!authorized(
         &state,
-        &AuthQuery { token: None },
+        &AuthQuery {
+            token: None,
+            last_event_seq: None
+        },
         &partial_cookie_headers
     ));
 
@@ -437,7 +1412,10 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     );
     assert!(!authorized(
         &state,
-        &AuthQuery { token: None },
+        &AuthQuery {
+            token: None,
+            last_event_seq: None
+        },
         &similar_cookie_headers
     ));
 }
@@ -447,7 +1425,10 @@ async fn static_web_entry_requires_token_or_authenticated_cookie() {
     let state = routing_test_state();
     let denied = static_asset(
         State((state.clone(), TEST_PORT)),
-        Query(AuthQuery { token: None }),
+        Query(AuthQuery {
+            token: None,
+            last_event_seq: None,
+        }),
         HeaderMap::new(),
         Uri::from_static("/"),
     )
@@ -465,6 +1446,7 @@ async fn static_web_entry_requires_token_or_authenticated_cookie() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery {
             token: Some("test".to_string()),
+            last_event_seq: None,
         }),
         HeaderMap::new(),
         Uri::from_static("/"),
@@ -487,7 +1469,10 @@ async fn static_web_entry_requires_token_or_authenticated_cookie() {
     );
     let cookie_allowed = static_asset(
         State((state, TEST_PORT)),
-        Query(AuthQuery { token: None }),
+        Query(AuthQuery {
+            token: None,
+            last_event_seq: None,
+        }),
         headers,
         Uri::from_static("/assets/index.js"),
     )
@@ -507,6 +1492,7 @@ async fn explicit_partial_static_token_does_not_fallback_to_cookie() {
         State((state, TEST_PORT)),
         Query(AuthQuery {
             token: Some("te".to_string()),
+            last_event_seq: None,
         }),
         headers,
         Uri::from_static("/"),
@@ -557,6 +1543,7 @@ async fn api_routes_reject_cross_origin_even_with_valid_token() {
         State((state, TEST_PORT)),
         Query(AuthQuery {
             token: Some("test".to_string()),
+            last_event_seq: None,
         }),
         headers,
     )
@@ -990,9 +1977,12 @@ fn runtime_update_propagates_to_existing_sessions_and_new_session_defaults() {
         key,
         value,
         session_env_defaults,
-    } = events.try_recv().unwrap()
+    } = drain_wire_events(&mut events)
+        .into_iter()
+        .find(|event| matches!(event, WireEvent::HostConfigUpdated { .. }))
+        .expect("runtime update must publish refreshed session defaults")
     else {
-        panic!("runtime update must publish refreshed session defaults")
+        unreachable!()
     };
     assert_eq!(key, "TIMEM_MODEL");
     assert_eq!(value, "future-session-model");
@@ -1079,8 +2069,9 @@ fn session_runtime_update_is_scoped_and_persisted_without_changing_host_defaults
     .unwrap()
     .is_none());
 
-    let event = events
-        .try_recv()
+    let event = drain_wire_events(&mut events)
+        .into_iter()
+        .find(|event| matches!(event, WireEvent::SessionRuntimeConfigUpdated { .. }))
         .expect("scoped update should publish an event");
     assert!(matches!(
         event,
@@ -1238,6 +2229,9 @@ fn browser_responses_disable_referrer_leaks_and_remote_active_content() {
         .to_str()
         .unwrap();
     assert!(policy.contains("img-src 'self' data:"));
+    assert!(policy.contains("script-src 'self'"));
+    assert!(!policy.contains("script-src 'self' 'unsafe-inline'"));
+    assert!(policy.contains("form-action 'none'"));
     assert!(policy.contains("object-src 'none'"));
     assert!(policy.contains("frame-ancestors 'none'"));
 }
@@ -1362,6 +2356,8 @@ fn session_delete_stops_workers_and_removes_persisted_session() {
                 turn_id: "turn_delete".to_string(),
                 created_at_ms: 1,
                 kind: None,
+                command_id: None,
+                delivery_state: None,
                 content: "delete this history".to_string(),
             },
         )
@@ -1469,8 +2465,9 @@ fn existing_session_api_key_can_be_updated_without_exposing_the_secret() {
     )
     .unwrap()
     .is_none());
-    let event = events
-        .try_recv()
+    let event = drain_wire_events(&mut events)
+        .into_iter()
+        .find(|event| matches!(event, WireEvent::SessionRuntimeUpdated { .. }))
         .expect("credential update should publish a scoped event");
     assert!(matches!(
         event,
@@ -1530,8 +2527,9 @@ fn existing_session_api_key_can_be_updated_without_exposing_the_secret() {
     )
     .unwrap()
     .is_none());
-    let cleared = events
-        .try_recv()
+    let cleared = drain_wire_events(&mut events)
+        .into_iter()
+        .find(|event| matches!(event, WireEvent::SessionRuntimeUpdated { .. }))
         .expect("credential clearing should publish a scoped event");
     assert!(matches!(
         cleared,
@@ -2073,6 +3071,8 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
                 turn_id: turn_id.to_string(),
                 created_at_ms: 1,
                 kind: Some("task".to_string()),
+                command_id: None,
+                delivery_state: None,
                 content: "generate the VLA parking milestones".to_string(),
             },
         )
@@ -2100,6 +3100,8 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
                 turn_id: turn_id.to_string(),
                 created_at_ms: 205,
                 kind: Some("supplement".to_string()),
+                command_id: None,
+                delivery_state: None,
                 content: "还有一个 tar_log，下面是 clp 压缩的日志".to_string(),
             },
         )
@@ -2211,6 +3213,8 @@ fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
             turn_id: "turn_10".to_string(),
             created_at_ms: 10,
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: "first by time".to_string(),
         },
         ChatHistoryRecord::Message {
@@ -2218,6 +3222,8 @@ fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
             turn_id: "turn_10".to_string(),
             created_at_ms: 11,
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: "first answer".to_string(),
         },
         ChatHistoryRecord::Message {
@@ -2225,6 +3231,8 @@ fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
             turn_id: "turn_2".to_string(),
             created_at_ms: 20,
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: "second by time".to_string(),
         },
         ChatHistoryRecord::Message {
@@ -2232,6 +3240,8 @@ fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
             turn_id: "turn_2".to_string(),
             created_at_ms: 21,
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: "second answer".to_string(),
         },
     ];
@@ -2256,6 +3266,8 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             turn_id: "turn_1".to_string(),
             created_at_ms: 10,
             kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
             content: "original task".to_string(),
         },
         ChatHistoryRecord::Message {
@@ -2263,6 +3275,8 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             turn_id: "turn_1".to_string(),
             created_at_ms: 11,
             kind: Some("supplement".to_string()),
+            command_id: None,
+            delivery_state: None,
             content: "mid-turn supplement".to_string(),
         },
         ChatHistoryRecord::Message {
@@ -2270,6 +3284,8 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             turn_id: "turn_1".to_string(),
             created_at_ms: 12,
             kind: Some("approval".to_string()),
+            command_id: None,
+            delivery_state: None,
             content: "approved request".to_string(),
         },
         ChatHistoryRecord::Message {
@@ -2277,6 +3293,8 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             turn_id: "turn_1".to_string(),
             created_at_ms: 13,
             kind: Some("unknown_legacy_kind".to_string()),
+            command_id: None,
+            delivery_state: None,
             content: "legacy text".to_string(),
         },
     ];
@@ -2311,6 +3329,8 @@ fn history_page_command_loads_older_records_by_cursor() {
                     turn_id: format!("turn_{index}"),
                     created_at_ms: index,
                     kind: None,
+                    command_id: None,
+                    delivery_state: None,
                     content: format!("line {index}"),
                 },
             )
@@ -2383,6 +3403,8 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
             turn_id: "turn_0".to_string(),
             created_at_ms: 0,
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: "first valid".to_string(),
         })
         .unwrap(),
@@ -2392,6 +3414,8 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
             turn_id: "turn_1".to_string(),
             created_at_ms: 1,
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: "second valid".to_string(),
         })
         .unwrap(),
@@ -2400,6 +3424,8 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
             turn_id: "turn_2".to_string(),
             created_at_ms: 2,
             kind: None,
+            command_id: None,
+            delivery_state: None,
             content: "third valid".to_string(),
         })
         .unwrap(),
@@ -2496,7 +3522,7 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     .unwrap()
     .is_none());
 
-    let WireEvent::Hello { snapshot } = events.try_recv().unwrap() else {
+    let WireEvent::Hello { snapshot, .. } = events.try_recv().unwrap() else {
         panic!("expected hello snapshot after mem switch")
     };
     assert_eq!(snapshot.server.mem.space, "beta");
@@ -2508,6 +3534,15 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
         .sessions
         .iter()
         .any(|session| session.session_id == alpha_session));
+    let journal_path = state.event_journal.lock().unwrap().path().to_path_buf();
+    assert_eq!(
+        journal_path,
+        data_dir
+            .join("beta")
+            .join("memory")
+            .join("web_events.ndjson"),
+        "switching mem must also switch the durable semantic-event journal"
+    );
 }
 
 #[test]
@@ -2532,6 +3567,27 @@ fn mem_switch_requires_a_safe_absolute_directory_path() {
         )
         .is_err());
     }
+}
+
+#[test]
+fn mem_switch_rejects_active_sessions_before_touching_mem_scoped_journals() {
+    let state = routing_test_state();
+    let original_mem = current_mem_state(&state).unwrap().space;
+    let original_journal = state.event_journal.lock().unwrap().path().to_path_buf();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .active_turn_id = Some("active_turn".to_string());
+
+    assert_eq!(
+        switch_mem_space(&state, TEST_PORT, ".next_mem").unwrap_err(),
+        "mem_switch_active_sessions"
+    );
+    assert_eq!(current_mem_state(&state).unwrap().space, original_mem);
+    assert_eq!(state.event_journal.lock().unwrap().path(), original_journal);
 }
 
 #[test]
@@ -2701,6 +3757,16 @@ fn routing_test_state() -> AppState {
         template: Arc::new(template),
         events,
         sessions: Arc::new(Mutex::new(sessions)),
+        command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
+        event_journal: Arc::new(Mutex::new(
+            EventJournal::open(
+                std::env::temp_dir().join(unique_web_id("routing_test_events.ndjson")),
+            )
+            .unwrap(),
+        )),
+        command_lanes: Arc::new(Mutex::new(HashMap::new())),
+        command_global_barrier: Arc::new(RwLock::new(())),
+        mem_epoch: Arc::new(RwLock::new(1)),
     }
 }
 
@@ -2748,6 +3814,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         resume_notice_pending: false,
         active_turn_id: None,
         pending_completion_message_id: None,
+        pending_unconsumed_supplements: Vec::new(),
         work_instruction_mode: WorkInstructionLoadMode::Off,
         work_instruction_allowed: None,
         pending_work_instruction_turn: None,
@@ -2918,6 +3985,121 @@ fn concurrent_agent_topics_stay_in_their_own_session_and_wire_payload() {
     }
     assert_eq!(forwarded.get("session_a"), Some(&EVENTS_PER_AGENT));
     assert_eq!(forwarded.get("session_b"), Some(&EVENTS_PER_AGENT));
+}
+
+#[test]
+fn barrier_synchronized_sessions_keep_request_action_final_and_completion_scoped() {
+    const SESSIONS: usize = 8;
+    let state = routing_test_state();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.clear();
+        for ordinal in 0..SESSIONS {
+            let session_id = format!("barrier_session_{ordinal}");
+            sessions.insert(
+                session_id.clone(),
+                test_web_session(&session_id, ordinal as u32, format!("Agent {ordinal}")),
+            );
+        }
+    }
+    for ordinal in 0..SESSIONS {
+        start_web_turn(
+            &state,
+            &format!("barrier_session_{ordinal}"),
+            &format!("task-{ordinal}"),
+        )
+        .unwrap();
+    }
+    let start = Arc::new(std::sync::Barrier::new(SESSIONS));
+    let after_request = Arc::new(std::sync::Barrier::new(SESSIONS));
+    let after_action = Arc::new(std::sync::Barrier::new(SESSIONS));
+    let threads = (0..SESSIONS)
+        .map(|ordinal| {
+            let state = state.clone();
+            let start = Arc::clone(&start);
+            let after_request = Arc::clone(&after_request);
+            let after_action = Arc::clone(&after_action);
+            thread::spawn(move || {
+                let session_id = format!("barrier_session_{ordinal}");
+                start.wait();
+                handle_worker_event(
+                    &state,
+                    &session_id,
+                    CoreSessionWorkerEvent::ModelRequest { round: 1 },
+                );
+                after_request.wait();
+                let action = CoreTopicEvent::new(
+                    &session_id,
+                    CoreTopic::new(CORE_TOPIC_ACTION, json!({ "event": "finish" })),
+                    CoreSessionState::Running,
+                    json!({ "action": "run_bash", "status": "completed", "marker": session_id }),
+                );
+                handle_worker_event(
+                    &state,
+                    &session_id,
+                    CoreSessionWorkerEvent::Topics(vec![action]),
+                );
+                after_action.wait();
+                handle_worker_event(
+                    &state,
+                    &session_id,
+                    CoreSessionWorkerEvent::Topics(vec![final_response_topic(
+                        &session_id,
+                        format!("final-{ordinal}"),
+                    )]),
+                );
+                handle_worker_event(
+                    &state,
+                    &session_id,
+                    CoreSessionWorkerEvent::TurnFinished {
+                        outcome: TurnOutcome::final_response(
+                            format!("final-{ordinal}"),
+                            UsageStats::zero(),
+                            None,
+                            None,
+                            Duration::ZERO,
+                        ),
+                    },
+                );
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    let sessions = state.sessions.lock().unwrap();
+    for ordinal in 0..SESSIONS {
+        let session_id = format!("barrier_session_{ordinal}");
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "ready");
+        assert!(session
+            .messages
+            .iter()
+            .any(|message| message.text == format!("final-{ordinal}")));
+        assert!(session.messages.iter().all(|message| {
+            (0..SESSIONS).all(|other| other == ordinal || message.text != format!("final-{other}"))
+        }));
+        let turn = session.turns.last().unwrap();
+        assert!(turn.events.iter().all(|event| {
+            event.payload["session_id"]
+                .as_str()
+                .map(|id| id == session_id)
+                .unwrap_or(true)
+        }));
+    }
+    drop(sessions);
+
+    let journal = state.event_journal.lock().unwrap();
+    let replay = journal.replay_after(0).unwrap();
+    assert_eq!(
+        replay
+            .iter()
+            .map(|event| event.event_seq)
+            .collect::<Vec<_>>(),
+        (1..=replay.len() as u64).collect::<Vec<_>>(),
+        "all sessions share one monotonic delivery order without sharing payload scope"
+    );
 }
 
 #[test]
@@ -3474,6 +4656,336 @@ fn five_agent_topic_burst_stays_isolated_and_bounded() {
 }
 
 #[test]
+fn concurrent_cancel_supplement_and_final_are_isolated_by_session() {
+    let state = routing_test_state();
+    let cancel_session = register_real_worker(&state, "CONCURRENT_CANCEL");
+    let supplement_session = register_real_worker(&state, "CONCURRENT_SUPPLEMENT");
+    let final_session = register_real_worker(&state, "CONCURRENT_FINAL");
+    let cancel_turn = start_web_turn(&state, &cancel_session, "cancel only this session").unwrap();
+    let supplement_turn =
+        start_web_turn(&state, &supplement_session, "supplement only this session").unwrap();
+    let final_turn = start_web_turn(&state, &final_session, "finish only this session").unwrap();
+    let (final_context_id, final_worker_id) = primary_worker_scope(&state, &final_session).unwrap();
+
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let cancel_thread = {
+        let state = state.clone();
+        let barrier = Arc::clone(&barrier);
+        let session_id = cancel_session.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            handle_command(&state, TEST_PORT, ClientCommand::TurnCancel { session_id }).unwrap();
+        })
+    };
+    let supplement_thread = {
+        let state = state.clone();
+        let barrier = Arc::clone(&barrier);
+        let session_id = supplement_session.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            append_turn_supplement_with_pending_attachments(
+                &state,
+                &session_id,
+                "only session B sees this".to_string(),
+                None,
+            )
+            .unwrap();
+        })
+    };
+    let final_thread = {
+        let state = state.clone();
+        let barrier = Arc::clone(&barrier);
+        let session_id = final_session.clone();
+        let context_id = final_context_id.clone();
+        let worker_id = final_worker_id.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            handle_scoped_worker_event(
+                &state,
+                &session_id,
+                &context_id,
+                &worker_id,
+                CoreSessionWorkerEvent::Topics(vec![final_response_topic(
+                    &session_id,
+                    "only session C sees this".to_string(),
+                )
+                .with_worker_scope(context_id.clone(), worker_id.clone())]),
+            );
+            handle_scoped_worker_event(
+                &state,
+                &session_id,
+                &context_id,
+                &worker_id,
+                CoreSessionWorkerEvent::TurnFinished {
+                    outcome: TurnOutcome::final_response(
+                        "only session C sees this",
+                        UsageStats::zero(),
+                        None,
+                        None,
+                        Duration::ZERO,
+                    ),
+                },
+            );
+        })
+    };
+    cancel_thread.join().unwrap();
+    supplement_thread.join().unwrap();
+    final_thread.join().unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    let cancelled = &sessions[&cancel_session];
+    assert_eq!(
+        cancelled.active_turn_id.as_deref(),
+        Some(cancel_turn.turn_id.as_str())
+    );
+    assert!(cancelled
+        .messages
+        .iter()
+        .all(|message| message.text != "only session C sees this"));
+    let supplemented = &sessions[&supplement_session];
+    assert_eq!(
+        supplemented.active_turn_id.as_deref(),
+        Some(supplement_turn.turn_id.as_str())
+    );
+    assert_eq!(
+        supplemented
+            .turns
+            .last()
+            .unwrap()
+            .user_entries
+            .last()
+            .unwrap()
+            .text,
+        "only session B sees this"
+    );
+    assert!(supplemented
+        .messages
+        .iter()
+        .all(|message| message.text != "only session C sees this"));
+    let finished = &sessions[&final_session];
+    assert!(finished.active_turn_id.is_none());
+    assert_eq!(finished.turns.last().unwrap().turn_id, final_turn.turn_id);
+    assert_eq!(
+        finished.turns.last().unwrap().final_answer.as_deref(),
+        Some("only session C sees this")
+    );
+    assert!(finished
+        .turns
+        .last()
+        .unwrap()
+        .user_entries
+        .iter()
+        .all(|entry| entry.text != "only session B sees this"));
+    drop(sessions);
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn eight_working_sessions_keep_mixed_cancel_supplement_final_and_request_scoped() {
+    const SESSION_COUNT: usize = 8;
+    let state = routing_test_state();
+    let sessions = (0..SESSION_COUNT)
+        .map(|ordinal| {
+            let session_id = register_real_worker(
+                &state,
+                Box::leak(format!("MIXED_{ordinal}").into_boxed_str()),
+            );
+            let turn = start_web_turn(&state, &session_id, &format!("task-{ordinal}")).unwrap();
+            let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+            (session_id, turn.turn_id, context_id, worker_id)
+        })
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(std::sync::Barrier::new(SESSION_COUNT));
+    let workers = sessions
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(ordinal, (session_id, _, context_id, worker_id))| {
+            let state = state.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                match ordinal % 4 {
+                    0 => {
+                        handle_command(&state, TEST_PORT, ClientCommand::TurnCancel { session_id })
+                            .unwrap();
+                    }
+                    1 => {
+                        append_turn_supplement_with_pending_attachments(
+                            &state,
+                            &session_id,
+                            format!("supplement-{ordinal}"),
+                            None,
+                        )
+                        .unwrap();
+                    }
+                    2 => {
+                        let answer = format!("final-{ordinal}");
+                        handle_scoped_worker_event(
+                            &state,
+                            &session_id,
+                            &context_id,
+                            &worker_id,
+                            CoreSessionWorkerEvent::Topics(vec![final_response_topic(
+                                &session_id,
+                                answer.clone(),
+                            )
+                            .with_worker_scope(context_id.clone(), worker_id.clone())]),
+                        );
+                        handle_scoped_worker_event(
+                            &state,
+                            &session_id,
+                            &context_id,
+                            &worker_id,
+                            CoreSessionWorkerEvent::TurnFinished {
+                                outcome: TurnOutcome::final_response(
+                                    answer,
+                                    UsageStats::zero(),
+                                    None,
+                                    None,
+                                    Duration::ZERO,
+                                ),
+                            },
+                        );
+                    }
+                    _ => {
+                        let request = CoreTopicEvent::new(
+                            session_id.clone(),
+                            CoreTopic::new(CORE_TOPIC_USER_APPROVAL_REQUEST, json!({})),
+                            CoreSessionState::Running,
+                            json!({
+                                "request_id": format!("request-{ordinal}"),
+                                "summary": format!("approval-{ordinal}"),
+                            }),
+                        )
+                        .with_worker_scope(context_id.clone(), worker_id.clone());
+                        handle_scoped_worker_event(
+                            &state,
+                            &session_id,
+                            &context_id,
+                            &worker_id,
+                            CoreSessionWorkerEvent::Topics(vec![request]),
+                        );
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let stored = state.sessions.lock().unwrap();
+    for (ordinal, (session_id, turn_id, _, _)) in sessions.iter().enumerate() {
+        let session = &stored[session_id];
+        let turn = session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == *turn_id)
+            .unwrap();
+        match ordinal % 4 {
+            0 => assert!(turn.final_answer.is_none()),
+            1 => assert_eq!(
+                turn.user_entries.last().unwrap().text,
+                format!("supplement-{ordinal}")
+            ),
+            2 => {
+                assert_eq!(
+                    turn.final_answer.as_deref(),
+                    Some(format!("final-{ordinal}").as_str())
+                );
+                assert!(session.active_turn_id.is_none());
+            }
+            _ => assert!(turn.events.iter().any(|event| {
+                let wire = event.payload.to_string();
+                wire.contains(CORE_TOPIC_USER_APPROVAL_REQUEST)
+                    && wire.contains(&format!("request-{ordinal}"))
+            })),
+        }
+        for other in 0..SESSION_COUNT {
+            if other != ordinal {
+                assert!(turn
+                    .user_entries
+                    .iter()
+                    .all(|entry| entry.text != format!("supplement-{other}")));
+                assert_ne!(
+                    turn.final_answer.as_deref(),
+                    Some(format!("final-{other}").as_str())
+                );
+            }
+        }
+    }
+    drop(stored);
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn deleting_idle_or_host_working_session_does_not_remove_another_sessions_worker() {
+    let state = routing_test_state();
+    let idle_session = register_real_worker(&state, "DELETE_IDLE");
+    let working_session = register_real_worker(&state, "DELETE_WORKING");
+    let survivor_session = register_real_worker(&state, "DELETE_SURVIVOR");
+    let survivor_worker = state.sessions.lock().unwrap()[&survivor_session]
+        .primary_worker_id
+        .clone();
+    start_web_turn(&state, &working_session, "host has an active turn").unwrap();
+    for session_id in [&idle_session, &working_session, &survivor_session] {
+        persist_web_session(&state, session_id).unwrap();
+    }
+
+    for session_id in [idle_session, working_session] {
+        let event = handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionDelete {
+                session_id: session_id.clone(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            event,
+            Some(WireEvent::SessionDeleted { session_id: deleted }) if deleted == session_id
+        ));
+        assert!(!state.sessions.lock().unwrap().contains_key(&session_id));
+        assert!(state
+            .manager
+            .lock()
+            .unwrap()
+            .handle(&survivor_worker)
+            .is_some());
+    }
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionRename {
+            session_id: survivor_session.clone(),
+            display_name: "survivor still routable".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.sessions.lock().unwrap()[&survivor_session].display_name,
+        "survivor still routable"
+    );
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
 fn host_chat_history_drops_only_the_oldest_entries_at_its_memory_bound() {
     let state = routing_test_state();
     for index in 0..(MAX_SESSION_MESSAGES + 25) {
@@ -3729,6 +5241,7 @@ fn user_supplement_is_retained_in_the_authoritative_web_session_snapshot() {
         &state,
         &session_id,
         "Use the second verification path".to_string(),
+        None,
     )
     .unwrap();
     let sessions = state.sessions.lock().unwrap();
@@ -3770,6 +5283,7 @@ fn active_turn_supplement_consumes_pending_attachments_into_the_same_turn() {
         &state,
         &session_id,
         "also use this attached context".to_string(),
+        None,
     )
     .unwrap();
     assert_eq!(updated.turn_id, turn.turn_id);
@@ -3812,6 +5326,7 @@ fn failed_active_turn_supplement_does_not_drop_pending_attachments() {
             &state,
             &session_id,
             "supplement during stale active turn".to_string(),
+            None,
         )
         .unwrap_err(),
         "active_turn_not_found"
@@ -3942,6 +5457,7 @@ fn turn_user_entries_are_persisted_with_raw_text_and_semantic_kind() {
         &state,
         &session_id,
         "mid-turn correction".to_string(),
+        None,
     )
     .unwrap();
     handle_command(
@@ -4045,6 +5561,7 @@ fn rapid_submit_during_an_active_turn_is_treated_as_a_supplement() {
         &state,
         &session_id,
         "stop if this is still running".to_string(),
+        None,
     )
     .unwrap();
     assert_eq!(turn.turn_id, first.turn_id);
@@ -4064,13 +5581,19 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
         "second correction after seeing output",
         "third correction from a rapid send click",
     ] {
-        append_turn_supplement_with_pending_attachments(&state, &session_id, text.to_string())
-            .unwrap();
+        append_turn_supplement_with_pending_attachments(
+            &state,
+            &session_id,
+            text.to_string(),
+            None,
+        )
+        .unwrap();
     }
     append_turn_supplement_with_pending_attachments(
         &state,
         &session_id,
         "explicit supplement command stays in the same turn".to_string(),
+        None,
     )
     .unwrap();
 
@@ -4109,6 +5632,7 @@ fn rapid_stop_and_send_clicks_during_active_turn_do_not_break_the_session() {
         &state,
         &session_id,
         "first correction before stopping".to_string(),
+        None,
     )
     .unwrap();
     assert_eq!(turn.turn_id, first.turn_id);
@@ -4129,6 +5653,7 @@ fn rapid_stop_and_send_clicks_during_active_turn_do_not_break_the_session() {
         &state,
         &session_id,
         "late correction from another rapid send click".to_string(),
+        None,
     )
     .unwrap();
     assert_eq!(turn.turn_id, first.turn_id);
@@ -4364,6 +5889,40 @@ impl ModelClient for TaggedFinalModel {
     }
 }
 
+struct RestoreBarrierModel {
+    barrier: Arc<std::sync::Barrier>,
+    prompts: Arc<Mutex<Vec<String>>>,
+    final_answer: String,
+}
+
+impl ModelClient for RestoreBarrierModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        self.barrier.wait();
+        Ok(LlmResponse {
+            content: format!(
+                "<response><free_talk>done</free_talk><final_answer>{}</final_answer></response>",
+                self.final_answer
+            ),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
 struct ToolGenPromptCaptureModel {
     prompts: Arc<Mutex<Vec<String>>>,
 }
@@ -4531,6 +6090,69 @@ fn register_real_worker(state: &AppState, name: &'static str) -> String {
         )
         .unwrap();
     let mut session = test_web_session(&session_id, ordinal, name.to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id;
+    session.active_context_id = session.contexts[0].context_id.clone();
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
+}
+
+fn register_restore_barrier_worker(
+    state: &AppState,
+    name: String,
+    barrier: Arc<std::sync::Barrier>,
+    prompts: Arc<Mutex<Vec<String>>>,
+) -> String {
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("restore_parallel_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir =
+        std::env::temp_dir().join(format!("timem_web_parallel_restore_{}_{}", name, now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some(name.clone()),
+            None,
+            RestoreBarrierModel {
+                barrier,
+                prompts,
+                final_answer: format!("{name}_FINAL"),
+            },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, name);
     session.current_dir = worker_dir.display().to_string();
     session.contexts[0] = WebContext {
         context_id: context_id.clone(),
