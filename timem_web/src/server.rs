@@ -3220,13 +3220,13 @@ fn resume_unfinished_core_command_after_restore(
                 .user_entries
                 .iter()
                 .filter_map(|entry| {
+                    entry.delivery_state.as_ref()?;
                     Some((
                         entry.command_id.clone()?,
                         entry.text.clone(),
                         entry.attachments.clone(),
                         entry.kind.clone(),
                     ))
-                    .filter(|_| entry.delivery_state.is_some())
                 })
                 .collect::<Vec<_>>();
             (!entries.is_empty()).then(|| (turn.turn_id.clone(), entries))
