@@ -6,6 +6,38 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-14
+
+### Added
+
+- Added durable, correlated browser command delivery with stable command IDs,
+  explicit accepted/committed/rejected acknowledgements, reconnect replay, and
+  per-Session ordering across browser tabs and sockets.
+- Added a sequenced semantic event journal with cursor replay, bounded
+  compaction, snapshot fallback for expired cursors, crash-tail repair, and
+  isolated concurrent restore batches for multiple working Sessions.
+- Added durable queued-message editing, deletion, reordering, immediate send,
+  automatic next-message dispatch, and cross-tab synchronization without
+  persisting API keys or MCP secrets.
+
+### Changed
+
+- Made Timem Web the recommended interface: install, run `timem-web`, then
+  click the current model name to configure the selected Session's API key,
+  model, protocol, and Base URL in the browser.
+- Tightened the Web content-security policy, bounded recovered browser storage
+  and long-running event journals, and kept the production Rust build free of
+  warnings.
+
+### Fixed
+
+- Closed races around final answers, late supplements, cancellation, queue
+  mutation, Session deletion, mem switching, command acknowledgement loss,
+  reconnect gaps, and multi-Session startup recovery.
+- Prevented raw and sequenced authoritative events from being reduced twice,
+  and preserved accepted user work across WebSocket disconnects and Host
+  restarts.
+
 ## [1.0.4] - 2026-08-13
 
 ### Fixed
