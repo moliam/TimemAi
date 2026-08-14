@@ -435,6 +435,8 @@ web_ui_required_test_names=(
   "removes the access token from the visible URL while retaining the session credential"
   "public_web_launch_keeps_token_auth_and_reports_bind_mode"
   "static_web_entry_requires_token_or_authenticated_cookie"
+  "reuses_the_same_authenticated_url_after_closing_and_reopening_a_page"
+  "restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port"
   "shows the runtime bind host and public-token mode from the server snapshot"
   "shows host and session errors directly without an Activity panel"
   "bounds a reconnect snapshot with many turns and high-frequency events"
