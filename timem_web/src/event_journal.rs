@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_JOURNAL_EVENTS: usize = 20_000;
@@ -21,6 +22,7 @@ pub(crate) struct JournalEvent {
 /// acknowledged only after the line and its metadata reach stable storage.
 #[derive(Debug)]
 pub(crate) struct EventJournal {
+    _instance_lock: JournalInstanceLock,
     path: PathBuf,
     next_seq: u64,
     first_seq: Option<u64>,
@@ -35,8 +37,28 @@ impl EventJournal {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("event_journal_dir_failed:{error}"))?;
         }
+        let instance_lock = JournalInstanceLock::acquire(&path)?;
         repair_partial_tail(&path)?;
-        let entries = read_entries(&path, 0)?;
+        let entries = match read_entries(&path, 0) {
+            Ok(entries) => entries,
+            Err(error) if error == "event_journal_sequence_not_increasing" => {
+                let backup = repair_non_increasing_sequences(&path)?;
+                eprintln!(
+                    "[timem_web_warning] event_journal_sequence_repaired backup={}",
+                    backup.display()
+                );
+                read_entries(&path, 0)?
+            }
+            Err(error) if error.starts_with("event_journal_parse_failed:") => {
+                let backup = quarantine_corrupt_journal(&path)?;
+                eprintln!(
+                    "[timem_web_warning] event_journal_corruption_quarantined error={error} backup={}",
+                    backup.display()
+                );
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
         let next_seq = entries
             .last()
             .map(|entry| entry.event_seq)
@@ -44,6 +66,7 @@ impl EventJournal {
             .checked_add(1)
             .ok_or_else(|| "event_journal_sequence_exhausted".to_string())?;
         let mut journal = Self {
+            _instance_lock: instance_lock,
             bytes: std::fs::metadata(&path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
@@ -162,6 +185,141 @@ impl EventJournal {
     }
 }
 
+#[derive(Debug)]
+struct JournalInstanceLock {
+    _file: File,
+}
+
+impl JournalInstanceLock {
+    fn acquire(journal_path: &Path) -> Result<Self, String> {
+        let lock_path = journal_lock_path(journal_path);
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let file = options.open(&lock_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                "event_journal_in_use".to_string()
+            } else {
+                format!("event_journal_lock_open_failed:{error}")
+            }
+        })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+                    "event_journal_in_use".to_string()
+                } else {
+                    format!("event_journal_lock_failed:{error}")
+                });
+            }
+        }
+
+        Ok(Self { _file: file })
+    }
+}
+
+fn journal_lock_path(journal_path: &Path) -> PathBuf {
+    let mut lock_path = journal_path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
+fn repair_non_increasing_sequences(path: &Path) -> Result<PathBuf, String> {
+    let mut entries = parse_entries(path)?;
+    let mut last_seq = 0_u64;
+    let mut changed = false;
+    for entry in &mut entries {
+        if entry.event_seq <= last_seq {
+            entry.event_seq = last_seq
+                .checked_add(1)
+                .ok_or_else(|| "event_journal_sequence_exhausted".to_string())?;
+            changed = true;
+        }
+        last_seq = entry.event_seq;
+    }
+    if !changed {
+        return Err("event_journal_sequence_repair_not_needed".to_string());
+    }
+
+    let raw =
+        std::fs::read(path).map_err(|error| format!("event_journal_repair_read_failed:{error}"))?;
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let backup_path = path_with_suffix(path, &format!(".sequence-backup-{suffix}"));
+    write_new_synced_file(&backup_path, &raw, "event_journal_backup")?;
+
+    let temporary_path = path_with_suffix(
+        path,
+        &format!(".sequence-repair-{}-{suffix}.tmp", std::process::id()),
+    );
+    let mut repaired = Vec::with_capacity(raw.len());
+    for entry in &entries {
+        serde_json::to_writer(&mut repaired, entry)
+            .map_err(|error| format!("event_journal_repair_serialize_failed:{error}"))?;
+        repaired.push(b'\n');
+    }
+    write_new_synced_file(&temporary_path, &repaired, "event_journal_repair_temporary")?;
+    if let Err(error) = std::fs::rename(&temporary_path, path) {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(format!("event_journal_repair_replace_failed:{error}"));
+    }
+    sync_parent_directory(path)?;
+    Ok(backup_path)
+}
+
+/// A semantic-event journal is a replay cache, not the authoritative session
+/// store. If a complete record is corrupt, preserve the exact bytes for
+/// diagnosis and start a fresh journal so a damaged cache cannot prevent the
+/// Web UI (and therefore the user's agent) from starting.
+fn quarantine_corrupt_journal(path: &Path) -> Result<PathBuf, String> {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let backup_path = path_with_suffix(path, &format!(".corrupt-backup-{suffix}"));
+    std::fs::rename(path, &backup_path)
+        .map_err(|error| format!("event_journal_quarantine_failed:{error}"))?;
+    sync_parent_directory(path)?;
+    Ok(backup_path)
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut suffixed = path.as_os_str().to_os_string();
+    suffixed.push(suffix);
+    PathBuf::from(suffixed)
+}
+
+fn write_new_synced_file(path: &Path, body: &[u8], label: &str) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("{label}_open_failed:{error}"))?;
+    file.write_all(body)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("{label}_write_failed:{error}"))
+}
+
 fn repair_partial_tail(path: &Path) -> Result<(), String> {
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
@@ -204,19 +362,34 @@ fn sync_parent_directory(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         File::open(parent)
             .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("event_journal_compact_dir_sync_failed:{error}"))?;
+            .map_err(|error| format!("event_journal_dir_sync_failed:{error}"))?;
     }
     Ok(())
 }
 
 fn read_entries(path: &Path, cursor: u64) -> Result<Vec<JournalEvent>, String> {
+    let parsed = parse_entries(path)?;
+    let mut entries = Vec::new();
+    let mut last_seq = 0;
+    for entry in parsed {
+        if entry.event_seq <= last_seq {
+            return Err("event_journal_sequence_not_increasing".to_string());
+        }
+        last_seq = entry.event_seq;
+        if entry.event_seq > cursor {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+fn parse_entries(path: &Path) -> Result<Vec<JournalEvent>, String> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(format!("event_journal_read_failed:{error}")),
     };
     let mut entries = Vec::new();
-    let mut last_seq = 0;
     let lines = BufReader::new(file).split(b'\n');
     for line in lines {
         let line = line.map_err(|error| format!("event_journal_read_failed:{error}"))?;
@@ -225,13 +398,7 @@ fn read_entries(path: &Path, cursor: u64) -> Result<Vec<JournalEvent>, String> {
         }
         let entry: JournalEvent = serde_json::from_slice(&line)
             .map_err(|error| format!("event_journal_parse_failed:{error}"))?;
-        if entry.event_seq <= last_seq {
-            return Err("event_journal_sequence_not_increasing".to_string());
-        }
-        last_seq = entry.event_seq;
-        if entry.event_seq > cursor {
-            entries.push(entry);
-        }
+        entries.push(entry);
     }
     Ok(entries)
 }
