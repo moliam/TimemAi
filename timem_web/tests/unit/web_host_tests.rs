@@ -2322,6 +2322,8 @@ fn embedded_frontend_assets_receive_browser_safe_content_types() {
         mime_for_path("/assets/index.js"),
         "application/javascript; charset=utf-8"
     );
+    assert_eq!(mime_for_path("/timem_logo.png"), "image/png");
+    assert!(embedded_web_asset("/timem_logo.png").is_some());
 }
 
 #[test]
