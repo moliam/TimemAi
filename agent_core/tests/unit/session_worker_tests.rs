@@ -548,7 +548,7 @@ impl ModelClient for ToolGenWorkflowModel {
     ) -> Result<LlmResponse, String> {
         let (phase, content) = if prompt.contains("Follow the ToolGen repository standard") {
             assert!(prompt.contains("[TOOL_GEN_TASK]"));
-            assert!(prompt.contains("reusable-main-evidence"));
+            assert!(prompt.contains("Action result: self_tool"));
             assert!(prompt.contains("## ID0"));
             assert!(!prompt.contains("ID0_TOOLGEN"));
             assert!(!prompt.contains("Referenced completed turn id:"));
@@ -592,7 +592,7 @@ impl ModelClient for ToolGenWorkflowModel {
                     format!("<response><free_talk>Writing and validating the reusable line counter.</free_talk><working_still_action><action_json><![CDATA[[{{\"toolgen\":{{\"op\":\"publish\",\"draft_path\":{}}}}}]]]></action_json></working_still_action></response>", serde_json::to_string(draft).unwrap()),
                 )
             }
-        } else if prompt.contains("reusable-main-evidence") {
+        } else if prompt.contains("Action result: self_tool") {
             (
                 "main_finish",
                 "<response><final_answer>Main task completed.</final_answer></response>"
@@ -601,7 +601,7 @@ impl ModelClient for ToolGenWorkflowModel {
         } else {
             (
                 "main_action",
-                "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"printf reusable-main-evidence\",\"timeout_ms\":5000}}]]]></action_json></working_still_action></response>".to_string(),
+                "<response><working_still_action><action_json><![CDATA[[{\"self_tool\":{\"type\":\"about_me\",\"op\":\"read\"}}]]]></action_json></working_still_action></response>".to_string(),
             )
         };
         let prompt_tokens = if phase.starts_with("toolgen") {
@@ -1020,11 +1020,11 @@ impl ModelClient for FailingToolGenModel {
         let content = if prompt.contains("Follow the ToolGen repository standard") {
             *self.child_calls.lock().unwrap() += 1;
             "not xml".to_string()
-        } else if prompt.contains("reusable-main-evidence") {
+        } else if prompt.contains("Action result: self_tool") {
             "<response><final_answer>Main task survives ToolGen failure.</final_answer></response>"
                 .to_string()
         } else {
-            "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"printf reusable-main-evidence\",\"timeout_ms\":5000}}]]]></action_json></working_still_action></response>".to_string()
+            "<response><working_still_action><action_json><![CDATA[[{\"self_tool\":{\"type\":\"about_me\",\"op\":\"read\"}}]]]></action_json></working_still_action></response>".to_string()
         };
         Ok(LlmResponse {
             content,

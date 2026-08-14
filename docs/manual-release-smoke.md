@@ -32,6 +32,12 @@ Suggested fake-model-server sequence:
 6. Refresh the page and confirm state is not stale.
 7. Narrow the window to a mobile width and confirm the composer remains usable.
 
+The automated `scripts/web_runtime_lifecycle_smoke.sh` additionally proves that
+the complete authenticated URL can be reused after independent page connections
+close, and that a stopped runtime can immediately restart with the same data and
+port. A restart intentionally rotates the token; the newly printed URL is the
+credential for the new Host process.
+
 ## Terminal Emulator Matrix
 
 Run the release binary in each target terminal when changing input, paste,

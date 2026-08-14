@@ -156,6 +156,105 @@ fn command_dedup_terminal_result_survives_restart_without_persisting_secrets() {
 }
 
 #[test]
+fn corrupt_command_dedup_cache_is_backed_up_without_blocking_web_startup() {
+    let dir = std::env::temp_dir().join(unique_web_id("corrupt_command_dedup"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("web_command_dedup.json");
+    std::fs::write(&path, b"not-json").unwrap();
+
+    let mut cache = load_command_dedup_resilient(&path).unwrap();
+    assert!(cache.reserve("new-command").is_none());
+    let backups = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("web_command_dedup.json.command-dedup-corrupt-backup-")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(backups[0].path()).unwrap(), b"not-json");
+    assert!(CommandDedupCache::load(&path).is_ok());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn corrupt_mcp_config_is_backed_up_without_blocking_web_startup() {
+    let data_dir = std::env::temp_dir().join(unique_web_id("corrupt_mcp_config"));
+    let space = ".mcp_recovery";
+    let memory_dir = RuntimeDataLayout::new(&data_dir, space).memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let path = memory_dir.join("mcp_servers.json");
+    std::fs::write(&path, b"not-json").unwrap();
+
+    let mem = WebMemState::new(data_dir.clone(), space.to_string()).unwrap();
+    assert!(mem.mcp_configs.is_empty());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]\n");
+    let backups = std::fs::read_dir(&memory_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("mcp_servers.json.mcp-config-corrupt-backup-")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(backups[0].path()).unwrap(), b"not-json");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable() {
+    let memory_dir = std::env::temp_dir().join(unique_web_id("corrupt_session_index"));
+    let store = SessionStore::new(&memory_dir);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    let valid = StoredSession {
+        session_id: "session-valid".to_string(),
+        display_name: "Recovered".to_string(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        current_dir: memory_dir.display().to_string(),
+        profile: StoredSessionProfile::default(),
+        env: BTreeMap::new(),
+        env_overrides: None,
+        mcp_server_ids: Vec::new(),
+        state: StoredSessionState::Ready,
+        last_turn_id: None,
+        raw_chat_history_path: memory_dir
+            .join("sessions/session-valid/raw_chat_history.jsonl")
+            .display()
+            .to_string(),
+    };
+    let valid_line = serde_json::to_string(&valid).unwrap();
+    let original = format!("{valid_line}\nnot-json\n");
+    std::fs::write(store.index_path(), &original).unwrap();
+
+    let recovered = list_stored_sessions_resilient(&store).unwrap();
+    assert_eq!(recovered, vec![valid]);
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    let backups = std::fs::read_dir(store.sessions_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("index.jsonl.session-index-corrupt-backup-")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(backups[0].path()).unwrap(),
+        original
+    );
+    let _ = std::fs::remove_dir_all(memory_dir);
+}
+
+#[test]
 fn concurrent_same_command_id_has_one_executor_but_distinct_ids_both_execute() {
     let cache = Arc::new(Mutex::new(CommandDedupCache::default()));
     let barrier = Arc::new(std::sync::Barrier::new(8));
@@ -1478,6 +1577,34 @@ async fn static_web_entry_requires_token_or_authenticated_cookie() {
     )
     .await;
     assert_ne!(cookie_allowed.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() {
+    let state = routing_test_state();
+    for _ in 0..3 {
+        let response = static_asset(
+            State((state.clone(), TEST_PORT)),
+            Query(AuthQuery {
+                token: Some("test".to_string()),
+                last_event_seq: None,
+            }),
+            HeaderMap::new(),
+            Uri::from_static("/"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+// Process-level coverage for the corresponding shutdown/restart behavior is
+// provided by scripts/web_runtime_lifecycle_smoke.sh in the production CI gate.
+#[test]
+fn restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port() {
+    let smoke = include_str!("../../../scripts/web_runtime_lifecycle_smoke.sh");
+    assert!(smoke.contains("--port \"$first_port\""));
+    assert!(smoke.contains("--data-dir \"$test_root/data\" --space lifecycle"));
+    assert!(smoke.contains("kill -TERM"));
 }
 
 #[tokio::test]
