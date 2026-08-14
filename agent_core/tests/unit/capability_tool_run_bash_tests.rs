@@ -75,7 +75,10 @@ fn normal_bash_reports_status_and_output() {
 #[test]
 fn normal_bash_contains_child_sigsegv_and_accepts_follow_up_command() {
     let mut runtime = NeverCancelRuntime;
-    let crashed = execute_one_bash("kill -SEGV $$", 1000, &mut runtime);
+    // Linux may synchronously hand a crashing process to its core-dump
+    // collector before wait(2) reports the signal. Keep this test focused on
+    // signal containment instead of relying on a macOS-sized timeout.
+    let crashed = execute_one_bash("kill -SEGV $$", 10_000, &mut runtime);
     assert!(crashed.contains("process signal"), "{crashed}");
     assert!(crashed.contains("Signal: 11"), "{crashed}");
 

@@ -342,6 +342,31 @@ impl CommandDedupCache {
     }
 }
 
+fn load_command_dedup_resilient(path: &Path) -> Result<CommandDedupCache, String> {
+    match CommandDedupCache::load(path) {
+        Ok(cache) => Ok(cache),
+        Err(error) if error.starts_with("command_dedup_parse_failed:") => {
+            let replacement = serde_json::to_vec(&PersistedCommandDedup {
+                records: Vec::new(),
+            })
+            .map_err(|serialize_error| {
+                format!("command_dedup_recovery_serialize_failed:{serialize_error}")
+            })?;
+            let backup = backup_and_replace_corrupt_state(
+                path,
+                &replacement,
+                "command-dedup-corrupt-backup",
+            )?;
+            eprintln!(
+                "[timem_web_warning] command_dedup_corruption_quarantined error={error} backup={}",
+                backup.display()
+            );
+            CommandDedupCache::load(path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Clone)]
 struct WorkerTemplate {
     settings: Arc<Mutex<RuntimeSettings>>,
@@ -368,7 +393,7 @@ impl WebMemState {
         validate_web_space_name(&space)?;
         let layout = RuntimeDataLayout::new(data_dir, space.clone());
         let mcp_store = McpStore::new(layout.memory_dir());
-        let mcp_configs = mcp_store.list()?;
+        let mcp_configs = load_mcp_configs_resilient(&mcp_store)?;
         Ok(Self {
             space,
             session_store: SessionStore::new(layout.memory_dir()),
@@ -403,6 +428,25 @@ impl WebMemState {
                 .display()
                 .to_string(),
         }
+    }
+}
+
+fn load_mcp_configs_resilient(mcp_store: &McpStore) -> Result<Vec<McpServerConfig>, String> {
+    match mcp_store.list() {
+        Ok(configs) => Ok(configs),
+        Err(error) if error.starts_with("mcp_store_parse_failed:") => {
+            let backup = backup_and_replace_corrupt_state(
+                mcp_store.file(),
+                b"[]\n",
+                "mcp-config-corrupt-backup",
+            )?;
+            eprintln!(
+                "[timem_web_warning] mcp_config_corruption_quarantined error={error} backup={}",
+                backup.display()
+            );
+            mcp_store.list()
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -957,7 +1001,7 @@ pub async fn run_from_env() -> Result<(), String> {
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
-    let command_dedup = CommandDedupCache::load(&command_dedup_path(&initial_mem))?;
+    let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
     let event_journal = EventJournal::open(event_journal_path(&initial_mem))?;
     let mem = Arc::new(Mutex::new(initial_mem));
     let state = AppState {
@@ -2486,7 +2530,7 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         let data_root = current_mem_state(state)?.layout.data_root().to_path_buf();
         WebMemState::new(data_root, path.to_string())?
     };
-    let next_command_dedup = CommandDedupCache::load(&command_dedup_path(&next_mem))?;
+    let next_command_dedup = load_command_dedup_resilient(&command_dedup_path(&next_mem))?;
     let next_event_journal = EventJournal::open(event_journal_path(&next_mem))?;
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
@@ -3093,7 +3137,7 @@ fn create_session(
 }
 
 fn restore_stored_sessions(state: &AppState) -> Result<usize, String> {
-    let stored_sessions = current_session_store(state)?.list_sessions()?;
+    let stored_sessions = list_stored_sessions_resilient(&current_session_store(state)?)?;
     let mut restored = 0usize;
     for stored in stored_sessions {
         let session_id = stored.session_id.clone();
@@ -3105,6 +3149,110 @@ fn restore_stored_sessions(state: &AppState) -> Result<usize, String> {
         }
     }
     Ok(restored)
+}
+
+fn list_stored_sessions_resilient(store: &SessionStore) -> Result<Vec<StoredSession>, String> {
+    match store.list_sessions() {
+        Ok(sessions) => Ok(sessions),
+        Err(error) if error == "session_record_parse_failed" => {
+            let path = store.index_path();
+            let raw = std::fs::read(&path)
+                .map_err(|read_error| format!("session_index_recovery_read_failed:{read_error}"))?;
+            let mut sessions = Vec::new();
+            let mut repaired = Vec::with_capacity(raw.len());
+            let mut invalid_records = 0usize;
+            for line in raw.split(|byte| *byte == b'\n') {
+                if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+                    continue;
+                }
+                match serde_json::from_slice::<StoredSession>(line) {
+                    Ok(session) => {
+                        serde_json::to_writer(&mut repaired, &session).map_err(
+                            |serialize_error| {
+                                format!("session_index_recovery_serialize_failed:{serialize_error}")
+                            },
+                        )?;
+                        repaired.push(b'\n');
+                        sessions.push(session);
+                    }
+                    Err(_) => invalid_records = invalid_records.saturating_add(1),
+                }
+            }
+            let backup =
+                backup_and_replace_corrupt_state(&path, &repaired, "session-index-corrupt-backup")?;
+            sessions.sort_by(|left, right| {
+                right
+                    .updated_at_ms
+                    .cmp(&left.updated_at_ms)
+                    .then_with(|| left.session_id.cmp(&right.session_id))
+            });
+            eprintln!(
+                "[timem_web_warning] session_index_corruption_repaired invalid_records={invalid_records} backup={}",
+                backup.display()
+            );
+            Ok(sessions)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn backup_and_replace_corrupt_state(
+    path: &Path,
+    replacement: &[u8],
+    backup_label: &str,
+) -> Result<PathBuf, String> {
+    let raw =
+        std::fs::read(path).map_err(|error| format!("recoverable_state_read_failed:{error}"))?;
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let backup = path_with_appended_suffix(path, &format!(".{backup_label}-{suffix}"));
+    write_new_private_synced_file(&backup, &raw, "recoverable_state_backup")?;
+
+    let temporary = path_with_appended_suffix(
+        path,
+        &format!(".recovery-{}-{suffix}.tmp", std::process::id()),
+    );
+    write_new_private_synced_file(&temporary, replacement, "recoverable_state_replacement")?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("recoverable_state_replace_failed:{error}"));
+    }
+    sync_state_parent_directory(path)?;
+    Ok(backup)
+}
+
+fn path_with_appended_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn write_new_private_synced_file(path: &Path, body: &[u8], label: &str) -> Result<(), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("{label}_open_failed:{error}"))?;
+    file.write_all(body)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("{label}_write_failed:{error}"))
+}
+
+fn sync_state_parent_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("recoverable_state_dir_sync_failed:{error}"))?;
+    }
+    Ok(())
 }
 
 fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(), String> {

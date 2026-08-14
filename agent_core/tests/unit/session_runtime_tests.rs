@@ -200,13 +200,15 @@ impl TurnUi for CancelAfterDelayUi {
 
 struct ApproveAndCancelAfterDelayUi {
     started: Instant,
-    delay: Duration,
+    ready_files: [std::path::PathBuf; 2],
+    hard_timeout: Duration,
     approvals: u32,
 }
 
 impl TurnUi for ApproveAndCancelAfterDelayUi {
     fn is_cancel_requested(&mut self) -> bool {
-        self.started.elapsed() >= self.delay
+        self.ready_files.iter().all(|path| path.is_file())
+            || self.started.elapsed() >= self.hard_timeout
     }
 
     fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
@@ -1673,7 +1675,8 @@ fn session_turn_stop_cancels_parallel_bash_after_approval() {
     let started = Instant::now();
     let mut ui = ApproveAndCancelAfterDelayUi {
         started,
-        delay: Duration::from_millis(200),
+        ready_files: [pid_a.clone(), pid_b.clone()],
+        hard_timeout: Duration::from_secs(5),
         approvals: 0,
     };
     let commands = [&pid_a, &pid_b].map(|pid_file| {

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Install release binaries by atomic replacement so rerunning `./install.sh`
+  while `timem-web` is active does not leave the installed macOS executable
+  terminating immediately with `SIGKILL`.
+- Keep `timem-web` startable when recoverable replay, command-dedup, MCP, or
+  Session-index state is malformed. The original bytes are retained in private
+  diagnostic backups before a safe cache reset or valid-record repair.
+- Reuse an authenticated URL across repeated page opens for the lifetime of one
+  Host, and continuously verify clean shutdown plus immediate restart in CI.
+
 All notable changes to TimemAi are tracked here. This project follows a
 pragmatic Keep a Changelog style: newest changes first, with release sections
 for tagged versions and an `Unreleased` section for work not yet tagged.
