@@ -13,11 +13,16 @@ the browser.
   its own model endpoint and settings.
 - **Quality-hardened delivery:** browser mutations use durable command IDs and
   explicit acknowledgements; authoritative events use ordered, replayable
-  cursors. Disconnects, duplicate clicks, reordered acknowledgements, and
-  multiple browser tabs no longer lose or double-apply work.
+  cursors. Transport recovery retains user intent across disconnects,
+  duplicate clicks, reordered acknowledgements, and multiple browser tabs,
+  while retries reuse the original command identity.
 - **Concurrent Sessions:** multiple Sessions can work and recover in parallel
   while task, supplement, cancellation, final-answer, queue, and event state
   remain isolated.
+- **Complete browser workspace:** switch and rename Sessions, manage queued
+  messages and attachments, follow live Thought/Action work, render GFM and
+  highlighted code, inspect context usage, configure Session-scoped MCP tools,
+  and create or reuse ToolRepo tools without leaving the Web UI.
 - **Performance and security:** long-running event storage is bounded with safe
   snapshot recovery, browser recovery records are size-bounded, credentials
   stay out of durable browser queues, CSP is stricter, and normal production

@@ -9,6 +9,18 @@ TimemAi is a local-first AI agent with two interfaces:
 Both interfaces use the same local runtime, memory, session history, tools, and
 model service configuration.
 
+## Install
+
+```bash
+git clone https://github.com/moliam/TimemAi.git
+cd TimemAi
+./install.sh
+```
+
+The installer builds and installs `timem` and `timem-web`. Cargo downloads Rust crates
+automatically during the build. The released Web bundle is already included;
+Node.js is only needed when developing the Web frontend.
+
 ## Quick Start — Timem Web (Recommended)
 
 After installation, start Timem Web with one command:
@@ -25,18 +37,6 @@ configured.
 
 Each Session keeps its own model service configuration, so different Sessions
 can use different models or endpoints without changing the others.
-
-## Install
-
-```bash
-git clone https://github.com/moliam/TimemAi.git
-cd TimemAi
-./install.sh
-```
-
-The installer builds and installs `timem` and `timem-web`. Cargo downloads Rust crates
-automatically during the build. The released Web bundle is already included;
-Node.js is only needed when developing the Web frontend.
 
 ## Optional Environment Configuration
 
@@ -155,9 +155,13 @@ appropriate network access control layer.
 - [Architecture](docs/architecture.md)
 - [Install and configuration](docs/install-and-configuration.md)
 - [Core/UI topic protocol](docs/core-ui-topic-protocol.md)
+- [Web delivery reliability contract](docs/web_reliability_test_matrix.md)
 - [Capability system](docs/capability-system.md)
 - [Test strategy](docs/test-strategy.md)
+- [Feature and test management](docs/feature-test-management.md)
+- [Release management](docs/release-management.md)
 - [Release smoke checklist](docs/manual-release-smoke.md)
+- [TimemAi 1.1.0 release notes](docs/release-notes-v1.1.0.md)
 
 ## Update and Uninstall
 
