@@ -1444,6 +1444,7 @@ dependencies = [
  "agent_core",
  "axum",
  "futures-util",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

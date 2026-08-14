@@ -64,6 +64,21 @@ fn append_restart_and_cursor_replay_preserve_exact_order() {
 }
 
 #[test]
+fn a_second_host_cannot_open_the_same_journal_until_the_owner_exits() {
+    let path = journal_path("exclusive_owner");
+    let journal = EventJournal::open(&path).unwrap();
+    assert_eq!(
+        EventJournal::open(&path).unwrap_err(),
+        "event_journal_in_use"
+    );
+
+    drop(journal);
+    assert!(EventJournal::open(&path).is_ok());
+    let _ = std::fs::remove_file(journal_lock_path(&path));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn snapshot_cursor_plus_replay_covers_an_event_during_snapshot_without_a_gap() {
     let path = journal_path("snapshot_gap");
     let mut journal = EventJournal::open(&path).unwrap();
@@ -144,20 +159,91 @@ fn complete_json_without_newline_is_preserved_and_separated_before_append() {
 }
 
 #[test]
-fn corruption_between_durable_entries_is_rejected_instead_of_skipped() {
+fn corruption_between_durable_entries_is_quarantined_without_blocking_startup() {
     let path = journal_path("middle_corruption");
-    std::fs::write(
-        &path,
-        concat!(
-            "{\"event_seq\":1,\"event\":{\"ok\":1}}\n",
-            "not-json\n",
-            "{\"event_seq\":3,\"event\":{\"ok\":3}}\n"
-        ),
-    )
-    .unwrap();
-    assert!(EventJournal::open(&path)
-        .unwrap_err()
-        .contains("event_journal_parse_failed"));
+    let original = concat!(
+        "{\"event_seq\":1,\"event\":{\"ok\":1}}\n",
+        "not-json\n",
+        "{\"event_seq\":3,\"event\":{\"ok\":3}}\n"
+    );
+    std::fs::write(&path, original).unwrap();
+
+    let mut journal = EventJournal::open(&path).unwrap();
+    assert_eq!(journal.cursor(), 0);
+    assert!(journal.replay_after(0).unwrap().is_empty());
+    assert_eq!(
+        journal
+            .append(json!({"type":"after_recovery"}))
+            .unwrap()
+            .event_seq,
+        1
+    );
+
+    let file_name = path.file_name().unwrap().to_string_lossy();
+    let backups = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{file_name}.corrupt-backup-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(backups[0].path()).unwrap(),
+        original
+    );
+
+    drop(journal);
+    let _ = std::fs::remove_file(journal_lock_path(&path));
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(backups[0].path());
+}
+
+#[test]
+fn non_increasing_sequences_are_backed_up_and_repaired_without_losing_events() {
+    let path = journal_path("sequence_repair");
+    let original = concat!(
+        "{\"event_seq\":1,\"event\":{\"ordinal\":1}}\n",
+        "{\"event_seq\":2,\"event\":{\"ordinal\":2}}\n",
+        "{\"event_seq\":1,\"event\":{\"ordinal\":3}}\n",
+        "{\"event_seq\":2,\"event\":{\"ordinal\":4}}\n"
+    );
+    std::fs::write(&path, original).unwrap();
+
+    let journal = EventJournal::open(&path).unwrap();
+    let replay = journal.replay_after(0).unwrap();
+    assert_eq!(
+        replay
+            .iter()
+            .map(|entry| (entry.event_seq, entry.event["ordinal"].as_u64().unwrap()))
+            .collect::<Vec<_>>(),
+        vec![(1, 1), (2, 2), (3, 3), (4, 4)]
+    );
+    assert_eq!(journal.cursor(), 4);
+
+    let file_name = path.file_name().unwrap().to_string_lossy();
+    let backups = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{file_name}.sequence-backup-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(backups[0].path()).unwrap(),
+        original
+    );
+
+    drop(journal);
+    let _ = std::fs::remove_file(journal_lock_path(&path));
+    let _ = std::fs::remove_file(backups[0].path());
     let _ = std::fs::remove_file(path);
 }
 
@@ -267,8 +353,10 @@ fn compaction_preserves_monotonic_sequences_and_exposes_a_replay_floor() {
     assert_eq!(replay.last().unwrap().event_seq, next.event_seq);
     assert!(replay.len() <= 33);
 
+    let expected_floor = journal.replay_floor();
+    drop(journal);
     let recovered = EventJournal::open(&path).unwrap();
     assert_eq!(recovered.cursor(), next.event_seq);
-    assert_eq!(recovered.replay_floor(), journal.replay_floor());
+    assert_eq!(recovered.replay_floor(), expected_floor);
     let _ = std::fs::remove_file(path);
 }
