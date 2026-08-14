@@ -6,6 +6,8 @@ for tagged versions and an `Unreleased` section for work not yet tagged.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-14
+
 ### Fixed
 
 - Serialized Session index read-modify-write operations across threads and
