@@ -23,17 +23,28 @@ Node.js is only needed when developing the Web frontend.
 
 ## Quick Start — Timem Web (Recommended)
 
-After installation, start Timem Web with one command:
+After installation, the shortest local start is:
 
 ```bash
 timem-web
 ```
 
-Timem Web opens its authenticated local page automatically. No environment
-file or model credential is required just to start the UI. In the page, click
-the current model name at the top left, then configure the API key, model, API
-protocol, and Base URL for that Session. Send a message when the Session is
-configured.
+To open Timem Web from another machine, enable public listening:
+
+```bash
+timem-web --public
+```
+
+`--public` binds to all network interfaces and prints a token-protected URL;
+it does not remove authentication. Open the complete URL, including
+`?token=...`. Use HTTPS and appropriate network access controls when exposing
+Timem Web beyond a trusted network.
+
+With the local command, Timem Web opens its authenticated page automatically.
+No environment file or model credential is required just to start the UI. In
+the page, click the current model name at the top left, then configure the API
+key, model, API protocol, and Base URL for that Session. Send a message when
+the Session is configured.
 
 Each Session keeps its own model service configuration, so different Sessions
 can use different models or endpoints without changing the others.
