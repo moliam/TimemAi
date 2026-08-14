@@ -205,7 +205,9 @@ export type Snapshot = {
 };
 
 export type WireEvent =
-  | { type: "hello"; snapshot: Snapshot }
+  | { type: "hello"; snapshot: Snapshot; event_cursor?: number; event_replay_floor?: number }
+  | { type: "semantic_event"; event_seq: number; event: WireEvent }
+  | { type: "command_ack"; command_id: string; status: "accepted" | "committed" | "rejected"; error?: string }
   | { type: "session_created"; session: Session }
   | { type: "session_renamed"; session_id: string; display_name: string }
   | { type: "session_deleted"; session_id: string }
@@ -260,3 +262,5 @@ export type ClientCommand =
       decision: "accept" | "decline" | "always_allow";
       payload?: Record<string, unknown>;
     };
+
+export type CommandWithId = ClientCommand & { command_id: string };

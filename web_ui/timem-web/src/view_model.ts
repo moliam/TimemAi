@@ -599,6 +599,21 @@ export function enqueueDecision(decisions: Decision[], incoming: Decision) {
   return exists ? decisions : [...decisions, incoming];
 }
 
+export function decisionsFromSessions(sessions: readonly Session[]) {
+  let decisions: Decision[] = [];
+  for (const session of sessions) {
+    for (const turn of session.turns) {
+      if (turn.state !== "working") continue;
+      for (const event of turn.events) {
+        if (event.source !== "core_topic") continue;
+        const decision = requestDecision(event.payload as unknown as CoreTopicEvent, turn.turn_id);
+        if (decision) decisions = enqueueDecision(decisions, decision);
+      }
+    }
+  }
+  return decisions;
+}
+
 export function sessionTurnKey(sessionId: string, turnId: string) {
   return `${sessionId}\u0000${turnId}`;
 }
