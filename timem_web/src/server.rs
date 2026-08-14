@@ -1,7 +1,8 @@
+use crate::event_journal::EventJournal;
 use agent_core::mcp::{McpRuntime, McpServerConfig, McpServerReport, McpStore, McpTool};
 use agent_core::session_store::{
-    ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole, SessionResumeNotice, SessionStore,
-    StoredSession, StoredSessionProfile, StoredSessionState,
+    ChatCommandDeliveryState, ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole,
+    SessionResumeNotice, SessionStore, StoredSession, StoredSessionProfile, StoredSessionState,
 };
 use agent_core::{
     apply_runtime_config_value, combine_additional_contexts, default_data_root,
@@ -30,15 +31,15 @@ use futures_util::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ffi::OsString,
-    io::Read,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -64,6 +65,9 @@ const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SESSION_UPLOADS: usize = 20;
 const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
 const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
+const COMMAND_DEDUP_CAPACITY: usize = 4_096;
+const MAX_COMMAND_DEDUP_RESULT_BYTES: usize = 64 * 1024;
+const MAX_COMMAND_ID_BYTES: usize = 256;
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_WEB_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -76,6 +80,266 @@ struct AppState {
     mem: Arc<Mutex<WebMemState>>,
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
+    command_dedup: Arc<Mutex<CommandDedupCache>>,
+    event_journal: Arc<Mutex<EventJournal>>,
+    command_lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
+    command_global_barrier: Arc<RwLock<()>>,
+    mem_epoch: Arc<RwLock<u64>>,
+}
+
+#[derive(Debug, Default)]
+struct TicketCommandLane {
+    state: Mutex<TicketCommandLaneState>,
+    ready: std::sync::Condvar,
+}
+
+#[derive(Debug, Default)]
+struct TicketCommandLaneState {
+    next_ticket: u64,
+    serving_ticket: u64,
+    skipped_tickets: BTreeSet<u64>,
+    active: bool,
+}
+
+impl TicketCommandLane {
+    fn issue(&self) -> Result<u64, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "command_lane_poisoned".to_string())?;
+        let ticket = state.next_ticket;
+        state.next_ticket = state
+            .next_ticket
+            .checked_add(1)
+            .ok_or_else(|| "command_lane_ticket_exhausted".to_string())?;
+        Ok(ticket)
+    }
+
+    fn enter(&self, ticket: u64) -> Result<TicketCommandLaneGuard<'_>, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "command_lane_poisoned".to_string())?;
+        while state.serving_ticket != ticket {
+            state = self
+                .ready
+                .wait(state)
+                .map_err(|_| "command_lane_poisoned".to_string())?;
+        }
+        state.active = true;
+        Ok(TicketCommandLaneGuard { lane: self })
+    }
+
+    fn skip(&self, ticket: u64) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "command_lane_poisoned".to_string())?;
+        state.skipped_tickets.insert(ticket);
+        if !state.active {
+            skip_cancelled_tickets(&mut state);
+        }
+        self.ready.notify_all();
+        Ok(())
+    }
+}
+
+fn advance_ticket_lane(state: &mut TicketCommandLaneState) {
+    state.active = false;
+    state.serving_ticket = state.serving_ticket.saturating_add(1);
+    skip_cancelled_tickets(state);
+}
+
+fn skip_cancelled_tickets(state: &mut TicketCommandLaneState) {
+    while state.skipped_tickets.remove(&state.serving_ticket) {
+        state.serving_ticket = state.serving_ticket.saturating_add(1);
+    }
+}
+
+struct TicketCommandLaneGuard<'a> {
+    lane: &'a TicketCommandLane,
+}
+
+impl Drop for TicketCommandLaneGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.lane.state.lock() {
+            advance_ticket_lane(&mut state);
+            self.lane.ready.notify_all();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CommandDedupState {
+    Accepted,
+    Committed {
+        event: Option<WireEvent>,
+        serialized_event: Option<Value>,
+    },
+    Rejected {
+        error: String,
+    },
+}
+
+#[derive(Debug, Default)]
+struct CommandDedupCache {
+    records: HashMap<String, CommandDedupState>,
+    insertion_order: VecDeque<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedCommandDedup {
+    records: Vec<PersistedCommandDedupRecord>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedCommandDedupRecord {
+    command_id: String,
+    status: PersistedCommandStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PersistedCommandStatus {
+    Accepted,
+    Committed,
+    Rejected,
+}
+
+impl CommandDedupCache {
+    fn reserve(&mut self, command_id: &str) -> Option<CommandDedupState> {
+        if let Some(existing) = self.records.get(command_id) {
+            return Some(existing.clone());
+        }
+        while self.records.len() >= COMMAND_DEDUP_CAPACITY {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                break;
+            };
+            // An accepted command must remain reserved until it reaches a terminal state.
+            if matches!(self.records.get(&oldest), Some(CommandDedupState::Accepted)) {
+                self.insertion_order.push_back(oldest);
+                if self
+                    .insertion_order
+                    .iter()
+                    .all(|id| matches!(self.records.get(id), Some(CommandDedupState::Accepted)))
+                {
+                    break;
+                }
+                continue;
+            }
+            self.records.remove(&oldest);
+        }
+        self.records
+            .insert(command_id.to_string(), CommandDedupState::Accepted);
+        self.insertion_order.push_back(command_id.to_string());
+        None
+    }
+
+    fn finish(&mut self, command_id: &str, state: CommandDedupState) {
+        self.records.insert(command_id.to_string(), state);
+    }
+
+    fn unreserve(&mut self, command_id: &str) {
+        self.records.remove(command_id);
+        self.insertion_order.retain(|id| id != command_id);
+    }
+
+    fn load(path: &Path) -> Result<Self, String> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw =
+            std::fs::read(path).map_err(|error| format!("command_dedup_read_failed:{error}"))?;
+        let persisted: PersistedCommandDedup = serde_json::from_slice(&raw)
+            .map_err(|error| format!("command_dedup_parse_failed:{error}"))?;
+        let mut cache = Self::default();
+        for record in persisted
+            .records
+            .into_iter()
+            .rev()
+            .take(COMMAND_DEDUP_CAPACITY)
+            .rev()
+        {
+            let state = match record.status {
+                // Accepted is deliberately retained as uncertain. Re-executing
+                // after a crash can duplicate a non-idempotent domain effect;
+                // a command-specific reconciler may later prove committed or
+                // rejected, but generic recovery must not guess.
+                PersistedCommandStatus::Accepted => CommandDedupState::Accepted,
+                PersistedCommandStatus::Committed => CommandDedupState::Committed {
+                    event: None,
+                    serialized_event: record.result,
+                },
+                PersistedCommandStatus::Rejected => CommandDedupState::Rejected {
+                    error: record
+                        .error
+                        .unwrap_or_else(|| "command_rejected".to_string()),
+                },
+            };
+            cache.insertion_order.push_back(record.command_id.clone());
+            cache.records.insert(record.command_id, state);
+        }
+        Ok(cache)
+    }
+
+    fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("command_dedup_dir_failed:{error}"))?;
+        }
+        let records = self
+            .insertion_order
+            .iter()
+            .filter_map(|command_id| {
+                self.records.get(command_id).map(|state| {
+                    let (status, error, result) = match state {
+                        CommandDedupState::Accepted => {
+                            (PersistedCommandStatus::Accepted, None, None)
+                        }
+                        CommandDedupState::Committed {
+                            event: _,
+                            serialized_event,
+                        } => (
+                            PersistedCommandStatus::Committed,
+                            None,
+                            serialized_event.clone(),
+                        ),
+                        CommandDedupState::Rejected { error } => {
+                            (PersistedCommandStatus::Rejected, Some(error.clone()), None)
+                        }
+                    };
+                    PersistedCommandDedupRecord {
+                        command_id: command_id.clone(),
+                        status,
+                        error,
+                        result,
+                    }
+                })
+            })
+            .collect();
+        let raw = serde_json::to_vec(&PersistedCommandDedup { records })
+            .map_err(|error| format!("command_dedup_serialize_failed:{error}"))?;
+        let temporary = path.with_extension("json.tmp");
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("command_dedup_open_failed:{error}"))?;
+        file.write_all(&raw)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("command_dedup_write_failed:{error}"))?;
+        std::fs::rename(&temporary, path)
+            .map_err(|error| format!("command_dedup_replace_failed:{error}"))
+    }
 }
 
 #[derive(Clone)]
@@ -181,6 +445,8 @@ struct WebSession {
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
     #[serde(skip)]
+    pending_unconsumed_supplements: Vec<String>,
+    #[serde(skip)]
     work_instruction_mode: WorkInstructionLoadMode,
     #[serde(skip)]
     work_instruction_allowed: Option<bool>,
@@ -255,6 +521,10 @@ struct WebTurnUserEntry {
     text: String,
     attachments: Vec<WebAttachment>,
     created_at_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivery_state: Option<ChatCommandDeliveryState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,6 +540,7 @@ struct PendingWorkInstructionTurn {
     request_id: String,
     text: String,
     attachments: Vec<WebAttachment>,
+    command_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -295,6 +566,12 @@ struct WebChatMessage {
 enum WireEvent {
     Hello {
         snapshot: WebSnapshot,
+        event_cursor: u64,
+        event_replay_floor: u64,
+    },
+    SemanticEvent {
+        event_seq: u64,
+        event: Value,
     },
     SessionCreated {
         session: WebSession,
@@ -345,6 +622,12 @@ enum WireEvent {
     HostError {
         message: String,
     },
+    CommandAck {
+        command_id: String,
+        status: CommandAckStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     HostConfigUpdated {
         key: String,
         value: String,
@@ -388,6 +671,14 @@ enum WireEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CommandAckStatus {
+    Accepted,
+    Committed,
+    Rejected,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WebSnapshot {
     server: ServerInfo,
@@ -426,12 +717,60 @@ struct WebRuntimeOption {
 #[derive(Debug, Deserialize)]
 struct AuthQuery {
     token: Option<String>,
+    last_event_seq: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UploadQuery {
     token: Option<String>,
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserCommand {
+    #[serde(default)]
+    command_id: Option<String>,
+    #[serde(skip)]
+    accepted_mem_epoch: u64,
+    #[serde(skip)]
+    accepted_lane: Option<AcceptedCommandLane>,
+    #[serde(flatten)]
+    command: ClientCommand,
+}
+
+#[derive(Debug)]
+struct AcceptedCommandLane {
+    key: String,
+    lane: Arc<TicketCommandLane>,
+    lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
+    ticket: u64,
+}
+
+impl Drop for AcceptedCommandLane {
+    fn drop(&mut self) {
+        let Ok(mut lanes) = self.lanes.lock() else {
+            return;
+        };
+        let Some(mapped) = lanes.get(&self.key) else {
+            return;
+        };
+        if !Arc::ptr_eq(mapped, &self.lane) || Arc::strong_count(&self.lane) != 2 {
+            return;
+        }
+        let idle = self
+            .lane
+            .state
+            .lock()
+            .map(|state| {
+                !state.active
+                    && state.serving_ticket == state.next_ticket
+                    && state.skipped_tickets.is_empty()
+            })
+            .unwrap_or(false);
+        if idle {
+            lanes.remove(&self.key);
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -544,6 +883,66 @@ enum ClientCommand {
     },
 }
 
+impl ClientCommand {
+    fn mutation_lane(&self) -> Option<String> {
+        match self {
+            Self::HistoryPage { .. }
+            | Self::ToolRepoSearch { .. }
+            | Self::ToolRepoDetail { .. }
+            | Self::SessionApiKeyReveal { .. }
+            | Self::McpServerSecretsReveal { .. } => None,
+            Self::RuntimeUpdate { .. } | Self::MemSwitch { .. } | Self::McpServerDelete { .. } => {
+                Some("global".to_string())
+            }
+            Self::SessionCreate { .. } => Some("session:create".to_string()),
+            Self::McpServerUpsert { config, .. } => Some(format!("mcp:{}", config.id)),
+            Self::SessionRename { session_id, .. }
+            | Self::SessionApiKeyUpdate { session_id, .. }
+            | Self::SessionStop { session_id }
+            | Self::SessionDelete { session_id }
+            | Self::TurnSubmit { session_id, .. }
+            | Self::TurnSupplement { session_id, .. }
+            | Self::TurnCancel { session_id }
+            | Self::AttachmentRemove { session_id, .. }
+            | Self::ToolRepoRename { session_id, .. }
+            | Self::ToolRepoOpenTerminal { session_id, .. }
+            | Self::TopicReply { session_id, .. }
+            | Self::SessionRuntimeUpdate { session_id, .. }
+            | Self::McpSessionToggle { session_id, .. }
+            | Self::McpServerReconnect { session_id, .. } => Some(format!("session:{session_id}")),
+        }
+    }
+
+    fn uses_global_mutation_barrier(&self) -> bool {
+        matches!(
+            self,
+            Self::RuntimeUpdate { .. } | Self::MemSwitch { .. } | Self::McpServerDelete { .. }
+        )
+    }
+
+    fn result_is_sensitive(&self) -> bool {
+        matches!(
+            self,
+            Self::SessionApiKeyReveal { .. } | Self::McpServerSecretsReveal { .. }
+        )
+    }
+
+    fn result_is_direct(&self) -> bool {
+        matches!(
+            self,
+            Self::HistoryPage { .. }
+                | Self::ToolRepoSearch { .. }
+                | Self::ToolRepoDetail { .. }
+                | Self::SessionApiKeyReveal { .. }
+                | Self::McpServerSecretsReveal { .. }
+        )
+    }
+
+    fn waits_for_core_acceptance(&self) -> bool {
+        matches!(self, Self::TurnSubmit { .. } | Self::TurnSupplement { .. })
+    }
+}
+
 pub async fn run_from_env() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -557,10 +956,10 @@ pub async fn run_from_env() -> Result<(), String> {
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-    let mem = Arc::new(Mutex::new(WebMemState::new(
-        template.data_dir.clone(),
-        template.initial_space.clone(),
-    )?));
+    let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
+    let command_dedup = CommandDedupCache::load(&command_dedup_path(&initial_mem))?;
+    let event_journal = EventJournal::open(event_journal_path(&initial_mem))?;
+    let mem = Arc::new(Mutex::new(initial_mem));
     let state = AppState {
         token: token.clone(),
         public_access: launch.public_access,
@@ -569,6 +968,11 @@ pub async fn run_from_env() -> Result<(), String> {
         mem,
         events,
         sessions,
+        command_dedup: Arc::new(Mutex::new(command_dedup)),
+        event_journal: Arc::new(Mutex::new(event_journal)),
+        command_lanes: Arc::new(Mutex::new(HashMap::new())),
+        command_global_barrier: Arc::new(RwLock::new(())),
+        mem_epoch: Arc::new(RwLock::new(1)),
     };
 
     if restore_stored_sessions(&state)? == 0 {
@@ -707,7 +1111,7 @@ fn apply_browser_security_headers(response: &mut Response) {
     response.headers_mut().insert(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self'; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         ),
     );
     response.headers_mut().insert(
@@ -747,10 +1151,13 @@ async fn upload_file(
             return Err("upload_too_large".to_string());
         }
         let attachment = store_upload(&state, &query.session_id, name, bytes.as_ref()).await?;
-        let _ = state.events.send(WireEvent::FileUploaded {
-            session_id: query.session_id,
-            file: attachment.clone(),
-        });
+        publish_semantic(
+            &state,
+            WireEvent::FileUploaded {
+                session_id: query.session_id,
+                file: attachment.clone(),
+            },
+        )?;
         Ok::<_, String>(attachment)
     }
     .await;
@@ -864,7 +1271,8 @@ async fn websocket(
     if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |socket| websocket_session(socket, state, port))
+    let last_event_seq = auth.last_event_seq;
+    ws.on_upgrade(move |socket| websocket_session(socket, state, port, last_event_seq))
 }
 
 #[cfg(test)]
@@ -922,17 +1330,44 @@ fn current_session_store(state: &AppState) -> Result<SessionStore, String> {
     Ok(current_mem_state(state)?.session_store)
 }
 
+fn command_dedup_path(mem: &WebMemState) -> PathBuf {
+    mem.layout.memory_dir().join("web_command_dedup.json")
+}
+
+fn event_journal_path(mem: &WebMemState) -> PathBuf {
+    mem.layout.memory_dir().join("web_events.ndjson")
+}
+
+fn current_command_dedup_path(state: &AppState) -> Result<PathBuf, String> {
+    Ok(command_dedup_path(&current_mem_state(state)?))
+}
+
 fn session_tool_repo(state: &AppState, session_id: &str) -> Result<SessionToolRepo, String> {
     let mem = current_mem_state(state)?;
     Ok(SessionToolRepo::new(mem.layout.memory_dir(), session_id))
 }
 
-async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
+async fn websocket_session(
+    socket: WebSocket,
+    state: AppState,
+    port: u16,
+    last_event_seq: Option<u64>,
+) {
     let (mut sender, mut receiver) = socket.split();
+    // Subscribe before taking the snapshot. Events produced after the snapshot
+    // is captured are then buffered instead of falling into a subscribe gap.
+    let mut events = state.events.subscribe();
+    let (event_cursor, event_replay_floor) = state
+        .event_journal
+        .lock()
+        .map(|journal| (journal.cursor(), journal.replay_floor()))
+        .unwrap_or_default();
     if send_event(
         &mut sender,
         &WireEvent::Hello {
             snapshot: snapshot_for(&state, port),
+            event_cursor,
+            event_replay_floor,
         },
     )
     .await
@@ -940,20 +1375,51 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
     {
         return;
     }
-    for event in work_instruction_notice_events(&state) {
-        if send_event(&mut sender, &event).await.is_err() {
-            return;
+    let replay_after = last_event_seq
+        .filter(|cursor| *cursor >= event_replay_floor && *cursor <= event_cursor)
+        .unwrap_or(event_cursor);
+    let mut last_sent_event_seq = replay_after;
+    let replay = state
+        .event_journal
+        .lock()
+        .map_err(|_| "event_journal_poisoned".to_string())
+        .and_then(|journal| journal.replay_after(replay_after));
+    match replay {
+        Ok(replay) => {
+            for entry in replay {
+                let event_seq = entry.event_seq;
+                if send_event(
+                    &mut sender,
+                    &WireEvent::SemanticEvent {
+                        event_seq: entry.event_seq,
+                        event: entry.event,
+                    },
+                )
+                .await
+                .is_err()
+                {
+                    return;
+                }
+                last_sent_event_seq = event_seq;
+            }
+        }
+        Err(error) => {
+            if send_event(&mut sender, &WireEvent::HostError { message: error })
+                .await
+                .is_err()
+            {
+                return;
+            }
         }
     }
-    let mut events = state.events.subscribe();
     let (command_tx, command_rx) =
-        tokio_mpsc::channel::<ClientCommand>(BROWSER_COMMAND_QUEUE_CAPACITY);
+        tokio_mpsc::channel::<BrowserCommand>(BROWSER_COMMAND_QUEUE_CAPACITY);
     let (command_result_tx, mut command_result_rx) = tokio_mpsc::unbounded_channel();
     let command_state = state.clone();
     let command_worker = tokio::spawn(run_ordered_blocking_queue(
         command_rx,
         command_result_tx,
-        move |command| handle_command(&command_state, port, command),
+        move |command| Ok(execute_browser_command(&command_state, port, command)),
     ));
     loop {
         tokio::select! {
@@ -966,15 +1432,65 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
                             }
                             continue;
                         }
-                        match serde_json::from_str::<ClientCommand>(&text) {
-                            Ok(command) => {
-                                if let Err(error) = command_tx.try_send(command) {
-                                    let message = match error {
-                                        tokio_mpsc::error::TrySendError::Full(_) => "browser_command_queue_full",
-                                        tokio_mpsc::error::TrySendError::Closed(_) => "browser_command_worker_stopped",
-                                    };
-                                    if send_event(&mut sender, &WireEvent::HostError { message: message.to_string() }).await.is_err() {
-                                        break;
+                        match serde_json::from_str::<BrowserCommand>(&text) {
+                            Ok(mut command) => {
+                                // Acceptance and mem switching share this barrier. A switch
+                                // cannot advance the epoch between stamping and queueing a
+                                // command, and the non-Send guard is dropped before any await.
+                                let enqueue_outcome = match state.mem_epoch.read() {
+                                    Err(_) => BrowserCommandEnqueueOutcome::Rejected {
+                                        command_id: command.command_id.clone(),
+                                        error: "mem_epoch_poisoned".to_string(),
+                                    },
+                                    Ok(epoch) => {
+                                        command.accepted_mem_epoch = *epoch;
+                                        let mut rejection = None;
+                                        let mut cached = None;
+                                        if let Some(command_id) = command.command_id.as_deref() {
+                                            if let Err(error) = validate_command_id(command_id) {
+                                                rejection = Some(error);
+                                            } else {
+                                                match reserve_command_dedup(&state, command_id) {
+                                                    Ok(Some(CommandDedupState::Accepted))
+                                                        if command.command.waits_for_core_acceptance() =>
+                                                    {
+                                                        // An accepted TurnSubmit is a durable
+                                                        // intent, not proof of Core delivery.
+                                                        // Re-drive it; Core deduplicates by ID.
+                                                    }
+                                                    Ok(Some(previous)) => {
+                                                        cached = Some((command_id.to_string(), previous));
+                                                    }
+                                                    Ok(None) => {}
+                                                    Err(error) => rejection = Some(error),
+                                                }
+                                            }
+                                        }
+                                        if let Some(error) = rejection {
+                                            BrowserCommandEnqueueOutcome::Rejected {
+                                                command_id: command.command_id.clone(),
+                                                error,
+                                            }
+                                        } else if let Some((command_id, state)) = cached {
+                                            BrowserCommandEnqueueOutcome::Cached { command_id, state }
+                                        } else {
+                                            enqueue_reserved_browser_command(&state, &command_tx, command)
+                                        }
+                                    }
+                                };
+                                match enqueue_outcome {
+                                    BrowserCommandEnqueueOutcome::Accepted(Some(command_id)) => {
+                                        if send_event(&mut sender, &command_ack(&command_id, CommandAckStatus::Accepted, None)).await.is_err() { break; }
+                                    }
+                                    BrowserCommandEnqueueOutcome::Accepted(None) => {}
+                                    BrowserCommandEnqueueOutcome::Cached { command_id, state: cached } => {
+                                        if send_cached_command_state(&mut sender, &command_id, cached).await.is_err() { break; }
+                                    }
+                                    BrowserCommandEnqueueOutcome::Rejected { command_id: Some(command_id), error } => {
+                                        if send_event(&mut sender, &command_ack(&command_id, CommandAckStatus::Rejected, Some(error))).await.is_err() { break; }
+                                    }
+                                    BrowserCommandEnqueueOutcome::Rejected { command_id: None, error } => {
+                                        if send_event(&mut sender, &WireEvent::HostError { message: error }).await.is_err() { break; }
                                     }
                                 }
                             }
@@ -991,8 +1507,17 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
             }
             result = command_result_rx.recv() => {
                 match result {
-                    Some(Ok(Some(event))) => if send_event(&mut sender, &event).await.is_err() { break; },
-                    Some(Ok(None)) => {}
+                    Some(Ok(completion)) => {
+                        if let Some(event) = completion.event {
+                            if send_event(&mut sender, &event).await.is_err() { break; }
+                        }
+                        if let Some(ack) = completion.ack {
+                            if send_event(&mut sender, &ack).await.is_err() { break; }
+                        }
+                        if let Some(error) = completion.legacy_error {
+                            if send_event(&mut sender, &WireEvent::HostError { message: error }).await.is_err() { break; }
+                        }
+                    }
                     Some(Err(error)) => if send_event(&mut sender, &WireEvent::HostError { message: error }).await.is_err() {
                         break;
                     },
@@ -1003,16 +1528,451 @@ async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
                 }
             }
             event = events.recv() => match event {
-                Ok(event) => if send_event(&mut sender, &event).await.is_err() { break; },
+                Ok(WireEvent::SemanticEvent { event_seq, .. }) if event_seq <= last_sent_event_seq => {}
+                Ok(event) => {
+                    let sent_seq = match &event {
+                        WireEvent::SemanticEvent { event_seq, .. } => Some(*event_seq),
+                        WireEvent::Hello { event_cursor, .. } => Some(*event_cursor),
+                        _ => None,
+                    };
+                    if send_event(&mut sender, &event).await.is_err() { break; }
+                    if let Some(sent_seq) = sent_seq {
+                        last_sent_event_seq = sent_seq;
+                    }
+                },
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    if send_event(&mut sender, &WireEvent::Hello { snapshot: snapshot_for(&state, port) }).await.is_err() { break; }
+                    let replay = state
+                        .event_journal
+                        .lock()
+                        .map_err(|_| "event_journal_poisoned".to_string())
+                        .and_then(|journal| journal.replay_after(last_sent_event_seq));
+                    match replay {
+                        Ok(entries) => {
+                            let mut disconnected = false;
+                            for entry in entries {
+                                let event_seq = entry.event_seq;
+                                if send_event(
+                                    &mut sender,
+                                    &semantic_event_envelope(event_seq, entry.event),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    disconnected = true;
+                                    break;
+                                }
+                                last_sent_event_seq = event_seq;
+                            }
+                            if disconnected { break; }
+                        }
+                        Err(message) => {
+                            if send_event(&mut sender, &WireEvent::HostError { message }).await.is_err() { break; }
+                        }
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     }
     drop(command_tx);
-    command_worker.abort();
+    // Dropping a JoinHandle detaches the worker. It must drain commands that this
+    // connection already received even when the browser disconnects before ACK.
+    drop(command_worker);
+}
+
+#[derive(Debug)]
+struct BrowserCommandCompletion {
+    event: Option<WireEvent>,
+    ack: Option<WireEvent>,
+    legacy_error: Option<String>,
+}
+
+enum BrowserCommandEnqueueOutcome {
+    Accepted(Option<String>),
+    Cached {
+        command_id: String,
+        state: CommandDedupState,
+    },
+    Rejected {
+        command_id: Option<String>,
+        error: String,
+    },
+}
+
+fn enqueue_reserved_browser_command(
+    state: &AppState,
+    command_tx: &tokio_mpsc::Sender<BrowserCommand>,
+    mut command: BrowserCommand,
+) -> BrowserCommandEnqueueOutcome {
+    if let Some((key, lane)) = command_lane(state, &command.command) {
+        match lane.issue() {
+            Ok(ticket) => {
+                command.accepted_lane = Some(AcceptedCommandLane {
+                    key,
+                    lane,
+                    lanes: Arc::clone(&state.command_lanes),
+                    ticket,
+                })
+            }
+            Err(error) => {
+                return reject_reserved_enqueue(state, command, error);
+            }
+        }
+    }
+    let command_id = command.command_id.clone();
+    match command_tx.try_send(command) {
+        Ok(()) => BrowserCommandEnqueueOutcome::Accepted(command_id),
+        Err(error) => {
+            let (message, command) = match error {
+                tokio_mpsc::error::TrySendError::Full(command) => {
+                    ("browser_command_queue_full", command)
+                }
+                tokio_mpsc::error::TrySendError::Closed(command) => {
+                    ("browser_command_worker_stopped", command)
+                }
+            };
+            reject_reserved_enqueue(state, command, message.to_string())
+        }
+    }
+}
+
+fn reject_reserved_enqueue(
+    state: &AppState,
+    command: BrowserCommand,
+    mut error: String,
+) -> BrowserCommandEnqueueOutcome {
+    if let Some(accepted) = command.accepted_lane.as_ref() {
+        let _ = accepted.lane.skip(accepted.ticket);
+    }
+    if let Some(command_id) = command.command_id.as_deref() {
+        if let Err(persist_error) = finish_command_dedup(
+            state,
+            command_id,
+            CommandDedupState::Rejected {
+                error: error.clone(),
+            },
+        ) {
+            error = persist_error;
+        }
+    }
+    BrowserCommandEnqueueOutcome::Rejected {
+        command_id: command.command_id,
+        error,
+    }
+}
+
+fn execute_browser_command(
+    state: &AppState,
+    port: u16,
+    browser_command: BrowserCommand,
+) -> BrowserCommandCompletion {
+    let BrowserCommand {
+        command_id,
+        command,
+        accepted_mem_epoch,
+        accepted_lane,
+    } = browser_command;
+    let sensitive_result = command.result_is_sensitive();
+    let direct_result = command.result_is_direct();
+    let waits_for_core_acceptance = command.waits_for_core_acceptance();
+    let mutation_lane = command.mutation_lane();
+    let _global_write_guard;
+    let _global_read_guard;
+    if mutation_lane.is_some() && command.uses_global_mutation_barrier() {
+        _global_write_guard = match state.command_global_barrier.write() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                return rejected_browser_command(
+                    state,
+                    command_id.as_deref(),
+                    "command_global_barrier_poisoned".to_string(),
+                )
+            }
+        };
+        _global_read_guard = None;
+    } else if mutation_lane.is_some() {
+        _global_read_guard = match state.command_global_barrier.read() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                return rejected_browser_command(
+                    state,
+                    command_id.as_deref(),
+                    "command_global_barrier_poisoned".to_string(),
+                )
+            }
+        };
+        _global_write_guard = None;
+    } else {
+        _global_write_guard = None;
+        _global_read_guard = None;
+    }
+    let _lane_guard = match accepted_lane
+        .as_ref()
+        .map(|accepted| accepted.lane.enter(accepted.ticket))
+        .transpose()
+    {
+        Ok(guard) => guard,
+        Err(error) => return rejected_browser_command(state, command_id.as_deref(), error),
+    };
+    let is_mem_switch = matches!(command, ClientCommand::MemSwitch { .. });
+    let mem_epoch_guard = if is_mem_switch {
+        None
+    } else {
+        state.mem_epoch.read().ok()
+    };
+    if !is_mem_switch
+        && mem_epoch_guard
+            .as_deref()
+            .is_none_or(|epoch| *epoch != accepted_mem_epoch)
+    {
+        return rejected_browser_command(
+            state,
+            command_id.as_deref(),
+            "command_mem_epoch_stale".to_string(),
+        );
+    }
+    match handle_command_with_id(state, port, command_id.as_deref(), command) {
+        Ok(event) => {
+            let direct_event = direct_result.then(|| event.clone()).flatten();
+            if let Some(command_id) = command_id.as_deref() {
+                if sensitive_result {
+                    if let Ok(mut cache) = state.command_dedup.lock() {
+                        cache.unreserve(command_id);
+                    }
+                    return BrowserCommandCompletion {
+                        event: direct_event,
+                        ack: Some(command_ack(command_id, CommandAckStatus::Committed, None)),
+                        legacy_error: None,
+                    };
+                }
+                if waits_for_core_acceptance {
+                    // The user entry is durable, but the command is not terminal
+                    // until Core reports that it dequeued the matching intent.
+                    return BrowserCommandCompletion {
+                        event: direct_event,
+                        ack: Some(command_ack(command_id, CommandAckStatus::Accepted, None)),
+                        legacy_error: None,
+                    };
+                }
+                match finish_command_dedup(
+                    state,
+                    command_id,
+                    CommandDedupState::Committed {
+                        serialized_event: direct_event.as_ref().and_then(durable_command_result),
+                        event: direct_event.clone(),
+                    },
+                ) {
+                    Ok(()) => BrowserCommandCompletion {
+                        event: direct_event,
+                        ack: Some(command_ack(command_id, CommandAckStatus::Committed, None)),
+                        legacy_error: None,
+                    },
+                    Err(error) => BrowserCommandCompletion {
+                        event: direct_event,
+                        ack: Some(command_ack(
+                            command_id,
+                            CommandAckStatus::Accepted,
+                            Some(format!("command_terminal_persist_pending:{error}")),
+                        )),
+                        legacy_error: None,
+                    },
+                }
+            } else {
+                BrowserCommandCompletion {
+                    event: direct_event,
+                    ack: None,
+                    legacy_error: None,
+                }
+            }
+        }
+        Err(error) => {
+            if let Some(command_id) = command_id.as_deref() {
+                let persist_error = finish_command_dedup(
+                    state,
+                    command_id,
+                    CommandDedupState::Rejected {
+                        error: error.clone(),
+                    },
+                )
+                .err();
+                BrowserCommandCompletion {
+                    event: None,
+                    ack: Some(command_ack(
+                        command_id,
+                        CommandAckStatus::Rejected,
+                        Some(persist_error.unwrap_or(error)),
+                    )),
+                    legacy_error: None,
+                }
+            } else {
+                BrowserCommandCompletion {
+                    event: None,
+                    ack: None,
+                    legacy_error: Some(error),
+                }
+            }
+        }
+    }
+}
+
+fn rejected_browser_command(
+    state: &AppState,
+    command_id: Option<&str>,
+    error: String,
+) -> BrowserCommandCompletion {
+    if let Some(command_id) = command_id {
+        let persisted = finish_command_dedup(
+            state,
+            command_id,
+            CommandDedupState::Rejected {
+                error: error.clone(),
+            },
+        )
+        .err();
+        BrowserCommandCompletion {
+            event: None,
+            ack: Some(command_ack(
+                command_id,
+                CommandAckStatus::Rejected,
+                Some(persisted.unwrap_or(error)),
+            )),
+            legacy_error: None,
+        }
+    } else {
+        BrowserCommandCompletion {
+            event: None,
+            ack: None,
+            legacy_error: Some(error),
+        }
+    }
+}
+
+fn command_lane(
+    state: &AppState,
+    command: &ClientCommand,
+) -> Option<(String, Arc<TicketCommandLane>)> {
+    command.mutation_lane().and_then(|key| {
+        state.command_lanes.lock().ok().map(|mut lanes| {
+            let lane = lanes.entry(key.clone()).or_default().clone();
+            (key, lane)
+        })
+    })
+}
+
+fn durable_command_result(event: &WireEvent) -> Option<Value> {
+    if matches!(
+        event,
+        WireEvent::SessionApiKeyRevealed { .. } | WireEvent::McpServerSecretsRevealed { .. }
+    ) {
+        return None;
+    }
+    let value = serde_json::to_value(event).ok()?;
+    (serde_json::to_vec(&value).ok()?.len() <= MAX_COMMAND_DEDUP_RESULT_BYTES).then_some(value)
+}
+
+fn reserve_command_dedup(
+    state: &AppState,
+    command_id: &str,
+) -> Result<Option<CommandDedupState>, String> {
+    let path = current_command_dedup_path(state)?;
+    let mut cache = state
+        .command_dedup
+        .lock()
+        .map_err(|_| "command_dedup_poisoned".to_string())?;
+    if !cache.records.contains_key(command_id)
+        && cache.records.len() >= COMMAND_DEDUP_CAPACITY
+        && cache
+            .records
+            .values()
+            .all(|record| matches!(record, CommandDedupState::Accepted))
+    {
+        // Accepted entries are ownership records and must never be evicted to
+        // make room for a click flood. Reject new ownership instead of letting
+        // an all-uncertain cache grow without bound.
+        return Err("command_dedup_capacity_exhausted".to_string());
+    }
+    let previous = cache.reserve(command_id);
+    if previous.is_none() {
+        if let Err(error) = cache.save(&path) {
+            cache.unreserve(command_id);
+            return Err(error);
+        }
+    }
+    Ok(previous)
+}
+
+fn finish_command_dedup(
+    state: &AppState,
+    command_id: &str,
+    terminal: CommandDedupState,
+) -> Result<(), String> {
+    let path = current_command_dedup_path(state)?;
+    let mut cache = state
+        .command_dedup
+        .lock()
+        .map_err(|_| "command_dedup_poisoned".to_string())?;
+    cache.finish(command_id, terminal);
+    cache.save(&path)
+}
+
+fn command_ack(command_id: &str, status: CommandAckStatus, error: Option<String>) -> WireEvent {
+    WireEvent::CommandAck {
+        command_id: command_id.to_string(),
+        status,
+        error,
+    }
+}
+
+fn validate_command_id(command_id: &str) -> Result<(), String> {
+    if command_id.is_empty() {
+        return Err("command_id_empty".to_string());
+    }
+    if command_id.len() > MAX_COMMAND_ID_BYTES {
+        return Err("command_id_too_large".to_string());
+    }
+    if command_id.chars().any(char::is_control) {
+        return Err("command_id_invalid".to_string());
+    }
+    Ok(())
+}
+
+async fn send_cached_command_state(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    command_id: &str,
+    state: CommandDedupState,
+) -> Result<(), ()> {
+    match state {
+        CommandDedupState::Accepted => {
+            send_event(
+                sender,
+                &command_ack(command_id, CommandAckStatus::Accepted, None),
+            )
+            .await
+        }
+        CommandDedupState::Committed {
+            event,
+            serialized_event,
+        } => {
+            if let Some(event) = event {
+                send_event(sender, &event).await?;
+            } else if let Some(event) = serialized_event {
+                let text = serde_json::to_string(&event).map_err(|_| ())?;
+                sender.send(Message::Text(text)).await.map_err(|_| ())?;
+            }
+            send_event(
+                sender,
+                &command_ack(command_id, CommandAckStatus::Committed, None),
+            )
+            .await
+        }
+        CommandDedupState::Rejected { error } => {
+            send_event(
+                sender,
+                &command_ack(command_id, CommandAckStatus::Rejected, Some(error)),
+            )
+            .await
+        }
+    }
 }
 
 async fn run_ordered_blocking_queue<T, R, F>(
@@ -1030,9 +1990,9 @@ async fn run_ordered_blocking_queue<T, R, F>(
         let result = tokio::task::spawn_blocking(move || handler(item))
             .await
             .unwrap_or_else(|error| Err(format!("browser_command_worker_failed:{error}")));
-        if results.send(result).is_err() {
-            break;
-        }
+        // The WebSocket may disappear after accepting a command. Continue
+        // draining the queue so accepted mutations are not cancelled with it.
+        let _ = results.send(result);
     }
 }
 
@@ -1044,9 +2004,54 @@ async fn send_event(
     sender.send(Message::Text(text)).await.map_err(|_| ())
 }
 
+fn publish_semantic(state: &AppState, event: WireEvent) -> Result<u64, String> {
+    let value = serde_json::to_value(&event)
+        .map_err(|error| format!("semantic_event_serialize_failed:{error}"))?;
+    let entry = state
+        .event_journal
+        .lock()
+        .map_err(|_| "event_journal_poisoned".to_string())?
+        .append(value)?;
+    #[cfg(not(test))]
+    let _ = state
+        .events
+        .send(semantic_event_envelope(entry.event_seq, entry.event));
+    #[cfg(test)]
+    let _ = state.events.send(event);
+    Ok(entry.event_seq)
+}
+
+fn semantic_event_envelope(event_seq: u64, event: Value) -> WireEvent {
+    WireEvent::SemanticEvent { event_seq, event }
+}
+
+fn publish_core_semantic(state: &AppState, session_id: &str, event: WireEvent) {
+    if let Err(error) = publish_semantic(state, event) {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.state = "error".to_string();
+            }
+        }
+        eprintln!("[timem_web_semantic_publish_error] session_id={session_id:?} reason={error}");
+        let _ = state.events.send(WireEvent::HostError {
+            message: format!("semantic_event_persist_failed:{error}"),
+        });
+    }
+}
+
+#[cfg(test)]
 fn handle_command(
     state: &AppState,
     port: u16,
+    command: ClientCommand,
+) -> Result<Option<WireEvent>, String> {
+    handle_command_with_id(state, port, None, command)
+}
+
+fn handle_command_with_id(
+    state: &AppState,
+    port: u16,
+    command_id: Option<&str>,
     command: ClientCommand,
 ) -> Result<Option<WireEvent>, String> {
     match command {
@@ -1064,9 +2069,11 @@ fn handle_command(
                 .cloned()
                 .ok_or_else(|| "created_session_not_found".to_string())?;
             if let Some(event) = work_instruction_notice_event(state, &session_id) {
-                let _ = state.events.send(event);
+                publish_semantic(state, event)?;
             }
-            return Ok(Some(WireEvent::SessionCreated { session }));
+            let event = WireEvent::SessionCreated { session };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::SessionRename {
             session_id,
@@ -1083,20 +2090,25 @@ fn handle_command(
                 .ok_or_else(|| "session_not_found".to_string())?
                 .display_name = display_name.clone();
             persist_web_session(state, &session_id)?;
-            return Ok(Some(WireEvent::SessionRenamed {
+            let event = WireEvent::SessionRenamed {
                 session_id,
                 display_name,
-            }));
+            };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::SessionApiKeyUpdate {
             session_id,
             api_key,
         } => {
             let runtime_profile = update_session_api_key(state, &session_id, api_key)?;
-            let _ = state.events.send(WireEvent::SessionRuntimeUpdated {
-                session_id,
-                runtime_profile,
-            });
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            )?;
         }
         ClientCommand::SessionApiKeyReveal { session_id } => {
             return Ok(Some(WireEvent::SessionApiKeyRevealed {
@@ -1133,7 +2145,9 @@ fn handle_command(
                 .map_err(|_| "session_store_poisoned")?
                 .remove(&session_id)
                 .ok_or_else(|| "session_not_found".to_string())?;
-            return Ok(Some(WireEvent::SessionDeleted { session_id }));
+            let event = WireEvent::SessionDeleted { session_id };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::TurnSubmit {
             session_id,
@@ -1141,6 +2155,19 @@ fn handle_command(
             input_kind,
             source_turn_id,
         } => {
+            if let Some(command_id) = command_id {
+                if let Some(turn) = turn_for_command_id(state, &session_id, command_id)? {
+                    redeliver_recorded_turn(
+                        state,
+                        &session_id,
+                        command_id,
+                        input_kind.as_deref(),
+                        &text,
+                        &turn,
+                    )?;
+                    return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+                }
+            }
             let turn = if input_kind.as_deref() == Some("toolgen") {
                 submit_toolgen_turn(
                     state,
@@ -1149,20 +2176,28 @@ fn handle_command(
                         .as_deref()
                         .ok_or_else(|| "toolgen_source_turn_id_required".to_string())?,
                     (!text.trim().is_empty()).then_some(text),
+                    command_id,
                 )?
             } else {
                 if input_kind.is_some() || source_turn_id.is_some() {
                     return Err("unsupported_turn_input_kind".to_string());
                 }
                 let text = nonempty_text(text, "turn text")?;
-                submit_or_supplement_turn(state, &session_id, text)?
+                submit_or_supplement_turn(state, &session_id, text, command_id)?
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
         }
         ClientCommand::TurnSupplement { session_id, text } => {
+            if let Some(command_id) = command_id {
+                if let Some(turn) = turn_for_command_id(state, &session_id, command_id)? {
+                    return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+                }
+            }
             let text = nonempty_text(text, "supplement")?;
-            let turn = append_supplement_or_submit_turn(state, &session_id, text)?;
-            return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+            let turn = append_supplement_or_submit_turn(state, &session_id, text, command_id)?;
+            let event = WireEvent::TurnUpdated { session_id, turn };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::TurnCancel { session_id } => {
             for worker_id in session_worker_ids(state, &session_id)? {
@@ -1180,10 +2215,12 @@ fn handle_command(
             attachment_id,
         } => {
             remove_pending_attachment(state, &session_id, &attachment_id)?;
-            return Ok(Some(WireEvent::AttachmentRemoved {
+            let event = WireEvent::AttachmentRemoved {
                 session_id,
                 attachment_id,
-            }));
+            };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::HistoryPage {
             session_id,
@@ -1241,7 +2278,9 @@ fn handle_command(
                     session.tools = tools.clone();
                 }
             }
-            return Ok(Some(WireEvent::ToolRepoUpdated { session_id, tools }));
+            let event = WireEvent::ToolRepoUpdated { session_id, tools };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::ToolRepoOpenTerminal {
             session_id,
@@ -1274,7 +2313,9 @@ fn handle_command(
                 )? {
                     let turn =
                         append_turn_user_entry(state, &session_id, "approval", approval_summary)?;
-                    return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+                    let event = WireEvent::TurnUpdated { session_id, turn };
+                    publish_semantic(state, event.clone())?;
+                    return Ok(Some(event));
                 }
                 return Ok(None);
             }
@@ -1299,7 +2340,11 @@ fn handle_command(
                 switch_session_bash_approval(state, &session_id, BashApprovalMode::Approve)?;
             }
             return match append_turn_user_entry(state, &session_id, "approval", approval_summary) {
-                Ok(turn) => Ok(Some(WireEvent::TurnUpdated { session_id, turn })),
+                Ok(turn) => {
+                    let event = WireEvent::TurnUpdated { session_id, turn };
+                    publish_semantic(state, event.clone())?;
+                    Ok(Some(event))
+                }
                 Err(error) if error == "active_turn_not_found" => Ok(None),
                 Err(error) => Err(error),
             };
@@ -1313,11 +2358,14 @@ fn handle_command(
                 .lock()
                 .map(|settings| session_env_values(&settings))
                 .map_err(|_| "runtime_settings_poisoned".to_string())?;
-            let _ = state.events.send(WireEvent::HostConfigUpdated {
-                key: report.key.to_string(),
-                value: report.value.clone(),
-                session_env_defaults,
-            });
+            publish_semantic(
+                state,
+                WireEvent::HostConfigUpdated {
+                    key: report.key.to_string(),
+                    value: report.value.clone(),
+                    session_env_defaults,
+                },
+            )?;
             // Propagate config change to all active sessions
             let field = runtime_config_field_from_key(&key)?;
             propagate_runtime_config_to_sessions(state, field, &report.value);
@@ -1330,12 +2378,15 @@ fn handle_command(
             let value = nonempty_text(value, "runtime config value")?;
             let (value, runtime_profile) =
                 update_session_runtime_setting(state, &session_id, &key, &value)?;
-            let _ = state.events.send(WireEvent::SessionRuntimeConfigUpdated {
-                session_id,
-                key,
-                value,
-                runtime_profile,
-            });
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeConfigUpdated {
+                    session_id,
+                    key,
+                    value,
+                    runtime_profile,
+                },
+            )?;
         }
         ClientCommand::McpServerUpsert { session_id, config } => {
             let server_id = config.id.clone();
@@ -1344,11 +2395,15 @@ fn handle_command(
             let _ = mark_sessions_using_mcp_server(state, &server_id)?;
             schedule_mcp_server_refresh(state, &server_id)?;
             persist_web_session(state, &session_id)?;
-            return Ok(Some(mcp_updated_event(state, Some(session_id))?));
+            let event = mcp_updated_event(state, Some(session_id))?;
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::McpServerDelete { server_id } => {
             delete_mcp_server(state, &server_id)?;
-            return Ok(Some(mcp_updated_event(state, None)?));
+            let event = mcp_updated_event(state, None)?;
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::McpSessionToggle {
             session_id,
@@ -1360,7 +2415,9 @@ fn handle_command(
                 schedule_mcp_server_refresh(state, &server_id)?;
             }
             persist_web_session(state, &session_id)?;
-            return Ok(Some(mcp_updated_event(state, Some(session_id))?));
+            let event = mcp_updated_event(state, Some(session_id))?;
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::McpServerReconnect {
             session_id,
@@ -1374,7 +2431,9 @@ fn handle_command(
                 .mcp_runtime
                 .disconnect(&server_id);
             schedule_mcp_server_refresh(state, &server_id)?;
-            return Ok(Some(mcp_updated_event(state, Some(session_id))?));
+            let event = mcp_updated_event(state, Some(session_id))?;
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::McpServerSecretsReveal { server_id } => {
             return Ok(Some(WireEvent::McpServerSecretsRevealed {
@@ -1383,14 +2442,42 @@ fn handle_command(
             }));
         }
         ClientCommand::MemSwitch { path } => {
+            let mut epoch = state
+                .mem_epoch
+                .write()
+                .map_err(|_| "mem_epoch_poisoned".to_string())?;
             let snapshot = switch_mem_space(state, port, &path)?;
-            let _ = state.events.send(WireEvent::Hello { snapshot });
+            *epoch = epoch.saturating_add(1);
+            let (event_cursor, event_replay_floor) = state
+                .event_journal
+                .lock()
+                .map(|journal| (journal.cursor(), journal.replay_floor()))
+                .unwrap_or_default();
+            let _ = state.events.send(WireEvent::Hello {
+                snapshot,
+                event_cursor,
+                event_replay_floor,
+            });
         }
     }
     Ok(None)
 }
 
 fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapshot, String> {
+    if state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .values()
+        .any(|session| {
+            session.active_turn_id.is_some()
+                || session.state == "working"
+                || !session.pending_unconsumed_supplements.is_empty()
+                || session.pending_work_instruction_turn.is_some()
+        })
+    {
+        return Err("mem_switch_active_sessions".to_string());
+    }
     let requested_path = Path::new(path);
     let next_mem = if requested_path.is_absolute() {
         WebMemState::from_directory(requested_path)?
@@ -1399,6 +2486,8 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         let data_root = current_mem_state(state)?.layout.data_root().to_path_buf();
         WebMemState::new(data_root, path.to_string())?
     };
+    let next_command_dedup = CommandDedupCache::load(&command_dedup_path(&next_mem))?;
+    let next_event_journal = EventJournal::open(event_journal_path(&next_mem))?;
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
     if current_path == next_path {
@@ -1433,6 +2522,20 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
             .lock()
             .map_err(|_| "mem_state_poisoned".to_string())?;
         *mem = next_mem;
+    }
+    {
+        let mut cache = state
+            .command_dedup
+            .lock()
+            .map_err(|_| "command_dedup_poisoned".to_string())?;
+        *cache = next_command_dedup;
+    }
+    {
+        let mut journal = state
+            .event_journal
+            .lock()
+            .map_err(|_| "event_journal_poisoned".to_string())?;
+        *journal = next_event_journal;
     }
     if restore_stored_sessions(state)? == 0 {
         let _ = create_session(state, None, None, BTreeMap::new())?;
@@ -1748,7 +2851,9 @@ fn schedule_mcp_server_refresh(state: &AppState, server_id: &str) -> Result<bool
             };
             for session_id in session_ids {
                 if let Ok(event) = mcp_updated_event(&state, Some(session_id)) {
-                    let _ = state.events.send(event);
+                    if let Err(error) = publish_semantic(&state, event) {
+                        eprintln!("[timem_web_semantic_publish_error] reason={error}");
+                    }
                 }
             }
         })
@@ -1967,6 +3072,7 @@ fn create_session(
                 resume_notice_pending: false,
                 active_turn_id: None,
                 pending_completion_message_id: None,
+                pending_unconsumed_supplements: Vec::new(),
                 work_instruction_mode: runtime.settings.work_instruction_mode,
                 work_instruction_allowed: None,
                 pending_work_instruction_turn: None,
@@ -2073,6 +3179,7 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
                 resume_notice_pending: true,
                 active_turn_id: None,
                 pending_completion_message_id: None,
+                pending_unconsumed_supplements: Vec::new(),
                 work_instruction_mode: runtime.settings.work_instruction_mode,
                 work_instruction_allowed: None,
                 pending_work_instruction_turn: None,
@@ -2088,7 +3195,82 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
         None,
         true,
     )?;
+    resume_unfinished_core_command_after_restore(state, &stored.session_id)?;
     persist_restored_session_runtime_cache(state, &stored)?;
+    Ok(())
+}
+
+fn resume_unfinished_core_command_after_restore(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), String> {
+    let pending = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let pending = session.turns.iter().rev().find_map(|turn| {
+            if turn.final_answer.is_some() || turn.completion.is_some() {
+                return None;
+            }
+            let entries = turn
+                .user_entries
+                .iter()
+                .filter_map(|entry| {
+                    Some((
+                        entry.command_id.clone()?,
+                        entry.text.clone(),
+                        entry.attachments.clone(),
+                        entry.kind.clone(),
+                    ))
+                    .filter(|_| entry.delivery_state.is_some())
+                })
+                .collect::<Vec<_>>();
+            (!entries.is_empty()).then(|| (turn.turn_id.clone(), entries))
+        });
+        if let Some((turn_id, ..)) = pending.as_ref() {
+            session.active_turn_id = Some(turn_id.clone());
+            session.state = "working".to_string();
+            if let Some(turn) = session
+                .turns
+                .iter_mut()
+                .find(|turn| &turn.turn_id == turn_id)
+            {
+                turn.state = "working".to_string();
+            }
+        }
+        pending
+    };
+    let Some((_turn_id, entries)) = pending else {
+        return Ok(());
+    };
+    let worker = primary_worker_handle(state, session_id)?;
+    let (command_id, text, attachments, kind) = entries[0].clone();
+    if kind == "toolgen_instruction" {
+        worker.run_toolgen_with_command_id(ToolGenRequest::new(Some(text)), Some(command_id))
+    } else {
+        worker.run_turn_batch_with_command_ids(
+            text,
+            session_context(state, session_id, &attachments)?,
+            Some(command_id),
+            entries
+                .iter()
+                .skip(1)
+                .filter(|(_, _, _, kind)| kind == "supplement")
+                .map(|(command_id, text, attachments, _)| {
+                    let mut worker_text = text.clone();
+                    if let Some(context) = uploaded_files_context(attachments) {
+                        worker_text.push_str("\n\n");
+                        worker_text.push_str(&context);
+                    }
+                    (worker_text, Some(command_id.clone()))
+                })
+                .collect(),
+        )
+    }?;
     Ok(())
 }
 
@@ -2156,6 +3338,8 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 turn_id,
                 created_at_ms,
                 kind,
+                command_id,
+                delivery_state,
                 content,
             } => {
                 let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
@@ -2174,6 +3358,8 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                         text: content,
                         attachments: Vec::new(),
                         created_at_ms: created_at_ms as u128,
+                        command_id,
+                        delivery_state,
                     }),
                     ChatHistoryRole::Assistant => {
                         turn.final_answer = Some(content);
@@ -2189,6 +3375,25 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 mut extra,
                 ..
             } => {
+                if kind == ChatHistoryEventKind::RuntimeNotice
+                    && extra.get("kind").and_then(Value::as_str) == Some("command_delivery")
+                {
+                    if let (Some(command_id), Some(delivery_state)) = (
+                        extra.get("command_id").and_then(Value::as_str),
+                        extra
+                            .get("delivery_state")
+                            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                    ) {
+                        for restored_turn in turns.values_mut() {
+                            for entry in &mut restored_turn.user_entries {
+                                if entry.command_id.as_deref() == Some(command_id) {
+                                    entry.delivery_state = Some(delivery_state);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let payload = extra
                     .remove("payload")
                     .unwrap_or_else(|| json!({"kind": format!("{kind:?}")}));
@@ -2231,6 +3436,7 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
             created_at_ms,
             kind: _,
             content,
+            ..
         } => {
             let role = match role {
                 ChatHistoryRole::User => "user",
@@ -2344,27 +3550,84 @@ fn session_has_active_turn(state: &AppState, session_id: &str) -> Result<bool, S
         .is_some_and(|turn_id| session.turns.iter().any(|turn| turn.turn_id == *turn_id)))
 }
 
+fn turn_for_command_id(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+) -> Result<Option<WebTurn>, String> {
+    Ok(state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .turns
+        .iter()
+        .find(|turn| {
+            turn.user_entries
+                .iter()
+                .any(|entry| entry.command_id.as_deref() == Some(command_id))
+        })
+        .cloned())
+}
+
+fn redeliver_recorded_turn(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+    input_kind: Option<&str>,
+    text: &str,
+    turn: &WebTurn,
+) -> Result<(), String> {
+    let Some(entry) = turn
+        .user_entries
+        .iter()
+        .find(|entry| entry.command_id.as_deref() == Some(command_id))
+    else {
+        return Ok(());
+    };
+    // CoreAccepted is process-local dequeue, not durable completion. An
+    // unfinished turn is therefore re-driven after restart with the same ID.
+    let worker = primary_worker_handle(state, session_id)?;
+    if input_kind == Some("toolgen") {
+        let instruction = (!text.trim().is_empty()).then(|| text.trim().to_string());
+        worker.run_toolgen_with_command_id(
+            ToolGenRequest::new(instruction),
+            Some(command_id.to_string()),
+        )
+    } else {
+        worker.run_turn_with_command_id(
+            entry.text.clone(),
+            session_context(state, session_id, &entry.attachments)?,
+            Some(command_id.to_string()),
+        )
+    }
+}
+
 fn submit_or_supplement_turn(
     state: &AppState,
     session_id: &str,
     text: String,
+    command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
     if session_has_active_turn(state, session_id)? {
-        if let Some(turn) = try_append_turn_supplement(state, session_id, text.clone())? {
+        if let Some(turn) = try_append_turn_supplement(state, session_id, text.clone(), command_id)?
+        {
             return Ok(turn);
         }
     }
-    submit_turn(state, session_id, text)
+    submit_turn_with_command_id(state, session_id, text, command_id)
 }
 
 fn append_supplement_or_submit_turn(
     state: &AppState,
     session_id: &str,
     text: String,
+    command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
-    match try_append_turn_supplement(state, session_id, text.clone())? {
+    match try_append_turn_supplement(state, session_id, text.clone(), command_id)? {
         Some(turn) => Ok(turn),
-        None => submit_turn(state, session_id, text),
+        None => submit_turn_with_command_id(state, session_id, text, command_id),
     }
 }
 
@@ -2372,6 +3635,7 @@ fn try_append_turn_supplement(
     state: &AppState,
     session_id: &str,
     text: String,
+    command_id: Option<&str>,
 ) -> Result<Option<WebTurn>, String> {
     if !session_has_active_turn(state, session_id)? {
         return Ok(None);
@@ -2390,15 +3654,25 @@ fn try_append_turn_supplement(
         worker_supplement_text.push_str("\n\n");
         worker_supplement_text.push_str(&context);
     }
-    if !worker_handle.try_add_user_supplement(worker_supplement_text) {
+    let mut appended_turn = None;
+    let accepted = worker_handle.try_add_user_supplement_with_command_id_after(
+        worker_supplement_text,
+        command_id.map(str::to_string),
+        || {
+            appended_turn = Some(append_turn_supplement_with_pending_attachments(
+                state,
+                session_id,
+                text.clone(),
+                command_id,
+            )?);
+            Ok(())
+        },
+    )?;
+    if !accepted {
         settle_closed_primary_turn(state, session_id)?;
         return Ok(None);
     }
-    match append_turn_supplement_with_pending_attachments(state, session_id, text) {
-        Ok(turn) => Ok(Some(turn)),
-        Err(error) if error == "active_turn_not_found" => Ok(None),
-        Err(error) => Err(error),
-    }
+    Ok(appended_turn)
 }
 
 fn settle_closed_primary_turn(state: &AppState, session_id: &str) -> Result<(), String> {
@@ -2603,6 +3877,15 @@ fn attach_worker_to_session_context(
 }
 
 fn submit_turn(state: &AppState, session_id: &str, text: String) -> Result<WebTurn, String> {
+    submit_turn_with_command_id(state, session_id, text, None)
+}
+
+fn submit_turn_with_command_id(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+    command_id: Option<&str>,
+) -> Result<WebTurn, String> {
     validate_session_model_service_config(state, session_id)?;
     apply_pending_session_mcp(state, session_id)?;
     let request = {
@@ -2622,7 +3905,14 @@ fn submit_turn(state: &AppState, session_id: &str, text: String) -> Result<WebTu
         }
     };
     if let Some(request) = request {
-        let turn = start_web_turn(state, session_id, &text)?;
+        let turn = start_web_turn_with_command_id(state, session_id, &text, command_id)?;
+        publish_semantic(
+            state,
+            WireEvent::TurnUpdated {
+                session_id: session_id.to_string(),
+                turn: turn.clone(),
+            },
+        )?;
         let attachments = turn.user_entries[0].attachments.clone();
         let event = HostDecisionRequest::WorkInstructionLoad(request).topic_event(session_id);
         let request_id = event.payload["request_id"]
@@ -2642,16 +3932,20 @@ fn submit_turn(state: &AppState, session_id: &str, text: String) -> Result<WebTu
                 request_id: request_id.clone(),
                 text,
                 attachments,
+                command_id: command_id.map(str::to_string),
             });
         }
         let wire_payload = event.wire_payload();
         let turn_ref =
             append_active_turn_event(state, session_id, "core_topic", wire_payload.clone());
-        let _ = state.events.send(WireEvent::CoreTopic {
-            turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
-            turn_event_id: turn_ref.map(|value| value.event_id),
-            event: wire_payload,
-        });
+        publish_semantic(
+            state,
+            WireEvent::CoreTopic {
+                turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+                turn_event_id: turn_ref.map(|value| value.event_id),
+                event: wire_payload,
+            },
+        )?;
         let timeout_state = state.clone();
         let timeout_session = session_id.to_string();
         tokio::spawn(async move {
@@ -2679,11 +3973,26 @@ fn submit_turn(state: &AppState, session_id: &str, text: String) -> Result<WebTu
         });
         return Ok(turn);
     }
-    let turn = start_web_turn(state, session_id, &text)?;
+    let turn = start_web_turn_with_command_id(state, session_id, &text, command_id)?;
+    // Publish the authoritative turn before allowing Core to emit activity for
+    // it. Otherwise a fast worker event can overtake the direct command reply.
+    if let Err(error) = publish_semantic(
+        state,
+        WireEvent::TurnUpdated {
+            session_id: session_id.to_string(),
+            turn: turn.clone(),
+        },
+    ) {
+        let attachments = turn.user_entries[0].attachments.clone();
+        rollback_web_turn(state, session_id, &turn.turn_id, attachments);
+        return Err(error);
+    }
     let attachments = turn.user_entries[0].attachments.clone();
-    if let Err(error) = primary_worker_handle(state, session_id)?
-        .run_turn(text, session_context(state, session_id, &attachments)?)
-    {
+    if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
+        text,
+        session_context(state, session_id, &attachments)?,
+        command_id.map(str::to_string),
+    ) {
         rollback_web_turn(state, session_id, &turn.turn_id, attachments);
         return Err(error);
     }
@@ -2718,12 +4027,13 @@ fn resolve_work_instruction_decision(
     };
     if decision.as_bool() {
         if let Some(event) = work_instruction_notice_event(state, session_id) {
-            let _ = state.events.send(event);
+            publish_semantic(state, event)?;
         }
     }
-    primary_worker_handle(state, session_id)?.run_turn(
+    primary_worker_handle(state, session_id)?.run_turn_with_command_id(
         pending.text,
         session_context(state, session_id, &pending.attachments)?,
+        pending.command_id,
     )?;
     Ok(true)
 }
@@ -3083,14 +4393,25 @@ fn append_message(
             &turn_id,
             &role_for_history,
             None,
+            None,
             created_at_ms,
             text_for_history,
-        );
+        )?;
     }
     Ok(message_id)
 }
 
+#[cfg(test)]
 fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebTurn, String> {
+    start_web_turn_with_command_id(state, session_id, text, None)
+}
+
+fn start_web_turn_with_command_id(
+    state: &AppState,
+    session_id: &str,
+    text: &str,
+    command_id: Option<&str>,
+) -> Result<WebTurn, String> {
     let mut sessions = state
         .sessions
         .lock()
@@ -3101,6 +4422,10 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
     if session.active_turn_id.is_some() {
         return Err("turn_already_active_use_supplement".to_string());
     }
+    // Host state must not expose a turn that failed its durable write. Keep a
+    // complete pre-mutation image because this mutation also consumes pending
+    // attachments and may evict bounded turn/message history.
+    let previous_session = session.clone();
     let attachments = std::mem::take(&mut session.attachments);
     let turn = WebTurn {
         turn_id: unique_web_id("web_turn"),
@@ -3111,6 +4436,8 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
             text: text.to_string(),
             attachments,
             created_at_ms: now_ms(),
+            command_id: command_id.map(str::to_string),
+            delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
         }],
         events: Vec::new(),
         final_answer: None,
@@ -3137,16 +4464,23 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
     let turn_id = turn.turn_id.clone();
     let created_at_ms = turn.created_at_ms as i64;
     drop(sessions);
-    append_chat_history_message(
+    let persist_result = append_chat_history_message(
         state,
         session_id,
         &turn_id,
         "user",
         Some("task"),
+        command_id,
         created_at_ms,
         text.to_string(),
-    );
-    let _ = persist_web_session(state, session_id);
+    )
+    .and_then(|()| persist_web_session(state, session_id));
+    if let Err(error) = persist_result {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id.to_string(), previous_session);
+        }
+        return Err(error);
+    }
     Ok(turn)
 }
 
@@ -3155,6 +4489,7 @@ fn submit_toolgen_turn(
     session_id: &str,
     source_turn_id: &str,
     user_instruction: Option<String>,
+    command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
     validate_session_model_service_config(state, session_id)?;
     {
@@ -3190,9 +4525,22 @@ fn submit_toolgen_turn(
         session_id,
         source_turn_id,
         user_instruction.as_deref(),
+        command_id,
     )?;
+    if let Err(error) = publish_semantic(
+        state,
+        WireEvent::TurnUpdated {
+            session_id: session_id.to_string(),
+            turn: turn.clone(),
+        },
+    ) {
+        rollback_web_turn(state, session_id, &turn.turn_id, Vec::new());
+        return Err(error);
+    }
     let request = ToolGenRequest::new(user_instruction);
-    if let Err(error) = primary_worker_handle(state, session_id)?.run_toolgen(request) {
+    if let Err(error) = primary_worker_handle(state, session_id)?
+        .run_toolgen_with_command_id(request, command_id.map(str::to_string))
+    {
         rollback_web_turn(state, session_id, &turn.turn_id, Vec::new());
         return Err(error);
     }
@@ -3216,6 +4564,7 @@ fn start_web_toolgen_turn(
     session_id: &str,
     source_turn_id: &str,
     user_instruction: Option<&str>,
+    command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
     let created_at_ms = now_ms();
     let mut sessions = state
@@ -3235,6 +4584,8 @@ fn start_web_toolgen_turn(
                 text: text.to_string(),
                 attachments: Vec::new(),
                 created_at_ms,
+                command_id: command_id.map(str::to_string),
+                delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
             }]
         })
         .unwrap_or_default();
@@ -3264,9 +4615,10 @@ fn start_web_toolgen_turn(
             &turn.turn_id,
             "user",
             Some("toolgen_instruction"),
+            command_id,
             created_at_ms as i64,
             text.to_string(),
-        );
+        )?;
     }
     let mut extra = BTreeMap::new();
     extra.insert(
@@ -3294,15 +4646,24 @@ fn append_turn_user_entry(
     kind: &str,
     text: String,
 ) -> Result<WebTurn, String> {
-    append_turn_user_entry_with_attachments(state, session_id, kind, text, Vec::new(), false)
+    append_turn_user_entry_with_attachments(state, session_id, kind, text, Vec::new(), false, None)
 }
 
 fn append_turn_supplement_with_pending_attachments(
     state: &AppState,
     session_id: &str,
     text: String,
+    command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
-    append_turn_user_entry_with_attachments(state, session_id, "supplement", text, Vec::new(), true)
+    append_turn_user_entry_with_attachments(
+        state,
+        session_id,
+        "supplement",
+        text,
+        Vec::new(),
+        true,
+        command_id,
+    )
 }
 
 fn append_turn_user_entry_with_attachments(
@@ -3312,6 +4673,7 @@ fn append_turn_user_entry_with_attachments(
     text: String,
     attachments: Vec<WebAttachment>,
     take_pending_attachments: bool,
+    command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
     let mut sessions = state
         .sessions
@@ -3320,6 +4682,7 @@ fn append_turn_user_entry_with_attachments(
     let session = sessions
         .get_mut(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
+    let previous_session = session.clone();
     let active_turn_id = session
         .active_turn_id
         .clone()
@@ -3339,6 +4702,8 @@ fn append_turn_user_entry_with_attachments(
         text,
         attachments,
         created_at_ms: now_ms(),
+        command_id: command_id.map(str::to_string),
+        delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
     });
     if turn.user_entries.len() > MAX_TURN_USER_ENTRIES {
         let excess = turn.user_entries.len() - MAX_TURN_USER_ENTRIES;
@@ -3357,16 +4722,25 @@ fn append_turn_user_entry_with_attachments(
         .unwrap_or_default();
     let history_kind = last_entry.as_ref().map(|entry| entry.kind.as_str());
     drop(sessions);
-    append_chat_history_message(
+    let persist_result = append_chat_history_message(
         state,
         session_id,
         &active_turn_id,
         "user",
         history_kind,
+        last_entry
+            .as_ref()
+            .and_then(|entry| entry.command_id.as_deref()),
         created_at_ms,
         content,
-    );
-    let _ = persist_web_session(state, session_id);
+    )
+    .and_then(|()| persist_web_session(state, session_id));
+    if let Err(error) = persist_result {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id.to_string(), previous_session);
+        }
+        return Err(error);
+    }
     Ok(turn_snapshot)
 }
 
@@ -3440,33 +4814,35 @@ fn append_active_turn_event(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_chat_history_message(
     state: &AppState,
     session_id: &str,
     turn_id: &str,
     role: &str,
     kind: Option<&str>,
+    command_id: Option<&str>,
     created_at_ms: i64,
     content: String,
-) {
+) -> Result<(), String> {
     let role = match role {
         "user" => ChatHistoryRole::User,
         "assistant" => ChatHistoryRole::Assistant,
         "system" => ChatHistoryRole::System,
         _ => ChatHistoryRole::System,
     };
-    if let Ok(store) = current_session_store(state) {
-        let _ = store.append_history_record(
-            session_id,
-            &ChatHistoryRecord::Message {
-                role,
-                turn_id: turn_id.to_string(),
-                created_at_ms,
-                kind: kind.map(ToString::to_string),
-                content,
-            },
-        );
-    }
+    current_session_store(state)?.append_history_record(
+        session_id,
+        &ChatHistoryRecord::Message {
+            role,
+            turn_id: turn_id.to_string(),
+            created_at_ms,
+            kind: kind.map(ToString::to_string),
+            command_id: command_id.map(str::to_string),
+            delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
+            content,
+        },
+    )
 }
 
 fn append_chat_history_event(
@@ -3798,26 +5174,6 @@ fn work_instruction_notice_event(state: &AppState, session_id: &str) -> Option<W
     })
 }
 
-fn work_instruction_notice_events(state: &AppState) -> Vec<WireEvent> {
-    let session_ids = state
-        .sessions
-        .lock()
-        .map(|sessions| sessions.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    session_ids
-        .into_iter()
-        .filter_map(|session_id| {
-            let should_notify = state
-                .sessions
-                .lock()
-                .ok()?
-                .get(&session_id)
-                .map(|session| session.work_instruction_mode == WorkInstructionLoadMode::Silent)?;
-            should_notify.then(|| work_instruction_notice_event(state, &session_id))?
-        })
-        .collect()
-}
-
 fn spawn_event_bridge(state: AppState) {
     tokio::spawn(async move {
         loop {
@@ -3874,14 +5230,93 @@ fn emit_worker_activity(
     event["context_id"] = json!(context_id);
     event["worker_id"] = json!(worker_id);
     let turn_ref = append_active_turn_event(state, session_id, "worker_activity", event.clone());
-    let _ = state.events.send(WireEvent::WorkerActivity {
-        session_id: session_id.to_string(),
-        context_id: context_id.to_string(),
-        worker_id: worker_id.to_string(),
-        turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
-        turn_event_id: turn_ref.map(|value| value.event_id),
-        event,
+    publish_core_semantic(
+        state,
+        session_id,
+        WireEvent::WorkerActivity {
+            session_id: session_id.to_string(),
+            context_id: context_id.to_string(),
+            worker_id: worker_id.to_string(),
+            turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+            turn_event_id: turn_ref.map(|value| value.event_id),
+            event,
+        },
+    );
+}
+
+fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &str) {
+    let turn_id = state.sessions.lock().ok().and_then(|mut sessions| {
+        let session = sessions.get_mut(session_id)?;
+        for turn in &mut session.turns {
+            if let Some(entry) = turn
+                .user_entries
+                .iter_mut()
+                .find(|entry| entry.command_id.as_deref() == Some(command_id))
+            {
+                entry.delivery_state = Some(ChatCommandDeliveryState::CoreAccepted);
+                return Some(turn.turn_id.clone());
+            }
+        }
+        None
     });
+    let Some(turn_id) = turn_id else {
+        publish_core_semantic(
+            state,
+            session_id,
+            WireEvent::HostError {
+                message: format!("core_command_acceptance_without_intent:{command_id}"),
+            },
+        );
+        return;
+    };
+
+    let mut extra = BTreeMap::new();
+    extra.insert("kind".to_string(), json!("command_delivery"));
+    extra.insert("command_id".to_string(), json!(command_id));
+    extra.insert("delivery_state".to_string(), json!("core_accepted"));
+    let persist_result = current_session_store(state).and_then(|store| {
+        store.append_history_record(
+            session_id,
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id,
+                created_at_ms: now_ms_i64(),
+                kind: ChatHistoryEventKind::RuntimeNotice,
+                content: "Core accepted command.".to_string(),
+                extra,
+            },
+        )?;
+        persist_web_session(state, session_id)
+    });
+    if let Err(error) = persist_result {
+        let _ = state.events.send(command_ack(
+            command_id,
+            CommandAckStatus::Accepted,
+            Some(format!("core_acceptance_persist_pending:{error}")),
+        ));
+        return;
+    }
+    match finish_command_dedup(
+        state,
+        command_id,
+        CommandDedupState::Committed {
+            serialized_event: None,
+            event: None,
+        },
+    ) {
+        Ok(()) => {
+            let _ = state
+                .events
+                .send(command_ack(command_id, CommandAckStatus::Committed, None));
+        }
+        Err(error) => {
+            let _ = state.events.send(command_ack(
+                command_id,
+                CommandAckStatus::Accepted,
+                Some(format!("command_terminal_persist_pending:{error}")),
+            ));
+        }
+    }
 }
 
 fn handle_scoped_worker_event(
@@ -3892,6 +5327,9 @@ fn handle_scoped_worker_event(
     event: CoreSessionWorkerEvent,
 ) {
     match event {
+        CoreSessionWorkerEvent::CommandAccepted { command_id } => {
+            mark_core_command_accepted(state, session_id, &command_id);
+        }
         CoreSessionWorkerEvent::Topics(events) => {
             for event in events {
                 let toolgen_scoped = event.payload.get("runtime_phase").and_then(Value::as_str)
@@ -4000,10 +5438,14 @@ fn handle_scoped_worker_event(
                                     session.tools = tools.clone();
                                 }
                             }
-                            let _ = state.events.send(WireEvent::ToolRepoUpdated {
-                                session_id: session_id.to_string(),
-                                tools,
-                            });
+                            publish_core_semantic(
+                                state,
+                                session_id,
+                                WireEvent::ToolRepoUpdated {
+                                    session_id: session_id.to_string(),
+                                    tools,
+                                },
+                            );
                         }
                     }
                 }
@@ -4029,11 +5471,15 @@ fn handle_scoped_worker_event(
                 } else {
                     append_active_turn_event(state, session_id, "core_topic", wire_payload.clone())
                 };
-                let _ = state.events.send(WireEvent::CoreTopic {
-                    turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
-                    turn_event_id: turn_ref.map(|value| value.event_id),
-                    event: wire_payload,
-                });
+                publish_core_semantic(
+                    state,
+                    session_id,
+                    WireEvent::CoreTopic {
+                        turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+                        turn_event_id: turn_ref.map(|value| value.event_id),
+                        event: wire_payload,
+                    },
+                );
             }
         }
         CoreSessionWorkerEvent::ModelRequest { round } => {
@@ -4081,6 +5527,22 @@ fn handle_scoped_worker_event(
                 context_id,
                 worker_id,
                 json!({ "kind": "model_error", "error": error }),
+            );
+        }
+        CoreSessionWorkerEvent::UnconsumedSupplements { supplements } => {
+            if let Ok(mut sessions) = state.sessions.lock() {
+                if let Some(session) = sessions.get_mut(session_id) {
+                    session
+                        .pending_unconsumed_supplements
+                        .extend(supplements.clone());
+                }
+            }
+            emit_worker_activity(
+                state,
+                session_id,
+                context_id,
+                worker_id,
+                json!({ "kind": "unconsumed_supplements", "supplements": supplements }),
             );
         }
         CoreSessionWorkerEvent::TurnFinished { outcome } => {
@@ -4155,7 +5617,16 @@ fn handle_scoped_worker_event(
                 }
             }
             let _ = persist_web_session(state, session_id);
-            let _ = state.events.send(WireEvent::TurnFinished { session_id: session_id.to_string(), turn_id, outcome: json!({ "text": outcome.text, "message_id": message_id, "completion": completion }) });
+            publish_core_semantic(
+                state,
+                session_id,
+                WireEvent::TurnFinished {
+                    session_id: session_id.to_string(),
+                    turn_id,
+                    outcome: json!({ "text": outcome.text, "message_id": message_id, "completion": completion }),
+                },
+            );
+            resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
         }
         CoreSessionWorkerEvent::WorkerStopped => {
             set_worker_state(state, session_id, worker_id, "stopped");
@@ -4165,6 +5636,60 @@ fn handle_scoped_worker_event(
                 context_id,
                 worker_id,
                 json!({ "kind": "worker_stopped" }),
+            );
+        }
+    }
+}
+
+fn resubmit_unconsumed_supplements(
+    state: &AppState,
+    session_id: &str,
+    context_id: &str,
+    worker_id: &str,
+) {
+    let supplements = state
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|mut sessions| {
+            sessions
+                .get_mut(session_id)
+                .map(|session| std::mem::take(&mut session.pending_unconsumed_supplements))
+        })
+        .unwrap_or_default();
+    if supplements.is_empty() {
+        return;
+    }
+    let text = supplements.join("\n\n");
+    match submit_turn(state, session_id, text.clone()) {
+        Ok(turn) => {
+            publish_core_semantic(
+                state,
+                session_id,
+                WireEvent::TurnUpdated {
+                    session_id: session_id.to_string(),
+                    turn,
+                },
+            );
+        }
+        Err(error) => {
+            if let Ok(mut sessions) = state.sessions.lock() {
+                if let Some(session) = sessions.get_mut(session_id) {
+                    let mut retained = supplements;
+                    retained.append(&mut session.pending_unconsumed_supplements);
+                    session.pending_unconsumed_supplements = retained;
+                }
+            }
+            emit_worker_activity(
+                state,
+                session_id,
+                context_id,
+                worker_id,
+                json!({
+                    "kind": "unconsumed_supplements_resubmit_failed",
+                    "error": error,
+                    "text": text,
+                }),
             );
         }
     }
