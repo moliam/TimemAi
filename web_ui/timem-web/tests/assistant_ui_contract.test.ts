@@ -8,12 +8,18 @@ const viewModelSource = readFileSync(new URL("../src/view_model.ts", import.meta
 const protocolSource = readFileSync(new URL("../src/protocol.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+const logo = readFileSync(new URL("../public/timem_logo.png", import.meta.url));
 const viteConfig = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
 
 describe("assistant-ui thread integration", () => {
   it("keeps a visible boot state before the React bundle mounts", () => {
     expect(html).toContain('<div id="root">');
     expect(html).toContain("Timem is loading...");
+  });
+
+  it("uses the Timem logo as the browser tab icon", () => {
+    expect(html).toContain('<link rel="icon" type="image/png" href="/timem_logo.png" />');
+    expect(Array.from(logo.subarray(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 
   it("does not require crypto.randomUUID on an HTTP public-IP origin", () => {
