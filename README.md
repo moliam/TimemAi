@@ -172,6 +172,7 @@ appropriate network access control layer.
 - [Feature and test management](docs/feature-test-management.md)
 - [Release management](docs/release-management.md)
 - [Release smoke checklist](docs/manual-release-smoke.md)
+- [TimemAi 1.1.3 release notes](docs/release-notes-v1.1.3.md)
 - [TimemAi 1.1.2 release notes](docs/release-notes-v1.1.2.md)
 - [TimemAi 1.1.1 release notes](docs/release-notes-v1.1.1.md)
 - [TimemAi 1.1.0 release notes](docs/release-notes-v1.1.0.md)

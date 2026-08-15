@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-08-15
+
+### Added
+
+- Use the existing Timem logo as the browser tab icon in both development and
+  the production Web bundle embedded in `timem-web`.
+
 ## [1.1.2] - 2026-08-14
 
 ### Fixed
