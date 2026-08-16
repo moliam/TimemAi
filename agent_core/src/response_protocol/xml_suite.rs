@@ -151,15 +151,15 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         memory_candidates: vec![],
         runtime_note: match (outer_free_talk.is_some(), root_was_completed) {
             (true, true) => Some(
-                "TIPS: The previous XML response had content outside <response> and a missing root boundary. Runtime recovered it for this non-final action round. In the next response, output nothing before <response> or after </response>, and close the root yourself."
+                "ERROR: The previous XML response had content outside <response> and a missing root boundary. Runtime recovered it for this non-final action round. In the next response, output nothing before <response> or after </response>, and close the root yourself."
                     .to_string(),
             ),
             (true, false) => Some(
-                "TIPS: The previous XML response had content outside <response>. Runtime recovered it for this non-final action round. In the next response, begin exactly with <response>, end with </response>, and output nothing outside that root."
+                "ERROR: The previous XML response had content outside <response>. Runtime recovered it for this non-final action round. In the next response, begin exactly with <response>, end with </response>, and output nothing outside that root."
                     .to_string(),
             ),
             (false, true) => Some(
-                "TIPS: The previous XML response omitted an outer response boundary. Runtime recovered it for this non-final action round. In the next response, return one complete <response>...</response> root and close it yourself."
+                "ERROR: The previous XML response omitted an outer response boundary. Runtime recovered it for this non-final action round. In the next response, return one complete <response>...</response> root and close it yourself."
                     .to_string(),
             ),
             (false, false) => None,
