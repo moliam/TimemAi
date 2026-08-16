@@ -1459,10 +1459,9 @@ fn action_kind_topic_payload(kind: &CoreActionKind) -> Value {
             "capability_kind": kind,
             "id": id,
         }),
-        CoreActionKind::SelfTool { self_type, op } => json!({
+        CoreActionKind::SelfTool { self_type } => json!({
             "kind": "self_tool",
             "self_type": self_type,
-            "op": op,
         }),
         CoreActionKind::ChatHistory { operation } => json!({
             "kind": "chat_history",
@@ -1502,7 +1501,6 @@ fn action_kind_from_topic_payload(value: &Value, fallback_action: &str) -> CoreA
         },
         "self_tool" => CoreActionKind::SelfTool {
             self_type: value["self_type"].as_str().unwrap_or_default().to_string(),
-            op: value["op"].as_str().unwrap_or_default().to_string(),
         },
         "chat_history" => CoreActionKind::ChatHistory {
             operation: value["operation"].as_str().unwrap_or_default().to_string(),

@@ -12,7 +12,7 @@ description: |
   command-bound tools. Do not use these for run_bash jobs; run_bash returns pid
   and the runtime injects running job updates.
 prompt_input: |
-  Requires op. For op=load or op=inspect, also provide kind=tool|skill and id.
+  Requires op. For op=load, also provide kind=tool|skill and id.
   For op=job_status or op=job_cancel, provide job_id. For job_status,
   timeout_ms is chosen by you; 0 means immediate check, max 15000.
 prompt_result: |
@@ -27,7 +27,7 @@ input_schema: |
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["list", "load", "inspect", "job_status", "job_cancel"],
+        "enum": ["list", "load", "job_status", "job_cancel"],
         "description": "Capability manager operation."
       },
       "kind": {
@@ -37,7 +37,7 @@ input_schema: |
       },
       "id": {
         "type": "string",
-        "description": "Capability id; required for load/inspect."
+        "description": "Capability id; required for load."
       },
       "job_id": {
         "type": "string",
@@ -49,7 +49,7 @@ input_schema: |
       }
     },
     "x-required-when": [
-      {"field": "op", "values": ["load", "inspect"], "required": ["kind", "id"]},
+      {"field": "op", "values": ["load"], "required": ["kind", "id"]},
       {"field": "op", "values": ["job_status", "job_cancel"], "required": ["job_id"]}
     ]
   }

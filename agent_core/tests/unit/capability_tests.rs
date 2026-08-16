@@ -70,7 +70,11 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("**Synopsis**"));
     assert!(rendered.contains("**Options**"));
     assert!(rendered.contains("Unified local memory manager"));
-    assert!(rendered.contains("Use when the user asks about Timem itself"));
+    assert!(rendered.contains("Ask for path when you need to know where something is"));
+    assert!(rendered.contains("Ask for params when"));
+    assert!(rendered.contains("Allowed: `path`, `params`"));
+    assert!(!rendered.contains("reminder_tips_file"));
+    assert!(!rendered.contains("max_llm_input_tokens"));
     assert!(rendered.contains("Conditional:"));
     assert!(rendered.contains("Use sql for durable reads"));
     assert!(!rendered.contains("durable: query|schema"));
@@ -94,7 +98,7 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("`op`:"));
     assert!(rendered.contains("`kind`:"));
     assert!(rendered.contains("`id`:"));
-    assert!(rendered.contains("`inspect`"));
+    assert!(!rendered.contains("`inspect`"));
     assert!(rendered.contains("memory_conflict"));
     assert!(!rendered.contains("\"output\": {"));
     assert!(!rendered.contains("\"description\""));
@@ -236,23 +240,49 @@ fn registry_validates_required_input_fields_from_manifest() {
     assert!(registry
         .validate_action_input(
             "self_tool",
-            &json_object([
-                ("type", Value::String("env".to_string())),
-                ("op", Value::String("write".to_string())),
-                ("key", Value::String("TIMEM_TEST_FLAG".to_string())),
-            ])
+            &json_object([("type", Value::String("unknown".to_string()))])
         )
         .unwrap_err()
-        .contains("input.value_required_when_op=write"));
+        .contains("input.type_unsupported:unknown"));
     assert!(registry
         .validate_action_input(
             "self_tool",
             &json_object([
-                ("type", Value::String("mem_path".to_string())),
-                ("op", Value::String("read".to_string())),
+                ("type", Value::String("path".to_string())),
+                ("unexpected", Value::Bool(true)),
             ])
         )
+        .unwrap_err()
+        .contains("input.unexpected_unsupported"));
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([("type", Value::String("path".to_string()))])
+        )
         .is_ok());
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([("type", Value::String("params".to_string()))])
+        )
+        .is_ok());
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([
+                ("type", Value::String("params".to_string())),
+                ("unexpected", Value::String("value".to_string())),
+            ])
+        )
+        .unwrap_err()
+        .contains("input.unexpected_unsupported"));
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([("type", Value::String("runtime".to_string()))])
+        )
+        .unwrap_err()
+        .contains("input.type_unsupported:runtime"));
     assert!(registry
         .validate_action_input(
             "run_bash",
@@ -293,12 +323,12 @@ fn registry_validates_required_input_fields_from_manifest() {
         .validate_action_input(
             "capmgr",
             &json_object([
-                ("op", Value::String("inspect".to_string())),
+                ("op", Value::String("load".to_string())),
                 ("kind", Value::String("skill".to_string())),
             ])
         )
         .unwrap_err()
-        .contains("input.id_required_when_op=inspect"));
+        .contains("input.id_required_when_op=load"));
     assert!(registry
         .validate_action_input(
             "capmgr",
@@ -345,6 +375,7 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
         .expect("capmgr op enum");
     assert!(op_enum.contains(&Value::String("list".to_string())));
     assert!(op_enum.contains(&Value::String("load".to_string())));
+    assert!(!op_enum.contains(&Value::String("inspect".to_string())));
     assert!(capmgr
         .get("required_when")
         .and_then(Value::as_array)
@@ -359,16 +390,16 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
     assert!(registry
         .validate_action_input(
             "capmgr",
-            &json_object([("op", Value::String("inspect".to_string()))])
+            &json_object([("op", Value::String("unknown".to_string()))])
         )
         .unwrap_err()
-        .contains("input.kind_required_when_op=inspect"));
+        .contains("input.op_unsupported:unknown"));
     assert!(registry
         .validate_action_input(
             "run_bash",
             &json_object([
                 ("cmd", Value::String("pwd".to_string())),
-                ("mode", Value::String("normal".to_string())),
+                ("background", Value::Bool(false)),
             ])
         )
         .is_ok());
@@ -377,21 +408,11 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
             "run_bash",
             &json_object([
                 ("cmd", Value::String("pwd".to_string())),
-                ("mode", Value::String("foreground".to_string())),
+                ("unexpected", Value::String("foreground".to_string())),
             ])
         )
         .unwrap_err()
-        .contains("input.mode_unsupported:foreground"));
-    assert!(registry
-        .validate_action_input(
-            "run_bash",
-            &json_object([
-                ("cmd", Value::String("pwd".to_string())),
-                ("mode", Value::String("daemon".to_string())),
-            ])
-        )
-        .unwrap_err()
-        .contains("input.mode_unsupported:daemon"));
+        .contains("input.unexpected_unsupported"));
 }
 
 #[test]
@@ -689,16 +710,13 @@ description: |
   Runtime-added test tool {i} for capability registry stress coverage.
 input_properties:
   type: string
-  op: string
 required:
   - type
-  - op
 example_json: |
   {{
     "action": "overlay_tool_{i:03}",
     "args": {{
-      "type": "about_me",
-      "op": "read"
+      "type": "path"
     }}
   }}
 "#
@@ -742,10 +760,7 @@ when_to_use: |
     assert!(registry
         .validate_action_input(
             "overlay_tool_079",
-            &json_object([
-                ("type", Value::String("about_me".to_string())),
-                ("op", Value::String("read".to_string())),
-            ])
+            &json_object([("type", Value::String("path".to_string()))])
         )
         .is_ok());
     let rendered = registry.render_tool_catalog_markdown();

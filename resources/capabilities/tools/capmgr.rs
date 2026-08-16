@@ -11,11 +11,11 @@ pub struct CapmgrActionInput<'a> {
 
 pub fn execute(registry: &CapabilityRegistry, input: CapmgrActionInput<'_>) -> String {
     if input.op.trim().is_empty() {
-        return "Action result: capmgr\nerror: invalid_input\nmessage: Missing `op`. Use list, load, inspect, job_status, or job_cancel.".to_string();
+        return "Action result: capmgr\nerror: invalid_input\nmessage: Missing `op`. Use list, load, job_status, or job_cancel.".to_string();
     }
     match input.op {
         "list" => registry.list_text(input.kind.trim()),
-        "load" | "inspect" => {
+        "load" => {
             if input.kind.trim().is_empty() {
                 return format!(
                     "Action result: capmgr\nop: {}\nerror: invalid_input\nmessage: Missing `kind`. Use tool or skill.",
