@@ -3446,7 +3446,11 @@ fn resume_unfinished_core_command_after_restore(
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
-        let pending = session.turns.iter().rev().find_map(|turn| {
+        // Only the newest turn may represent work interrupted by the process
+        // restart. Never skip a completed newer turn and revive an older,
+        // abandoned turn: doing so makes a restored ready session appear to be
+        // working immediately after Web startup.
+        let pending = session.turns.last().and_then(|turn| {
             if turn.final_answer.is_some() || turn.completion.is_some() {
                 return None;
             }
@@ -3629,6 +3633,9 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     }
                     continue;
                 }
+                let completion = (kind == ChatHistoryEventKind::Stats)
+                    .then(|| extra.get("completion").cloned())
+                    .flatten();
                 let payload = extra
                     .remove("payload")
                     .unwrap_or_else(|| json!({"kind": format!("{kind:?}")}));
@@ -3646,6 +3653,10 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     completion: None,
                 });
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
+                if let Some(completion) = completion {
+                    turn.state = "completed".to_string();
+                    turn.completion = Some(completion);
+                }
                 turn.events.push(WebTurnEvent {
                     event_id: format!(
                         "history_event_{turn_id}_{created_at_ms}_{}",
