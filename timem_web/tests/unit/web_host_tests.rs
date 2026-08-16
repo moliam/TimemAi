@@ -640,6 +640,72 @@ fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
 }
 
 #[test]
+fn restore_does_not_revive_an_old_unfinished_turn_after_a_newer_turn_completed() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "RESTORE_OLD_UNFINISHED");
+
+    let old_turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "old command interrupted before completion",
+        Some("old_accepted_command"),
+    )
+    .unwrap();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.turns.last_mut().unwrap().user_entries[0].delivery_state =
+            Some(ChatCommandDeliveryState::CoreAccepted);
+        session.turns.last_mut().unwrap().state = "restored".to_string();
+
+        session.turns.push(WebTurn {
+            turn_id: "web_turn_newer_completed".to_string(),
+            state: "completed".to_string(),
+            created_at_ms: old_turn.created_at_ms.saturating_add(1),
+            user_entries: vec![WebTurnUserEntry {
+                kind: "task".to_string(),
+                text: "newer completed command".to_string(),
+                attachments: Vec::new(),
+                created_at_ms: old_turn.created_at_ms.saturating_add(1),
+                command_id: Some("newer_committed_command".to_string()),
+                delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+            }],
+            events: Vec::new(),
+            // A turn can finish without an assistant message, for example after
+            // a protocol/model error. Its persisted completion is still terminal.
+            final_answer: None,
+            completion: Some(json!({"stop_reason": "model_error"})),
+        });
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+
+    resume_unfinished_core_command_after_restore(&state, &session_id).unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.state, "ready");
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(
+        session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == old_turn.turn_id)
+            .unwrap()
+            .state,
+        "restored"
+    );
+
+    drop(sessions);
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
 fn restore_redrives_unfinished_core_accepted_intent_into_the_new_worker() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "RESTORE_CORE_ACCEPTED");
@@ -3510,6 +3576,44 @@ fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
     );
     assert_eq!(turns[0].user_entries[0].text, "first by time");
     assert_eq!(turns[1].user_entries[0].text, "second by time");
+}
+
+#[test]
+fn restored_web_turns_recover_terminal_completion_without_an_assistant_message() {
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        "completion".to_string(),
+        json!({"stop_reason": "model_error", "rounds": 3}),
+    );
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_completion_only".to_string(),
+            created_at_ms: 10,
+            kind: Some("task".to_string()),
+            command_id: Some("accepted_command".to_string()),
+            delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+            content: "task that ended without a final answer".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_completion_only".to_string(),
+            created_at_ms: 11,
+            kind: ChatHistoryEventKind::Stats,
+            content: "Turn completed.".to_string(),
+            extra,
+        },
+    ];
+
+    let turns = restored_turns_from_history_records(&records);
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].state, "completed");
+    assert_eq!(turns[0].final_answer, None);
+    assert_eq!(
+        turns[0].completion,
+        Some(json!({"stop_reason": "model_error", "rounds": 3}))
+    );
 }
 
 #[test]
