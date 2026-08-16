@@ -58,7 +58,7 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     let rendered = registry.render_tool_catalog_markdown();
 
     assert!(rendered.contains("#### `memmgr`"));
-    assert!(rendered.contains("#### `capmgr`"));
+    assert!(!rendered.contains("#### `capmgr`"));
     assert!(rendered.contains("#### `run_bash`"));
     assert!(!rendered.contains("#### `shell_job_status`"));
     assert!(!rendered.contains("#### `tool_job_status`"));
