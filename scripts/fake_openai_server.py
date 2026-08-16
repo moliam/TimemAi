@@ -6,6 +6,13 @@ import shlex
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from xml.sax.saxutils import escape
+
+
+FINISH_CONFIRM_PREFIX = (
+    "Now let me think seriously twice before I stop. Do I really complete all user's "
+    "valid tasks or need to stop now? If not, i should continue action."
+)
 
 
 def extract_text(value):
@@ -115,6 +122,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_model_response(prompt, content)
 
     def send_model_response(self, prompt, content):
+        content = confirm_xml_final(content)
         prompt_tokens = max(1, len(prompt) // 4)
         completion_tokens = max(1, len(content) // 4)
         total_tokens = max(2, (len(prompt) + len(content)) // 4)
@@ -154,13 +162,44 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
+def confirm_xml_final(content):
+    if "<final_answer" not in content or "<finish_confirm" in content:
+        return content
+    confirmation = f"<finish_confirm>{FINISH_CONFIRM_PREFIX}</finish_confirm>"
+    candidates = [
+        pos
+        for pos in (content.find("<toolgen_retrospect"), content.find("<final_answer"))
+        if pos >= 0
+    ]
+    insertion_point = min(candidates)
+    return content[:insertion_point] + confirmation + content[insertion_point:]
+
+
+def xml_element(name, value):
+    if value is None:
+        return f"<{name}/>"
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+        return f"<{name}>{text}</{name}>"
+    if isinstance(value, dict):
+        body = "".join(xml_element(child, child_value) for child, child_value in value.items())
+        return f"<{name}>{body}</{name}>"
+    if isinstance(value, list):
+        body = "".join(xml_element("item", item) for item in value)
+        return f"<{name}>{body}</{name}>"
+    return f"<{name}>{escape(str(value))}</{name}>"
+
+
 def xml_action(payload, free_talk):
+    if len(payload) != 1:
+        raise ValueError("XML action fixture requires exactly one tool")
+    tool, arguments = next(iter(payload.items()))
     return (
         "<response>"
         f"<free_talk>{free_talk}</free_talk>"
-        "<working_still_action><action_json><![CDATA["
-        + json.dumps([payload], ensure_ascii=False)
-        + "]]></action_json></working_still_action>"
+        "<actions>"
+        + xml_element(tool, arguments)
+        + "</actions>"
         "</response>"
     )
 

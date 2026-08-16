@@ -3,55 +3,24 @@ use crate::prompt_spec;
 use crate::response_protocol::ResponseProtocolSuite;
 use crate::{PromptDelta, PromptSlice};
 
+pub(crate) const RESPONSE_TRAILER: &str =
+    "Please continue the work and respond as protocol requires:";
+
 pub(crate) fn formatted_response_trailer(
-    response_shape_hint: &str,
+    _response_shape_hint: &str,
     _assistant_heading: &str,
 ) -> String {
-    let response_shape_hint = response_shape_hint.trim();
-    format!("Now please fulfill your response part like {response_shape_hint}:")
+    RESPONSE_TRAILER.to_string()
 }
 
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
     let trimmed = rendered_prompt.trim_end();
-    let Some(trailer_start) = [
-        "\n\nNow please fulfill your response part like ",
-        "\n\nNow please fulfill your response part in one-",
-        "\n\nNow please continue your ID's response part as required in protocol:\n## ",
-        "\n\nNow please continue your ID's response part in XML as required in protocol:\n## ",
-    ]
-    .into_iter()
-    .filter_map(|prefix| trimmed.rfind(prefix))
-    .max() else {
+    let marker = format!("\n\n{RESPONSE_TRAILER}");
+    let Some(trailer_start) = trimmed.strip_suffix(&marker).map(str::len) else {
         return (rendered_prompt, None);
     };
-    let candidate = &trimmed[trailer_start + 2..];
-    let (instruction, legacy_assistant_heading) = candidate
-        .split_once("\n## ")
-        .map_or((candidate, None), |(instruction, heading)| {
-            (instruction, Some(heading))
-        });
-    let shape_hint = instruction
-        .strip_prefix("Now please fulfill your response part like ")
-        .and_then(|value| value.strip_suffix(':'));
-    let one_format_protocol = instruction
-        .strip_prefix("Now please fulfill your response part in one-")
-        .and_then(|value| value.strip_suffix(" format as required in protocol:"));
-    let valid_instruction = shape_hint
-        .is_some_and(|hint| !hint.is_empty() && !hint.contains(['\n', '\r']))
-        || one_format_protocol
-            .is_some_and(|protocol| !protocol.is_empty() && !protocol.contains(['\n', '\r']))
-        || matches!(
-            instruction,
-            "Now please continue your ID's response part as required in protocol:"
-                | "Now please continue your ID's response part in XML as required in protocol:"
-        );
-    let valid_legacy_heading = legacy_assistant_heading
-        .is_none_or(|heading| !heading.is_empty() && !heading.contains('\n'));
-    if valid_instruction && valid_legacy_heading {
-        let prefix = trimmed[..trailer_start].trim_end();
-        return (prefix, Some(candidate.to_string()));
-    }
-    (rendered_prompt, None)
+    let prefix = trimmed[..trailer_start].trim_end();
+    (prefix, Some(RESPONSE_TRAILER.to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

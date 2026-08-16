@@ -1,4 +1,4 @@
-use crate::prompt_render::split_formatted_response_trailer;
+use crate::prompt_render::{split_formatted_response_trailer, RESPONSE_TRAILER};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptBlockRole {
@@ -148,7 +148,7 @@ pub fn plan_prompt_cache(rendered_prompt: &str) -> Vec<PromptBlock> {
     let (prompt_without_trailer, trailer) = split_formatted_response_trailer(rendered_prompt);
     let mut blocks =
         plan_incremental_cache(prompt_parts_from_rendered_prompt(prompt_without_trailer));
-    if let Some(trailer) = trailer {
+    if let Some(trailer) = trailer.filter(|trailer| trailer == RESPONSE_TRAILER) {
         blocks.push(PromptBlock {
             role: PromptBlockRole::User,
             text: trailer,
