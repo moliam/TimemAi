@@ -1001,6 +1001,7 @@ pub async fn run_from_env() -> Result<(), String> {
 
     let launch = WebLaunchOptions::parse(&args)?;
     let template = WorkerTemplate::from_environment(&launch)?;
+    println!("Starting Timem Web and restoring the selected workspace...");
     let token = generate_token()?;
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
@@ -1026,13 +1027,22 @@ pub async fn run_from_env() -> Result<(), String> {
         mem_epoch: Arc::new(RwLock::new(1)),
     };
 
-    if restore_stored_sessions(&state)? == 0 {
+    let restored_sessions = restore_stored_sessions(&state).map_err(|error| {
+        friendly_memory_space_error(
+            error,
+            &state.template.data_dir,
+            &state.template.initial_space,
+        )
+    })?;
+    if restored_sessions == 0 {
         let default_session = create_session(&state, None, None, BTreeMap::new())?;
         let _ = default_session;
     }
     spawn_event_bridge(state.clone());
 
-    let listener = bind_web_listener(launch.port, launch.public_access).await?;
+    let listener = bind_web_listener(launch.port, launch.public_access)
+        .await
+        .map_err(|error| friendly_bind_error(error, launch.port))?;
     let port = listener
         .local_addr()
         .map_err(|error| error.to_string())?
@@ -1396,6 +1406,32 @@ fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str
         )
     } else {
         error
+    }
+}
+
+fn friendly_memory_space_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
+    if error == "mem_guard_timeout" {
+        let space_dir = absolute_path(RuntimeDataLayout::new(data_dir, space).space_dir());
+        format!(
+            "The selected Timem workspace is still locked by another running operation.\n\n  data dir: {}\n  space:    {}\n  location: {}\n\nTimem automatically recovers locks left by processes that have exited. If this message persists, another Timem process is still using this workspace. Close that process and retry, or start with a different workspace:\n\n  cargo run -p timem_web -- --space <another-name>\n\nYou can also select another data directory with --data-dir <path>. Do not delete the lock while another Timem process is running.",
+            data_dir.display(),
+            space,
+            space_dir.display(),
+        )
+    } else {
+        friendly_journal_error(error, data_dir, space)
+    }
+}
+
+fn friendly_bind_error(error: String, requested_port: Option<u16>) -> String {
+    match (error.as_str(), requested_port) {
+        ("requested_port_unavailable", Some(port)) => format!(
+            "Port {port} is already in use or cannot be opened. Stop the process using it, choose another port, or let Timem select one automatically:\n\n  cargo run -p timem_web\n  cargo run -p timem_web -- --port 18080"
+        ),
+        (error, _) if error.starts_with("no_available_port_in_range:") => format!(
+            "Timem could not open a local web port in the supported range {PORT_START}–{PORT_END}. Check whether local-network access is blocked by a firewall or sandbox, then retry with an explicit port:\n\n  cargo run -p timem_web -- --port 18080\n\nIf another Timem Web process is running, close it first."
+        ),
+        _ => error,
     }
 }
 

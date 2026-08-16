@@ -7484,3 +7484,27 @@ fn friendly_journal_error_replaces_in_use_with_actionable_message() {
     let passthrough = friendly_journal_error("other_error".to_string(), &data_dir, ".test_mem");
     assert_eq!(passthrough, "other_error");
 }
+
+#[test]
+fn startup_resource_errors_are_actionable_instead_of_internal_codes() {
+    let data_dir = std::path::PathBuf::from("/tmp/timem_test_data");
+    let locked =
+        friendly_memory_space_error("mem_guard_timeout".to_string(), &data_dir, ".test_mem");
+    assert!(locked.contains("locked by another running operation"));
+    assert!(locked.contains("automatically recovers locks"));
+    assert!(locked.contains("cargo run -p timem_web -- --space"));
+    assert!(!locked.contains("mem_guard_timeout"));
+
+    let requested = friendly_bind_error("requested_port_unavailable".to_string(), Some(18080));
+    assert!(requested.contains("Port 18080"));
+    assert!(requested.contains("cargo run -p timem_web"));
+    assert!(!requested.contains("requested_port_unavailable"));
+
+    let exhausted = friendly_bind_error(
+        format!("no_available_port_in_range:{PORT_START}..={PORT_END}"),
+        None,
+    );
+    assert!(exhausted.contains("local web port"));
+    assert!(exhausted.contains("firewall or sandbox"));
+    assert!(!exhausted.contains("no_available_port_in_range"));
+}
