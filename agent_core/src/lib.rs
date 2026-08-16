@@ -40,6 +40,7 @@ pub mod prompt_components;
 pub mod prompt_render;
 pub mod prompt_spec;
 pub mod redaction;
+pub mod reminder_config;
 pub mod response_protocol;
 pub mod retry_policy;
 pub mod runtime_context;
@@ -136,6 +137,10 @@ pub use prompt_cache::{
 };
 pub use prompt_components::{PromptComponent, PromptComponentRole};
 pub use redaction::{redact_value, REDACTED};
+pub use reminder_config::{
+    default_config_root, load_reminder_tips_config, reminder_tips_config_path,
+    ReminderScheduleConfig, ReminderTipsConfig, REMINDER_TIPS_FILE_NAME,
+};
 pub use response_protocol::ResponseProtocolKind;
 use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};
 pub use retry_policy::{
@@ -496,11 +501,33 @@ impl PendingApprovedAction {
 }
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
-const DEFAULT_ROUND_BUDGET: u32 = 50;
+pub const UNLIMITED_ROUND_BUDGET: u32 = u32::MAX;
+const DEFAULT_ROUND_BUDGET: u32 = UNLIMITED_ROUND_BUDGET;
+const MAX_CONFIGURED_ROUND_BUDGET: u32 = 10_000;
 const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 5;
+const RUNTIME_CONFIG_CHANGED_NOTICE: &str =
+    "User changes some runtime config, retrieve again when you need it.";
 const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
 const MEM_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
 const MEM_GUARD_STALE_AFTER: Duration = Duration::from_secs(60 * 60 * 6);
+
+fn configured_round_budget(value: Option<&str>) -> u32 {
+    let Some(value) = value.map(str::trim) else {
+        return DEFAULT_ROUND_BUDGET;
+    };
+    if value.eq_ignore_ascii_case("unlimited") {
+        return UNLIMITED_ROUND_BUDGET;
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|rounds| (1..=MAX_CONFIGURED_ROUND_BUDGET).contains(rounds))
+        .unwrap_or(DEFAULT_ROUND_BUDGET)
+}
+
+fn configured_round_budget_from_env() -> u32 {
+    configured_round_budget(std::env::var("TIMEM_MAX_ROUNDS").ok().as_deref())
+}
 
 #[derive(Debug, Clone)]
 pub struct MemGuard {
@@ -845,6 +872,8 @@ pub struct AgentCore {
     last_observed_prompt_tokens: u32,
     configured_round_budget: u32,
     round_budget: u32,
+    reminder_tips_config: ReminderTipsConfig,
+    runtime_config_changed_notice_pending: bool,
     current_round: u32,
     pub(crate) current_stats: UsageStats,
     repair_attempted: bool,
@@ -882,6 +911,7 @@ impl AgentCore {
         let static_prompt = static_prompt.into();
         let capabilities = CapabilityRegistry::builtin().without_tool("toolgen");
         let response_protocol = ResponseProtocolKind::default();
+        let configured_round_budget = configured_round_budget_from_env();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let rendered_static_prompt = prompt_render::render_static_prompt(
@@ -910,8 +940,10 @@ impl AgentCore {
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
-            configured_round_budget: DEFAULT_ROUND_BUDGET,
-            round_budget: DEFAULT_ROUND_BUDGET,
+            configured_round_budget,
+            round_budget: configured_round_budget,
+            reminder_tips_config: ReminderTipsConfig::default(),
+            runtime_config_changed_notice_pending: false,
             current_round: 0,
             current_stats: UsageStats::zero(),
             repair_attempted: false,
@@ -1212,17 +1244,49 @@ impl AgentCore {
             RuntimeConfigEffect::BashApprovalChanged(mode) => self.set_bash_approval_mode(mode),
             RuntimeConfigEffect::WorkInstructionsChanged(_) => {}
         }
-        Ok(runtime_config_apply_report(
+        let report = runtime_config_apply_report(
             config,
             *bash_approval_mode,
             *work_instruction_mode,
             field,
             effect,
-        ))
+        );
+        self.self_tool
+            .set_env_value(report.key, report.value.clone());
+        if field == RuntimeConfigField::ApiProtocol {
+            self.self_tool
+                .set_env_value("TIMEM_BASE_URL", config.base_url.clone());
+        }
+        self.notify_runtime_config_changed();
+        Ok(report)
     }
     pub fn set_max_rounds(&mut self, max_rounds: u32) {
         self.configured_round_budget = max_rounds.max(1);
         self.round_budget = self.configured_round_budget;
+        self.self_tool.set_env_value(
+            "TIMEM_MAX_ROUNDS",
+            if self.configured_round_budget == UNLIMITED_ROUND_BUDGET {
+                "unlimited".to_string()
+            } else {
+                self.configured_round_budget.to_string()
+            },
+        );
+    }
+    pub fn set_reminder_tips_config(&mut self, config: ReminderTipsConfig) {
+        self.reminder_tips_config = config;
+    }
+    pub fn reminder_tips_config(&self) -> &ReminderTipsConfig {
+        &self.reminder_tips_config
+    }
+    pub fn notify_runtime_config_changed(&mut self) {
+        self.runtime_config_changed_notice_pending = true;
+    }
+    pub fn set_self_tool_runtime_param(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) {
+        self.self_tool.set_env_value(key, value);
     }
     fn refresh_rendered_static_prompt(&mut self) {
         self.rendered_static_prompt = prompt_render::render_static_prompt(
@@ -1375,12 +1439,21 @@ impl AgentCore {
         env: BTreeMap<String, String>,
         paths: SelfToolPaths,
     ) {
-        self.self_tool = SelfToolState::new(
+        let mut self_tool = SelfToolState::new(
             env,
             paths,
             default_self_tool_about(),
             default_self_tool_process(),
         );
+        self_tool.set_env_value(
+            "TIMEM_MAX_ROUNDS",
+            if self.configured_round_budget == UNLIMITED_ROUND_BUDGET {
+                "unlimited".to_string()
+            } else {
+                self.configured_round_budget.to_string()
+            },
+        );
+        self.self_tool = self_tool;
     }
     pub fn profile(&self) -> &CoreProfile {
         &self.profile
@@ -2577,6 +2650,15 @@ impl AgentCore {
     }
 
     pub fn build_next_prompt(&mut self) -> String {
+        if self.runtime_config_changed_notice_pending {
+            self.runtime_config_changed_notice_pending = false;
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "runtime_config_changed",
+                RUNTIME_CONFIG_CHANGED_NOTICE,
+                "runtime_config",
+            );
+        }
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
         self.render_prompt()
@@ -2640,7 +2722,11 @@ impl AgentCore {
         prompt_render::render_prompt_slices(&self.deltas)
     }
     fn remaining_rounds(&self) -> u32 {
-        self.round_budget.saturating_sub(self.current_round)
+        if self.round_budget == UNLIMITED_ROUND_BUDGET {
+            UNLIMITED_ROUND_BUDGET
+        } else {
+            self.round_budget.saturating_sub(self.current_round)
+        }
     }
 
     fn request_protocol_repair(
@@ -3066,9 +3152,10 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
         let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0.";
         Some(format!(
-            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{instruction}",
+            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
             self.max_llm_input_tokens
         ))
     }
@@ -3558,15 +3645,6 @@ impl AgentCore {
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
         event.payload["status"] = json!(Self::action_finish_status(action, result));
-        if action.action == "self_tool"
-            && action.input_lower("type") == "cwd"
-            && action.input_lower("op") == "chg_cwd"
-            && result.contains("status: updated_prompt_context_cwd")
-        {
-            event.payload["context_state"] = json!({
-                "cwd": self.current_prompt_cwd().display().to_string(),
-            });
-        }
         if let Some(pid) = action_result_pid(result) {
             event.payload["pid"] = json!(pid);
         }

@@ -212,6 +212,9 @@ enum CoreSessionWorkerCommand {
         field: crate::RuntimeConfigField,
         value: String,
     },
+    UpdateMaxRounds {
+        max_rounds: u32,
+    },
     UpdateApiKey {
         api_key: String,
     },
@@ -523,6 +526,15 @@ impl CoreSessionWorkerHandle {
         }
         self.command_tx
             .send(CoreSessionWorkerCommand::UpdateRuntimeConfig { field, value })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_max_rounds(&self, max_rounds: u32) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateMaxRounds { max_rounds })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -961,6 +973,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::Rename { .. }
                     | CoreSessionWorkerCommand::UpdateBashApproval { .. }
                     | CoreSessionWorkerCommand::UpdateRuntimeConfig { .. }
+                    | CoreSessionWorkerCommand::UpdateMaxRounds { .. }
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
@@ -1098,27 +1111,56 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::UpdateBashApproval { mode } => {
                         core.set_bash_approval_mode(mode);
+                        core.set_self_tool_runtime_param(
+                            "TIMEM_BASH_APPROVAL",
+                            crate::bash_approval_mode_label(mode),
+                        );
+                        core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::UpdateRuntimeConfig { field, value } => {
                         use crate::RuntimeConfigField;
                         match field {
-                            RuntimeConfigField::Model => config.model = value,
+                            RuntimeConfigField::Model => {
+                                config.model = value;
+                                core.set_self_tool_runtime_param(
+                                    field.label(),
+                                    config.model.clone(),
+                                );
+                            }
                             RuntimeConfigField::ApiProtocol => {
                                 if let Ok(proto) = crate::parse_api_protocol(&value) {
                                     config.api_protocol = proto;
+                                    core.set_self_tool_runtime_param(
+                                        field.label(),
+                                        config.api_protocol.label(),
+                                    );
                                 }
                             }
-                            RuntimeConfigField::BaseUrl => config.base_url = value,
+                            RuntimeConfigField::BaseUrl => {
+                                config.base_url = value;
+                                core.set_self_tool_runtime_param(
+                                    field.label(),
+                                    config.base_url.clone(),
+                                );
+                            }
                             RuntimeConfigField::MaxInput => {
                                 if let Some(tokens) = crate::parse_token_count(&value) {
                                     let tokens = tokens.max(3_000);
                                     config.max_llm_input_tokens = tokens;
                                     core.set_max_llm_input_tokens(tokens);
+                                    core.set_self_tool_runtime_param(
+                                        field.label(),
+                                        tokens.to_string(),
+                                    );
                                 }
                             }
                             RuntimeConfigField::MaxOutput => {
                                 if let Some(tokens) = crate::parse_token_count(&value) {
                                     config.max_llm_output_tokens = tokens.max(512);
+                                    core.set_self_tool_runtime_param(
+                                        field.label(),
+                                        config.max_llm_output_tokens.to_string(),
+                                    );
                                 }
                             }
                             RuntimeConfigField::BashApproval => {
@@ -1129,13 +1171,25 @@ impl CoreSessionWorker {
                                 };
                                 if let Some(mode) = mode {
                                     core.set_bash_approval_mode(mode);
+                                    core.set_self_tool_runtime_param(
+                                        field.label(),
+                                        crate::bash_approval_mode_label(mode),
+                                    );
                                 }
                             }
-                            RuntimeConfigField::WorkInstructions => {}
+                            RuntimeConfigField::WorkInstructions => {
+                                core.set_self_tool_runtime_param(field.label(), value);
+                            }
                         }
+                        core.notify_runtime_config_changed();
+                    }
+                    CoreSessionWorkerCommand::UpdateMaxRounds { max_rounds } => {
+                        core.set_max_rounds(max_rounds);
+                        core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
                         config.api_key = api_key;
+                        core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::UpdateMcp {
                         base_capabilities,

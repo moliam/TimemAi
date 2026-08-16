@@ -14,50 +14,129 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const TURN_FOCUS_REMINDER_INTERVAL: Duration = Duration::from_secs(10 * 60);
-const TURN_FOCUS_REMINDERS: [&str; 3] = [
-    "注意：目标是什么，不要忘了跑偏了，如果忘了及时提出",
-    "注意：现在的阶段工作到哪里哪里了？ 有没有迷路，迷路了及时停止",
-    "注意：现在的工作是不是钻了牛角尖，要注意总体思考，迷路了及时停止",
-];
-
-struct TurnFocusReminderSchedule {
+struct TimeReminderSchedule {
     interval: Duration,
     last_emitted_period: u64,
+    tips: Vec<String>,
+}
+
+struct RoundReminderSchedule {
+    interval: u32,
+    last_emitted_period: u32,
+    tips: Vec<String>,
+}
+
+struct TurnReminderSchedules {
+    time: Vec<TimeReminderSchedule>,
+    rounds: Vec<RoundReminderSchedule>,
     random_state: RandomState,
     turn_id: String,
 }
 
-impl TurnFocusReminderSchedule {
-    fn new(turn_id: &str, interval: Duration) -> Self {
+impl TurnReminderSchedules {
+    fn new(turn_id: &str, config: &crate::ReminderTipsConfig) -> Self {
+        let mut time = Vec::new();
+        let mut rounds = Vec::new();
+        for schedule in &config.schedules {
+            if let Some(minutes) = schedule.every_minutes {
+                time.push(TimeReminderSchedule {
+                    interval: Duration::from_secs(minutes.saturating_mul(60)),
+                    last_emitted_period: 0,
+                    tips: schedule.tips.clone(),
+                });
+            }
+            if let Some(interval) = schedule.every_rounds.filter(|interval| *interval > 0) {
+                rounds.push(RoundReminderSchedule {
+                    interval,
+                    last_emitted_period: 0,
+                    tips: schedule.tips.clone(),
+                });
+            }
+        }
         Self {
-            interval,
-            last_emitted_period: 0,
+            time,
+            rounds,
             random_state: RandomState::new(),
             turn_id: turn_id.to_string(),
         }
     }
 
-    fn take_due(&mut self, active_elapsed: Duration) -> Option<&'static str> {
-        let interval_nanos = self.interval.as_nanos();
-        if interval_nanos == 0 {
-            return None;
+    fn override_first_time_interval(&mut self, interval: Duration) {
+        if let Some(schedule) = self.time.first_mut() {
+            schedule.interval = interval;
         }
-        let period = active_elapsed.as_nanos() / interval_nanos;
-        let period = u64::try_from(period).unwrap_or(u64::MAX);
-        if period == 0 || period <= self.last_emitted_period {
-            return None;
-        }
-
-        // One reminder is enough after a long blocking operation. Advancing to
-        // the latest period avoids injecting a backlog of stale reminders.
-        self.last_emitted_period = period;
-        let mut hasher = self.random_state.build_hasher();
-        self.turn_id.hash(&mut hasher);
-        period.hash(&mut hasher);
-        let index = (hasher.finish() as usize) % TURN_FOCUS_REMINDERS.len();
-        Some(TURN_FOCUS_REMINDERS[index])
     }
+
+    fn take_due_time(&mut self, active_elapsed: Duration) -> Vec<String> {
+        let mut due = Vec::new();
+        for (index, schedule) in self.time.iter_mut().enumerate() {
+            let interval_nanos = schedule.interval.as_nanos();
+            if interval_nanos == 0 {
+                continue;
+            }
+            let period = active_elapsed.as_nanos() / interval_nanos;
+            let period = u64::try_from(period).unwrap_or(u64::MAX);
+            if period == 0 || period <= schedule.last_emitted_period {
+                continue;
+            }
+            // Collapse missed periods after a long blocking operation instead
+            // of injecting a backlog of stale reminders.
+            schedule.last_emitted_period = period;
+            if let Some(tip) = choose_tip(
+                &self.random_state,
+                &self.turn_id,
+                "minutes",
+                index,
+                period,
+                &schedule.tips,
+            ) {
+                due.push(tip);
+            }
+        }
+        due
+    }
+
+    fn take_due_rounds(&mut self, completed_rounds: u32) -> Vec<String> {
+        let mut due = Vec::new();
+        for (index, schedule) in self.rounds.iter_mut().enumerate() {
+            let period = completed_rounds / schedule.interval;
+            if period == 0 || period <= schedule.last_emitted_period {
+                continue;
+            }
+            schedule.last_emitted_period = period;
+            if let Some(tip) = choose_tip(
+                &self.random_state,
+                &self.turn_id,
+                "rounds",
+                index,
+                u64::from(period),
+                &schedule.tips,
+            ) {
+                due.push(tip);
+            }
+        }
+        due
+    }
+}
+
+fn choose_tip(
+    random_state: &RandomState,
+    turn_id: &str,
+    schedule_kind: &str,
+    schedule_index: usize,
+    period: u64,
+    tips: &[String],
+) -> Option<String> {
+    if tips.is_empty() {
+        return None;
+    }
+    let mut hasher = random_state.build_hasher();
+    turn_id.hash(&mut hasher);
+    schedule_kind.hash(&mut hasher);
+    schedule_index.hash(&mut hasher);
+    period.hash(&mut hasher);
+    let tip = tips[(hasher.finish() as usize) % tips.len()].trim();
+    (!tip.eq_ignore_ascii_case("NONE")).then(|| tip.to_string())
 }
 
 pub trait ModelClient {
@@ -89,29 +168,53 @@ pub fn run_session_turn_with_model_client(
     profiler: Option<&mut RuntimeProfiler>,
     model_client: &mut dyn ModelClient,
 ) -> TurnOutcome {
-    run_session_turn_with_model_client_and_focus_interval(
+    run_session_turn_with_model_client_and_reminder_override(
         core,
         config,
         request,
         ui,
         profiler,
         model_client,
-        TURN_FOCUS_REMINDER_INTERVAL,
+        None,
     )
 }
 
+#[cfg(test)]
 fn run_session_turn_with_model_client_and_focus_interval(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+    focus_reminder_interval: Duration,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_reminder_override(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        Some(focus_reminder_interval),
+    )
+}
+
+fn run_session_turn_with_model_client_and_reminder_override(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,
     request: TurnInput<'_>,
     ui: &mut dyn TurnUi,
     mut profiler: Option<&mut RuntimeProfiler>,
     model_client: &mut dyn ModelClient,
-    focus_reminder_interval: Duration,
+    focus_reminder_interval: Option<Duration>,
 ) -> TurnOutcome {
     core.set_response_protocol(config.response_protocol);
     let turn_id = format!("turn_{}", epoch_millis());
-    let mut focus_reminders = TurnFocusReminderSchedule::new(&turn_id, focus_reminder_interval);
+    let mut reminders = TurnReminderSchedules::new(&turn_id, core.reminder_tips_config());
+    if let Some(interval) = focus_reminder_interval {
+        reminders.override_first_time_interval(interval);
+    }
     core.record_turn_start_audit(request.audit_file, request.session, &turn_id, request.input);
     let start = Instant::now();
     let mut user_wait_this_turn = Duration::ZERO;
@@ -147,13 +250,32 @@ fn run_session_turn_with_model_client_and_focus_interval(
                     continue;
                 }
                 let active_elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
-                if let Some(reminder) = focus_reminders.take_due(active_elapsed) {
-                    core.submit_prompt_component(
-                        PromptComponentRole::system(),
-                        "turn_focus_reminder",
-                        reminder,
-                        "turn_runtime",
-                    );
+                let time_reminders = reminders.take_due_time(active_elapsed);
+                if !time_reminders.is_empty() {
+                    for reminder in time_reminders {
+                        core.submit_prompt_component(
+                            PromptComponentRole::system(),
+                            "turn_time_reminder",
+                            reminder,
+                            "turn_runtime",
+                        );
+                    }
+                    step = CoreStep::NeedModel {
+                        prompt: core.build_next_prompt(),
+                        rounds_remaining: core.remaining_rounds(),
+                    };
+                    continue;
+                }
+                let round_reminders = reminders.take_due_rounds(rounds);
+                if !round_reminders.is_empty() {
+                    for reminder in round_reminders {
+                        core.submit_prompt_component(
+                            PromptComponentRole::system(),
+                            "turn_round_reminder",
+                            reminder,
+                            "turn_runtime",
+                        );
+                    }
                     step = CoreStep::NeedModel {
                         prompt: core.build_next_prompt(),
                         rounds_remaining: core.remaining_rounds(),

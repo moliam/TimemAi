@@ -6,7 +6,7 @@ use agent_core::{
     CoreStep, LlmResponse, MemGuard, ModelServiceConfig, OutputExpansionRequest,
     OutputExpansionResolution, ResponseProtocolKind, RoundLimitDecisionRequest,
     RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail, TurnStopReason,
-    UsageStats,
+    UsageStats, UNLIMITED_ROUND_BUDGET,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -205,7 +205,7 @@ fn unresponsive_mcp_tool_times_out_as_action_evidence_and_agent_continues() {
             ],
             env: BTreeMap::new(),
         },
-        request_timeout_ms: 50,
+        request_timeout_ms: 250,
     };
     let runtime = McpRuntime::default();
     let tools = runtime.connect(&config).unwrap();
@@ -229,7 +229,7 @@ fn unresponsive_mcp_tool_times_out_as_action_evidence_and_agent_continues() {
         usage: usage(),
         truncated: false,
     });
-    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(started.elapsed() < Duration::from_millis(750));
     let next_prompt = match step {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -300,7 +300,7 @@ fn prompt_is_append_only_and_segmented() {
             prompt,
             rounds_remaining,
         } => {
-            assert_eq!(rounds_remaining, 50);
+            assert_eq!(rounds_remaining, UNLIMITED_ROUND_BUDGET);
             prompt
         }
         other => panic!("unexpected step: {other:?}"),
@@ -379,7 +379,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
     assert_eq!(core.assistant_replay_mode(), AssistantReplayMode::RawOutput);
 
     let _ = core.begin_turn("查看自己信息", None);
-    let raw_response = r#"{"free_talk":"需要读取自身信息。","working_still_action":[{"self_tool":{"type":"about_me","op":"read"}}]}"#;
+    let raw_response = r#"{"free_talk":"需要读取自身信息。","working_still_action":[{"self_tool":{"type":"params"}}]}"#;
     let step = core.apply_model_response(LlmResponse {
         content: scored(raw_response),
         model_name: "qwen-plus".to_string(),
@@ -448,9 +448,7 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
 
     let _ = core.begin_turn("查看自身信息", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"working_still_action":[{"self_tool":{"type":"about_me","op":"read"}}]}"#,
-        ),
+        content: scored(r#"{"working_still_action":[{"self_tool":{"type":"params"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -490,7 +488,7 @@ fn runtime_info_is_dynamic_context_not_static_prompt() {
 }
 
 #[test]
-fn default_max_rounds_is_fifty() {
+fn default_max_rounds_is_unlimited() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("default_rounds"));
     let step = core.begin_turn("你好", None);
     let CoreStep::NeedModel {
@@ -500,8 +498,8 @@ fn default_max_rounds_is_fifty() {
     else {
         panic!("unexpected step: {step:?}");
     };
-    assert_eq!(rounds_remaining, 50);
-    assert!(!prompt.contains("rounds_remaining: 50"));
+    assert_eq!(rounds_remaining, UNLIMITED_ROUND_BUDGET);
+    assert!(!prompt.contains("rounds_remaining:"));
 }
 
 #[test]
@@ -553,10 +551,10 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     assert_eq!(events[0]["turn_id"], "turn_1");
     assert_eq!(events[0]["max_rounds"], 1);
     assert_eq!(events[0]["continued"], true);
-    assert_eq!(rounds_remaining, 50);
+    assert_eq!(rounds_remaining, UNLIMITED_ROUND_BUDGET);
     assert!(prompt.contains("## USER\n\n需要两步完成"));
     assert!(prompt.contains("Runtime round budget continued by user."));
-    assert!(!prompt.contains("rounds_remaining: 50"));
+    assert!(!prompt.contains("rounds_remaining:"));
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%x%"],"limit":1}}]}"#),
@@ -571,7 +569,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     else {
         panic!("unexpected step: {step:?}");
     };
-    assert_eq!(rounds_remaining, 49);
+    assert_eq!(rounds_remaining, UNLIMITED_ROUND_BUDGET);
     assert!(prompt.contains("Action result: memmgr"));
 }
 
@@ -855,10 +853,12 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     );
     core.set_response_protocol(ResponseProtocolKind::Xml);
     let _ = core.begin_turn("需要推理一下", None);
+    let response = format!(
+        "<response><free_talk>先分析</free_talk><finish_confirm>{}</finish_confirm><final_answer>结论</final_answer></response>",
+        agent_core::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
+    );
     let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"<response><free_talk>先分析</free_talk><final_answer>结论</final_answer></response>"#,
-        ),
+        content: scored(response),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -870,9 +870,8 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids, vec!["pd_1"]);
     assert!(!prompt.contains("先分析"));
     assert!(!prompt.contains("Final Answer:\n结论"));
-    assert!(prompt.ends_with(
-        "Now please fulfill your response part like one-root label <response>...</response>:"
-    ));
+    assert!(prompt.ends_with("Please continue the work and respond as protocol requires:"));
+    assert!(!prompt.contains("Now please fulfill your response part"));
     let prompt = match core.begin_turn("继续", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -882,7 +881,8 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids, vec!["pd_1", "pd_2"]);
     assert!(prompt.contains("## TIMEM_ASSISTANT"));
     assert!(prompt.contains("先分析"));
-    assert!(prompt.contains(r#"<free_talk>先分析</free_talk><final_answer>结论</final_answer>"#));
+    assert!(prompt.contains("<free_talk>先分析</free_talk><finish_confirm>"));
+    assert!(prompt.contains("</finish_confirm><final_answer>结论</final_answer>"));
     assert!(!prompt.contains("All previous pending open tasks are completed."));
 }
 
@@ -1577,7 +1577,7 @@ fn canonical_tools_accept_json_object_args() {
     let _ = core.begin_turn("用 JSON object args 跑工具", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"run_bash":{"cmd":"printf kv-ok","timeout_ms":5000}},{"self_tool":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"run_bash":{"cmd":"printf kv-ok","timeout_ms":5000}},{"self_tool":{"type":"params"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1661,23 +1661,10 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
                 "id": "run_bash"
             }}],
             [{"self_tool": {
-                "type": "env",
-                "op": "write",
-                "key": "TIMEM_BUILTIN_E2E",
-                "value": "enabled"
+                "type": "path"
             }}],
             [{"self_tool": {
-                "type": "env",
-                "op": "read",
-                "key": "TIMEM_BUILTIN_E2E"
-            }}],
-            [{"self_tool": {
-                "type": "mem_path",
-                "op": "read"
-            }}],
-            [{"self_tool": {
-                "type": "about_me",
-                "op": "read"
+                "type": "params"
             }}],
             [{"run_bash": {
                 "cmd": "printf builtin-normal",
@@ -1720,9 +1707,8 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
     assert!(prompt.contains("op: load"));
     assert!(prompt.contains("#### `run_bash`"));
     assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("key: TIMEM_BUILTIN_E2E"));
-    assert!(prompt.contains("value: enabled"));
-    assert!(prompt.contains("type: mem_path"));
+    assert!(prompt.contains("type: path"));
+    assert!(prompt.contains("type: params"));
     assert!(prompt.contains("TimemAi"));
     assert!(prompt.contains("Action result: run_bash"));
     assert!(prompt.contains("builtin-normal"));
@@ -1807,7 +1793,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("查项目代号并统计文件", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","free_talk":{"content":"并行查询记忆和本地文件数量。","keep_in_context":true},"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project codename%"],"limit":5}},{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","free_talk":"并行查询记忆和本地文件数量。","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project codename%"],"limit":5}},{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1839,7 +1825,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("更新冲突后的事实", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","free_talk":{"content":"使用查询得到的 expected_version=3 更新测试事实。","keep_in_context":false},"working_still_action":[{"memmgr":{"type":"durable","op":"update","id":"fact_992","expected_version":3,"content":"测试项目代号为：Project-Alpha"}}]}"#,
+            r#"{"status":"working","free_talk":"使用查询得到的 expected_version=3 更新测试事实。","working_still_action":[{"memmgr":{"type":"durable","op":"update","id":"fact_992","expected_version":3,"content":"测试项目代号为：Project-Alpha"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1854,7 +1840,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("读取受保护路径", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","free_talk":{"content":"启动变量不可运行期修改，改为读取路径。","keep_in_context":false},"working_still_action":[{"self_tool":{"type":"mem_path","op":"read"}}]}"#,
+            r#"{"status":"working","free_talk":"启动变量不可运行期修改，改为读取路径。","working_still_action":[{"self_tool":{"type":"path"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1864,12 +1850,12 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         other => panic!("expected self_tool action result, got {other:?}"),
     };
     assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: mem_path"));
+    assert!(prompt.contains("type: path"));
 
     let _ = core.begin_turn("上下文收缩", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","free_talk":{"content":"将测试 delta ids 移出活跃上下文。","keep_in_context":true},"context_compact":{"discard":["pd_001"],"offload":["pd_002"],"summary":"保留测试状态摘要"}}"#,
+            r#"{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compact":{"discard":["pd_001"],"offload":["pd_002"],"summary":"保留测试状态摘要"}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -2046,11 +2032,11 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
 }
 
 #[test]
-fn plain_text_after_repair_failure_is_shown_as_final_answer() {
+fn plain_text_after_repair_failure_is_not_exposed_as_a_final_answer() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("repair"));
     core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("你好", None);
-    // JSON protocol keeps a bounded prose fallback after repair failure.
+    // Strict protocol mode never exposes unstructured model text as completion.
     let mut step = CoreStep::NeedModel {
         prompt: String::new(),
         rounds_remaining: 0,
@@ -2070,11 +2056,9 @@ fn plain_text_after_repair_failure_is_shown_as_final_answer() {
         CoreStep::Final(turn) => turn,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(final_turn.final_answer, "not json");
-    assert_eq!(
-        final_turn.repair_issue.as_deref(),
-        Some("invalid_json_plain_text_fallback")
-    );
+    assert!(final_turn.final_answer.is_empty());
+    assert_eq!(final_turn.repair_issue.as_deref(), Some("invalid_json"));
+    assert!(final_turn.stop_summary.is_some());
 }
 
 #[test]
@@ -2118,31 +2102,6 @@ fn final_turn_wire_shape_uses_semantic_final_answer_field() {
 }
 
 #[test]
-fn fields_wrapped_finished_answer_is_accepted_without_repair() {
-    let mut core = test_core(
-        "STATIC",
-        profile("qwen-plus"),
-        tmp_dir("fields_wrapped_finished_answer"),
-    );
-    let _ = core.begin_turn("hello", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"fields":{"status":"ALL_FINISHED","final_answer":"你好。"}}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("expected final without repair, got {other:?}"),
-    };
-    assert_eq!(final_turn.final_answer, "你好。");
-    assert_eq!(core.current_stats().repair_calls, 0);
-    assert!(!core
-        .render_prompt()
-        .contains("response is not protocol compliant"));
-}
-
-#[test]
 fn final_answer_without_finished_status_requests_protocol_repair() {
     let mut core = test_core(
         "STATIC",
@@ -2152,7 +2111,7 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
     core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"final_answer":"这是最终结论。"}"#),
+        content: scored("## Final_Answer\n这是最终结论。"),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2167,7 +2126,7 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
     assert!(prompt.contains("没有明确完成状态"));
     assert!(prompt.contains("请写 `## Status` 为 `finished`"));
     assert!(prompt.contains("并写 `## Final_Answer`"));
-    assert!(prompt.contains(r#"{"final_answer":"这是最终结论。"}"#));
+    assert!(prompt.contains("## Final_Answer\n这是最终结论。"));
     assert_eq!(core.current_stats().repair_calls, 1);
 }
 
@@ -2181,7 +2140,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
     core.set_response_protocol(ResponseProtocolKind::Markdown);
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"status":"ALL_FINISHED"}"#),
+        content: scored("## Status\nfinished"),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2195,7 +2154,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
     assert!(prompt.contains("final_answer_required_when_status_finished"));
     assert!(prompt.contains("缺少 `## Final_Answer`"));
     assert!(prompt.contains("同时提供 `## Status` 和 `## Final_Answer`"));
-    assert!(prompt.contains(r#"{"status":"ALL_FINISHED"}"#));
+    assert!(prompt.contains("## Status\nfinished"));
 }
 
 #[test]
@@ -2677,111 +2636,6 @@ fn truncated_repair_failure_explains_model_max_token_reason() {
 }
 
 #[test]
-fn mixed_protocol_transcript_extracts_final_json_without_leaking_raw_segments() {
-    let mut core = test_core(
-        "STATIC",
-        profile("qwen-plus"),
-        tmp_dir("mixed_protocol_transcript"),
-    );
-    let _ = core.begin_turn("展示一个耗尽 8 步交互的操作", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"free_talk":"Round 7","working_still_action":[{"run_bash":{"cmd":"uptime"}}]}
-
-[BEGIN DELTA]
-delta_id: pd_18
-
-## SYSTEM
-Action result: run_bash
-command: uptime
-status: 0
-output:
-ok
-[END DELTA]
-
-{
-  "free_talk": "Final summary",
-  "status": "ALL_FINISHED",
-  "final_answer": "只展示最终摘要。"
-}"#,
-        ),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert_eq!(final_turn.final_answer, "只展示最终摘要。");
-    assert!(!final_turn.final_answer.contains("[BEGIN SEGMENT"));
-    assert!(!final_turn.final_answer.contains("working_still_action"));
-}
-
-#[test]
-fn prose_then_markdown_fenced_json_extracts_payload() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aws-claude-sonnet-4-6"),
-        tmp_dir("prose_then_fenced_json"),
-    );
-    core.set_response_protocol(ResponseProtocolKind::Json);
-    let _ = core.begin_turn("把下载目录视频做 3 倍加速", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"转码已在后台顺利运行，进度正常。
-
-```json
-{
-  "status": "ALL_FINISHED",
-  "final_answer": "转码已在后台顺利运行，输出文件：`~/Videos/example_3x.mp4`。"
-}
-```"#,
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.final_answer.contains("example_3x.mp4"));
-    assert!(!final_turn.final_answer.contains("```json"));
-    assert_eq!(final_turn.repair_issue, None);
-}
-
-#[test]
-fn response_text_with_unescaped_inner_quotes_is_repaired() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aws-claude-sonnet-4-6"),
-        tmp_dir("unescaped_response_quotes"),
-    );
-    let _ = core.begin_turn(
-        "当前目录的代码量，rust 代码有多少行？  ---> 这个是几点和你聊的？",
-        None,
-    );
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{
-  "free_talk": "The answer is available from chat history.",
-  "status": "ALL_FINISHED",
-  "final_answer": "根据聊天记录，你问"当前目录的代码量，rust 代码有多少行？"这个问题的时间是今天（2026-06-23）17:46:36 左右。"
-}"#),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.final_answer.contains("17:46:36"));
-    assert!(final_turn.final_answer.contains("\"当前目录的代码量"));
-    assert_eq!(final_turn.repair_issue, None);
-}
-
-#[test]
 fn response_text_preserves_valid_complex_symbols_and_quotes() {
     let mut core = test_core(
         "STATIC",
@@ -3010,17 +2864,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         content: scored(
             r#"<response>
   <free_talk>用 SQL 列出 durable memory 最近记录来确认现状。</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[
-[{"memmgr": {
-    "type": "durable",
-    "op": "sql",
-    "sql": "SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 10",
-    "limit": 10
-  }
-}]
-    ]]></action_json>
-  </working_still_action>
+  <actions><memmgr type="durable" op="sql" limit="10"><sql>SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 10</sql></memmgr></actions>
 </response>"#,
         ),
         model_name: "qwen-plus".to_string(),
@@ -5008,7 +4852,9 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
     };
 
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf late","background":true}}]}"#),
+        content: scored(
+            "## Free_talk\n启动后台任务。\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"sleep 5; printf late\",\"background\":true}}\n```",
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5746,12 +5592,12 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
 }
 
 #[test]
-fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
+fn scenario_self_qa_returns_runtime_params_and_paths() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("scenario_self_qa"));
-    let _ = core.begin_turn("你是谁？把本轮调试标记设成 enabled，再确认你的路径。", None);
+    let _ = core.begin_turn("你是谁？再确认你的运行参数和路径。", None);
     let prompt = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"about_me","op":"read"}},{"self_tool":{"type":"env","op":"write","key":"TIMEM_SCENARIO_DEBUG","value":"enabled"}},{"self_tool":{"type":"mem_path","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"params"}},{"self_tool":{"type":"path"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5760,18 +5606,14 @@ fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected self_tool evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("type: about_me"));
+    assert!(prompt.contains("type: params"));
     assert!(prompt.contains("name: TimemAi"));
-    assert!(prompt.contains("project: https://github.com/moliam/TimemAi"));
-    assert!(prompt.contains("star_message: Please star https://github.com/moliam/TimemAi"));
-    assert!(prompt.contains("status: updated_current_process_env"));
-    assert!(prompt.contains("key: TIMEM_SCENARIO_DEBUG"));
-    assert!(prompt.contains("type: mem_path"));
+    assert!(prompt.contains("type: path"));
     assert!(prompt.contains("api_audit_file:"));
 
     let final_turn = match core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"ALL_FINISHED","final_answer":"我是 TimemAi，当前调试标记已在本进程设置为 enabled；记忆和审计路径也已通过 self_tool 确认。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"我是 TimemAi；当前运行参数、记忆和审计路径已通过 self_tool 确认。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5781,7 +5623,7 @@ fn scenario_self_qa_and_runtime_env_update_stays_bounded() {
         other => panic!("expected final self answer, got {other:?}"),
     };
     assert!(final_turn.final_answer.contains("TimemAi"));
-    assert!(final_turn.final_answer.contains("enabled"));
+    assert!(final_turn.final_answer.contains("运行参数"));
 }
 
 #[test]
@@ -5874,7 +5716,7 @@ fn free_talk_field_optional_does_not_trigger_repair() {
 }
 
 #[test]
-fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
+fn free_talk_string_is_persisted_as_llm_free_talk_slice() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5882,7 +5724,9 @@ fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
     );
     let _ = core.begin_turn("需要推理", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":{"content":"对象形式的思考","keep_in_context":true},"status":"ALL_FINISHED","final_answer":"好的"}"#),
+        content: scored(
+            r#"{"free_talk":"对象形式的思考","status":"ALL_FINISHED","final_answer":"好的"}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5897,7 +5741,7 @@ fn free_talk_object_is_persisted_as_llm_free_talk_slice() {
 }
 
 #[test]
-fn free_talk_object_keep_in_context_false_is_still_persisted() {
+fn free_talk_string_is_kept_in_context() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5905,7 +5749,9 @@ fn free_talk_object_keep_in_context_false_is_still_persisted() {
     );
     let _ = core.begin_turn("需要推理", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(r#"{"free_talk":{"content":"临时思考不保留","keep_in_context":false},"status":"ALL_FINISHED","final_answer":"好的"}"#),
+        content: scored(
+            r#"{"free_talk":"临时思考不保留","status":"ALL_FINISHED","final_answer":"好的"}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5942,7 +5788,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(!template.contains("runtime implementation details"));
     assert!(!template.contains("resources/response_v1_summary.json"));
     let xml_protocol = include_str!("../../resources/protocol/xml/response_protocol.md");
-    assert!(xml_protocol.contains("## XML-native actions"));
+    assert!(xml_protocol.contains("`<actions>` are those function provided by capability catalog"));
     assert!(xml_protocol.contains("<actions>"));
     assert!(xml_protocol.contains("<parallel>"));
     assert!(!xml_protocol.contains("<action_json>"));
@@ -6136,7 +5982,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     };
     assert!(xml_prompt.contains("# System Response Protocol"));
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
-    assert!(xml_prompt.contains("## XML-native actions"));
+    assert!(xml_prompt.contains("`<actions>` are those function provided by capability catalog"));
     assert!(xml_prompt.contains("<actions>"));
     assert!(xml_prompt.contains("<parallel>"));
     assert!(!xml_prompt.contains("<action_json>"));
@@ -6144,8 +5990,8 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("<discard>"));
     assert!(xml_prompt.contains("<offload>"));
     assert!(xml_prompt.contains("<summary>"));
-    assert!(xml_prompt.contains("Runtime writes offloaded content to scratch"));
-    assert!(xml_prompt.contains("## Format examples — EXAMPLES ONLY"));
+    assert!(xml_prompt.contains("offload: will be saved into scratch memory"));
+    assert!(xml_prompt.contains("## RESPONSE EXAMPLES"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }
 
@@ -6431,7 +6277,7 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
 
-    assert!(prompt.contains("EXAMPLES ONLY"));
+    assert!(prompt.contains("## RESPONSE EXAMPLES"));
     for leaked_example_task in [
         "project codename",
         "Get the OS version",
@@ -6604,13 +6450,13 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
 }
 
 #[test]
-fn self_tool_reads_mem_paths_and_about_info() {
+fn self_tool_reads_runtime_paths_and_params() {
     let dir = tmp_dir("self_tool_paths");
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("Timem 的记忆路径和版本是什么？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"mem_path","op":"read"}},{"self_tool":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"path"}},{"self_tool":{"type":"params"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6621,16 +6467,16 @@ fn self_tool_reads_mem_paths_and_about_info() {
         other => panic!("expected model continuation, got {other:?}"),
     };
     assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: mem_path"));
+    assert!(prompt.contains("type: path"));
     assert!(prompt.contains("memory_file:"));
+    assert!(prompt.contains("reminder_tips_file:"));
+    assert!(prompt.contains("session_index_file:"));
+    assert!(prompt.contains("tool_repo_dir:"));
     assert!(prompt.contains("api_audit_file:"));
-    assert!(prompt.contains("type: about_me"));
+    assert!(prompt.contains("type: params"));
     assert!(prompt.contains("name: TimemAi"));
-    assert!(prompt.contains("author: TimemAi <phylimo@163.com>"));
-    assert!(prompt.contains("project: https://github.com/moliam/TimemAi"));
-    assert!(prompt.contains("star_message: Please star https://github.com/moliam/TimemAi"));
     assert!(prompt.contains("pid:"));
-    assert!(prompt.contains("current_dir:"));
+    assert!(prompt.contains("process_cwd:"));
     assert!(prompt.contains("executable:"));
 
     let step = core.apply_model_response(LlmResponse {
@@ -6646,6 +6492,133 @@ fn self_tool_reads_mem_paths_and_about_info() {
         other => panic!("expected final after self_tool evidence, got {other:?}"),
     };
     assert!(final_turn.final_answer.contains("TimemAi"));
+}
+
+#[test]
+fn self_tool_public_surface_groups_self_information_into_path_and_params() {
+    let dir = tmp_dir("self_tool_path_params");
+    let mut core = test_core("STATIC", profile("self-model"), &dir);
+    let mut env = BTreeMap::new();
+    env.insert("TIMEM_MODEL".to_string(), "self-model".to_string());
+    env.insert(
+        "TIMEM_BASE_URL".to_string(),
+        "https://alice:base-url-secret@example.invalid/v1?token=query-secret#fragment-secret"
+            .to_string(),
+    );
+    env.insert("TIMEM_MAX_LLM_OUTPUT".to_string(), "20000".to_string());
+    env.insert(
+        "TIMEM_API_KEY".to_string(),
+        "never-expose-this-key".to_string(),
+    );
+    env.insert(
+        "CUSTOM_RUNTIME_NOTE".to_string(),
+        "arbitrary-env-must-not-leak".to_string(),
+    );
+    core.configure_self_tool_runtime(
+        env,
+        SelfToolPaths {
+            space_dir: dir.join("space"),
+            memory_dir: dir.join("space/memory"),
+            memory_file: dir.join("space/memory/memory.jsonl"),
+            scratch_file: dir.join("space/memory/scratch_notes.jsonl"),
+            api_audit_file: dir.join("space/audit/api_audit.json"),
+            action_audit_file: dir.join("space/audit/action_audit.json"),
+        },
+    );
+    core.set_max_rounds(200);
+    let _ = core.begin_turn("请说明你的路径和运行参数", None);
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"path"}},{"self_tool":{"type":"params"}}]}"#,
+        ),
+        model_name: "self-model".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("expected model continuation, got {step:?}");
+    };
+    assert!(prompt.contains("type: path"));
+    assert!(prompt.contains("reminder_tips_file:"));
+    assert!(prompt.contains("memory_file:"));
+    assert!(prompt.contains("type: params"));
+    assert!(prompt.contains("model: \"self-model\""));
+    assert!(prompt.contains("base_url: \"https://example.invalid/v1\""));
+    assert!(prompt.contains("api_key_configured: true"));
+    assert!(prompt.contains("max_llm_output_tokens: \"20000\""));
+    assert!(prompt.contains("max_steps: 200"));
+    assert!(!prompt.contains("non_sensitive_session_env_json"));
+    assert!(!prompt.contains("never-expose-this-key"));
+    assert!(!prompt.contains("TIMEM_API_KEY"));
+    assert!(!prompt.contains("base-url-secret"));
+    assert!(!prompt.contains("query-secret"));
+    assert!(!prompt.contains("fragment-secret"));
+    assert!(!prompt.contains("arbitrary-env-must-not-leak"));
+    assert!(!prompt.contains("CUSTOM_RUNTIME_NOTE"));
+}
+
+#[test]
+fn multiple_runtime_config_changes_emit_one_system_notice_on_the_next_interaction() {
+    let dir = tmp_dir("runtime_config_change_notice");
+    let mut core = test_core("STATIC", profile("model-a"), &dir);
+    core.notify_runtime_config_changed();
+    core.notify_runtime_config_changed();
+    core.notify_runtime_config_changed();
+
+    let CoreStep::NeedModel { prompt, .. } = core.begin_turn("继续任务", None) else {
+        panic!("expected model request");
+    };
+    let notice = "User changes some runtime config, retrieve again when you need it.";
+    assert_eq!(prompt.matches(notice).count(), 1);
+    assert!(prompt.contains("## SYSTEM"));
+
+    let CoreStep::NeedModel { prompt, .. } = core.begin_turn("再继续", None) else {
+        panic!("expected model request");
+    };
+    assert_eq!(prompt.matches(notice).count(), 1);
+}
+
+#[test]
+fn runtime_config_notice_is_session_isolated_and_rearms_only_after_a_new_change() {
+    let dir_a = tmp_dir("runtime_config_notice_session_a");
+    let dir_b = tmp_dir("runtime_config_notice_session_b");
+    let mut core_a = test_core("STATIC", profile("model-a"), &dir_a);
+    let mut core_b = test_core("STATIC", profile("model-b"), &dir_b);
+    let notice = "User changes some runtime config, retrieve again when you need it.";
+
+    core_a.notify_runtime_config_changed();
+    core_a.notify_runtime_config_changed();
+    core_b.notify_runtime_config_changed();
+    let CoreStep::NeedModel {
+        prompt: first_a, ..
+    } = core_a.begin_turn("A first", None)
+    else {
+        panic!("expected model request for A");
+    };
+    let CoreStep::NeedModel {
+        prompt: first_b, ..
+    } = core_b.begin_turn("B first", None)
+    else {
+        panic!("expected model request for B");
+    };
+    assert_eq!(first_a.matches(notice).count(), 1);
+    assert_eq!(first_b.matches(notice).count(), 1);
+
+    core_a.notify_runtime_config_changed();
+    let CoreStep::NeedModel {
+        prompt: second_a, ..
+    } = core_a.begin_turn("A second", None)
+    else {
+        panic!("expected second model request for A");
+    };
+    let CoreStep::NeedModel {
+        prompt: second_b, ..
+    } = core_b.begin_turn("B second", None)
+    else {
+        panic!("expected second model request for B");
+    };
+    assert_eq!(second_a.matches(notice).count(), 2);
+    assert_eq!(second_b.matches(notice).count(), 1);
 }
 
 #[test]
@@ -6673,7 +6646,7 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
     let _ = core.begin_turn("查看运行时信息", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"mem_path","op":"read"}},{"self_tool":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"path"}},{"self_tool":{"type":"params"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6695,17 +6668,15 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
         configured_action_audit.display()
     )));
     assert!(prompt.contains("name: TimemAi"));
-    assert!(prompt.contains("author: TimemAi <phylimo@163.com>"));
-    assert!(prompt.contains("project: https://github.com/moliam/TimemAi"));
 }
 
 #[test]
-fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
+fn self_tool_params_excludes_credentials_and_arbitrary_environment() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("self_tool_env"));
     let _ = core.begin_turn("调整 Timem 的运行期环境。", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"env","op":"read","key":"TIMEM_API_KEY"}},{"self_tool":{"type":"env","op":"write","key":"TIMEM_SELF_TOOL_TEST","value":"enabled"}},{"self_tool":{"type":"env","op":"read","key":"TIMEM_SELF_TOOL_TEST"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"params"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6715,27 +6686,23 @@ fn self_tool_env_denies_api_keys_and_allows_non_sensitive_runtime_write() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("key: TIMEM_API_KEY"));
-    assert!(prompt.contains("error: sensitive_env_denied"));
-    assert!(prompt.contains("status: updated_current_process_env"));
-    assert!(prompt.contains("key: TIMEM_SELF_TOOL_TEST"));
-    assert!(prompt.contains("value: enabled"));
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("type: params"));
+    assert!(!prompt.contains("TIMEM_API_KEY"));
 }
 
 #[test]
-fn self_tool_env_denies_memory_path_writes_through_core_action() {
+fn self_tool_path_is_read_only_and_reports_data_root() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
         tmp_dir("self_tool_protected_env"),
     );
-    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
-    let _ = core.begin_turn("把 Timem 的 data dir 改到另一个目录。", None);
-    let attempted_path = "/tmp/timem-should-not-become-data-root";
+    let _ = core.begin_turn("Timem 的 data root 在哪里？", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored(format!(
-            r#"{{"status":"working","working_still_action":[{{"self_tool":{{"type":"env","op":"write","key":"TIMEM_DATA_DIR","value":"{attempted_path}"}}}},{{"self_tool":{{"type":"env","op":"write","key":"TIMEM_SPACE","value":".other_mem"}}}}]}}"#
-        )),
+        content: scored(
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"path"}}]}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -6744,16 +6711,13 @@ fn self_tool_env_denies_memory_path_writes_through_core_action() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("key: TIMEM_DATA_DIR"));
-    assert!(prompt.contains("key: TIMEM_SPACE"));
-    assert_eq!(prompt.matches("error: protected_env_denied").count(), 2);
-    assert!(prompt.contains("reason: memory_path_env_is_startup_only"));
-    assert!(!prompt.contains("status: updated_current_process_env"));
-    assert!(!prompt.contains(attempted_path));
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("type: path"));
+    assert!(prompt.contains("data_root:"));
 }
 
 #[test]
-fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
+fn self_tool_path_read_does_not_mutate_context_and_allows_following_action() {
     #[derive(Default)]
     struct TopicRecorder(Vec<agent_core::CoreTopicEvent>);
     impl ActionRuntime for TopicRecorder {
@@ -6767,14 +6731,9 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
     }
 
     let memory_dir = tmp_dir("self_tool_chg_cwd_memory");
-    let work_dir = tmp_dir("self_tool_chg_cwd_work");
-    let sub_dir = work_dir.join("sub");
-    fs::create_dir_all(&sub_dir).unwrap();
-    fs::write(sub_dir.join("marker.txt"), "cwd-ok").unwrap();
-    let sub_dir = fs::canonicalize(&sub_dir).unwrap();
-
     let mut core = test_core("STATIC", profile("qwen-plus"), memory_dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let original_cwd = core.current_prompt_cwd().to_path_buf();
 
     let first_prompt = match core.begin_turn("先确认 cwd", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -6782,16 +6741,13 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
     };
     assert!(first_prompt.contains("[!!!NOTE] cwd now set to:"));
 
-    let response = format!(
-        r#"{{
+    let response = r#"{
   "status":"working",
   "working_still_action":[
-    {{"self_tool":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}},
-    {{"run_bash":{{"cmd":"pwd; cat marker.txt","timeout_ms":5000}}}}
+    {"self_tool":{"type":"path"}},
+    {"run_bash":{"cmd":"pwd","timeout_ms":5000}}
   ]
-}}"#,
-        sub_dir.display()
-    );
+}"#;
     let mut runtime = TopicRecorder::default();
     let step = core.apply_model_response_with_action_runtime(
         LlmResponse {
@@ -6807,42 +6763,22 @@ fn self_tool_chg_cwd_updates_prompt_context_and_future_run_bash_cwd() {
         other => panic!("expected model continuation, got {other:?}"),
     };
 
-    assert_eq!(core.current_prompt_cwd(), sub_dir.as_path());
+    assert_eq!(core.current_prompt_cwd(), original_cwd.as_path());
     assert!(prompt.contains("Action result: self_tool"), "{prompt}");
-    assert!(prompt.contains("type: cwd"), "{prompt}");
-    assert!(prompt.contains("op: chg_cwd"), "{prompt}");
-    assert!(
-        prompt.contains("status: updated_prompt_context_cwd"),
-        "{prompt}"
-    );
-    assert!(prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", sub_dir.display())));
     assert!(prompt.contains("Action result: run_bash"), "{prompt}");
-    assert!(prompt.contains(&sub_dir.display().to_string()), "{prompt}");
-    assert!(prompt.contains("cwd-ok"), "{prompt}");
-    let cwd_update = runtime
+    assert!(runtime
         .0
         .iter()
-        .find(|event| {
-            event.topic.name == agent_core::CORE_TOPIC_ACTION
-                && event.payload["action"] == "self_tool"
-                && event.payload["event"] == "finish"
-        })
-        .expect("self_tool finish topic");
-    assert_eq!(
-        cwd_update.payload["context_state"]["cwd"],
-        sub_dir.display().to_string()
-    );
+        .all(|event| event.payload.get("context_state").is_none()));
 }
 
 #[test]
-fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
+fn self_tool_path_read_preserves_an_explicit_prompt_context() {
     let memory_dir = tmp_dir("self_tool_relative_cwd_memory");
     let base_dir = tmp_dir("self_tool_relative_cwd_base");
     let sub_dir = base_dir.join("nested");
     fs::create_dir_all(&sub_dir).unwrap();
-    fs::write(sub_dir.join("rel.txt"), "relative-ok").unwrap();
     let base_dir = fs::canonicalize(&base_dir).unwrap();
-    let sub_dir = fs::canonicalize(&sub_dir).unwrap();
 
     let mut core = test_core("STATIC", profile("qwen-plus"), memory_dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -6851,7 +6787,7 @@ fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
     let _ = core.begin_turn("切到相对路径", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"cwd","op":"chg_cwd","new_path":"nested"}},{"run_bash":{"cmd":"pwd; cat rel.txt","timeout_ms":5000}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"path"}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6862,13 +6798,13 @@ fn self_tool_chg_cwd_relative_path_resolves_from_prompt_context() {
         other => panic!("expected model continuation, got {other:?}"),
     };
 
-    assert_eq!(core.current_prompt_cwd(), sub_dir.as_path());
-    assert!(prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", sub_dir.display())));
-    assert!(prompt.contains("relative-ok"), "{prompt}");
+    assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
+    assert!(prompt.contains("Action result: self_tool"), "{prompt}");
+    assert!(prompt.contains("Action result: run_bash"), "{prompt}");
 }
 
 #[test]
-fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
+fn self_tool_path_read_emits_no_context_state_mutation() {
     #[derive(Default)]
     struct TopicRecorder(Vec<agent_core::CoreTopicEvent>);
     impl ActionRuntime for TopicRecorder {
@@ -6884,8 +6820,6 @@ fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
     let memory_dir = tmp_dir("self_tool_bad_cwd_memory");
     let base_dir = tmp_dir("self_tool_bad_cwd_base");
     let base_dir = fs::canonicalize(&base_dir).unwrap();
-    let missing = base_dir.join("missing");
-
     let mut core = test_core("STATIC", profile("qwen-plus"), memory_dir);
     core.change_prompt_cwd(base_dir.to_string_lossy()).unwrap();
 
@@ -6893,10 +6827,9 @@ fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
     let mut runtime = TopicRecorder::default();
     let step = core.apply_model_response_with_action_runtime(
         LlmResponse {
-            content: scored(format!(
-                r#"{{"status":"working","working_still_action":[{{"self_tool":{{"type":"cwd","op":"chg_cwd","new_path":"{}"}}}}]}}"#,
-                missing.display()
-            )),
+            content: scored(
+                r#"{"status":"working","working_still_action":[{"self_tool":{"type":"path"}}]}"#,
+            ),
             model_name: "qwen-plus".to_string(),
             usage: usage(),
             truncated: false,
@@ -6910,9 +6843,6 @@ fn self_tool_chg_cwd_invalid_path_does_not_change_context_cwd() {
 
     assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
     assert!(prompt.contains("Action result: self_tool"), "{prompt}");
-    assert!(prompt.contains("type: cwd"), "{prompt}");
-    assert!(prompt.contains("error: path_not_found"), "{prompt}");
-    assert!(!prompt.contains(&format!("[!!!NOTE] cwd now set to: {}", missing.display())));
     assert!(runtime
         .0
         .iter()
@@ -6929,7 +6859,7 @@ fn self_tool_supports_identity_and_process_qa_replay() {
     let _ = core.begin_turn("你是谁？你这个 Timem 进程是什么？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"params"}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6940,19 +6870,14 @@ fn self_tool_supports_identity_and_process_qa_replay() {
         other => panic!("expected model continuation, got {other:?}"),
     };
     assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: about_me"));
+    assert!(prompt.contains("type: params"));
     assert!(prompt.contains("name: TimemAi"));
     assert!(prompt.contains("version:"));
-    assert!(prompt.contains("author: TimemAi <phylimo@163.com>"));
-    assert!(prompt.contains("project: https://github.com/moliam/TimemAi"));
-    assert!(prompt.contains("star_message: Please star https://github.com/moliam/TimemAi"));
     assert!(prompt.contains("pid:"));
-    assert!(prompt.contains("current_dir:"));
-    assert!(prompt.contains("executable:"));
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"{"status":"ALL_FINISHED","final_answer":"我是 TimemAi。当前 self_tool 已返回版本、作者、pid、current_dir 和 executable，可据此说明我正在本机 Timem 进程中运行。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"我是 TimemAi。当前 self_tool 已返回版本和 pid，可据此说明当前 Timem 运行实例。"}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6964,7 +6889,6 @@ fn self_tool_supports_identity_and_process_qa_replay() {
     };
     assert!(final_turn.final_answer.contains("TimemAi"));
     assert!(final_turn.final_answer.contains("pid"));
-    assert!(final_turn.final_answer.contains("executable"));
 }
 
 #[test]
@@ -7455,7 +7379,7 @@ fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
         ),
         (
             "self_tool",
-            r#"{"status":"ALL_FINISHED","final_answer":"好的，以下是我的版本信息。","working_still_action":[{"self_tool":{"type":"about_me","op":"read"}}]}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"好的，以下是我的版本信息。","working_still_action":[{"self_tool":{"type":"params"}}]}"#,
         ),
     ] {
         let mut core = core_with_builtin_capabilities(&format!("finished_actions_repair_{case}"));
@@ -7479,81 +7403,6 @@ fn finished_with_multiple_or_non_bash_actions_requests_same_repair() {
 }
 
 #[test]
-fn prose_then_final_answer_only_json_extracts_payload() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aws-claude-sonnet-4-6"),
-        tmp_dir("prose_final_answer_only"),
-    );
-    let _ = core.begin_turn("你叫什么", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"你叫张三！
-
-{"status":"ALL_FINISHED","final_answer":"你叫**张三**！"}
-"#,
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.final_answer.contains("张三"));
-    assert_eq!(final_turn.repair_issue, None);
-}
-
-#[test]
-fn markdown_fenced_final_answer_only_json_extracts_payload() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aws-claude-sonnet-4-6"),
-        tmp_dir("fenced_final_answer_only"),
-    );
-    let _ = core.begin_turn("秘密是什么", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            "```json\n{\"status\":\"finished\",\"final_answer\":\"ABC = 123456\"}\n```",
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.final_answer.contains("ABC = 123456"));
-    assert_eq!(final_turn.repair_issue, None);
-}
-
-#[test]
-fn prose_with_json_reference_before_actual_response() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aws-claude-sonnet-4-6"),
-        tmp_dir("prose_json_ref"),
-    );
-    let _ = core.begin_turn("explain json", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            "JSON looks like {\"key\":\"value\"} and is widely used.\n\n{\"status\":\"finished\",\"final_answer\":\"JSON is a data format.\"}",
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.final_answer.contains("JSON is a data format"));
-    assert_eq!(final_turn.repair_issue, None);
-}
-
-#[test]
 fn final_answer_containing_json_code_example() {
     let mut core = test_core(
         "STATIC",
@@ -7574,54 +7423,6 @@ fn final_answer_containing_json_code_example() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(final_turn.final_answer.contains("Use this format"));
-    assert_eq!(final_turn.repair_issue, None);
-}
-
-#[test]
-fn prose_with_fake_envelope_keys_picks_last_valid_json() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aws-claude-sonnet-4-6"),
-        tmp_dir("fake_envelope"),
-    );
-    let _ = core.begin_turn("test", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            "Example:\n{\"status\":\"finished\",\"final_answer\":\"wrong\"}\n\nActual:\n{\"status\":\"finished\",\"final_answer\":\"correct answer\"}",
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.final_answer.contains("correct answer"));
-    assert_eq!(final_turn.repair_issue, None);
-}
-
-#[test]
-fn prose_with_curly_braces_in_code_does_not_confuse_parser() {
-    let mut core = test_core(
-        "STATIC",
-        profile("aws-claude-sonnet-4-6"),
-        tmp_dir("curly_in_code"),
-    );
-    let _ = core.begin_turn("rust code", None);
-    let step = core.apply_model_response(LlmResponse {
-        content: scored(
-            "In Rust: fn main() { println!(\"hello\"); }\n\n{\"status\":\"finished\",\"final_answer\":\"Rust uses curly braces for blocks.\"}",
-        ),
-        model_name: "aws-claude-sonnet-4-6".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let final_turn = match step {
-        CoreStep::Final(turn) => turn,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(final_turn.final_answer.contains("curly braces"));
     assert_eq!(final_turn.repair_issue, None);
 }
 
@@ -7730,15 +7531,12 @@ description: |
   Synthetic overlay tool {i} used for capability prompt render performance.
 input_properties:
   type: string
-  op: string
 required:
   - type
-  - op
 example_json: |
   {{
     "perf_tool_{i:03}": {{
-      "type": "about_me",
-      "op": "read"
+      "type": "path"
     }}
   }}
 "#
@@ -7840,7 +7638,7 @@ fn performance_guard_topic_generation_for_many_actions_is_bounded() {
 
     let mut core = core_with_builtin_capabilities("perf_many_action_topics");
     let actions = (0..150)
-        .map(|_| r#"{"self_tool":{"type":"about_me","op":"read"}}"#.to_string())
+        .map(|_| r#"{"self_tool":{"type":"params"}}"#.to_string())
         .collect::<Vec<_>>()
         .join(",");
 
