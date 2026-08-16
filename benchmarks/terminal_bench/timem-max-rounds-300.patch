@@ -1,0 +1,63 @@
+diff --git a/agent_core/src/lib.rs b/agent_core/src/lib.rs
+index d2b8baa..f011182 100644
+--- a/agent_core/src/lib.rs
++++ b/agent_core/src/lib.rs
+@@ -497,11 +497,39 @@ impl PendingApprovedAction {
+ 
+ const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
+ const DEFAULT_ROUND_BUDGET: u32 = 50;
++const MAX_CONFIGURED_ROUND_BUDGET: u32 = 10_000;
+ const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 5;
+ const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
+ const MEM_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
+ const MEM_GUARD_STALE_AFTER: Duration = Duration::from_secs(60 * 60 * 6);
+ 
++fn configured_round_budget(value: Option<&str>) -> u32 {
++    value
++        .and_then(|value| value.parse::<u32>().ok())
++        .filter(|rounds| (1..=MAX_CONFIGURED_ROUND_BUDGET).contains(rounds))
++        .unwrap_or(DEFAULT_ROUND_BUDGET)
++}
++
++fn configured_round_budget_from_env() -> u32 {
++    configured_round_budget(std::env::var("TIMEM_MAX_ROUNDS").ok().as_deref())
++}
++
++#[cfg(test)]
++mod round_budget_configuration_tests {
++    use super::{configured_round_budget, DEFAULT_ROUND_BUDGET};
++
++    #[test]
++    fn benchmark_round_budget_accepts_three_hundred() {
++        assert_eq!(configured_round_budget(Some("300")), 300);
++    }
++
++    #[test]
++    fn invalid_round_budget_uses_product_default() {
++        assert_eq!(configured_round_budget(Some("0")), DEFAULT_ROUND_BUDGET);
++        assert_eq!(configured_round_budget(Some("not-a-number")), DEFAULT_ROUND_BUDGET);
++    }
++}
++
+ #[derive(Debug, Clone)]
+ pub struct MemGuard {
+     lock_dir: PathBuf,
+@@ -882,6 +910,7 @@ impl AgentCore {
+         let static_prompt = static_prompt.into();
+         let capabilities = CapabilityRegistry::builtin().without_tool("toolgen");
+         let response_protocol = ResponseProtocolKind::default();
++        let configured_round_budget = configured_round_budget_from_env();
+         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
+         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+         let rendered_static_prompt = prompt_render::render_static_prompt(
+@@ -910,8 +939,8 @@ impl AgentCore {
+             deltas: Vec::new(),
+             max_llm_input_tokens: 100_000,
+             last_observed_prompt_tokens: 0,
+-            configured_round_budget: DEFAULT_ROUND_BUDGET,
+-            round_budget: DEFAULT_ROUND_BUDGET,
++            configured_round_budget,
++            round_budget: configured_round_budget,
+             current_round: 0,
+             current_stats: UsageStats::zero(),
+             repair_attempted: false,

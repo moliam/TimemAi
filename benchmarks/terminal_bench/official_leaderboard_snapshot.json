@@ -1,0 +1,69 @@
+{
+  "benchmark": "Terminal-Bench 2.0",
+  "accessed_at": "2026-08-15",
+  "source": "https://www.tbench.ai/leaderboard/terminal-bench/2.0",
+  "protocol": {
+    "trials_per_task": 5,
+    "task_count": 89,
+    "total_trials": 445,
+    "historical_leaderboard": true
+  },
+  "entries": [
+    {
+      "agent": "NexAU-AHE",
+      "model": "GPT-5.5",
+      "score": 0.847,
+      "ci": 0.021,
+      "date": "2026-05-14",
+      "url": "https://www.tbench.ai/leaderboard/terminal-bench/2.0"
+    },
+    {
+      "agent": "Codex CLI",
+      "model": "GPT-5.5",
+      "score": 0.822,
+      "ci": 0.022,
+      "date": "2026-04-23",
+      "url": "https://www.tbench.ai/leaderboard/terminal-bench/2.0"
+    },
+    {
+      "agent": "Goose",
+      "model": "Claude Opus 4.5",
+      "score": 0.543,
+      "ci": 0.026,
+      "date": "2025-12-11",
+      "url": "https://www.tbench.ai/leaderboard/terminal-bench/2.0"
+    },
+    {
+      "agent": "Terminus 2",
+      "model": "GLM 5",
+      "score": 0.524,
+      "ci": 0.026,
+      "date": "2026-02-23",
+      "url": "https://www.tbench.ai/leaderboard/terminal-bench/2.0"
+    },
+    {
+      "agent": "OpenHands",
+      "model": "Claude Opus 4.5",
+      "score": 0.519,
+      "ci": 0.029,
+      "date": "2026-01-04",
+      "url": "https://www.tbench.ai/leaderboard/terminal-bench/2.0"
+    },
+    {
+      "agent": "OpenHands",
+      "model": "GPT-5",
+      "score": 0.438,
+      "ci": 0.030,
+      "date": "2025-11-02",
+      "url": "https://www.tbench.ai/leaderboard/terminal-bench/2.0"
+    },
+    {
+      "agent": "Mini-SWE-Agent",
+      "model": "GPT-5",
+      "score": 0.339,
+      "ci": 0.029,
+      "date": "2025-11-03",
+      "url": "https://www.tbench.ai/leaderboard/terminal-bench/2.0"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+env:
+  deployment:
+    type: local
+  repo: null
+  post_startup_commands:
+    - cd /app
+
+agent:
+  templates:
+    system_template: |-
+      You are an autonomous systems and software engineering agent. Use the available
+      terminal and editing tools to complete the task in the current environment.
+      Continue until the requested state is implemented and verified.
+    instance_template: |-
+      Complete this task in the current environment:
+
+      <task>
+      {{problem_statement}}
+      </task>
+    next_step_template: |-
+      OBSERVATION:
+      {{observation}}
+    next_step_no_output_template: |-
+      Your command ran successfully and produced no output.
+  tools:
+    bundles:
+      - path: /opt/agents/swe-source/tools/registry
+      - path: /opt/agents/swe-source/tools/submit
+    enable_bash_tool: true
+    parse_function:
+      type: function_calling
+  history_processors: []
+  model:
+    name: openai/gpt-5.6-sol
+    per_instance_cost_limit: 0
+    total_cost_limit: 0
+    per_instance_call_limit: 100
+    temperature: 0
+    top_p: 1
+    max_input_tokens: 200000
+    max_output_tokens: 20000

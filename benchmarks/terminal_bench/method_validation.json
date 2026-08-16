@@ -1,0 +1,103 @@
+{
+  "validated_at": "2026-08-15",
+  "checks": [
+    {
+      "name": "terminal_bench_2_task_count",
+      "status": "pass",
+      "expected": 89,
+      "observed": 89,
+      "evidence": "Pinned dataset commit contains 89 task.toml files."
+    },
+    {
+      "name": "binary_verifier_semantics",
+      "status": "pass",
+      "expected": "89 binary reward verifiers",
+      "observed": "89 tests/test.sh scripts write reward 0 or 1",
+      "evidence": "Static audit of every pinned task verifier."
+    },
+    {
+      "name": "timem_max_rounds_configuration",
+      "status": "pass",
+      "expected": "benchmark accepts 300; invalid values retain product default 50",
+      "observed": "2 Rust unit tests passed",
+      "evidence": "agent_core round_budget_configuration_tests"
+    },
+    {
+      "name": "timem_unattended_round_limit_auto_continue",
+      "status": "pass",
+      "expected": "--once-json automatically continues at the configured round boundary without waiting for UI input",
+      "observed": "NoopTurnUi accepted RoundLimitContinue, preserved task context, and completed after recharge",
+      "evidence": "cargo test -p agent_core session_turn_noop_ui_uses_default_round_limit_continue"
+    },
+    {
+      "name": "docker_exec_timeout_process_cleanup",
+      "status": "pass",
+      "expected": "orphaned in-container process tree is terminated before verifier",
+      "observed": "real Ubuntu container reproduced the orphan after host docker-exec termination; cleanup terminated the tree and wrote cleanup_completed=true",
+      "evidence": "Isolated server-side Docker integration test"
+    },
+    {
+      "name": "timeout_scoring_gate",
+      "status": "pass",
+      "expected": "timeout without cleanup marker is infra_error; timeout with marker is scored",
+      "observed": "synthetic Harbor result test passed",
+      "evidence": "run_full_server.result_summary validation"
+    },
+    {
+      "name": "summary_timeout_cleanup_precedence",
+      "status": "pass",
+      "expected": "a timeout with model-call evidence is still invalid unless process cleanup is proven",
+      "observed": "normal model-call trial and clean timeout were valid; identical unclean timeout was rejected",
+      "evidence": "summarize_runs.record_is_valid regression test"
+    },
+    {
+      "name": "model_safety_refusal_scoring_gate",
+      "status": "pass",
+      "expected": "deterministic provider safety refusal is scored; generic 502 without model evidence is infrastructure-invalid",
+      "observed": "synthetic paired result test passed",
+      "evidence": "run_full_server.agent_safety_refused and result_summary validation"
+    },
+    {
+      "name": "openharness_assistant_complete_evidence",
+      "status": "pass",
+      "expected": "OpenHarness 0.1.9 assistant_complete events count as model-response evidence",
+      "observed": "synthetic assistant_complete JSONL produced a scored trial instead of agent_no_model_call",
+      "evidence": "run_full_server.agent_called_model regression test"
+    },
+    {
+      "name": "first_valid_pass_at_1_and_crash_recovery",
+      "status": "pass",
+      "expected": "first valid trial remains authoritative and an unledgered completed Harbor job is recovered before rescheduling",
+      "observed": "synthetic duplicate-score and missing-ledger scenarios selected the earliest valid job and appended exactly one recovery record",
+      "evidence": "run_matrix_server.load_completed and summarize_runs.first_valid_scored synthetic integration test"
+    },
+    {
+      "name": "enhanced_final_provenance_gate",
+      "status": "pass",
+      "expected": "final audit independently checks first-valid ledger identity, one valid attempt per task, raw model labels, and Timem max-round provenance for both matrices",
+      "observed": "synthetic 2-model x 7-agent fixture passed all 35 final audit checks",
+      "evidence": "audit_final_artifacts synthetic integration test"
+    },
+    {
+      "name": "dual_model_completeness_gate",
+      "status": "pass",
+      "expected": "2 models x 7 agents x 89 tasks required before rendering",
+      "observed": "synthetic 89-task end-to-end summary, paired comparison, and Markdown render passed",
+      "evidence": "compare_model_summaries and render_dual_model_report integration test"
+    },
+    {
+      "name": "completion_audit_end_to_end",
+      "status": "pass",
+      "expected": "all final dataset, manifest, raw-job, timeout, model-pair, report, hash-source, and credential checks pass only on a complete 2 x 7 x 89 campaign",
+      "observed": "full synthetic 2 x 7 x 89 server-side integration passed",
+      "evidence": "audit_final_artifacts integration test using the pinned dataset and benchmark binary"
+    },
+    {
+      "name": "credential_persistence_scan",
+      "status": "pass",
+      "expected": 0,
+      "observed": 0,
+      "evidence": "Local source scan plus 2,508 server adapter/job/run/result files scanned with generic long cpx-token and three-segment JWT patterns"
+    }
+  ]
+}
