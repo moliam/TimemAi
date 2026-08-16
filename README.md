@@ -49,6 +49,43 @@ the Session is configured.
 Each Session keeps its own model service configuration, so different Sessions
 can use different models or endpoints without changing the others.
 
+### Reminder tips configuration
+
+On first startup, Timem creates one user-level global `reminder_tips.json`.
+Both `timem` and `timem-web` load the same file at startup, across all projects,
+mem spaces, and Sessions:
+
+- macOS: `~/Library/Application Support/TimemAi/reminder_tips.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/timem/reminder_tips.json`
+- Override: set `TIMEM_CONFIG_DIR` to the directory that should contain the file.
+
+A schedule may trigger by active minutes or completed model rounds; when
+`NONE` is randomly selected, that period is consumed without adding anything
+to the prompt. Project-local `.timem_data` directories never hold this program
+configuration.
+
+Restart Timem after editing the file so the new schedules are loaded.
+
+```json
+{
+  "schedules": [
+    {
+      "every_minutes": 10,
+      "tips": ["TIPS: Review the goal.", "NONE"]
+    },
+    {
+      "every_rounds": 8,
+      "tips": ["TIPS: Check the deduction chain.", "NONE"]
+    }
+  ]
+}
+```
+
+Each schedule must set exactly one of `every_minutes` or `every_rounds` to a
+positive integer and provide a non-empty `tips` list. Invalid configuration is
+reported as a warning and safely falls back to the built-in defaults; it never
+prevents Timem from starting.
+
 ## Optional Environment Configuration
 
 The Web UI is the recommended place to configure each Session. Environment
