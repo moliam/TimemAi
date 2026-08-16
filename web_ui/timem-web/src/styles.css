@@ -818,7 +818,7 @@ button:disabled { cursor: not-allowed; }
 .tool-activity[open] .tool-activity-chevron { transform: rotate(90deg); }
 .tool-activity-body { max-height: 280px; overflow: auto; margin: 0 0 5px 22px; padding: 0; border: 0; }
 .tool-activity-body .turn-work-detail { padding: 2px 0 3px; }
-.tool-activity-body .code-block { margin: 2px 0; border: 0; border-radius: 0; background: transparent; }
+.tool-activity-body .code-block { margin: 0; border: 0; border-radius: 0; background: transparent; }
 .tool-activity-body .code-block figcaption { display: none; }
 .tool-activity-body .code-block pre { max-height: 160px; padding: 5px 3px; background: transparent; font-size: 11px; line-height: 1.55; }
 .tool-activity-body .code-block code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

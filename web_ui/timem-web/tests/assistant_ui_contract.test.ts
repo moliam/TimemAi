@@ -561,7 +561,7 @@ describe("assistant-ui thread integration", () => {
   it("shows readable tool names and invocation previews in the working pane", () => {
     expect(source).toContain("function toolInvocationPreview");
     expect(source).toContain("activity.detail?.split");
-    expect(source).toContain("const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();");
+    expect(source).toContain("const detail = activity.detail?.trim();"); expect(source).toContain("const code = activity.code?.trim();"); expect(source).toContain("const hasExpandableDetail = !!detail || !!code;");
     expect(source).toContain('const running = status === "running" || status === "background_running";');
     expect(source).toContain("const [open, setOpen] = useState(false);");
     expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
@@ -576,7 +576,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain("tool-activity-collapse");
     expect(styles).not.toContain(".tool-activity-collapse");
     expect(styles).toContain(".tool-activity-body { max-height: 280px; overflow: auto; margin: 0 0 5px 22px; padding: 0; border: 0; }");
-    expect(styles).toContain(".tool-activity-body .turn-work-detail { padding: 2px 0 3px; }");
+    expect(styles).toContain(".tool-activity-body .turn-work-detail { padding: 2px 0 3px; }"); expect(styles).toContain(".tool-activity-body .code-block { margin: 0;"); expect(source).toContain('{detail && <div className="turn-work-detail"><MarkdownContent text={detail}/></div>}'); expect(source).toContain('<MarkdownContent text={fencedCode(activity.code_language ?? "text", code)} />');
     expect(styles).toContain(".tool-activity summary:focus-visible { background: #1f1f1f; box-shadow: inset 2px 0 0 #4d8fd7; }");
     expect(styles).toContain(':root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }');
     expect(source).toContain("toolDisplayName(activity.tool_name || activity.title)");

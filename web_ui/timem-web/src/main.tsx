@@ -2016,7 +2016,9 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const bashActivity = activity.tool_name === "run_bash";
   const [open, setOpen] = useState(false);
   const invocationPreview = toolInvocationPreview(activity);
-  const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
+ const detail = activity.detail?.trim();
+ const code = activity.code?.trim();
+ const hasExpandableDetail = !!detail || !!code;
   const toolName = toolDisplayName(activity.tool_name || activity.title);
   const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
   const summaryContent = <>
@@ -2035,10 +2037,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
       <ChevronRight className="tool-activity-chevron" size={14}/>
     </summary>
     <div className="tool-activity-body">
-      {activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}
-      {activity.code && (
-        <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)} />
-      )}
+      {detail && <div className="turn-work-detail"><MarkdownContent text={detail}/></div>}
+      {code && (
+ <MarkdownContent text={fencedCode(activity.code_language ?? "text", code)} />
+ )}
     </div>
   </details>;
 }
