@@ -67,9 +67,8 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     assert!(!rendered.contains("slice_id:"));
     assert!(!rendered.contains("prompt_type:"));
     assert!(!rendered.contains("HIDDEN"));
-    assert!(rendered.ends_with(
-        "Now please fulfill your response part like one Markdown response with one state branch:"
-    ));
+    assert!(rendered.ends_with("Please continue the work and respond as protocol requires:"));
+    assert!(!rendered.contains("one Markdown response with one state branch"));
 }
 
 #[test]
@@ -82,43 +81,32 @@ fn formatted_response_trailer_parser_extracts_heading_free_trailer() {
     assert_eq!(prefix, "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]");
     assert_eq!(
         trailer.as_deref(),
-        Some("Now please fulfill your response part like one-root label <response>...</response>:")
+        Some("Please continue the work and respond as protocol requires:")
     );
 }
 
 #[test]
-fn formatted_response_trailer_uses_each_protocol_shape_hint() {
+fn formatted_response_trailer_is_protocol_neutral_and_does_not_repeat_the_shape() {
     assert_eq!(
         formatted_response_trailer("one-root label <response>...</response>", "Ai7"),
-        "Now please fulfill your response part like one-root label <response>...</response>:"
+        "Please continue the work and respond as protocol requires:"
     );
     assert_eq!(
         formatted_response_trailer("one JSON object {...}", "Ai7"),
-        "Now please fulfill your response part like one JSON object {...}:"
+        "Please continue the work and respond as protocol requires:"
     );
     assert_eq!(
         formatted_response_trailer("one Markdown response with one state branch", "Ai7"),
-        "Now please fulfill your response part like one Markdown response with one state branch:"
+        "Please continue the work and respond as protocol requires:"
     );
 }
 
 #[test]
-fn formatted_response_trailer_parser_rejects_empty_legacy_assistant_heading() {
-    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nNow please fulfill your response part in one-JSON format as required in protocol:\n## ";
+fn formatted_response_trailer_parser_ignores_unrecognized_trailing_text() {
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nunrecognized trailing text";
     let (prefix, trailer) = split_formatted_response_trailer(prompt);
     assert_eq!(prefix, prompt);
     assert_eq!(trailer, None);
-}
-
-#[test]
-fn formatted_response_trailer_parser_accepts_legacy_assistant_heading() {
-    let prompt = "STATIC\n\nNow please fulfill your response part in one-XML format as required in protocol:\n## Ai7";
-    let (prefix, trailer) = split_formatted_response_trailer(prompt);
-    assert_eq!(prefix, "STATIC");
-    assert_eq!(
-        trailer.as_deref(),
-        Some("Now please fulfill your response part in one-XML format as required in protocol:\n## Ai7")
-    );
 }
 
 #[test]

@@ -921,10 +921,9 @@ fn action_topic_kind_wire_payload_is_explicit_and_round_trips() {
         ),
         (
             CoreActionKind::SelfTool {
-                self_type: "about_me".to_string(),
-                op: "read".to_string(),
+                self_type: "params".to_string(),
             },
-            json!({"kind": "self_tool", "self_type": "about_me", "op": "read"}),
+            json!({"kind": "self_tool", "self_type": "params"}),
         ),
         (
             CoreActionKind::ChatHistory {

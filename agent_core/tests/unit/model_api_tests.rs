@@ -195,28 +195,23 @@ fn anthropic_request_maps_cache_strategy_blocks_to_content_blocks() {
 }
 
 #[test]
-fn anthropic_request_sends_formatted_response_trailer_without_cache_control() {
+fn anthropic_request_sends_the_current_response_trailer_as_an_uncached_tail() {
     let config = config(ApiProtocol::Anthropic);
-    let prompt = format!(
-            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer(
-                "one-root label <response>...</response>",
-                "Ai4",
-            )
-        );
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires:";
 
-    let prepared = prepare_model_request(&config, &prompt);
+    let prepared = prepare_model_request(&config, prompt);
     let content = prepared.body["messages"][0]["content"].as_array().unwrap();
 
+    assert!(content.iter().any(|block| {
+        block["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("hello"))
+    }));
     assert_eq!(
         content.last().unwrap()["text"],
-        "Now please fulfill your response part like one-root label <response>...</response>:"
+        "Please continue the work and respond as protocol requires:"
     );
-    assert_eq!(content.last().unwrap().get("cache_control"), None);
-    assert!(!content[0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("Now please fulfill your response part"));
+    assert!(content.last().unwrap().get("cache_control").is_none());
 }
 
 #[test]
@@ -293,28 +288,23 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
 }
 
 #[test]
-fn openai_compatible_request_sends_formatted_response_trailer_without_cache_control() {
+fn openai_compatible_request_sends_the_current_response_trailer_as_an_uncached_tail() {
     let config = config(ApiProtocol::OpenAiCompatible);
-    let prompt = format!(
-            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer(
-                "one Markdown response with one state branch",
-                "Ai9",
-            )
-        );
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires:";
 
-    let prepared = prepare_model_request(&config, &prompt);
+    let prepared = prepare_model_request(&config, prompt);
     let messages = prepared.body["messages"].as_array().unwrap();
 
+    assert!(messages.iter().any(|message| {
+        message["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("hello"))
+    }));
     assert_eq!(
         messages.last().unwrap()["content"],
-        "Now please fulfill your response part like one Markdown response with one state branch:"
+        "Please continue the work and respond as protocol requires:"
     );
-    assert_eq!(messages.last().unwrap().get("cache_control"), None);
-    assert!(!messages[messages.len() - 2]["content"]
-        .as_str()
-        .unwrap()
-        .contains("Now please fulfill your response part"));
+    assert!(messages.last().unwrap().get("cache_control").is_none());
 }
 
 #[test]

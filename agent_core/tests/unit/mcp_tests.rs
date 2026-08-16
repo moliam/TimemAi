@@ -368,7 +368,7 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
         .render_tool_catalog_markdown()
         .contains("mcp.demo.echo-value"));
 
-    let response = r#"<response><working_still_action><action_json><![CDATA[[{"mcp.demo.echo-value":{"value":"literal </response> and ```xml <response> text","nested":{"json":"{\"action\":\"not-a-call\"}"}}}]]]></action_json></working_still_action></response>"#;
+    let response = r#"<response><actions><mcp.demo.echo-value><value><![CDATA[literal </response> and ```xml <response> text]]></value><nested><json>{"action":"not-a-call"}</json></nested></mcp.demo.echo-value></actions></response>"#;
     let parsed = crate::response_protocol::ResponseProtocolKind::Xml
         .suite()
         .parse(response, &registry);
