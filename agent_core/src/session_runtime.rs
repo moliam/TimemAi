@@ -2,9 +2,9 @@ use crate::{
     append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
     model_retry_audit_event, model_retry_decision, normalize_user_supplements,
     turn_supporting_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
-    HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandContinueRequest,
-    LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome, ModelServiceConfig,
-    ModelSystemRetryPolicy, OutputExpansionRequest, OutputExpansionResolution, PromptComponentRole,
+    HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandDecision,
+    LongRunningCommandStatus, ModelCallOutcome, ModelServiceConfig, ModelSystemRetryPolicy,
+    OutputExpansionRequest, OutputExpansionResolution, PromptComponentRole,
     RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn,
     SupportingContextInput, TurnInput, TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi,
     UsageStats,
@@ -360,7 +360,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             &response.response.usage,
                             &response.response.content,
                         );
-                        let mut action_runtime = TurnActionRuntime::new(ui, request.session);
+                        let mut action_runtime = TurnActionRuntime::new(ui);
                         step = core.apply_model_response_with_repair_audit_and_runtime(
                             response.response,
                             request.audit_file,
@@ -439,7 +439,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     ui.resume_after_user_decision();
                     continue;
                 }
-                let mut action_runtime = TurnActionRuntime::new(ui, request.session);
+                let mut action_runtime = TurnActionRuntime::new(ui);
                 step = core.resolve_user_approval_with_audit_and_runtime(
                     &approval,
                     approved,
@@ -546,16 +546,14 @@ fn is_terminal_stop(step: &CoreStep) -> bool {
 
 struct TurnActionRuntime<'a> {
     ui: &'a mut dyn TurnUi,
-    session: &'a str,
     pending_supplements: Vec<String>,
     user_wait: Duration,
 }
 
 impl<'a> TurnActionRuntime<'a> {
-    fn new(ui: &'a mut dyn TurnUi, session: &'a str) -> Self {
+    fn new(ui: &'a mut dyn TurnUi) -> Self {
         Self {
             ui,
-            session,
             pending_supplements: Vec::new(),
             user_wait: Duration::ZERO,
         }
@@ -581,36 +579,9 @@ impl ActionRuntime for TurnActionRuntime<'_> {
 
     fn on_long_running_command(
         &mut self,
-        status: &LongRunningCommandStatus,
+        _status: &LongRunningCommandStatus,
     ) -> LongRunningCommandDecision {
-        self.ui.pause_for_user_decision();
-        let user_wait_start = Instant::now();
-        let decision = self
-            .ui
-            .request_host_decision_topic(
-                self.session,
-                HostDecisionRequest::LongRunningCommandContinue(
-                    LongRunningCommandContinueRequest::new(
-                        status.action.clone(),
-                        status.command.clone(),
-                        status.elapsed,
-                        status.timeout_ms,
-                    ),
-                ),
-            )
-            .as_bool();
-        self.user_wait = self.user_wait.saturating_add(user_wait_start.elapsed());
-        self.ui.resume_after_user_decision();
-        if decision {
-            LongRunningCommandDecision::Continue
-        } else {
-            self.pending_supplements.push(format!(
-                "user cancels the command: {} (already running {} secs). You can initiate action to check current working status. If you feel it is still necessary, initiate action again with an explanation in free_talk.",
-                status.command,
-                status.elapsed.as_secs()
-            ));
-            LongRunningCommandDecision::Cancel
-        }
+        LongRunningCommandDecision::Continue
     }
 }
 

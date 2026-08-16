@@ -258,31 +258,11 @@ pub fn render_final_response_at(
 }
 
 pub fn render_turn_outcome_text(outcome: &TurnOutcome) -> String {
-    let mut text = outcome
+    outcome
         .stop_summary
         .as_ref()
         .map(render_turn_stop_summary)
-        .unwrap_or_else(|| outcome.text.clone());
-    if !outcome.running_jobs.is_empty() {
-        if !text.trim().is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&render_running_jobs_for_user(&outcome.running_jobs));
-    }
-    text
-}
-
-pub fn render_running_jobs_for_user(jobs: &[RunningShellJob]) -> String {
-    let mut out = String::from("RUNNING JOB LIST:\n");
-    for job in jobs {
-        out.push_str(&format!(
-            "- pid={}, {}, cmd={}, still running\n",
-            job.pid,
-            job.description(),
-            job.command
-        ));
-    }
-    out.trim_end().to_string()
+        .unwrap_or_else(|| outcome.text.clone())
 }
 
 pub fn render_turn_stop_summary(stop: &TurnStopSummary) -> String {
