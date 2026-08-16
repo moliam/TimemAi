@@ -21,10 +21,6 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
     let sql = action.input_str("sql");
     let params = action.input_params();
     let id = action.input_str("id");
-    let slice_ids = action.input_list("slice_ids");
-    if !slice_ids.is_empty() {
-        return "Action result: memmgr\nerror: slice_ids_removed_use_delta_ids".to_string();
-    }
     let limit = action.input_u64("limit").unwrap_or(5) as usize;
     let after_ms = action.input_i64("after_ms");
     let before_ms = action.input_i64("before_ms");

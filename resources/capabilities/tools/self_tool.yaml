@@ -2,98 +2,83 @@ kind: tool
 id: self_tool
 binding_type: builtin
 binding_name: self_tool
-summary: Inspect or adjust Timem runtime self information.
+summary: Locate Timem runtime resources or inspect its effective configuration.
 description: |
-  Use when the user asks about Timem itself, current runtime environment
-  variables, memory/audit paths, or wants to adjust a non-secret process env
-  value for this running Timem session. It can also change the current prompt
-  context cwd used by later run_bash actions.
+  Use this read-only tool when work requires information about Timem itself.
+  Ask for path when you need to know where something is. Ask for params when
+  you need to know how the current runtime is configured.
 prompt_input: |
-  Always include type and op. type=env supports op=read/write; read may include
-  key or omit key to list non-sensitive env values. write requires key and
-  value and only changes current process runtime env. type=mem_path supports
-  op=read. type=about_me supports op=read. type=cwd supports op=read/chg_cwd;
-  chg_cwd requires new_path and changes the prompt context cwd used by later
-  run_bash actions in this context. You should shorten your 'cd' command output
-  with this ability.
-  API key/token/secret/password-like env
-  variables are not readable or writable. Memory path env variables such as
-  TIMEM_DATA_DIR and TIMEM_SPACE are startup-only and are not writable through
-  self_tool.
+  Use type=path for "where" information. Use type=params for effective runtime
+  configuration and limits.
 prompt_result: |
-  Returns current runtime env values, memory/audit paths, or Timem about
-  information. Sensitive env requests return sensitive_env_denied. Env writes
-  update the current process only; model service config may still need /config
-  or restart. Memory path env writes return protected_env_denied because those
-  resources are selected at startup. about_me also returns project/star info,
-  current process id, current directory, and executable path. cwd chg_cwd returns
-  the new prompt context cwd; future run_bash actions in the same prompt context
-  run from that directory.
+  path returns relevant runtime file and directory locations. params returns
+  relevant effective, non-sensitive runtime values. Secrets are never returned.
 input_schema: |
   {
     "type": "object",
-    "required": ["type", "op"],
     "properties": {
       "type": {
         "type": "string",
-        "enum": ["env", "mem_path", "about_me", "cwd"],
-        "description": "Self information surface."
-      },
-      "op": {
-        "type": "string",
-        "enum": ["read", "write", "chg_cwd"],
-        "description": "Operation. env supports read/write; mem_path/about_me support read; cwd supports read/chg_cwd."
-      },
-      "key": {
-        "type": "string",
-        "description": "Environment variable name for type=env."
-      },
-      "value": {
-        "type": "string",
-        "description": "Environment variable value for type=env op=write."
-      },
-      "new_path": {
-        "type": "string",
-        "description": "Directory path for type=cwd op=chg_cwd. Relative paths are resolved from the current prompt context cwd."
+        "enum": ["path", "params"],
+        "description": "Read-only self-information class."
       }
     },
-    "x-required-when": [
-      {"field": "op", "values": ["write"], "required": ["key", "value"]},
-      {"field": "op", "values": ["chg_cwd"], "required": ["new_path"]}
-    ]
+    "required": ["type"]
   }
 output_schema: |
   {
     "type": "object",
     "properties": {
-      "type": {"type": "string", "description": "Echoed self surface."},
-      "op": {"type": "string", "description": "Echoed operation."},
-      "key": {"type": "string", "description": "Environment key when relevant."},
-      "value": {"type": "string", "description": "Environment value when non-sensitive."},
-      "results": {"type": "string", "description": "Environment list when no key is provided."},
-      "space_dir": {"type": "string", "description": "Current memory space directory."},
-      "memory_dir": {"type": "string", "description": "Memory data directory."},
-      "memory_file": {"type": "string", "description": "Durable memory file."},
-      "scratch_file": {"type": "string", "description": "Scratch notes file."},
-      "api_audit_file": {"type": "string", "description": "API audit JSON file."},
-      "action_audit_file": {"type": "string", "description": "Action audit JSON file."},
-      "name": {"type": "string", "description": "Software name."},
-      "version": {"type": "string", "description": "Software version."},
-      "author": {"type": "string", "description": "Author/contact."},
-      "summary": {"type": "string", "description": "Short software summary."},
-      "project": {"type": "string", "description": "Public project URL."},
-      "star_message": {"type": "string", "description": "Optional project star request."},
-      "pid": {"type": "integer", "description": "Current Timem process id."},
-      "current_dir": {"type": "string", "description": "Current process working directory."},
-      "cwd": {"type": "string", "description": "Current prompt context cwd used by run_bash."},
-      "executable": {"type": "string", "description": "Current Timem executable path."},
-      "error": {"type": "string", "description": "sensitive_env_denied|protected_env_denied|key_required|unsupported_type_or_op"}
+      "type": {
+        "type": "string",
+        "enum": ["path", "params"],
+        "description": "Echoed self-information class."
+      },
+      "cwd": {"type": "string", "description": "Current prompt context working directory for type=path."},
+      "process_cwd": {"type": "string", "description": "Process working directory for type=path."},
+      "executable": {"type": "string", "description": "Current executable path for type=path."},
+      "config_root": {"type": "string", "description": "Global Timem configuration directory for type=path."},
+      "reminder_tips_file": {"type": "string", "description": "Global reminder tips configuration file for type=path."},
+      "capabilities_dir": {"type": "string", "description": "Configured capability overlay directory for type=path, when present."},
+      "data_root": {"type": "string", "description": "Timem data root for type=path."},
+      "workspace_config_file": {"type": "string", "description": "Workspace configuration file for type=path."},
+      "space_dir": {"type": "string", "description": "Current Timem space directory for type=path."},
+      "memory_dir": {"type": "string", "description": "Memory directory for type=path."},
+      "memory_file": {"type": "string", "description": "Durable memory file for type=path."},
+      "scratch_file": {"type": "string", "description": "Scratch memory file for type=path."},
+      "sessions_dir": {"type": "string", "description": "Stored Session directory for type=path."},
+      "session_index_file": {"type": "string", "description": "Stored Session index for type=path."},
+      "tool_repo_dir": {"type": "string", "description": "Current Session tool repository for type=path."},
+      "audit_dir": {"type": "string", "description": "Audit directory for type=path."},
+      "api_audit_file": {"type": "string", "description": "API audit file for type=path."},
+      "action_audit_file": {"type": "string", "description": "Action audit file for type=path."},
+      "name": {"type": "string", "description": "Timem runtime name for type=params."},
+      "version": {"type": "string", "description": "Timem version for type=params."},
+      "pid": {"type": "integer", "description": "Current process id for type=params."},
+      "model": {"type": "string", "description": "Effective model for type=params."},
+      "assistant_name": {"type": "string", "description": "Current assistant speaker name for type=params."},
+      "api_protocol": {"type": "string", "description": "Effective model API protocol for type=params."},
+      "response_protocol": {"type": "string", "description": "Effective response protocol for type=params."},
+      "base_url": {"type": "string", "description": "Redacted model service Base URL for type=params."},
+      "api_key_configured": {"type": "boolean", "description": "Whether the current Session has a non-empty API key, without revealing it."},
+      "timeout_secs": {"type": "string", "description": "Effective model timeout for type=params."},
+      "max_llm_input_tokens": {"type": "integer", "description": "Effective model input-token limit for type=params."},
+      "max_llm_output_tokens": {"type": "string", "description": "Effective model output-token limit for type=params."},
+      "max_steps": {"type": "string", "description": "Effective turn step limit for type=params."},
+      "bash_approval": {"type": "string", "description": "Effective Bash approval policy for type=params."},
+      "work_instructions": {"type": "string", "description": "Effective work-instruction setting for type=params."},
+      "enable_thinking": {"type": "string", "description": "Effective thinking switch for type=params."},
+      "reasoning_effort": {"type": "string", "description": "Effective reasoning effort for type=params."},
+      "stream": {"type": "string", "description": "Effective streaming setting for type=params."},
+      "capability_tools": {"type": "integer", "description": "Number of available capability tools for type=params."},
+      "capability_skills": {"type": "integer", "description": "Number of available capability skills for type=params."},
+      "note": {"type": "string", "description": "Safety and scope note."},
+      "error": {"type": "string", "description": "Structured error for unsupported input."}
     }
   }
 example_json: |
   {
     "self_tool": {
-      "type": "mem_path",
-      "op": "read"
+      "type": "path"
     }
   }

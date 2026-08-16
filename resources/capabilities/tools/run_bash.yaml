@@ -5,7 +5,7 @@ binding_name: run_bash
 requires_host: local_command_execution
 summary: Run local shell commands.
 prompt_synopsis: |
-  run_bash cmd=<shell_command> timeout_ms=<n> [background=true|mode=background]
+  run_bash cmd=<shell_command> timeout_ms=<n> [background=true]
   run_bash loop_cmd=<check_command> interval_ms=<n> loop_timeout_ms=<total_wait_ms> [once_timeout_ms=<n>]
 description: |
   `run_bash` runs a shell command on the local machine and collects bounded
@@ -22,8 +22,8 @@ description: |
   background=true. Background and timeout jobs return a pid; manage them with
   normal shell commands if the user asks you to inspect or stop them.
 prompt_input: |
-  Use cmd for a shell command. Optional: timeout_ms, background=true or
-  mode=background. Use loop_cmd with interval_ms for polling/waiting. loop_cmd
+  Use cmd for a shell command. Optional: timeout_ms and background=true. Use
+  loop_cmd with interval_ms for polling/waiting. loop_cmd
   is run repeatedly until it exits with code 0 or loop_timeout_ms total wait budget
   is reached. once_timeout_ms is the per-check command timeout.
 prompt_result: |
@@ -43,8 +43,7 @@ input_schema: |
       "loop_timeout_ms": {"type": ">0 integer", "description": "Total polling wait budget in milliseconds when loop_cmd is present."},
       "once_timeout_ms": {"type": ">0 integer", "description": "Per-check timeout in polling mode."},
       "interval_ms": {"type": ">0 integer", "description": "Polling interval. Requires loop_cmd."},
-      "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."},
-      "mode": {"type": "string", "enum": ["normal", "background"], "description": "Execution mode alias."}
+      "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."}
     },
     "x-required-any": [["cmd", "loop_cmd"]]
   }

@@ -36,7 +36,6 @@ pub enum CoreActionKind {
     },
     SelfTool {
         self_type: String,
-        op: String,
     },
     ChatHistory {
         operation: String,
@@ -158,7 +157,6 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
         },
         "self_tool" => CoreActionKind::SelfTool {
             self_type: action.input_str("type"),
-            op: action.input_str("op"),
         },
         "chat_history_query" => CoreActionKind::ChatHistory {
             operation: "query".to_string(),
