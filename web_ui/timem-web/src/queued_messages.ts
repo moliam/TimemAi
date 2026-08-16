@@ -108,6 +108,31 @@ export function releaseQueuedMessageClaim(claims: QueuedMessageClaims, sessionId
   return claims.delete(queuedMessageKey(sessionId, messageId));
 }
 
+export function releaseSessionQueuedMessageClaims(
+  claims: QueuedMessageClaims,
+  sessionId: string,
+) {
+  const prefix = `${sessionId}\u0000`;
+  let released = 0;
+  for (const key of Array.from(claims)) {
+    if (!key.startsWith(prefix)) continue;
+    claims.delete(key);
+    released += 1;
+  }
+  return released;
+}
+
+export function clearSessionQueuedMessages(
+  queues: Readonly<Record<string, readonly QueuedMessage[]>>,
+  sessionId: string,
+): Record<string, QueuedMessage[]> {
+  return Object.fromEntries(
+    Object.entries(queues)
+      .filter(([candidateSessionId]) => candidateSessionId !== sessionId)
+      .map(([candidateSessionId, messages]) => [candidateSessionId, [...messages]]),
+  );
+}
+
 export function applyQueuedMessageAck(
   messages: readonly QueuedMessage[],
   messageId: string,

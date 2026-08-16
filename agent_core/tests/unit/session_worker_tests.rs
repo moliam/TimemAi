@@ -18,6 +18,7 @@ fn failed_durable_supplement_append_releases_command_id_for_retry() {
             queue: Vec::new(),
         })),
         cancel_requested: Arc::new(AtomicBool::new(false)),
+        cancel_generation: Arc::new(AtomicU64::new(0)),
         shutdown_requested: Arc::new(AtomicBool::new(false)),
         reply_tx,
         accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
@@ -55,6 +56,7 @@ fn recovered_turn_batch_rejects_duplicate_ids_and_rolls_back_closed_send() {
             queue: Vec::new(),
         })),
         cancel_requested: Arc::new(AtomicBool::new(false)),
+        cancel_generation: Arc::new(AtomicU64::new(0)),
         shutdown_requested: Arc::new(AtomicBool::new(false)),
         reply_tx,
         accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
@@ -1854,6 +1856,110 @@ impl ModelClient for CancellableCountingModel {
             truncated: false,
         })
     }
+}
+
+#[test]
+fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
+    let dir = tmp_dir("stop_discards_queued");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "session_worker_stop_queue", 4),
+        CancellableCountingModel {
+            calls: Arc::clone(&calls),
+        },
+    );
+    let handle = worker.handle();
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .run_turn("first active turn", None)
+        .expect("first turn should be accepted");
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first model request should arrive")
+        {
+            CoreSessionWorkerEvent::ModelRequest { .. } => break,
+            CoreSessionWorkerEvent::Topics(_) => {}
+            other => panic!("unexpected event before first model request: {other:?}"),
+        }
+    }
+
+    handle
+        .run_turn("second queued turn", None)
+        .expect("second turn should be queued");
+    handle.cancel_current_turn();
+
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancelled turn should finish")
+        {
+            CoreSessionWorkerEvent::TurnFinished { .. } => break,
+            CoreSessionWorkerEvent::ModelError { .. }
+            | CoreSessionWorkerEvent::Topics(_)
+            | CoreSessionWorkerEvent::UnconsumedSupplements { .. } => {}
+            CoreSessionWorkerEvent::ModelRequest { .. } => {
+                panic!("work queued before Stop must not reach the model")
+            }
+            other => panic!("unexpected event while cancelling: {other:?}"),
+        }
+    }
+
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["first".to_string()],
+        "Stop must discard the already queued second turn"
+    );
+
+    handle
+        .run_turn("third after stop", None)
+        .expect("new work after Stop should be accepted");
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("third model request should arrive")
+        {
+            CoreSessionWorkerEvent::ModelRequest { .. } => break,
+            CoreSessionWorkerEvent::Topics(_) => {}
+            other => panic!("unexpected event before third model request: {other:?}"),
+        }
+    }
+
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("third turn should finish")
+        {
+            CoreSessionWorkerEvent::TurnFinished { .. } => break,
+            CoreSessionWorkerEvent::ModelResponse { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+            other => panic!("unexpected event while finishing third turn: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        2,
+        "work submitted after Stop must run normally"
+    );
+    worker.shutdown().unwrap();
 }
 
 #[test]

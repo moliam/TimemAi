@@ -722,6 +722,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('cancellingSessionIds.current.add(activeSession.session_id);');
     expect(source).toContain('cancellingSessionIds.current.delete(event.session_id);');
     expect(source).toContain('{isCancelling ? "Stopping…" : "Stop"}');
+    expect(source).toContain("const cancelActiveSessionTurn = async () =>");
+    expect(source).toContain("clearSessionQueuedMessages(previous, activeSessionId)");
+    expect(source).toContain("releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, activeSessionId)");
+    expect(source).toContain("queuedDispatchSessionIdsRef.current.delete(activeSessionId)");
+    expect(source).toContain("onClick={() => void cancelActiveSessionTurn()}");
   });
 
   it("blocks send while cancellation is still in flight", () => {
