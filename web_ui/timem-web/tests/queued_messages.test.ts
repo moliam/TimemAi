@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -30,6 +30,25 @@ describe("queued messages", () => {
     expect(claimQueuedMessage(claims, "session_a", messages, "missing")).toBe(false);
     expect(releaseQueuedMessageClaim(claims, "session_a", "a")).toBe(true);
     expect(claimQueuedMessage(claims, "session_a", messages, "a")).toBe(true);
+  });
+
+  it("clears only the stopped session queue and releases its claims", () => {
+    const queues = {
+      session_a: messages.slice(0, 2),
+      session_b: messages.slice(2, 4),
+    };
+    const claims = new Set([
+      queuedMessageKey("session_a", "a"),
+      queuedMessageKey("session_a", "b"),
+      queuedMessageKey("session_b", "c"),
+    ]);
+
+    expect(clearSessionQueuedMessages(queues, "session_a")).toEqual({
+      session_b: messages.slice(2, 4),
+    });
+    expect(releaseSessionQueuedMessageClaims(claims, "session_a")).toBe(2);
+    expect(claims).toEqual(new Set([queuedMessageKey("session_b", "c")]));
+    expect(queues.session_a.map(({ id }) => id)).toEqual(["a", "b"]);
   });
 
   it("blocks delete and reorder while a stable message id is claimed", () => {

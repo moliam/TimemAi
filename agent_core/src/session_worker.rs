@@ -6,7 +6,7 @@ use crate::{
     TurnUi, UsageStats,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -197,10 +197,12 @@ enum CoreSessionWorkerCommand {
         additional_context: Option<String>,
         command_id: Option<String>,
         initial_supplements: Vec<QueuedSupplement>,
+        cancel_generation: u64,
     },
     RunToolGen {
         request: ToolGenRequest,
         command_id: Option<String>,
+        cancel_generation: u64,
     },
     Rename {
         display_name: String,
@@ -246,6 +248,7 @@ pub struct CoreSessionWorkerHandle {
     command_tx: Sender<CoreSessionWorkerCommand>,
     supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
     cancel_requested: Arc<AtomicBool>,
+    cancel_generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
     reply_tx: Sender<TopicReply>,
     accepted_command_ids: Arc<Mutex<BTreeSet<String>>>,
@@ -306,7 +309,7 @@ impl CoreSessionWorkerHandle {
             }
             accepted.extend(batch_command_ids.iter().cloned());
         }
-        self.cancel_requested.store(false, Ordering::SeqCst);
+        let cancel_generation = self.cancel_generation.load(Ordering::SeqCst);
         self.open_supplement_mailbox();
         let result = self
             .command_tx
@@ -318,6 +321,7 @@ impl CoreSessionWorkerHandle {
                     .into_iter()
                     .map(|(text, command_id)| QueuedSupplement { text, command_id })
                     .collect(),
+                cancel_generation,
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
@@ -352,13 +356,14 @@ impl CoreSessionWorkerHandle {
                 return Ok(());
             }
         }
-        self.cancel_requested.store(false, Ordering::SeqCst);
+        let cancel_generation = self.cancel_generation.load(Ordering::SeqCst);
         self.open_supplement_mailbox();
         let result = self
             .command_tx
             .send(CoreSessionWorkerCommand::RunToolGen {
                 request,
                 command_id: command_id.clone(),
+                cancel_generation,
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
@@ -459,6 +464,7 @@ impl CoreSessionWorkerHandle {
     }
 
     pub fn cancel_current_turn(&self) {
+        self.cancel_generation.fetch_add(1, Ordering::SeqCst);
         self.cancel_requested.store(true, Ordering::SeqCst);
     }
 
@@ -935,6 +941,7 @@ impl CoreSessionWorker {
         let (reply_tx, reply_rx) = mpsc::channel();
         let supplement_mailbox = Arc::new(Mutex::new(SupplementMailbox::default()));
         let cancel_requested = Arc::new(AtomicBool::new(false));
+        let cancel_generation = Arc::new(AtomicU64::new(0));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let accepted_command_ids = Arc::new(Mutex::new(BTreeSet::new()));
         let pending_runtime_updates = Arc::new(Mutex::new(Vec::new()));
@@ -942,6 +949,7 @@ impl CoreSessionWorker {
             command_tx,
             supplement_mailbox: Arc::clone(&supplement_mailbox),
             cancel_requested: Arc::clone(&cancel_requested),
+            cancel_generation: Arc::clone(&cancel_generation),
             shutdown_requested: Arc::clone(&shutdown_requested),
             reply_tx,
             accepted_command_ids,
@@ -974,7 +982,7 @@ impl CoreSessionWorker {
                 context_id: identity.context_id.clone(),
                 worker_id: identity.worker_id.clone(),
                 supplement_mailbox,
-                cancel_requested,
+                cancel_requested: Arc::clone(&cancel_requested),
                 reply_rx,
                 runtime: runtime.clone(),
                 current_turn_active: None,
@@ -1003,7 +1011,24 @@ impl CoreSessionWorker {
                         mut additional_context,
                         command_id,
                         initial_supplements,
+                        cancel_generation: command_generation,
                     } => {
+                        if command_generation < cancel_generation.load(Ordering::SeqCst) {
+                            if let Some(command_id) = command_id {
+                                let _ = event_tx
+                                    .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                            }
+                            for supplement in initial_supplements {
+                                if let Some(command_id) = supplement.command_id {
+                                    let _ =
+                                        event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
+                                            command_id,
+                                        });
+                                }
+                            }
+                            continue;
+                        }
+                        cancel_requested.store(false, Ordering::SeqCst);
                         if !initial_supplements.is_empty() {
                             if let Ok(mut mailbox) = ui.supplement_mailbox.lock() {
                                 mailbox.queue.extend(initial_supplements);
@@ -1066,7 +1091,16 @@ impl CoreSessionWorker {
                     CoreSessionWorkerCommand::RunToolGen {
                         request,
                         command_id,
+                        cancel_generation: command_generation,
                     } => {
+                        if command_generation < cancel_generation.load(Ordering::SeqCst) {
+                            if let Some(command_id) = command_id {
+                                let _ = event_tx
+                                    .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                            }
+                            continue;
+                        }
+                        cancel_requested.store(false, Ordering::SeqCst);
                         if let Some(command_id) = command_id {
                             let _ = event_tx
                                 .send(CoreSessionWorkerEvent::CommandAccepted { command_id });

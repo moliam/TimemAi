@@ -13,7 +13,7 @@ import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, me
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
-import { applyQueuedMessagesAck, claimQueuedMessage, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
@@ -1693,7 +1693,30 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     setEditingQueuedMessage(undefined);
   };
 
-  return <ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">
+  const cancelActiveSessionTurn = async () => {
+ if (activeSessionId) {
+ const previous = queuedMessagesBySessionRef.current;
+ const next = clearSessionQueuedMessages(previous, activeSessionId);
+
+ // Stop is an explicit discard boundary. Keep memory cleared even if
+ // localStorage cleanup fails, preventing stale automatic dispatch.
+ if (reliableStorageScope) {
+ saveQueuedMessages(window.localStorage, reliableStorageScope, next, previous);
+ }
+ queuedMessagesBySessionRef.current = next;
+ setQueuedMessagesBySession(next);
+ releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, activeSessionId);
+ setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+ queuedDispatchSessionIdsRef.current.delete(activeSessionId);
+ setEditingQueuedMessage((current) =>
+ current?.sessionId === activeSessionId ? undefined : current,
+ );
+ setDraggedQueueMessageId(undefined);
+ }
+ await onCancel();
+ };
+
+ return <ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">
     <ThreadPrimitive.Viewport
       ref={viewportRef}
       className="chat-scroll aui-thread-viewport"
@@ -1764,7 +1787,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
               }
             }}
           />
-          <div className="composer-actions"><span className="composer-cwd-inline" title={activeSession?.current_dir}>{activeSession && <><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></>}</span><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void onCancel()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
+          <div className="composer-actions"><span className="composer-cwd-inline" title={activeSession?.current_dir}>{activeSession && <><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></>}</span><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void cancelActiveSessionTurn()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
