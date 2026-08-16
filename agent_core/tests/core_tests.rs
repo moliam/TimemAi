@@ -403,6 +403,44 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
 }
 
 #[test]
+fn xml_raw_replay_uses_the_largest_response_accepted_by_runtime() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("assistant_replay_xml_largest_root"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Xml);
+
+    let _ = core.begin_turn("run the selected action", None);
+    let raw = r#"discard-before
+<response><actions><self_tool type="path"/></actions></response>
+between-roots
+<response>
+  <free_talk>selected larger response</free_talk>
+  <actions><self_tool type="params"/></actions>
+</response>
+discard-after"#;
+    let step = core.apply_model_response(LlmResponse {
+        content: raw.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("selected larger response"));
+    assert!(prompt.contains(r#"<self_tool type="params"/>"#));
+    assert!(!prompt.contains(r#"<self_tool type="path"/>"#));
+    assert!(!prompt.contains("discard-before"));
+    assert!(!prompt.contains("between-roots"));
+    assert!(!prompt.contains("discard-after"));
+    assert!(prompt.contains("content outside <response>"));
+}
+
+#[test]
 fn assistant_prompt_heading_uses_current_worker_speaker_name() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("assistant_heading"));
     core.set_assistant_speaker_name("ID2\nignored");

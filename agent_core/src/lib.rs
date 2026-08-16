@@ -2836,11 +2836,14 @@ impl AgentCore {
     ) -> Vec<(String, String)> {
         match self.assistant_replay_mode {
             AssistantReplayMode::RawOutput => {
-                let raw = raw_response.trim();
-                if raw.is_empty() {
+                let replay = parsed
+                    .and_then(|parsed| parsed.accepted_response.as_deref())
+                    .unwrap_or(raw_response)
+                    .trim();
+                if replay.is_empty() {
                     Vec::new()
                 } else {
-                    vec![("llm_response".to_string(), raw.to_string())]
+                    vec![("llm_response".to_string(), replay.to_string())]
                 }
             }
             AssistantReplayMode::ExtractedFields => {

@@ -1009,7 +1009,7 @@ This is an answer, not an executable action:
 }
 
 #[test]
-fn session_turn_xml_outer_text_becomes_free_talk_and_continues_action() {
+fn session_turn_xml_replays_only_the_extracted_response_root() {
     let dir = tmp_dir("xml_root_repair_exact_structure");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -1021,8 +1021,9 @@ fn session_turn_xml_outer_text_becomes_free_talk_and_continues_action() {
         Ok(llm(
             r#"<free_talk>search memory</free_talk>
 <response>
-  <actions><memmgr type="raw_chat" op="search" limit="1"><search_text>fixture</search_text></memmgr></actions>
-</response>"#,
+ <actions><memmgr type="raw_chat" op="search" limit="1"><search_text>fixture</search_text></memmgr></actions>
+</response>
+discard-after"#,
             1_000,
             false,
         )),
@@ -1054,10 +1055,14 @@ fn session_turn_xml_outer_text_becomes_free_talk_and_continues_action() {
     assert_eq!(outcome.stats.tool_calls, 1);
     assert_eq!(model.prompts.len(), 2);
     assert!(model.prompts[1].contains("## TIMEM_ASSISTANT"));
-    assert!(model.prompts[1].contains("<free_talk>search memory</free_talk>"));
+    assert!(model.prompts[1].contains("<response>"));
+    assert!(model.prompts[1].contains(r#"<memmgr type="raw_chat" op="search" limit="1">"#));
+    assert!(!model.prompts[1].contains("<free_talk>search memory</free_talk>"));
+    assert!(!model.prompts[1].contains("discard-after"));
     assert!(model.prompts[1].contains("Action result: memmgr"));
     assert!(model.prompts[1].contains("ERROR: The previous XML response had content outside"));
     assert!(model.prompts[1].contains("begin exactly with <response>"));
+
     let repair_events = read_audit_events(&audit)
         .into_iter()
         .filter(|event| event["type"] == "model_repair_request")
@@ -1067,7 +1072,7 @@ fn session_turn_xml_outer_text_becomes_free_talk_and_continues_action() {
 }
 
 #[test]
-fn session_turn_retries_a_recovered_final_answer_before_finishing() {
+fn session_turn_retries_an_extracted_final_answer_before_finishing() {
     let dir = tmp_dir("xml_recovered_final_retry");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
