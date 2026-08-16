@@ -1109,8 +1109,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('return ["openai-compatible", "openai-responses", "anthropic"];');
     expect(source).toContain('case "TIMEM_RESPONSE_PROTOCOL":');
     expect(source).toContain('return ["xml", "json", "markdown"];');
+    expect(source).toContain('case "TIMEM_MAX_ROUNDS":');
+    expect(source).toContain('return ["50", "200", "500", "unlimited"];');
     expect(source).toContain("options ? <select value={value}");
-    expect(source).toContain("options.map((choice) => <option value={choice} key={choice}>{choice}</option>)");
+    expect(source).toContain('options.map((choice) => <option value={choice} key={choice}>{choice === "unlimited" ? "Unlimited" : choice}</option>)');
     expect(styles).toContain(".runtime-options input, .runtime-options select, .session-modal input, .session-modal select");
   });
 

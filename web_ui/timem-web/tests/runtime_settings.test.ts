@@ -11,6 +11,7 @@ describe("runtime setting labels", () => {
   it("hides the Timem namespace prefix without changing other keys", () => {
     expect(runtimeOptionLabel("TIMEM_MODEL")).toBe("MODEL");
     expect(runtimeOptionLabel("TIMEM_BASE_URL")).toBe("BASE_URL");
+    expect(runtimeOptionLabel("TIMEM_MAX_ROUNDS")).toBe("MAX STEPS");
     expect(runtimeOptionLabel("CUSTOM_OPTION")).toBe("CUSTOM_OPTION");
   });
 });
@@ -41,15 +42,18 @@ describe("session runtime settings", () => {
       base_url: "https://session.example/v1",
       max_llm_input_tokens: 64000,
       max_llm_output_tokens: 8000,
+      max_rounds: "unlimited",
       bash_approval: "ask",
       work_instructions: "silent",
     }, [
       { key: "TIMEM_MODEL", value: "host-model" },
       { key: "TIMEM_BASE_URL", value: "https://host.example/v1" },
+      { key: "TIMEM_MAX_ROUNDS", value: "50" },
     ]);
     expect(options).toEqual([
       { key: "TIMEM_MODEL", value: "session-model" },
       { key: "TIMEM_BASE_URL", value: "https://session.example/v1" },
+      { key: "TIMEM_MAX_ROUNDS", value: "unlimited" },
     ]);
   });
 });
