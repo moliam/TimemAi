@@ -1,10 +1,11 @@
 export const COLLAPSED_QUEUE_LIMIT = 4;
 
 export type QueuedMessage = {
-  id: string;
-  text: string;
-  createdAtMs: number;
-  deliveryError?: string;
+ id: string;
+ text: string;
+ createdAtMs: number;
+ attachmentIds: string[];
+ deliveryError?: string;
 };
 
 const STORAGE_PREFIX = "timem-web-queued-messages:v2";
@@ -19,22 +20,37 @@ export function queuedMessagesStorageKey(scope: string, messageId?: string) {
 type StoredQueuedMessage = { sessionId: string; position: number; message: QueuedMessage };
 
 function parseStoredQueuedMessage(raw: string | null): StoredQueuedMessage | null {
-  try {
-    if (!raw || raw.length > MAX_STORED_MESSAGE_BYTES) return null;
-    const value = JSON.parse(raw) as Partial<StoredQueuedMessage>;
-    const message = value?.message;
-    return typeof value?.sessionId === "string"
-      && typeof value.position === "number"
-      && !!message
-      && typeof message.id === "string"
-      && typeof message.text === "string"
-      && typeof message.createdAtMs === "number"
-      && (message.deliveryError === undefined || typeof message.deliveryError === "string")
-      ? value as StoredQueuedMessage
-      : null;
-  } catch {
-    return null;
-  }
+ try {
+ if (!raw || raw.length > MAX_STORED_MESSAGE_BYTES) return null;
+ const value = JSON.parse(raw) as Partial<StoredQueuedMessage>;
+ const message = value?.message as Partial<QueuedMessage> | undefined;
+ if (
+ typeof value?.sessionId !== "string"
+ || typeof value.position !== "number"
+ || !message
+ || typeof message.id !== "string"
+ || typeof message.text !== "string"
+ || typeof message.createdAtMs !== "number"
+ || (message.deliveryError !== undefined && typeof message.deliveryError !== "string")
+ ) return null;
+ if (
+ message.attachmentIds !== undefined
+ && (!Array.isArray(message.attachmentIds) || message.attachmentIds.some((id) => typeof id !== "string"))
+ ) return null;
+ return {
+ sessionId: value.sessionId,
+ position: value.position,
+ message: {
+ id: message.id,
+ text: message.text,
+ createdAtMs: message.createdAtMs,
+ attachmentIds: Array.from(new Set(message.attachmentIds ?? [])),
+ ...(message.deliveryError === undefined ? {} : { deliveryError: message.deliveryError }),
+ },
+ };
+ } catch {
+ return null;
+ }
 }
 
 export function loadQueuedMessages(storage: Pick<Storage, "length" | "key" | "getItem">, scope: string): Record<string, QueuedMessage[]> {
@@ -83,6 +99,10 @@ export function saveQueuedMessages(
   } catch {
     return false;
   }
+}
+
+export function reservedQueuedAttachmentIds(messages: readonly QueuedMessage[]) {
+ return new Set(messages.flatMap((message) => message.attachmentIds));
 }
 
 export type QueuedMessageClaims = Set<string>;

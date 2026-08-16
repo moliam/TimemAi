@@ -144,7 +144,29 @@ describe("web topic view model", () => {
     });
   });
 
-  it("keeps rapid repeated sends during a working turn as separate supplements", () => {
+  it("forces ready-session text to send immediately as a supplement with attachments", () => {
+ const current = session("session_1");
+ expect(composerSendDecision(
+ current,
+ " urgent context ",
+ false,
+ false,
+ ["attachment_1", "attachment_2"],
+ true,
+ )).toEqual({
+ kind: "send",
+ text: "urgent context",
+ clearDraftOnSuccess: true,
+ command: {
+ type: "turn_supplement",
+ session_id: "session_1",
+ text: "urgent context",
+ attachment_ids: ["attachment_1", "attachment_2"],
+ },
+ });
+ });
+
+ it("keeps rapid repeated sends during a working turn as separate supplements", () => {
     const current = { ...session("session_1"), state: "working" };
     const decisions = ["first correction", "second correction", "third correction"].map((text) => composerSendDecision(current, text, false));
     expect(decisions.map((decision) => decision.kind)).toEqual(["send", "send", "send"]);

@@ -237,8 +237,8 @@ export type ClientCommand =
   | { type: "session_api_key_reveal"; session_id: string }
   | { type: "session_stop"; session_id: string }
   | { type: "session_delete"; session_id: string }
-  | { type: "turn_submit"; session_id: string; text: string; input_kind?: "toolgen"; source_turn_id?: string }
-  | { type: "turn_supplement"; session_id: string; text: string }
+  | { type: "turn_submit"; session_id: string; text: string; attachment_ids?: string[]; input_kind?: "toolgen"; source_turn_id?: string }
+  | { type: "turn_supplement"; session_id: string; text: string; attachment_ids?: string[] }
   | { type: "turn_cancel"; session_id: string }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
   | { type: "history_page"; session_id: string; before_cursor?: string | null; /** Maximum complete tasks (turns), not JSONL records. */ limit?: number }
