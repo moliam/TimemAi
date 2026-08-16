@@ -620,9 +620,7 @@ fn action_detail_for_shell(kind: &CoreActionKind) -> (String, Option<ActionTimer
             capmgr_action_detail(op.trim(), kind.trim(), id.trim()),
             None,
         ),
-        CoreActionKind::SelfTool { self_type, op } => {
-            (self_tool_action_detail(self_type.trim(), op.trim()), None)
-        }
+        CoreActionKind::SelfTool { self_type } => (self_tool_action_detail(self_type.trim()), None),
         CoreActionKind::ChatHistory { operation } => {
             (memory_action_detail("raw_chat", operation.trim()), None)
         }
@@ -683,9 +681,6 @@ fn capmgr_action_detail(op: &str, kind: &str, id: &str) -> String {
         ("load", kind, id) => format!("能力: 加载 {kind}/{id}"),
         ("list", "", _) => "能力: 列出".to_string(),
         ("list", kind, _) => format!("能力: 列出 {kind}"),
-        ("inspect", kind, id) if !kind.is_empty() && !id.is_empty() => {
-            format!("能力: 查看 {kind}/{id}")
-        }
         ("job_status", _, id) if !id.is_empty() => format!("后台工具任务: {}", id.trim()),
         ("job_status", _, _) => "后台工具任务: 查询".to_string(),
         ("job_cancel", _, id) if !id.is_empty() => format!("后台工具任务: 取消 {}", id.trim()),
@@ -694,13 +689,12 @@ fn capmgr_action_detail(op: &str, kind: &str, id: &str) -> String {
     }
 }
 
-fn self_tool_action_detail(self_type: &str, op: &str) -> String {
-    match (self_type, op) {
-        ("env", "read") => "Timem: 查看环境".to_string(),
-        ("env", "write") => "Timem: 更新环境".to_string(),
-        ("mem_path", "read") => "Timem: 查看记忆路径".to_string(),
-        ("about_me", "read") => "Timem: 查看自身信息".to_string(),
-        _ => "Timem: 自身工具".to_string(),
+fn self_tool_action_detail(self_type: &str) -> String {
+    match self_type {
+        "path" => "Timem: 查看自身路径".to_string(),
+        "params" => "Timem: 查看运行参数".to_string(),
+        other if !other.is_empty() => format!("Timem: 查看自身信息 ({other})"),
+        _ => "Timem: 查看自身信息".to_string(),
     }
 }
 

@@ -723,16 +723,14 @@ fn self_tool_action_maps_to_user_readable_observation_events() {
         action_topic(
             "self_tool",
             CoreActionKind::SelfTool {
-                self_type: "mem_path".to_string(),
-                op: "read".to_string(),
+                self_type: "path".to_string(),
             },
             false,
         ),
         action_topic(
             "self_tool",
             CoreActionKind::SelfTool {
-                self_type: "about_me".to_string(),
-                op: "read".to_string(),
+                self_type: "params".to_string(),
             },
             false,
         ),
@@ -740,8 +738,8 @@ fn self_tool_action_maps_to_user_readable_observation_events() {
     assert_eq!(
         events,
         vec![
-            ObservationEvent::Persistent("Timem: 查看记忆路径".to_string()),
-            ObservationEvent::Persistent("Timem: 查看自身信息".to_string()),
+            ObservationEvent::Persistent("Timem: 查看自身路径".to_string()),
+            ObservationEvent::Persistent("Timem: 查看运行参数".to_string()),
         ]
     );
 }
