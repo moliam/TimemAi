@@ -89,7 +89,7 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(!STATIC_PROMPT.contains("\"perspective_policy\""));
     assert!(!STATIC_PROMPT.contains("\"tool_claim_policy\""));
     assert!(!STATIC_PROMPT.contains("\"storage_style_policy\""));
-    assert!(STATIC_PROMPT.contains("persisted user/assistant chat records"));
+    assert!(STATIC_PROMPT.contains("runtime's automatic chat audit records"));
     assert!(!STATIC_PROMPT.contains("\"durable|raw_chat|scratch|context\""));
     assert!(!STATIC_PROMPT.contains("\"durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink\""));
     assert!(!STATIC_PROMPT.contains("\"query\": {\"type\": \"string\""));
