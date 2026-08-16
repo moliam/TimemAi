@@ -23,6 +23,29 @@ fn invalid_round_budget_uses_product_default() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn mem_guard_reclaims_a_fresh_lock_owned_by_a_dead_process() {
+    let dir = std::env::temp_dir().join(format!(
+        "timem_dead_mem_guard_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let memory_dir = dir.join("memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let guard = MemGuard::for_memory_dir(&memory_dir);
+    std::fs::create_dir_all(&guard.lock_dir).unwrap();
+    std::fs::write(
+        guard.lock_dir.join("owner.json"),
+        serde_json::json!({"pid": i32::MAX, "created_at_ms": now_ms()}).to_string(),
+    )
+    .unwrap();
+
+    guard.with_write(|| ()).unwrap();
+    assert!(!guard.lock_dir.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn test_core(name: &str) -> AgentCore {
     let dir = std::env::temp_dir().join(format!(
         "timem_prompt_component_test_{}_{}",

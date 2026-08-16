@@ -615,6 +615,9 @@ impl MemGuard {
     }
 
     fn is_stale_lock(&self) -> bool {
+        if let Some(owner_alive) = self.lock_owner_alive() {
+            return !owner_alive;
+        }
         fs::metadata(&self.lock_dir)
             .and_then(|metadata| metadata.modified())
             .ok()
@@ -622,6 +625,34 @@ impl MemGuard {
             .map(|age| age >= MEM_GUARD_STALE_AFTER)
             .unwrap_or(false)
     }
+
+    fn lock_owner_alive(&self) -> Option<bool> {
+        let owner = fs::read_to_string(self.lock_dir.join("owner.json")).ok()?;
+        let pid = serde_json::from_str::<Value>(&owner)
+            .ok()?
+            .get("pid")?
+            .as_u64()?;
+        process_is_alive(pid)
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u64) -> Option<bool> {
+    let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return Some(true);
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Some(false),
+        Some(libc::EPERM) => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u64) -> Option<bool> {
+    None
 }
 
 #[derive(Debug)]
