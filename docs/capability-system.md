@@ -56,7 +56,7 @@ Normal/background execution is part of the capability interface:
   keeps a dedicated path because it includes approval policy and local shell
   safety checks.
 - Command-bound registered tools run in normal mode by default. If their
-  YAML declares `background` or `mode=background` in `input_schema`, core may
+  YAML declares `background` in `input_schema`, core may
   start the command as a background `tool_job`, persist its status under the
   runtime memory directory, and return a `job_id`.
 - Background command-bound tools are checked or cancelled through
@@ -207,8 +207,6 @@ Current operations:
 - `list`: list capability headers
 - `load`: load a skill body or tool details into prompt context
 
-`inspect` currently aliases `load` for implemented kinds.
-
 Planned operations:
 
 - `resource`: load skill sub-documents, scratch records, workspace summaries,
@@ -226,24 +224,29 @@ the example capability root.
 
 ## `self_tool`
 
-`self_tool` exposes Timem runtime self-information to the model through the same
-manifest and executor path as other builtin tools. It is intentionally narrow:
+`self_tool` exposes Timem runtime self-information through two read-only classes:
 
-- `type=env, op=read|write`: current process env only; API key/token variables
-  and secret/password-like variables are denied. Memory path env variables such
-  as `TIMEM_DATA_DIR` and `TIMEM_SPACE` are startup-only and writes are denied.
-- `type=mem_path, op=read`: current memory/audit paths.
-- `type=about_me, op=read`: software name, version, author/contact, project/star
-  info, summary, current process id, working directory, and executable path.
-- `type=cwd, op=read|chg_cwd`: current prompt context cwd. `chg_cwd` requires
-  `new_path`; relative paths resolve from the current prompt context cwd. Future
-  `run_bash` actions in that same prompt context execute from this cwd.
+- `type=path`: use for questions about where Timem runtime resources are. The
+  result returns the relevant known file and directory locations; the model may
+  then use normal `run_bash` policy if file contents are actually needed.
+- `type=params`: use for questions about how the current Timem runtime is
+  configured. The result returns the relevant effective runtime values.
+
+API keys, tokens, passwords, secrets, credentials, and similarly named env
+values are excluded. `params` is an explicit allowlist and never dumps arbitrary
+Session environment entries; Base URL userinfo, query, and fragment data are
+redacted. The interface has no mutation operation and no additional type family.
+
+Successful runtime configuration changes set one Core-side pending notice.
+Regardless of how many fields the user changes before the next interaction,
+the next model prompt receives exactly one SYSTEM component telling it to
+retrieve runtime parameters again when needed.
 
 Do not use `self_tool` for user memory, shell commands, project file edits, or
 model service model calls. Those remain owned by `memmgr`, `run_bash`, and the
 session runtime respectively. Future additions should stay within Timem runtime
-self-state, such as config inspection, workspace references, capability overlay
-status, or recent diagnostics.
+self-state. New information belongs under `path` or `params`; do not add another
+top-level type without a strong boundary reason.
 
 ## Iteration Rule
 

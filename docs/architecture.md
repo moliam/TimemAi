@@ -207,12 +207,13 @@ flowchart LR
   using the same data root and space do not corrupt or lose writes.
 - Tracks per-turn stats: model calls, token usage, memory reads/writes, tool
   calls, and prompt shrink counters.
-- Tracks long-running turn focus independently for every active Session worker.
-  For each ten minutes of active turn time, the next model request receives one
-  randomly selected `SYSTEM` focus reminder through the normal prompt-component
-  queue. Time paused for a host decision is excluded, a blocking model/tool call
-  is never interrupted, and missed periods collapse to one current reminder
-  instead of producing a backlog.
+- Tracks reminder schedules independently for every active Session worker.
+  Terminal and Web hosts load one user-global `reminder_tips.json` at startup;
+  Core evaluates its active-minute and completed-round schedules before model
+  requests and routes random selections through the normal `SYSTEM`
+  prompt-component queue. `NONE` consumes a due interval without injection.
+  Time paused for a host decision is excluded, blocking model/tool calls are not
+  interrupted, and missed time periods collapse instead of producing a backlog.
 - Exposes a JSON-in/JSON-out C ABI for host integrations.
 
 ### `timem_shell/`
@@ -376,9 +377,9 @@ conversation mounts only a progressive turn window, memoizes that turn subtree
 away from composer keystrokes, and applies browser `content-visibility` only to
 completed offscreen turns. The active working turn remains fully rendered.
 
-The Web session snapshot includes the prompt context's cwd. A successful
-`self_tool type=cwd op=chg_cwd` action adds `context_state.cwd` to the existing
-`core.action` finish topic. `timem_web` updates the authoritative session before
+The Web session snapshot includes the prompt context's cwd. When Core reports a
+successful prompt-context cwd change, its existing `core.action` finish topic
+includes `context_state.cwd`. `timem_web` updates the authoritative session before
 forwarding the event, and the browser reducer updates only the matching session.
 This keeps reconnects, navigation, the composer, and later `run_bash` execution
 on the same cwd without creating a separate fine-grained topic.
@@ -482,8 +483,7 @@ Timem separates model-facing protocol instructions from runtime parsing:
 
 ```text
 resources/protocol/<suite>/
-├─ response_protocol.md          model-facing instructions injected into prompt_0
-└─ response_schema_summary.*     compact schema summary injected by prompt render
+└─ response_protocol.md          model-facing instructions injected into prompt_0
 
 agent_core/src/response_protocol/
 ├─ mod.rs                        protocol-independent ParsedEnvelope/ParsedAction
@@ -505,12 +505,13 @@ tree parser. It recognizes only the small response vocabulary under the single
 `final_answer`, or compact `summary`), it extracts that field as text and does
 not scan its contents for nested protocol tags. This prevents XML/JSON/Markdown
 examples inside user-visible text from being re-parsed as runtime actions.
-The XML parser also accepts a whole model response wrapped in a single
-documentation-style ```xml fence, then parses the inner `<response>` with the
-same protocol scanner. XML state branches are strict:
-`working_still_action`, `final_answer`, and `context_compact` are mutually
-exclusive in one response; `<status>` is rejected by the XML suite because
-completion is represented by the `<final_answer>` branch.
+For non-terminal action rounds, the XML parser can recover accidental prose
+outside the root and emits a model-visible `SYSTEM TIPS` correction for the next
+round. Recovered terminal answers are never accepted. XML state branches are
+strict: `actions`, `final_answer`, and `context_compact` are mutually exclusive
+in one response; `<status>` is rejected. A terminal `<final_answer>` is accepted
+only when preceded by one `<finish_confirm>` whose content starts with the
+protocol's exact confirmation prefix.
 
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
 `--response-protocol`. The default is `xml`; `markdown` and `json` remain
@@ -1000,10 +1001,11 @@ Algorithm:
    exact slice boundaries.
 4. Mark the latest `DYNAMIC_TAIL_CACHE_BLOCKS = 3` dynamic blocks cacheable.
 5. Leave older dynamic blocks unmarked.
-6. Append a temporary response trailer as the final user block without cache
-   control: every suite expands `Now please fulfill your response part like <SHAPE>:`
-   with its own concise response shape. XML uses
-   `one-root label <response>...</response>`. It is not followed by an assistant heading.
+6. Append the protocol-neutral temporary trailer
+   `Please continue the work and respond as protocol requires:` as the final
+   user block without cache control. The concrete response shape remains only
+   in the system protocol; the trailer must not repeat XML labels or invite a
+   format-confirmation final answer. It is not followed by an assistant heading.
    This trailer is not a prompt delta and must not be merged into the latest
    delta cache block.
 
@@ -1058,15 +1060,16 @@ is separate from `TIMEM_API_PROTOCOL`, which selects model HTTP payload shape.
 Each response parses into the same runtime envelope: optional `status`, optional
 `free_talk`, optional `working_still_action`, optional `context_compact`, and
 optional `final_answer`. Protocols may express completion differently: JSON and
-Markdown use their status field/section, while XML uses `<final_answer>` as the
-completion branch.
+Markdown use their status field/section, while XML uses a validated
+`<finish_confirm>` followed by `<final_answer>` as the completion branch.
 `free_talk` is the visible working note for the Thought/Action panel while
 the job is working. It is emitted to the host/UI as part of the accepted model
 response topic; replay context keeps command/input, action results, runtime
 notes, compact summaries, free_talk, and final answers. For protocols with a
 status field, missing `status` defaults to `working`; `status:"finished"` means
-the current task is complete and must be paired with `final_answer`. In XML,
-`<final_answer>` directly means the current task is complete. After a completion
+the current task is complete and must be paired with `final_answer`. In XML, a
+valid `<finish_confirm>` followed by `<final_answer>` means the current task is
+complete. After a completion
 envelope, runtime ends the current model/action interaction and shows the final
 answer as the closing user-visible answer.
 
@@ -1085,7 +1088,7 @@ stateDiagram-v2
 
 ### Response Envelope
 
-Each protocol directory owns its model-facing schema summary and examples:
+Each protocol directory owns its model-facing protocol and examples:
 
 - [`resources/protocol/markdown/response_protocol.md`](../resources/protocol/markdown/response_protocol.md)
 - [`resources/protocol/json/response_protocol.md`](../resources/protocol/json/response_protocol.md)
@@ -1096,8 +1099,9 @@ the authoritative executable boundary.
 
 In the JSON protocol, the envelope has this shape. In the Markdown protocol,
 the same fields are represented as sections. In the XML protocol, the same
-fields are represented as tags under one `<response>` root; tool action payloads
-remain JSON objects inside `<action_json>` blocks.
+fields are represented as tags under one `<response>` root. XML actions use the
+exact capability id as the tool element name; direct children are sequential and
+tools inside one `<parallel>` group execute concurrently.
 
 ```json
 {
@@ -1117,20 +1121,21 @@ With omitted `status` or `status:"working"` in status-based protocols,
 `working_still_action` or `context_compact` is required and `free_talk` is shown
 in the Thought/Action panel. With `status:"finished"`, `final_answer` is
 required and shown as the closing answer before runtime stops this task's
-action/model loop. In XML, `<final_answer>` is the completion branch and must
-not appear together with `<working_still_action>` or `<context_compact>`. If the
+action/model loop. In XML, `<final_answer>` is the completion branch, requires a
+valid preceding `<finish_confirm>`, and must not appear together with `<actions>`
+or `<context_compact>`. If the
 model still needs evidence, it must stay working, run actions, and answer after
 the action result is visible. The parser also tolerates common model service drift
 such as a valid JSON envelope embedded in Markdown text, but it never shows raw
 protocol fragments to the user.
 
-Action sections accept the equivalent runtime shapes across JSON, Markdown, and
-XML suites: tool-name action objects such as `{ "run_bash": { ... } }`, direct
-arrays of action objects as one parallel group, and outer workflow arrays mixing
-inner parallel arrays and single sequential action objects. XML `<action_json>`
-requires the payload to be a top-level JSON array. Old `{ "action": ..., "args":
-... }` and `{ "order": ..., "actions": ... }` objects are rejected for protocol
-repair. Order is preserved; outer workflow entries execute in model-provided
+JSON and Markdown action sections accept tool-name action objects such as
+`{ "run_bash": { ... } }`, direct arrays as one parallel group, and outer workflow
+arrays mixing inner parallel arrays and single sequential actions. XML expresses
+the same execution plan with native tool elements under `<actions>` and explicit
+`<parallel>` groups. Old `{ "action": ..., "args": ... }` and
+`{ "order": ..., "actions": ... }` objects are rejected for protocol repair.
+Order is preserved; outer workflow entries execute in model-provided
 order.
 
 ### Context Compact
@@ -1252,7 +1257,7 @@ the concrete protocol error:
 <ASSSISTANT_ID>'s previous response is not protocol compliant.
 error: invalid_xml_response_root
 
-The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'.
+The response must begin with '<response>', end with '</response>', and contain one XML state branch such as '<actions>...</actions>'.
 ```
 
 Repair is retried a bounded number of times for one model response failure. Each
@@ -1318,28 +1323,22 @@ Current implemented surface:
 
 ### Timem Self Tool
 
-`self_tool` is for questions or requests about Timem itself, not user memory or
-local project work. Current surfaces:
+`self_tool` is for questions about Timem itself, not user memory or local project
+work. Its public contract is intentionally only `type=path|params`, with no
+operation argument. `path` answers where runtime resources are and returns all
+relevant known locations. `params` answers how the current runtime is configured
+and returns all relevant effective non-sensitive values.
+It uses an explicit parameter allowlist rather than dumping the Session
+environment; URL userinfo, query, and fragment data are removed before a Base
+URL is shown. Sensitive env values are excluded. The tool has no mutation
+operation and no additional type family.
+Future self information must be added beneath `path` or `params`; file work
+remains `run_bash`, and memory work remains `memmgr`.
 
-- `type=env, op=read|write`: read or update non-sensitive environment values in
-  the current Timem process. API key, token, secret, password, credential, and
-  access-key-like variables are denied. Memory path variables such as
-  `TIMEM_DATA_DIR` and `TIMEM_SPACE` are startup-only and cannot be changed via
-  `self_tool`; use CLI/env at startup instead.
-- `type=mem_path, op=read`: list the current memory space, memory files, and
-  API/action audit files.
-- `type=about_me, op=read`: report TimemAi name, version, author/contact,
-  project/star info, and a short software summary, plus current process id,
-  working directory, and executable path.
-- `type=cwd, op=read|chg_cwd`: inspect or change the active prompt context
-  working directory. Relative paths resolve from that prompt context's current
-  cwd. This is prompt-context metadata, not process-global state.
-
-Candidate future surfaces are `config` for runtime config inspection,
-`workspace` for loaded workspace references, `capabilities` for active
-capability overlays, and `diagnostics` for recent retry/repair counters. These
-should stay scoped to Timem runtime state; file work remains `run_bash`, and
-memory work remains `memmgr`.
+Runtime configuration mutation and model notification are separate concerns.
+Hosts update the owning Session worker; Core coalesces any number of successful
+changes into one pending SYSTEM notice consumed by the next model interaction.
+The notice is never repeated once per changed field.
 
 ### Read-only SQL
 
@@ -1367,8 +1366,8 @@ Current local-command approval is configured at startup:
 - `TIMEM_BASH_APPROVAL=ask`: ask before running bash actions.
 - `TIMEM_BASH_APPROVAL=approve`: run bash actions directly.
 
-Each prompt context owns its own `run_bash` cwd. At session start, after
-`self_tool type=cwd op=chg_cwd`, and after context compaction, core injects a
+Each prompt context owns its own `run_bash` cwd. At session start, after a
+host-requested prompt-context cwd change, and after context compaction, core injects a
 short `SYSTEM` note such as `[!!!NOTE] cwd now set to: ...` so the model can
 avoid redundant `cd` prefixes. `run_bash` execution uses the same cwd recorded in
 that prompt context, including normal, polling, background, approval, and
@@ -1393,7 +1392,7 @@ keep waiting. If the host/user stops waiting, core terminates the active process
 and adds a `user_supplement` delta that tells the model the user cancelled the
 command and may request a status check or a new action if still necessary.
 Long-running shell work that should survive later prompt deltas should use
-`background=true` or `mode=background`, or a normal command with a positive
+`background=true`, or a normal command with a positive
 `timeout_ms`. Runtime returns a process id and tracks it in the session
 running-pid set. The start/timeout transition is present in the action result
 once; later exits are injected once as `RUNNING_JOB_UPDATE`. When
