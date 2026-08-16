@@ -13,6 +13,13 @@ use std::time::{Duration, Instant};
 
 const TEST_PORT: u16 = 12345;
 
+fn confirmed_xml_response(body: &str) -> String {
+    format!(
+        "<response><finish_confirm>{} verified</finish_confirm>{body}</response>",
+        agent_core::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
+    )
+}
+
 #[test]
 fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
     let reliable: BrowserCommand = serde_json::from_value(json!({
@@ -2212,10 +2219,46 @@ fn session_runtime_update_is_scoped_and_persisted_without_changing_host_defaults
             && value == "session-only-model"
             && runtime_profile.model == "session-only-model"
     ));
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionRuntimeUpdate {
+            session_id: target_session_id.clone(),
+            key: "TIMEM_MAX_ROUNDS".to_string(),
+            value: "200".to_string(),
+        },
+    )
+    .unwrap()
+    .is_none());
+    let max_rounds_event = drain_wire_events(&mut events)
+        .into_iter()
+        .find(|event| {
+            matches!(
+                event,
+                WireEvent::SessionRuntimeConfigUpdated { key, .. }
+                    if key == "TIMEM_MAX_ROUNDS"
+            )
+        })
+        .expect("max steps update should publish an event");
+    assert!(matches!(
+        max_rounds_event,
+        WireEvent::SessionRuntimeConfigUpdated {
+            ref session_id,
+            ref value,
+            ref runtime_profile,
+            ..
+        } if session_id == &target_session_id
+            && value == "200"
+            && runtime_profile.max_rounds == "200"
+    ));
     let sessions = state.sessions.lock().unwrap();
     assert_eq!(
         sessions[&target_session_id].runtime_profile.model,
         "session-only-model"
+    );
+    assert_eq!(
+        sessions[&target_session_id].runtime_profile.max_rounds,
+        "200"
     );
     assert_eq!(
         sessions[&untouched_session_id].runtime_profile.model,
@@ -2234,6 +2277,10 @@ fn session_runtime_update_is_scoped_and_persisted_without_changing_host_defaults
     assert_eq!(
         stored.env.get("TIMEM_MODEL").map(String::as_str),
         Some("session-only-model")
+    );
+    assert_eq!(
+        stored.env.get("TIMEM_MAX_ROUNDS").map(String::as_str),
+        Some("200")
     );
 
     let manager = {
@@ -2382,12 +2429,14 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
             },
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
+            max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
         })),
         data_dir: PathBuf::from("/tmp/data"),
         initial_space: ".test_mem".to_string(),
         env: BTreeMap::new(),
         current_dir: PathBuf::from("/work/a"),
         workspace_dirs: vec![PathBuf::from("/work/a"), PathBuf::from("/work/b")],
+        reminder_tips_config: agent_core::ReminderTipsConfig::default(),
     };
     assert_eq!(web_workspace_dirs(&template), vec!["/work/a", "/work/b"]);
 }
@@ -3858,12 +3907,14 @@ fn routing_test_state() -> AppState {
             config,
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
+            max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
         })),
         data_dir: std::env::temp_dir().join(unique_web_id("timem_web_data_test")),
         initial_space: ".test_mem".to_string(),
         env: BTreeMap::new(),
         current_dir: PathBuf::from("/work"),
         workspace_dirs: vec![PathBuf::from("/work")],
+        reminder_tips_config: agent_core::ReminderTipsConfig::default(),
     };
     let sessions = ["session_a", "session_b"]
         .into_iter()
@@ -3978,6 +4029,7 @@ fn test_runtime_settings() -> RuntimeSettings {
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Off,
+        max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
     }
 }
 
@@ -3990,10 +4042,55 @@ fn test_runtime_profile() -> WebSessionRuntimeProfile {
         timeout_secs: 1,
         max_llm_input_tokens: 10_000,
         max_llm_output_tokens: 1_024,
+        max_rounds: "unlimited".to_string(),
         bash_approval: "ask".to_string(),
         work_instructions: "off".to_string(),
         api_key_configured: true,
     }
+}
+
+#[test]
+fn round_budget_configuration_accepts_ui_choices_and_rejects_invalid_values() {
+    assert_eq!(parse_round_budget("50").unwrap(), 50);
+    assert_eq!(parse_round_budget("200").unwrap(), 200);
+    assert_eq!(parse_round_budget("500").unwrap(), 500);
+    assert_eq!(
+        parse_round_budget("unlimited").unwrap(),
+        agent_core::UNLIMITED_ROUND_BUDGET
+    );
+    assert_eq!(
+        round_budget_value(agent_core::UNLIMITED_ROUND_BUDGET),
+        "unlimited"
+    );
+    assert_eq!(
+        parse_round_budget("0").unwrap_err(),
+        "invalid_session_max_rounds"
+    );
+    assert_eq!(
+        parse_round_budget("not-a-number").unwrap_err(),
+        "invalid_session_max_rounds"
+    );
+}
+
+#[test]
+fn snapshot_exposes_unlimited_max_steps_as_the_session_default() {
+    let state = routing_test_state();
+    let snapshot = snapshot_for(&state, TEST_PORT);
+    let option = snapshot
+        .server
+        .runtime_options
+        .iter()
+        .find(|option| option.key == "TIMEM_MAX_ROUNDS")
+        .expect("max steps runtime option");
+    assert_eq!(option.value, "unlimited");
+    assert_eq!(
+        snapshot
+            .server
+            .session_env_defaults
+            .get("TIMEM_MAX_ROUNDS")
+            .map(String::as_str),
+        Some("unlimited")
+    );
 }
 
 fn final_response_topic(session_id: &str, answer: String) -> CoreTopicEvent {
@@ -4480,7 +4577,7 @@ impl ModelClient for BlockingShutdownModel {
         self.entered.fetch_add(1, Ordering::SeqCst);
         thread::sleep(Duration::from_secs(2));
         Ok(LlmResponse {
-            content: "<response><status>ALL_FINISHED</status><final_answer>late</final_answer></response>".to_string(),
+            content: confirmed_xml_response("<final_answer>late</final_answer>"),
             model_name: "test-model".to_string(),
             usage: UsageStats::zero(),
             truncated: false,
@@ -4565,10 +4662,10 @@ impl ModelClient for CancelThenFinishModel {
             return Err("cancelled_by_user".to_string());
         }
         Ok(LlmResponse {
-            content: format!(
-                "<response><free_talk>done</free_talk><final_answer>{}</final_answer></response>",
+            content: confirmed_xml_response(&format!(
+                "<final_answer>{}</final_answer>",
                 self.final_text
-            ),
+            )),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -6001,10 +6098,7 @@ impl ModelClient for TaggedFinalModel {
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
         Ok(LlmResponse {
-            content: format!(
-                "<response><free_talk>done</free_talk><final_answer>{}</final_answer></response>",
-                self.0
-            ),
+            content: confirmed_xml_response(&format!("<final_answer>{}</final_answer>", self.0)),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -6035,10 +6129,10 @@ impl ModelClient for RestoreBarrierModel {
         self.prompts.lock().unwrap().push(prompt.to_string());
         self.barrier.wait();
         Ok(LlmResponse {
-            content: format!(
-                "<response><free_talk>done</free_talk><final_answer>{}</final_answer></response>",
+            content: confirmed_xml_response(&format!(
+                "<final_answer>{}</final_answer>",
                 self.final_answer
-            ),
+            )),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -6066,7 +6160,7 @@ impl ModelClient for ToolGenPromptCaptureModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         Ok(LlmResponse {
-            content: "<response><toolgen_retrospect>No reusable tool was published.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></response>".to_string(),
+            content: confirmed_xml_response("<toolgen_retrospect>No reusable tool was published.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer>"),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -6094,9 +6188,9 @@ impl ModelClient for ToolGenPublishModel {
     ) -> Result<LlmResponse, String> {
         self.calls += 1;
         let content = if self.calls == 1 {
-            "<response><free_talk>Checking the reusable workflow.</free_talk><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"printf toolgen-host-check\",\"timeout_ms\":5000}}]]]></action_json></working_still_action></response>".to_string()
+            "<response><free_talk>Checking the reusable workflow.</free_talk><actions><run_bash timeout_ms=\"5000\"><cmd>printf toolgen-host-check</cmd></run_bash></actions></response>".to_string()
         } else if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
-            "<response><toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer></response>".to_string()
+            confirmed_xml_response("<toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";
             let draft = prompt
@@ -6127,8 +6221,8 @@ impl ModelClient for ToolGenPublishModel {
             )
             .unwrap();
             format!(
-                "<response><free_talk>Publishing the verified draft.</free_talk><working_still_action><action_json><![CDATA[[{{\"toolgen\":{{\"op\":\"publish\",\"draft_path\":{}}}}}]]]></action_json></working_still_action></response>",
-                serde_json::to_string(draft).unwrap()
+                "<response><free_talk>Publishing the verified draft.</free_talk><actions><toolgen op=\"publish\"><draft_path>{}</draft_path></toolgen></actions></response>",
+                draft
             )
         };
         Ok(LlmResponse {
@@ -6146,12 +6240,11 @@ impl ModelClient for ToolGenPublishModel {
     }
 }
 
-struct ChangeCwdModel {
-    new_path: String,
+struct InspectPathModel {
     round: u8,
 }
 
-impl ModelClient for ChangeCwdModel {
+impl ModelClient for InspectPathModel {
     fn call_model(
         &mut self,
         _config: &ModelServiceConfig,
@@ -6161,12 +6254,9 @@ impl ModelClient for ChangeCwdModel {
     ) -> Result<LlmResponse, String> {
         self.round += 1;
         let content = if self.round == 1 {
-            format!(
-                "<response><working_still_action><action_json><![CDATA[[{{\"self_tool\":{{\"type\":\"cwd\",\"op\":\"chg_cwd\",\"new_path\":{}}}}}]]]></action_json></working_still_action></response>",
-                serde_json::to_string(&self.new_path).unwrap()
-            )
+            "<response><actions><self_tool type=\"path\"/></actions></response>".to_string()
         } else {
-            "<response><final_answer>cwd updated</final_answer></response>".to_string()
+            confirmed_xml_response("<final_answer>paths inspected</final_answer>")
         };
         Ok(LlmResponse {
             content,
@@ -6752,13 +6842,11 @@ fn real_concurrent_workers_route_final_topics_to_matching_web_sessions() {
 }
 
 #[test]
-fn real_worker_cwd_tool_call_updates_web_session_state() {
+fn real_worker_self_tool_path_call_is_read_only_for_web_session_cwd() {
     let state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_cwd_e2e_{}", now_ms()));
-    let nested = root.join("nested");
-    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
-    let nested = std::fs::canonicalize(nested).unwrap();
     let mut core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
@@ -6782,10 +6870,7 @@ fn real_worker_cwd_tool_call_updates_web_session_state() {
             context_id.clone(),
             Some("CWD_TEST".to_string()),
             None,
-            ChangeCwdModel {
-                new_path: nested.display().to_string(),
-                round: 0,
-            },
+            InspectPathModel { round: 0 },
         )
         .unwrap();
     let mut session = test_web_session(&session_id, 0, "CWD_TEST".to_string());
@@ -6818,7 +6903,10 @@ fn real_worker_cwd_tool_call_updates_web_session_state() {
                 event,
             );
         }
-        if state.sessions.lock().unwrap()[&session_id].current_dir == nested.display().to_string() {
+        if state.sessions.lock().unwrap()[&session_id]
+            .active_turn_id
+            .is_none()
+        {
             break;
         }
         thread::sleep(Duration::from_millis(5));
@@ -6826,7 +6914,7 @@ fn real_worker_cwd_tool_call_updates_web_session_state() {
 
     assert_eq!(
         state.sessions.lock().unwrap()[&session_id].current_dir,
-        nested.display().to_string()
+        root.display().to_string()
     );
 }
 

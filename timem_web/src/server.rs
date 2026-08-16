@@ -375,6 +375,7 @@ struct WorkerTemplate {
     env: BTreeMap<String, String>,
     current_dir: PathBuf,
     workspace_dirs: Vec<PathBuf>,
+    reminder_tips_config: agent_core::ReminderTipsConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -455,6 +456,7 @@ struct RuntimeSettings {
     config: ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    max_rounds: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -543,6 +545,7 @@ struct WebSessionRuntimeProfile {
     timeout_secs: u64,
     max_llm_input_tokens: u32,
     max_llm_output_tokens: u32,
+    max_rounds: String,
     bash_approval: String,
     work_instructions: String,
     api_key_configured: bool,
@@ -4330,6 +4333,46 @@ fn update_session_runtime_setting(
     if session_has_active_turn(state, session_id)? {
         return Err("session_runtime_update_while_working".to_string());
     }
+    if key == "TIMEM_MAX_ROUNDS" {
+        let max_rounds = parse_round_budget(value)?;
+        let normalized_value = round_budget_value(max_rounds);
+        let worker_ids = session_worker_ids(state, session_id)?;
+        {
+            let manager = state
+                .manager
+                .lock()
+                .map_err(|_| "worker_manager_poisoned".to_string())?;
+            for worker_id in &worker_ids {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())?
+                    .update_max_rounds(max_rounds)?;
+            }
+        }
+        let runtime_profile = {
+            let mut sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| "session_not_found".to_string())?;
+            session.runtime.settings.max_rounds = max_rounds;
+            session
+                .runtime
+                .env
+                .insert(key.to_string(), normalized_value.clone());
+            session
+                .runtime
+                .env_overrides
+                .insert(key.to_string(), normalized_value.clone());
+            session.runtime_profile =
+                WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+            session.runtime_profile.clone()
+        };
+        persist_web_session(state, session_id)?;
+        return Ok((normalized_value, runtime_profile));
+    }
     let field = runtime_config_field_from_key(key)?;
     let worker_ids = session_worker_ids(state, session_id)?;
     let mut settings = {
@@ -5911,6 +5954,11 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 value: item.value,
                 applies_to: "new_sessions",
             })
+            .chain(std::iter::once(WebRuntimeOption {
+                key: "TIMEM_MAX_ROUNDS".to_string(),
+                value: round_budget_value(settings.max_rounds),
+                applies_to: "new_sessions",
+            }))
             .collect()
         })
         .unwrap_or_default();
@@ -6022,6 +6070,7 @@ fn update_runtime_setting(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        ..
     } = &mut *settings;
     let effect = apply_runtime_config_value(
         config,
@@ -6069,6 +6118,8 @@ impl WorkerTemplate {
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(default_data_root);
+        let reminder_tips_config =
+            agent_core::load_reminder_tips_config(&agent_core::default_config_root());
         let session_store =
             SessionStore::new(RuntimeDataLayout::new(&data_dir, &space).memory_dir());
         if let Ok(sessions) = session_store.list_sessions() {
@@ -6110,6 +6161,10 @@ impl WorkerTemplate {
                     launch.work_instructions.as_deref(),
                     &env,
                 ),
+                max_rounds: env
+                    .get("TIMEM_MAX_ROUNDS")
+                    .and_then(|value| parse_round_budget(value).ok())
+                    .unwrap_or(agent_core::UNLIMITED_ROUND_BUDGET),
             })),
             data_dir,
             initial_space: space,
@@ -6119,6 +6174,7 @@ impl WorkerTemplate {
                 .collect(),
             current_dir,
             workspace_dirs,
+            reminder_tips_config,
         })
     }
 
@@ -6136,6 +6192,8 @@ impl WorkerTemplate {
         core.change_prompt_cwd(current_dir.display().to_string())?;
         core.set_response_protocol(settings.config.response_protocol);
         core.configure_runtime_from_host(&settings.config, settings.bash_approval_mode);
+        core.set_max_rounds(settings.max_rounds);
+        core.set_reminder_tips_config(self.reminder_tips_config.clone());
         core.configure_self_tool_runtime(
             session_env,
             SelfToolPaths {
@@ -6213,6 +6271,9 @@ impl WorkerTemplate {
                     value,
                 )?;
             }
+        }
+        if let Some(value) = env_overrides.get("TIMEM_MAX_ROUNDS") {
+            settings.max_rounds = parse_round_budget(value)?;
         }
         if let Some(base_url) = env_overrides.get("TIMEM_BASE_URL") {
             apply_session_runtime_field(
@@ -6292,6 +6353,10 @@ impl WorkerTemplate {
             "TIMEM_MAX_LLM_OUTPUT".to_string(),
             settings.config.max_llm_output_tokens.to_string(),
         );
+        env.insert(
+            "TIMEM_MAX_ROUNDS".to_string(),
+            round_budget_value(settings.max_rounds),
+        );
         env.insert("TIMEM_API_KEY".to_string(), settings.config.api_key.clone());
         if let Some(value) = settings.config.openai_compatible.enable_thinking {
             env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
@@ -6347,12 +6412,33 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_TIMEOUT",
     "TIMEM_MAX_LLM_INPUT",
     "TIMEM_MAX_LLM_OUTPUT",
+    "TIMEM_MAX_ROUNDS",
     "TIMEM_BASH_APPROVAL",
     "TIMEM_WORK_INSTRUCTIONS",
     "TIMEM_ENABLE_THINKING",
     "TIMEM_REASONING_EFFORT",
     "TIMEM_STREAM",
 ];
+
+fn parse_round_budget(value: &str) -> Result<u32, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Ok(agent_core::UNLIMITED_ROUND_BUDGET);
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|rounds| (1..=10_000).contains(rounds))
+        .ok_or_else(|| "invalid_session_max_rounds".to_string())
+}
+
+fn round_budget_value(max_rounds: u32) -> String {
+    if max_rounds == agent_core::UNLIMITED_ROUND_BUDGET {
+        "unlimited".to_string()
+    } else {
+        max_rounds.to_string()
+    }
+}
 
 const RETIRED_SESSION_ENV_KEYS: &[&str] = &["TIMEM_GATEWAY_PROVIDER"];
 
@@ -6389,6 +6475,7 @@ impl WebSessionRuntimeProfile {
             timeout_secs: settings.config.timeout_secs,
             max_llm_input_tokens: settings.config.max_llm_input_tokens,
             max_llm_output_tokens: settings.config.max_llm_output_tokens,
+            max_rounds: round_budget_value(settings.max_rounds),
             bash_approval: agent_core::bash_approval_mode_label(settings.bash_approval_mode)
                 .to_string(),
             work_instructions: agent_core::work_instruction_mode_label(
@@ -6426,6 +6513,10 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
         (
             "TIMEM_MAX_LLM_OUTPUT".to_string(),
             settings.config.max_llm_output_tokens.to_string(),
+        ),
+        (
+            "TIMEM_MAX_ROUNDS".to_string(),
+            round_budget_value(settings.max_rounds),
         ),
         (
             "TIMEM_BASH_APPROVAL".to_string(),
