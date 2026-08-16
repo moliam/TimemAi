@@ -13,6 +13,7 @@ import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, me
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
+import { summarizeToolActivities, ToolActivitySummary } from "./activity_groups";
 import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
@@ -1808,7 +1809,8 @@ type TurnInteractionProps = {
 
 const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, onDecisionReply, onRequestToolGen }: TurnInteractionProps) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
-  const followLatest = useRef(true);
+ const workContentRef = useRef<HTMLDivElement | null>(null);
+ const followLatest = useRef(true);
   const previousUpdateCount = useRef(turn.events.length + decisions.length);
   const previousTurnState = useRef(turn.state);
   const [pendingUpdates, setPendingUpdates] = useState(0);
@@ -1823,6 +1825,9 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   }), [turn.turn_id, visibleEvents]);
   const persistentToolGenEventIds = useMemo(() => new Set(persistentToolGenEvents.map((event) => event.event_id)), [persistentToolGenEvents]);
   const scrollEvents = useMemo(() => visibleEvents.filter((event) => !persistentToolGenEventIds.has(event.event_id)), [persistentToolGenEventIds, visibleEvents]);
+ const scrollEventActivities = useMemo(() => scrollEvents.map((event) => ({ event, activity: activityFromTurnEvent(event, sessionId) })), [scrollEvents, sessionId]);
+ const toolActivitySummary = useMemo(() => summarizeToolActivities(scrollEventActivities.map(({ activity }) => activity).filter((activity): activity is Activity => activity !== null)), [scrollEventActivities]);
+ const firstToolEventId = useMemo(() => scrollEventActivities.find(({ activity }) => activity?.tone === "action")?.event.event_id, [scrollEventActivities]);
   const omitted = lifecycleEvents.length - visibleEvents.length;
   const hasVisibleProcess = processActivities.length > 0 || decisions.length > 0 || turn.state === "working";
   const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
@@ -1853,6 +1858,19 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       setPendingUpdates((count) => count + added);
     }
   }, [turn.events.length, decisions.length]);
+ useLayoutEffect(() => {
+ const scroll = workScrollRef.current;
+ const content = workContentRef.current;
+ if (!scroll || !content || typeof ResizeObserver === "undefined") return;
+ const observer = new ResizeObserver(() => {
+ if (!followLatest.current) return;
+ scroll.scrollTop = scroll.scrollHeight;
+ setPendingUpdates(0);
+ });
+ observer.observe(content);
+ return () => observer.disconnect();
+ }, [showWorkStream]);
+
 
   const scrollWorkToLatest = () => {
     const scroll = workScrollRef.current;
@@ -1874,15 +1892,12 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading">{canCollapseCompletedWork ? <button type="button" className={`working-chip work-title-chip completed-work-title work-collapse-toggle${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? " toolgen-working toolgen-completed-title" : ""}`} title={showCompletedWork ? "Hide work details" : "Show work details"} aria-label={showCompletedWork ? "Hide work details" : "Show work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/><CheckCheck size={11}/>{isToolGenTurn ? "ToolGen" : "Thought/Action"}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button> : <span className={`working-chip work-title-chip active-work-title${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>}{isToolGenTurn ? "Generating tools…" : "working"}</span>}</div>}
       {showWorkStream && <div className="turn-work-panel">
         <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
-          const remaining = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight;
-          followLatest.current = remaining < 36;
+          followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
           if (followLatest.current) setPendingUpdates(0);
         }}>
-          {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>}
-          {scrollEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>)}
-          {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
+          <div className="turn-work-content" ref={workContentRef}> {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>} {scrollEventActivities.map(({ event, activity }) => { if (activity?.tone === "action") return event.event_id === firstToolEventId && toolActivitySummary ? <ToolActivityGroup key="tool-activity-group" summary={toolActivitySummary}/> : null; return <TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
           {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
-          {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>}
+          {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>} </div>
         </div>
         {pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13} aria-hidden="true"/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
       </div>}
@@ -1971,11 +1986,26 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
   </details>;
 }
 
+function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
+ const [open, setOpen] = useState(false);
+ const running = summary.status === "running";
+ const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${summary.status}`;
+ return <details className={`tool-activity-group ${summary.status}`} open={open} aria-busy={running || undefined} onToggle={(event) => setOpen(event.currentTarget.open)}>
+ <summary aria-label={summaryLabel} title={open ? "收起工具活动" : "展开工具活动"}>
+ <span className="tool-activity-group-icon"><Wrench size={14}/></span>
+ <b>{summary.label}</b>
+ <span className="tool-activity-group-status">· {summary.status}</span>
+ <ChevronRight className="tool-activity-chevron" size={14}/>
+ </summary>
+ <div className="tool-activity-group-body">{summary.activities.map((activity, index) => <ToolActivity key={`${activity.id}-${index}`} activity={activity}/>)}</div>
+ </details>;
+}
+
 function ToolActivity({ activity }: { activity: Activity }) {
   const status = activity.tool_status || "running";
   const running = status === "running" || status === "background_running";
   const bashActivity = activity.tool_name === "run_bash";
-  const [open, setOpen] = useState(() => !bashActivity);
+  const [open, setOpen] = useState(false);
   const invocationPreview = toolInvocationPreview(activity);
   const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
   const toolName = toolDisplayName(activity.tool_name || activity.title);

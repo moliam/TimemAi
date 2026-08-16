@@ -831,7 +831,7 @@ export function toolDisplayName(name: string) {
   if (name === "run_bash") return "Bash";
   if (name === "memmgr") return "MemMgr";
   if (name === "capmgr") return "CapMgr";
-  if (name === "self_tool") return "Self tool";
+  if (name === "self_tool") return "Self Tool";
   return name;
 }
 
