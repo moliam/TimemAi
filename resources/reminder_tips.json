@@ -3,13 +3,13 @@
     {
       "every_minutes": 10,
       "tips": [
-        "TIPS: Remind the goal, don't get lost. If you get lost, say so promptly, and stop.",
+        "TIPS: Remind the goal, don't get lost. Clearly manage the picture of your working progress. If you get lost, say so promptly, and stop.",
         "TIPS: Jump out. Take a look at the whole work's state. Make sure the whole picture is still in your control.",
         "TIPS: Don't get stuck in a narrow line of thought. Don't be dragged too far by a superficial observation."
       ]
     },
     {
-      "every_rounds": 8,
+      "every_rounds": 10,
       "tips": [
         "TIPS: A good inference has rigid deduction chain. If you say A causes B, there must be no hidden C in the middle.",
         "TIPS: Don't make illusion correlation, such as A happens first, B happends later. Then A is the reason of B. This is super dangerous.",

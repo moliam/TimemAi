@@ -92,6 +92,23 @@ fn final_answer_requires_a_valid_finish_confirmation() {
     );
     assert!(wrong_prefix.final_answer.is_empty());
     assert!(wrong_prefix.continue_work);
+
+    let previous_prefix = parse_xml_envelope(
+        "<response><finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action.</finish_confirm><final_answer>must not escape</final_answer></response>",
+        &caps(),
+    );
+    assert_eq!(
+        previous_prefix.repair_issue.as_deref(),
+        Some("finish_confirm_prefix_invalid")
+    );
+    assert!(previous_prefix.final_answer.is_empty());
+    assert!(previous_prefix.continue_work);
+}
+
+#[test]
+fn runtime_finish_confirmation_prefix_matches_the_prompt_contract() {
+    assert!(XML_RESPONSE_PROTOCOL_SECTION
+        .contains(&format!("CONFIRM_PREFIX: \"{FINISH_CONFIRM_PREFIX}\"")));
 }
 
 #[test]
