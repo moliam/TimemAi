@@ -4745,7 +4745,7 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
     // This helper represents a turn already entered by Core. Production
     // submission paths remain pending until the real TurnStarted event.
     activate_core_started_turn(state, session_id, &worker_id, None);
-    Ok(state
+    state
         .sessions
         .lock()
         .map_err(|_| "session_store_poisoned".to_string())?
@@ -4757,7 +4757,7 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
                 .find(|candidate| candidate.turn_id == turn.turn_id)
                 .cloned()
         })
-        .ok_or_else(|| "turn_not_found".to_string())?)
+        .ok_or_else(|| "turn_not_found".to_string())
 }
 
 #[cfg(test)]
