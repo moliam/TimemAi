@@ -289,7 +289,7 @@ def self_test():
     assert extract_prompt({"messages": [{"content": "hello"}]}) == "hello"
     assert extract_prompt({"instructions": "system", "input": "user"}) == "system\nuser"
     source = toolgen_scenario_response("TOOLGEN_E2E_SOURCE")
-    assert '"run_bash"' in source and "TOOLGEN_E2E_SOURCE_DONE" in source
+    assert "<run_bash>" in source and "TOOLGEN_E2E_SOURCE_DONE" in source
     completed = toolgen_scenario_response(
         "Action result: run_bash\noutput: TOOLGEN_E2E_SOURCE_DONE"
     )
@@ -300,11 +300,11 @@ def self_test():
         "/tmp/toolgen-fixture-draft\n"
     )
     draft = toolgen_scenario_response(toolgen_prompt)
-    assert '"run_bash"' in draft and "TOOLGEN_E2E_DRAFT_READY" in draft
+    assert "<run_bash>" in draft and "TOOLGEN_E2E_DRAFT_READY" in draft
     publish = toolgen_scenario_response(
         toolgen_prompt + "\nAction result: run_bash\noutput: TOOLGEN_E2E_DRAFT_READY"
     )
-    assert '"toolgen"' in publish and '"op": "publish"' in publish
+    assert "<toolgen>" in publish and "<op>publish</op>" in publish
     finished = toolgen_scenario_response(
         toolgen_prompt + "\nAction result: toolgen\nop: publish\nstatus: ready"
     )
