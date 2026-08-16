@@ -182,7 +182,7 @@ button:disabled { cursor: not-allowed; }
 .session-modal { width: min(460px, 100%); }
 .session-modal label + label { margin-top: 12px; }
 .mem-validation { margin: 8px 0 0 !important; color: #e0b66f !important; font-size: 12px; }
-@keyframes breathe { 50% { opacity: .4; transform: scale(.82); } }
+@keyframes live-turn-usage-breathe { 50% { opacity: .48; } } @keyframes breathe { 50% { opacity: .4; transform: scale(.82); } }
 @keyframes connection-retry { 50% { opacity: .45; transform: scale(.78); } }
 @keyframes upload-button-pulse { 50% { box-shadow: 0 0 0 3px #4bbaa522; } }
 @keyframes upload-dot-pulse { 50% { opacity: .35; transform: scale(.72); } }
@@ -198,7 +198,7 @@ button:disabled { cursor: not-allowed; }
 .completion-card b { color: #d2e2e7; font-weight: 650; }
 .completion-card .warning { color: #e4bd76; } .mcp-session-name { color: #7ec8b8; font-weight: 700; }
 .turn-completion-only { width: 100%; max-width: 760px; margin: -12px auto 28px; }
-.live-turn-usage { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 9px 0 0; padding: 8px 10px 2px 28px; border-top: 1px solid #253640; color: #8198a5; font-size: 11px; line-height: 1.45; }
+.live-turn-usage { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 9px 0 0; padding: 8px 10px 2px 28px; border-top: 1px solid #253640; color: #8198a5; font-size: 11px; line-height: 1.45; animation: live-turn-usage-breathe 2.8s ease-in-out infinite; }
 .live-turn-usage span { white-space: nowrap; }
 .live-turn-usage b { color: #b9cbd3; font-weight: 650; }
 .activity .message-content, .activity p { margin: 7px 0 0; }
@@ -422,7 +422,7 @@ button:disabled { cursor: not-allowed; }
 @keyframes compact-after-settle { from { width: 100%; } }
 @keyframes work-row-enter { from { opacity: 0; transform: translateY(3px); } }
 @keyframes working-frame-breathe { 50% { border-left-color: #e4bc72; box-shadow: inset 3px 0 12px #d0a75f12; } }
-@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.pulse, .connection.offline, .session-dot.working, .session-row.working, .session-working-icon, .worker-state-dot.working, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot, .mcp-session-toggle.connecting .mcp-port-link { animation: none; }.scroll-to-bottom { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-dot.working, .session-row.working, .session-working-icon, .worker-state-dot.working, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot, .mcp-session-toggle.connecting .mcp-port-link { animation: none; }.scroll-to-bottom { transition: none; } }
 @media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); }.context-compact-notice { grid-template-columns: 32px minmax(0, auto) minmax(90px, 1fr); } }
 @media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; }.context-compact-notice { grid-template-columns: 32px 1fr; }.compact-meter { grid-column: 1 / -1; } }
 @media (max-width: 720px) { .session-runtime-grid { grid-template-columns: 1fr; } }
@@ -1432,3 +1432,22 @@ body {
 :root[data-theme="light"] .tool-activity-group > summary:hover,
 :root[data-theme="light"] .tool-activity-group > summary:focus-visible { background: #edf4f7; }
 :root[data-theme="light"] .tool-activity-group-body { border-left-color: #d7dde2; }
+
+.tool-command-symbol {
+  width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b949e;
+  font: 700 11px/1 "SFMono-Regular", Consolas, monospace;
+  letter-spacing: -1px;
+}
+.queued-message-attachments {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 7px;
+  color: #8fa9b8;
+  font-size: 10px;
+  white-space: nowrap;
+}

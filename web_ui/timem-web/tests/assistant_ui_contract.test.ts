@@ -132,15 +132,15 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".stop-button.sending svg");
     expect(styles).toContain(".send-button.sending svg, .stop-button.sending svg");
     expect(source).toContain('aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"}');
-    expect(source).toContain("const submitDraftAsSupplement = () => {");
-    expect(source).toContain('event.key !== "Enter" || event.nativeEvent.isComposing');
-    expect(source).toContain("event.metaKey || event.ctrlKey");
-    expect(source).toContain("submitDraftAsSupplement();");
-    expect(source).toContain('clientId("supplement")');
-    expect(source).toContain("availableAttachments.map((attachment) => attachment.id)");
-    expect(source).toContain("attachmentIds?: readonly string[], forceSupplement = false");
-    expect(source).toMatch(/attachmentIds,\s+forceSupplement,/);
-  });
+  expect(source).toContain("const submitDraftAsSupplement = () => {");
+ expect(source).toContain('event.key !== "Enter" || event.nativeEvent.isComposing');
+ expect(source).toContain("event.metaKey || event.ctrlKey");
+ expect(source).toContain("submitDraftAsSupplement();");
+ expect(source).toContain('clientId("supplement")');
+ expect(source).toContain("availableAttachments.map((attachment) => attachment.id)");
+ expect(source).toContain("attachmentIds?: readonly string[], forceSupplement = false");
+ expect(source).toContain("attachmentIds,\n forceSupplement,");
+ });
 
   it("loads older stored history explicitly and preserves the reading position", () => {
     expect(source).toContain("STORED_HISTORY_PAGE_SIZE = 200");
@@ -852,7 +852,7 @@ describe("assistant-ui thread integration", () => {
   it("renders live task usage and session context without replacing final telemetry", () => {
     expect(source).toContain("<HeaderContextUsage session={activeSession}");
     expect(source).toContain("<LiveTurnUsage turn={turn}");
-    expect(source).toContain('aria-label="Current task token usage"');
+    expect(source).toContain('aria-label="Current task token usage"'); expect(styles).toContain("animation: live-turn-usage-breathe 2.8s ease-in-out infinite;"); expect(styles).toContain("@keyframes live-turn-usage-breathe { 50% { opacity: .48; } }"); expect(styles).toContain(".live-turn-usage, .pulse, .connection.offline");
     expect(source).toContain('const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";');
     expect(source).toContain('className={`header-context ${level}`}');
     expect(source).toContain('const ratio = limit ? Math.min(100, Math.ceil((usage?.prompt_tokens ?? 0) * 100 / limit)) : 0;');
