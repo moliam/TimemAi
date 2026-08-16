@@ -1,0 +1,13 @@
+#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "https://astral.sh/uv/0.9.5/install.sh" ]; then
+    printf '%s\n' '#!/bin/sh' 'mkdir -p "$HOME/.local/bin"' \
+      'ln -sf /opt/benchmark-assets/uv "$HOME/.local/bin/uv"' \
+      'printf '\''%s\\n'\'' '\''export PATH="$HOME/.local/bin:$PATH"'\'' > "$HOME/.local/bin/env"'
+    exit 0
+  fi
+done
+root=/opt/timem-curl
+exec "$root/lib64/ld-linux-x86-64.so.2" \
+  --library-path "$root/lib/x86_64-linux-gnu:$root/usr/lib/x86_64-linux-gnu" \
+  "$root/usr/bin/curl" "$@"

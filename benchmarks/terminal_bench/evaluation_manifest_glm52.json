@@ -1,0 +1,85 @@
+{
+  "benchmark": {
+    "name": "Terminal-Bench",
+    "version": "2.0",
+    "task_count": 89,
+    "dataset_revision": "2fd12b88aafdd04a52c298e3940bcb189f9766d6",
+    "verifier_semantics": "binary 0/1",
+    "replicates_per_task": 1
+  },
+  "harness": {
+    "name": "Harbor",
+    "version": "0.21.0",
+    "timeout_multiplier": 1,
+    "task_resource_overrides": false
+  },
+  "model": {
+    "label": "kivy-glm-5_2",
+    "protocol": "OpenAI-compatible",
+    "endpoint": "user-supplied private endpoint (redacted)"
+  },
+  "execution": {
+    "architecture": "x86_64",
+    "container_runtime": "Docker",
+    "max_concurrent_trials": 2,
+    "score": "Pass@1 over the same 89 tasks for every agent",
+    "task_definition_changes": false,
+    "agent_runtime_adjustments": {
+      "timem_max_rounds": 300,
+      "rationale": "The product default of 50 opens an interactive continue prompt. Unattended --once-json evaluation uses NoopTurnUi, which automatically accepts RoundLimitContinue, retains task context, and recharges another 300 rounds whenever the boundary is reached; 300 is therefore not a hard agent-step cap."
+    },
+    "timeout_process_isolation": {
+      "required_marker": "benchmark-process-cleanup.json",
+      "policy": "Every installed-agent command records its in-container process-tree root. On normal exit or Harbor cancellation, the adapter terminates the tree before verification and records cleanup_completed=true. A timeout is scoreable only with this proof."
+    },
+    "model_refusal_policy": "A deterministic provider safety refusal is a real combined agent-model capability outcome and remains scored by the verifier. Transient transport failures without model-response evidence remain infrastructure-invalid and are retried.",
+    "pass_at_1_attempt_policy": "For each agent/task, the first infrastructure-valid scored Harbor trial is authoritative. Infrastructure-invalid attempts do not consume Pass@1; later valid retries can never replace or improve an earlier valid score. If a runner exits after Harbor writes a result but before progress.jsonl is updated, the earliest valid immutable Harbor job is recovered into the ledger before scheduling.",
+    "environment_build_transport_changes": [
+      "official Python/Ubuntu/Debian base images pulled through public ECR",
+      "APT package downloads use the USTC mirror",
+      "Dockerfile git clone transport pinned to HTTP/1.1"
+    ],
+    "environment_build_transport_rationale": "Work around registry and HTTP/2 transport failures on the evaluation host; the same built image is shared by every compared agent and model."
+  },
+  "agents": {
+    "timem": {
+      "version": "0d518f4edbe24c7255ed16e9ec087ebbf9b5b938",
+      "benchmark_source_patch": "timem-max-rounds-300.patch",
+      "benchmark_source_file_sha256": "70933e87ddc5d397a3af1df45a0cff8f9be1258ff1af7c0219c9dd5a0b440c20",
+      "benchmark_binary_sha256": "4011378bb840afdff97b98d4c26d675981d9d437850861ca234aae4db5b7ce0f",
+      "benchmark_max_rounds": 300,
+      "product_default_max_rounds": 50
+    },
+    "pi": {
+      "package": "@earendil-works/pi-coding-agent",
+      "version": "0.84.2"
+    },
+    "openhands": {
+      "package": "openhands",
+      "version": "1.13.0"
+    },
+    "goose": {
+      "version": "1.46.0"
+    },
+    "aider": {
+      "package": "aider-chat",
+      "version": "0.86.0"
+    },
+    "sweagent": {
+      "package": "sweagent",
+      "version": "1.1.0",
+      "source_revision": "0f3acafacabc0def8cc76b4e48acb4b6cf302cb9"
+    },
+    "openharness": {
+      "package": "openharness-ai",
+      "version": "0.1.9"
+    }
+  },
+  "comparability": {
+    "controlled_matrix": true,
+    "official_leaderboard_submission_ready": false,
+    "official_current_dataset": "Terminal-Bench 2.1",
+    "community_submissions_open_as_of_2026_08_15": false,
+    "leaderboard_caveat": "The current official leaderboard uses Terminal-Bench 2.1 with five trials per task and maintainer-run submissions. This controlled comparison uses Terminal-Bench 2.0 with one trial per task and cannot be submitted or numerically equated to that leaderboard."
+  }
+}
