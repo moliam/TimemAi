@@ -2446,13 +2446,14 @@ fn completed_stress_actions(
 }
 
 fn stress_progress(worker_idx: usize, turn_idx: usize, step_idx: usize) -> String {
+    let marker = stress_marker(worker_idx, turn_idx, step_idx);
     if step_idx == 0 {
         format!(
-            "stress worker {worker_idx} turn {turn_idx} long progress {}",
+            "stress worker {worker_idx} turn {turn_idx} long progress {} {marker}",
             "progress_chunk_".repeat(260)
         )
     } else {
-        format!("stress worker {worker_idx} turn {turn_idx} step {step_idx}")
+        format!("stress worker {worker_idx} turn {turn_idx} step {step_idx} {marker}")
     }
 }
 
