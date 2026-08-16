@@ -519,7 +519,7 @@ trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
         "prefix prose <actions><run_bash><cmd>must not execute</cmd></run_bash></actions>\n\ntrailing prose <run_bash><cmd>also must not execute</cmd></run_bash>\n\ninside thought"
     );
     assert!(env.runtime_note.as_deref().is_some_and(|note| {
-        note.starts_with("TIPS:")
+        note.starts_with("ERROR:")
             && note.contains("content outside <response>")
             && note.contains("begin exactly with <response>")
     }));
