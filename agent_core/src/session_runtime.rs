@@ -237,6 +237,14 @@ fn run_session_turn_with_model_client_and_reminder_override(
         }
         match step {
             CoreStep::NeedModel { ref prompt, .. } => {
+                if ui.apply_pending_runtime_updates(core, config) {
+                    core.set_response_protocol(config.response_protocol);
+                    step = CoreStep::NeedModel {
+                        prompt: core.build_next_prompt(),
+                        rounds_remaining: core.remaining_rounds(),
+                    };
+                    continue;
+                }
                 let supplements = normalize_user_supplements(ui.drain_user_supplements());
                 if !supplements.is_empty() {
                     if let Some(next_step) = core.append_user_supplements_with_audit(

@@ -1653,6 +1653,14 @@ pub trait TurnUi {
         Vec::new()
     }
 
+    fn apply_pending_runtime_updates(
+        &mut self,
+        _core: &mut crate::AgentCore,
+        _config: &mut crate::ModelServiceConfig,
+    ) -> bool {
+        false
+    }
+
     fn on_model_request(&mut self, _round: u32, _prompt: &str) {}
 
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}

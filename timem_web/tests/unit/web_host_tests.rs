@@ -2729,6 +2729,71 @@ fn existing_session_api_key_can_be_updated_without_exposing_the_secret() {
 }
 
 #[test]
+fn session_runtime_update_is_allowed_during_an_active_turn() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "ACTIVE_RUNTIME_UPDATE");
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = Some("turn_active".to_string());
+        session.state = "working".to_string();
+        session.turns.push(WebTurn {
+            turn_id: "turn_active".to_string(),
+            state: "working".to_string(),
+            created_at_ms: now_ms(),
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            final_answer: None,
+            completion: None,
+        });
+    }
+
+    let mut events = state.events.subscribe();
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionRuntimeUpdate {
+            session_id: session_id.clone(),
+            key: "TIMEM_MODEL".to_string(),
+            value: "active-turn-model".to_string(),
+        },
+    )
+    .unwrap()
+    .is_none());
+
+    let event = drain_wire_events(&mut events)
+        .into_iter()
+        .find(|event| matches!(event, WireEvent::SessionRuntimeConfigUpdated { .. }))
+        .expect("active-turn runtime update should publish a scoped event");
+    assert!(matches!(
+        event,
+        WireEvent::SessionRuntimeConfigUpdated {
+            session_id: ref event_session_id,
+            ref key,
+            ref value,
+            ref runtime_profile,
+        } if event_session_id == &session_id
+            && key == "TIMEM_MODEL"
+            && value == "active-turn-model"
+            && runtime_profile.model == "active-turn-model"
+    ));
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "working");
+        assert_eq!(session.active_turn_id.as_deref(), Some("turn_active"));
+        assert_eq!(session.runtime_profile.model, "active-turn-model");
+    }
+
+    let manager = {
+        let mut manager = state.manager.lock().unwrap();
+        std::mem::take(&mut *manager)
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
 fn session_api_key_update_is_rejected_during_an_active_turn() {
     let state = routing_test_state();
     let mut sessions = state.sessions.lock().unwrap();

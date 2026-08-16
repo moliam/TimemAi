@@ -208,13 +208,8 @@ enum CoreSessionWorkerCommand {
     UpdateBashApproval {
         mode: crate::BashApprovalMode,
     },
-    UpdateRuntimeConfig {
-        field: crate::RuntimeConfigField,
-        value: String,
-    },
-    UpdateMaxRounds {
-        max_rounds: u32,
-    },
+    RuntimeConfigUpdated,
+    MaxRoundsUpdated,
     UpdateApiKey {
         api_key: String,
     },
@@ -238,6 +233,14 @@ struct QueuedSupplement {
     command_id: Option<String>,
 }
 
+enum PendingRuntimeUpdate {
+    Config {
+        field: crate::RuntimeConfigField,
+        value: String,
+    },
+    MaxRounds(u32),
+}
+
 #[derive(Clone)]
 pub struct CoreSessionWorkerHandle {
     command_tx: Sender<CoreSessionWorkerCommand>,
@@ -246,6 +249,7 @@ pub struct CoreSessionWorkerHandle {
     shutdown_requested: Arc<AtomicBool>,
     reply_tx: Sender<TopicReply>,
     accepted_command_ids: Arc<Mutex<BTreeSet<String>>>,
+    pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
 }
 
 impl CoreSessionWorkerHandle {
@@ -524,8 +528,15 @@ impl CoreSessionWorkerHandle {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
+        self.pending_runtime_updates
+            .lock()
+            .map_err(|_| "core_runtime_update_poisoned".to_string())?
+            .push(PendingRuntimeUpdate::Config {
+                field,
+                value: value.clone(),
+            });
         self.command_tx
-            .send(CoreSessionWorkerCommand::UpdateRuntimeConfig { field, value })
+            .send(CoreSessionWorkerCommand::RuntimeConfigUpdated)
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -533,8 +544,12 @@ impl CoreSessionWorkerHandle {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
+        self.pending_runtime_updates
+            .lock()
+            .map_err(|_| "core_runtime_update_poisoned".to_string())?
+            .push(PendingRuntimeUpdate::MaxRounds(max_rounds));
         self.command_tx
-            .send(CoreSessionWorkerCommand::UpdateMaxRounds { max_rounds })
+            .send(CoreSessionWorkerCommand::MaxRoundsUpdated)
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -922,6 +937,7 @@ impl CoreSessionWorker {
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let accepted_command_ids = Arc::new(Mutex::new(BTreeSet::new()));
+        let pending_runtime_updates = Arc::new(Mutex::new(Vec::new()));
         let handle = CoreSessionWorkerHandle {
             command_tx,
             supplement_mailbox: Arc::clone(&supplement_mailbox),
@@ -929,6 +945,7 @@ impl CoreSessionWorker {
             shutdown_requested: Arc::clone(&shutdown_requested),
             reply_tx,
             accepted_command_ids,
+            pending_runtime_updates: Arc::clone(&pending_runtime_updates),
         };
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();
@@ -964,6 +981,7 @@ impl CoreSessionWorker {
                 phase: None,
                 accept_supplements: true,
                 pending_bash_always_allow: false,
+                pending_runtime_updates,
             };
 
             while let Ok(command) = command_rx.recv() {
@@ -972,8 +990,8 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::RunToolGen { .. }
                     | CoreSessionWorkerCommand::Rename { .. }
                     | CoreSessionWorkerCommand::UpdateBashApproval { .. }
-                    | CoreSessionWorkerCommand::UpdateRuntimeConfig { .. }
-                    | CoreSessionWorkerCommand::UpdateMaxRounds { .. }
+                    | CoreSessionWorkerCommand::RuntimeConfigUpdated
+                    | CoreSessionWorkerCommand::MaxRoundsUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
@@ -1117,75 +1135,9 @@ impl CoreSessionWorker {
                         );
                         core.notify_runtime_config_changed();
                     }
-                    CoreSessionWorkerCommand::UpdateRuntimeConfig { field, value } => {
-                        use crate::RuntimeConfigField;
-                        match field {
-                            RuntimeConfigField::Model => {
-                                config.model = value;
-                                core.set_self_tool_runtime_param(
-                                    field.label(),
-                                    config.model.clone(),
-                                );
-                            }
-                            RuntimeConfigField::ApiProtocol => {
-                                if let Ok(proto) = crate::parse_api_protocol(&value) {
-                                    config.api_protocol = proto;
-                                    core.set_self_tool_runtime_param(
-                                        field.label(),
-                                        config.api_protocol.label(),
-                                    );
-                                }
-                            }
-                            RuntimeConfigField::BaseUrl => {
-                                config.base_url = value;
-                                core.set_self_tool_runtime_param(
-                                    field.label(),
-                                    config.base_url.clone(),
-                                );
-                            }
-                            RuntimeConfigField::MaxInput => {
-                                if let Some(tokens) = crate::parse_token_count(&value) {
-                                    let tokens = tokens.max(3_000);
-                                    config.max_llm_input_tokens = tokens;
-                                    core.set_max_llm_input_tokens(tokens);
-                                    core.set_self_tool_runtime_param(
-                                        field.label(),
-                                        tokens.to_string(),
-                                    );
-                                }
-                            }
-                            RuntimeConfigField::MaxOutput => {
-                                if let Some(tokens) = crate::parse_token_count(&value) {
-                                    config.max_llm_output_tokens = tokens.max(512);
-                                    core.set_self_tool_runtime_param(
-                                        field.label(),
-                                        config.max_llm_output_tokens.to_string(),
-                                    );
-                                }
-                            }
-                            RuntimeConfigField::BashApproval => {
-                                let mode = match value.trim().to_lowercase().as_str() {
-                                    "approve" => Some(crate::BashApprovalMode::Approve),
-                                    "ask" => Some(crate::BashApprovalMode::Ask),
-                                    _ => None,
-                                };
-                                if let Some(mode) = mode {
-                                    core.set_bash_approval_mode(mode);
-                                    core.set_self_tool_runtime_param(
-                                        field.label(),
-                                        crate::bash_approval_mode_label(mode),
-                                    );
-                                }
-                            }
-                            RuntimeConfigField::WorkInstructions => {
-                                core.set_self_tool_runtime_param(field.label(), value);
-                            }
-                        }
-                        core.notify_runtime_config_changed();
-                    }
-                    CoreSessionWorkerCommand::UpdateMaxRounds { max_rounds } => {
-                        core.set_max_rounds(max_rounds);
-                        core.notify_runtime_config_changed();
+                    CoreSessionWorkerCommand::RuntimeConfigUpdated
+                    | CoreSessionWorkerCommand::MaxRoundsUpdated => {
+                        ui.apply_pending_runtime_updates(&mut core, &mut config);
                     }
                     CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
                         config.api_key = api_key;
@@ -1264,6 +1216,7 @@ struct WorkerTurnUi {
     phase: Option<String>,
     accept_supplements: bool,
     pending_bash_always_allow: bool,
+    pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
 }
 
 fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static str {
@@ -1414,7 +1367,87 @@ fn toolgen_failure_detail(outcome: &TurnOutcome) -> Option<String> {
     })
 }
 
+fn apply_worker_runtime_update(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    update: PendingRuntimeUpdate,
+) {
+    use crate::RuntimeConfigField;
+
+    match update {
+        PendingRuntimeUpdate::Config { field, value } => match field {
+            RuntimeConfigField::Model => {
+                config.model = value;
+                core.set_self_tool_runtime_param(field.label(), config.model.clone());
+            }
+            RuntimeConfigField::ApiProtocol => {
+                if let Ok(protocol) = crate::parse_api_protocol(&value) {
+                    config.api_protocol = protocol;
+                    core.set_self_tool_runtime_param(field.label(), config.api_protocol.label());
+                }
+            }
+            RuntimeConfigField::BaseUrl => {
+                config.base_url = value;
+                core.set_self_tool_runtime_param(field.label(), config.base_url.clone());
+            }
+            RuntimeConfigField::MaxInput => {
+                if let Some(tokens) = crate::parse_token_count(&value) {
+                    let tokens = tokens.max(3_000);
+                    config.max_llm_input_tokens = tokens;
+                    core.set_max_llm_input_tokens(tokens);
+                    core.set_self_tool_runtime_param(field.label(), tokens.to_string());
+                }
+            }
+            RuntimeConfigField::MaxOutput => {
+                if let Some(tokens) = crate::parse_token_count(&value) {
+                    config.max_llm_output_tokens = tokens.max(512);
+                    core.set_self_tool_runtime_param(
+                        field.label(),
+                        config.max_llm_output_tokens.to_string(),
+                    );
+                }
+            }
+            RuntimeConfigField::BashApproval => {
+                let mode = match value.trim().to_lowercase().as_str() {
+                    "approve" => Some(crate::BashApprovalMode::Approve),
+                    "ask" => Some(crate::BashApprovalMode::Ask),
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    core.set_bash_approval_mode(mode);
+                    core.set_self_tool_runtime_param(
+                        field.label(),
+                        crate::bash_approval_mode_label(mode),
+                    );
+                }
+            }
+            RuntimeConfigField::WorkInstructions => {
+                core.set_self_tool_runtime_param(field.label(), value);
+            }
+        },
+        PendingRuntimeUpdate::MaxRounds(max_rounds) => core.set_max_rounds(max_rounds),
+    }
+    core.notify_runtime_config_changed();
+}
+
 impl TurnUi for WorkerTurnUi {
+    fn apply_pending_runtime_updates(
+        &mut self,
+        core: &mut AgentCore,
+        config: &mut ModelServiceConfig,
+    ) -> bool {
+        let updates = self
+            .pending_runtime_updates
+            .lock()
+            .map(|mut updates| std::mem::take(&mut *updates))
+            .unwrap_or_default();
+        let changed = !updates.is_empty();
+        for update in updates {
+            apply_worker_runtime_update(core, config, update);
+        }
+        changed
+    }
+
     fn is_cancel_requested(&mut self) -> bool {
         self.cancel_requested.load(Ordering::SeqCst)
     }

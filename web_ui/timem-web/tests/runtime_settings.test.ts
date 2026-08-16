@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   reconcileRuntimeDrafts,
@@ -6,6 +7,8 @@ import {
   shouldAutoRevealSessionApiKey,
   updateRevealedSessionApiKeys,
 } from "../src/runtime_settings";
+
+const mainSource = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 
 describe("runtime setting labels", () => {
   it("hides the Timem namespace prefix without changing other keys", () => {
@@ -81,5 +84,17 @@ describe("session API key presentation", () => {
       "session-2": "other-secret",
     });
     expect(updateRevealedSessionApiKeys(current, "session-1")).toEqual({ "session-2": "other-secret" });
+  });
+});
+
+
+describe("active session runtime controls", () => {
+  it("keeps model settings editable while credentials remain locked during work", () => {
+    expect(mainSource).toContain('disabled={!session || credentialPending || sessionWorking}');
+    expect(mainSource).toContain('disabled={pending}');
+    expect(mainSource).toContain('disabled={pending || !dirty}');
+    expect(mainSource).not.toContain('disabled={pending || sessionWorking}');
+    expect(mainSource).not.toContain('disabled={pending || !dirty || sessionWorking}');
+    expect(mainSource).not.toContain('dirty && !pending && !sessionWorking');
   });
 });
