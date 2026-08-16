@@ -568,8 +568,7 @@ fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
     );
 
     assert_eq!(outcome.text, "完成。");
-    let reminder_prompt_index =
-        usize::try_from(interval).expect("round interval should fit usize");
+    let reminder_prompt_index = usize::try_from(interval).expect("round interval should fit usize");
     assert_eq!(model.prompts.len(), reminder_prompt_index + 1);
     let reasoning_tips = reasoning_schedule.tips.clone();
     assert!(model.prompts[..reminder_prompt_index]
@@ -580,8 +579,7 @@ fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
     assert_eq!(
         reasoning_tips
             .iter()
-            .filter(|reminder| model.prompts[reminder_prompt_index]
-                .contains(reminder.as_str()))
+            .filter(|reminder| model.prompts[reminder_prompt_index].contains(reminder.as_str()))
             .count(),
         1
     );
