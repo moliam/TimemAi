@@ -493,6 +493,8 @@ struct WebSession {
     #[serde(skip)]
     pending_unconsumed_supplements: Vec<String>,
     #[serde(skip)]
+    reported_session_working_worker_count: Option<usize>,
+    #[serde(skip)]
     work_instruction_mode: WorkInstructionLoadMode,
     #[serde(skip)]
     work_instruction_allowed: Option<bool>,
@@ -3139,6 +3141,7 @@ fn create_session(
                 active_turn_id: None,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
+                reported_session_working_worker_count: None,
                 work_instruction_mode: runtime.settings.work_instruction_mode,
                 work_instruction_allowed: None,
                 pending_work_instruction_turn: None,
@@ -3350,6 +3353,7 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
                 active_turn_id: None,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
+                reported_session_working_worker_count: None,
                 work_instruction_mode: runtime.settings.work_instruction_mode,
                 work_instruction_allowed: None,
                 pending_work_instruction_turn: None,
@@ -3404,6 +3408,7 @@ fn resume_unfinished_core_command_after_restore(
         if let Some((turn_id, ..)) = pending.as_ref() {
             session.active_turn_id = Some(turn_id.clone());
             session.state = "working".to_string();
+            session.reported_session_working_worker_count = None;
             if let Some(turn) = session
                 .turns
                 .iter_mut()
@@ -4652,6 +4657,7 @@ fn start_web_turn_with_command_id(
     };
     session.state = "working".to_string();
     session.active_turn_id = Some(turn.turn_id.clone());
+    session.reported_session_working_worker_count = None;
     session.turns.push(turn.clone());
     if session.turns.len() > MAX_SESSION_TURNS {
         let excess = session.turns.len() - MAX_SESSION_TURNS;
@@ -4807,6 +4813,7 @@ fn start_web_toolgen_turn(
     };
     session.state = "working".to_string();
     session.active_turn_id = Some(turn.turn_id.clone());
+    session.reported_session_working_worker_count = None;
     session.pending_completion_message_id = None;
     session.turns.push(turn.clone());
     if session.turns.len() > MAX_SESSION_TURNS {
@@ -5591,6 +5598,21 @@ fn handle_scoped_worker_event(
                     }
                 }
                 if let Some(response) = event.as_model_response() {
+                    let reported_session_count = event
+                        .payload
+                        .get("global")
+                        .and_then(|global| global.get("session_working_worker_count"))
+                        .and_then(Value::as_u64)
+                        .map(|count| count as usize);
+
+                    if let Some(reported_session_count) = reported_session_count {
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get_mut(session_id) {
+                                session.reported_session_working_worker_count =
+                                    Some(reported_session_count);
+                            }
+                        }
+                    }
                     if !response.final_answer.is_empty()
                         && !toolgen_scoped
                         && is_primary_worker(state, session_id, worker_id)
@@ -5788,9 +5810,13 @@ fn handle_scoped_worker_event(
                                     turn.completion = Some(completion.clone());
                                 }
                             }
-                            for worker in &mut session.workers {
-                                if worker.state == "working" {
-                                    worker.state = "ready".to_string();
+                            let reported_session_working =
+                                session.reported_session_working_worker_count.take();
+                            if reported_session_working.unwrap_or(0) == 0 {
+                                for worker in &mut session.workers {
+                                    if worker.state == "working" {
+                                        worker.state = "ready".to_string();
+                                    }
                                 }
                             }
                             session.state =
@@ -5802,6 +5828,13 @@ fn handle_scoped_worker_event(
                                     .all(|worker| worker.state == "stopped")
                                 {
                                     "stopped"
+                                } else if reported_session_working.unwrap_or(0) > 0
+                                    || session
+                                        .workers
+                                        .iter()
+                                        .any(|worker| worker.state == "working")
+                                {
+                                    "working"
                                 } else {
                                     "ready"
                                 }

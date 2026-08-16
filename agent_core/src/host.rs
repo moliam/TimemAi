@@ -401,12 +401,24 @@ pub struct CoreWorkInstructionLoadTopic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CoreGlobalWorkerStatus {
     pub working_worker_count: usize,
+    pub session_working_worker_count: usize,
 }
 
 impl CoreGlobalWorkerStatus {
     pub fn new(working_worker_count: usize) -> Self {
         Self {
             working_worker_count,
+            session_working_worker_count: working_worker_count,
+        }
+    }
+
+    pub fn with_session_working_worker_count(
+        working_worker_count: usize,
+        session_working_worker_count: usize,
+    ) -> Self {
+        Self {
+            working_worker_count,
+            session_working_worker_count,
         }
     }
 }
@@ -1064,12 +1076,17 @@ fn dynamic_context_summary_payload(context: CoreDynamicContextSummary) -> Value 
 fn global_worker_status_payload(status: CoreGlobalWorkerStatus) -> Value {
     json!({
         "working_worker_count": status.working_worker_count,
+        "session_working_worker_count": status.session_working_worker_count,
     })
 }
 
 fn parse_global_worker_status(value: &Value) -> CoreGlobalWorkerStatus {
+    let working_worker_count = value["working_worker_count"].as_u64().unwrap_or(0) as usize;
     CoreGlobalWorkerStatus {
-        working_worker_count: value["working_worker_count"].as_u64().unwrap_or(0) as usize,
+        working_worker_count,
+        session_working_worker_count: value["session_working_worker_count"]
+            .as_u64()
+            .unwrap_or(working_worker_count as u64) as usize,
     }
 }
 

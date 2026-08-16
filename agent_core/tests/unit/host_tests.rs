@@ -567,6 +567,7 @@ fn core_notifications_can_be_published_as_topic_events() {
                 "continue_work": true,
                 "global": {
                     "working_worker_count": 1,
+                    "session_working_worker_count": 1,
                 },
             },
         })
