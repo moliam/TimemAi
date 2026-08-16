@@ -5788,6 +5788,24 @@ fn handle_scoped_worker_event(
                                     turn.completion = Some(completion.clone());
                                 }
                             }
+                            for worker in &mut session.workers {
+                                if worker.state == "working" {
+                                    worker.state = "ready".to_string();
+                                }
+                            }
+                            session.state =
+                                if session.workers.iter().any(|worker| worker.state == "error") {
+                                    "error"
+                                } else if session
+                                    .workers
+                                    .iter()
+                                    .all(|worker| worker.state == "stopped")
+                                {
+                                    "stopped"
+                                } else {
+                                    "ready"
+                                }
+                                .to_string();
                             let message_id = session.pending_completion_message_id.take().and_then(
                                 |message_id| {
                                     session
