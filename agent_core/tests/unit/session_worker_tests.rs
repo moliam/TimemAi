@@ -465,7 +465,7 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
                 handle.add_user_supplement("补充：最终答案必须使用 SUPPLEMENT_WORKER_OK。");
                 break;
             }
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
             other => panic!("unexpected event before first model request: {other:?}"),
         }
     }
@@ -477,7 +477,8 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
             .expect("worker should finish supplemented turn")
         {
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::Topics(_)
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. } => {}
             other => panic!("unexpected worker event: {other:?}"),
@@ -549,7 +550,9 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
                 unconsumed_supplements.extend(supplements);
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::Topics(_) | CoreSessionWorkerEvent::ModelRequest { .. } => {}
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::Topics(_)
+            | CoreSessionWorkerEvent::ModelRequest { .. } => {}
             other => panic!("unexpected worker event: {other:?}"),
         }
     };
@@ -1176,7 +1179,8 @@ fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source
                 }
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::ModelRequest { .. }
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. } => {}
             other => panic!("failed ToolGen child emitted unexpected event: {other:?}"),
         }
@@ -1246,7 +1250,8 @@ fn toolgen_runs_beyond_ten_model_calls_with_the_normal_round_budget() {
                 }
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::ModelRequest { .. }
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. } => {}
             other => panic!("unexpected ToolGen limit event: {other:?}"),
         }
@@ -1406,7 +1411,8 @@ fn session_worker_manager_allocates_id0_default_and_tracks_lifecycle() {
     let outcome = loop {
         match wait_for_manager_event(&mut manager, &session_id, "manager turn") {
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::Topics(_)
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. } => {}
             other => panic!("unexpected manager turn event: {other:?}"),
@@ -1671,7 +1677,7 @@ fn session_worker_manager_tracks_global_working_count() {
         loop {
             match wait_for_manager_event(&mut manager, session_id, "manager count request") {
                 CoreSessionWorkerEvent::ModelRequest { .. } => break,
-                CoreSessionWorkerEvent::Topics(_) => {}
+                CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
                 other => panic!("unexpected manager count pre-release event: {other:?}"),
             }
         }
@@ -1863,7 +1869,8 @@ fn session_worker_shutdown_cancels_pending_host_decision() {
                     break;
                 }
             }
-            CoreSessionWorkerEvent::ModelRequest { .. }
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. } => {}
             other => panic!("unexpected event while waiting for approval: {other:?}"),
         }
@@ -1953,7 +1960,7 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
             .expect("first model request should arrive")
         {
             CoreSessionWorkerEvent::ModelRequest { .. } => break,
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
             other => panic!("unexpected event before first model request: {other:?}"),
         }
     }
@@ -1997,7 +2004,7 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
             .expect("third model request should arrive")
         {
             CoreSessionWorkerEvent::ModelRequest { .. } => break,
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
             other => panic!("unexpected event before third model request: {other:?}"),
         }
     }
@@ -2337,7 +2344,8 @@ fn drain_worker_count_event(
             assert_eq!(outcome.text, "WORKER_COUNT_DONE");
             *finished = true;
         }
-        Ok(CoreSessionWorkerEvent::ModelRequest { .. })
+        Ok(CoreSessionWorkerEvent::TurnStarted { .. })
+        | Ok(CoreSessionWorkerEvent::ModelRequest { .. })
         | Ok(CoreSessionWorkerEvent::ModelResponse { .. }) => {}
         Ok(other) => panic!("{label} unexpected event while collecting counts: {other:?}"),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -2585,7 +2593,7 @@ fn wait_for_model_request(events: &Receiver<CoreSessionWorkerEvent>, label: &str
                 assert_eq!(round, 1, "{label} first request should be round 1");
                 return;
             }
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
             other => panic!("{label} unexpected event before model request: {other:?}"),
         }
     }
@@ -2598,7 +2606,8 @@ fn wait_for_turn_finished(events: &Receiver<CoreSessionWorkerEvent>, label: &str
             .unwrap_or_else(|_| panic!("{label} timed out waiting for turn finish"))
         {
             CoreSessionWorkerEvent::TurnFinished { outcome } => return outcome,
-            CoreSessionWorkerEvent::Topics(_)
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. } => {}
             other => panic!("{label} unexpected event while waiting finish: {other:?}"),
