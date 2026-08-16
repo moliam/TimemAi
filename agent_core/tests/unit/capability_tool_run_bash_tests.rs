@@ -422,6 +422,261 @@ fn background_job_reports_pid_and_running_list_until_exit() {
     let _ = fs::remove_dir_all(dir);
 }
 
+fn wait_for_shell_job_update(
+    store: &FileShellJobStore,
+    session_id: &str,
+    timeout: Duration,
+) -> ShellJobExitUpdate {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        let (_, mut updates) = store.refresh_for_session(session_id);
+        if let Some(update) = updates.pop() {
+            return update;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("shell job did not finish within {timeout:?}");
+}
+
+#[test]
+fn shell_job_output_spool_is_outside_the_command_worktree() {
+    let memory_dir = tmp_memory_dir("isolated_spool_memory");
+    let cwd = tmp_cwd("isolated_spool_worktree");
+    fs::write(cwd.join("visible.txt"), "visible").unwrap();
+    let store = FileShellJobStore::new(&memory_dir);
+
+    let started = store.spawn_background(
+        "sleep 0.2; find . -maxdepth 3 -type f -print",
+        &cwd,
+        "session_isolated_spool",
+        "turn_a",
+    );
+    assert!(
+        started.contains("now keeps running in background"),
+        "{started}"
+    );
+
+    let records = store.records_unlocked();
+    assert_eq!(records.len(), 1);
+    let output_file = PathBuf::from(&records[0].output_file);
+    assert!(
+        !output_file.starts_with(&cwd),
+        "job output spool must not be inside the recursively scanned cwd: {}",
+        output_file.display()
+    );
+    assert!(
+        !output_file.starts_with(&memory_dir),
+        "job output spool must not be inside the persistent memory tree: {}",
+        output_file.display()
+    );
+
+    let update =
+        wait_for_shell_job_update(&store, "session_isolated_spool", Duration::from_secs(5));
+    assert_eq!(update.status, "0");
+    assert!(update.output.contains("./visible.txt"), "{}", update.output);
+    assert!(!output_file.exists(), "completed spool should be removed");
+    assert!(
+        !shell_job_truncated_file(&output_file).exists(),
+        "completed truncation marker should be removed"
+    );
+    assert!(
+        !shell_job_output_complete_file(&output_file).exists(),
+        "completed output-ready marker should be removed"
+    );
+
+    let _ = fs::remove_dir_all(memory_dir);
+    let _ = fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn shell_job_output_is_hard_limited_while_the_child_is_fully_drained() {
+    let memory_dir = tmp_memory_dir("bounded_spool_memory");
+    let cwd = tmp_cwd("bounded_spool_worktree");
+    let store = FileShellJobStore::new(&memory_dir);
+
+    let started = store.spawn_background(
+        "yes 0123456789 | head -c 4194304; sleep 0.3",
+        &cwd,
+        "session_bounded_spool",
+        "turn_a",
+    );
+    assert!(
+        started.contains("now keeps running in background"),
+        "{started}"
+    );
+
+    let records = store.records_unlocked();
+    assert_eq!(records.len(), 1);
+    let output_file = PathBuf::from(&records[0].output_file);
+    let truncated_file = shell_job_truncated_file(&output_file);
+
+    let wait_started = Instant::now();
+    while wait_started.elapsed() < Duration::from_secs(3) && !truncated_file.exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        truncated_file.exists(),
+        "large output should be marked truncated"
+    );
+    let output_len = fs::metadata(&output_file).unwrap().len();
+    assert!(
+        output_len <= MAX_SHELL_JOB_OUTPUT_BYTES,
+        "bounded spool grew unexpectedly: {output_len}"
+    );
+
+    let update = wait_for_shell_job_update(&store, "session_bounded_spool", Duration::from_secs(5));
+    assert_eq!(update.status, "0");
+    assert!(
+        update.output.contains("run_bash output truncated"),
+        "bounded output should disclose truncation: {}",
+        update.output
+    );
+    assert!(!output_file.exists(), "completed spool should be removed");
+    assert!(
+        !truncated_file.exists(),
+        "completed marker should be removed"
+    );
+
+    let _ = fs::remove_dir_all(memory_dir);
+    let _ = fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn rebuilt_store_refreshes_job_without_original_watcher_handle() {
+    let memory_dir = tmp_memory_dir("rebuilt_store_memory");
+    let cwd = tmp_cwd("rebuilt_store_worktree");
+    let original_store = FileShellJobStore::new(&memory_dir);
+
+    let started = original_store.spawn_background(
+        "sleep 0.2; printf rebuilt_store_output",
+        &cwd,
+        "session_rebuilt_store",
+        "turn_a",
+    );
+    assert!(
+        started.contains("now keeps running in background"),
+        "{started}"
+    );
+
+    let record = original_store
+        .records_unlocked()
+        .into_iter()
+        .next()
+        .expect("tracked record");
+    let output_file = PathBuf::from(&record.output_file);
+
+    let detached_child = original_store
+        .watcher
+        .state
+        .jobs
+        .lock()
+        .unwrap()
+        .remove(&record.pid)
+        .expect("original watcher handle");
+    drop(detached_child);
+    drop(original_store);
+
+    let rebuilt_store = FileShellJobStore::new(&memory_dir);
+    let update = wait_for_shell_job_update(
+        &rebuilt_store,
+        "session_rebuilt_store",
+        Duration::from_secs(5),
+    );
+    assert_eq!(update.status, "exited");
+    assert!(
+        update.output.contains("rebuilt_store_output"),
+        "{}",
+        update.output
+    );
+    assert!(
+        !output_file.exists(),
+        "rebuilt store should clean the spool"
+    );
+    assert!(
+        !shell_job_output_complete_file(&output_file).exists(),
+        "rebuilt store should clean the completion marker"
+    );
+
+    let _ = fs::remove_dir_all(memory_dir);
+    let _ = fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn notified_job_spool_is_reclaimed_without_another_refresh() {
+    let memory_dir = tmp_memory_dir("delayed_spool_cleanup_memory");
+    let cwd = tmp_cwd("delayed_spool_cleanup_worktree");
+    let store = FileShellJobStore::new(&memory_dir);
+
+    let started = store.spawn_background(
+        "sleep 0.1; (sleep 0.5; printf descendant_output) &",
+        &cwd,
+        "session_delayed_cleanup",
+        "turn_a",
+    );
+    assert!(
+        started.contains("now keeps running in background"),
+        "{started}"
+    );
+
+    let record = store
+        .records_unlocked()
+        .into_iter()
+        .next()
+        .expect("tracked record");
+    let output_file = PathBuf::from(&record.output_file);
+
+    let update =
+        wait_for_shell_job_update(&store, "session_delayed_cleanup", Duration::from_secs(3));
+    assert_eq!(update.status, "0");
+    assert!(
+        Path::new(&format!("{}.notified", record.status_file)).exists(),
+        "exit update should be marked notified"
+    );
+
+    let cleanup_started = Instant::now();
+    while cleanup_started.elapsed() < Duration::from_secs(3) && output_file.exists() {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !output_file.exists(),
+        "delayed cleanup should reclaim spool without another refresh"
+    );
+    assert!(
+        !shell_job_output_complete_file(&output_file).exists(),
+        "delayed cleanup should reclaim completion marker"
+    );
+
+    let _ = fs::remove_dir_all(memory_dir);
+    let _ = fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn bounded_shell_output_preserves_nonzero_status_and_merges_stderr() {
+    let memory_dir = tmp_memory_dir("bounded_status_memory");
+    let cwd = tmp_cwd("bounded_status_worktree");
+    let store = FileShellJobStore::new(&memory_dir);
+
+    let started = store.spawn_background(
+        "printf stdout_line; printf stderr_line >&2; exit 7",
+        &cwd,
+        "session_bounded_status",
+        "turn_a",
+    );
+    assert!(
+        started.contains("now keeps running in background"),
+        "{started}"
+    );
+
+    let update =
+        wait_for_shell_job_update(&store, "session_bounded_status", Duration::from_secs(5));
+    assert_eq!(update.status, "7");
+    assert!(update.output.contains("stdout_line"), "{}", update.output);
+    assert!(update.output.contains("stderr_line"), "{}", update.output);
+
+    let _ = fs::remove_dir_all(memory_dir);
+    let _ = fs::remove_dir_all(cwd);
+}
+
 #[test]
 fn timeout_job_reports_pid_and_later_exit_update() {
     let dir = tmp_memory_dir("timeout_job");
@@ -677,6 +932,12 @@ fn running_job_list_context_uses_pid_kind_and_command() {
     for job in store.running_for_session("session_other") {
         terminate_process(job.pid);
     }
+
+    let owned_update = wait_for_shell_job_update(&store, "session_owned", Duration::from_secs(3));
+    let other_update = wait_for_shell_job_update(&store, "session_other", Duration::from_secs(3));
+    assert_eq!(owned_update.command, "sleep 10");
+    assert_eq!(other_update.command, "sleep 10");
+
     let _ = fs::remove_dir_all(&dir);
 }
 

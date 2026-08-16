@@ -7,6 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -22,6 +23,9 @@ use std::os::unix::process::CommandExt;
 
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const BASH_EXECUTABLE: &str = "/bin/bash";
+const MAX_SHELL_JOB_OUTPUT_BYTES: u64 = 1024 * 1024;
+const SHELL_JOB_OUTPUT_TRUNCATED_MARKER: &[u8] =
+    b"\n[run_bash output truncated after 1048576 bytes]\n";
 #[cfg(test)]
 static LONG_RUNNING_COMMAND_PROMPT_AFTER_MS: AtomicU64 = AtomicU64::new(60_000);
 #[cfg(test)]
@@ -99,6 +103,7 @@ impl RunningShellJob {
 #[derive(Debug, Clone)]
 pub struct FileShellJobStore {
     dir: PathBuf,
+    spool_dir: PathBuf,
     index_file: PathBuf,
     guard: MemGuard,
     watcher: ShellJobWatcher,
@@ -164,7 +169,7 @@ impl ShellJobWatcher {
         };
         if let Some(status) = status {
             if let Some(watched) = jobs.remove(&pid) {
-                write_status_if_empty(&watched.status_file, &status);
+                finish_watched_shell_child(watched, &status);
             }
         }
     }
@@ -206,7 +211,7 @@ fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
         }
         for (pid, status) in finished {
             if let Some(watched) = jobs.remove(&pid) {
-                write_status_if_empty(&watched.status_file, &status);
+                finish_watched_shell_child(watched, &status);
             }
         }
 
@@ -218,6 +223,115 @@ fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
             Err(_) => return,
         };
     }
+}
+
+fn finish_watched_shell_child(watched: WatchedShellChild, status: &str) {
+    write_status_if_empty(&watched.status_file, status);
+}
+
+fn shell_job_spool_dir(memory_dir: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    memory_dir.to_string_lossy().hash(&mut hasher);
+    std::env::temp_dir()
+        .join("timem-shell-job-spool")
+        .join(format!("{:016x}", hasher.finish()))
+}
+
+fn shell_job_truncated_file(output_file: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.truncated", output_file.to_string_lossy()))
+}
+
+fn shell_job_output_complete_file(output_file: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.complete", output_file.to_string_lossy()))
+}
+
+fn shell_job_output_ready(output_file: &Path, pid: u32) -> bool {
+    if shell_job_output_complete_file(output_file).exists() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        !process_group_running(pid)
+    }
+    #[cfg(not(unix))]
+    {
+        !process_running(pid)
+    }
+}
+
+fn wait_for_shell_job_output_ready(output_file: &Path, pid: u32, timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if shell_job_output_ready(output_file, pid) {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace("'", "'\\''"))
+}
+
+fn bounded_shell_command(command: &str, output_file: &Path, status_file: &Path) -> String {
+    let quoted_command = shell_quote(command);
+    let quoted_bash = shell_quote(BASH_EXECUTABLE);
+    let truncated_file = shell_job_truncated_file(output_file);
+    let complete_file = shell_job_output_complete_file(output_file);
+    let notified_file = PathBuf::from(format!("{}.notified", status_file.to_string_lossy()));
+    let quoted_output_file = shell_quote(&output_file.to_string_lossy());
+    let quoted_truncated_file = shell_quote(&truncated_file.to_string_lossy());
+    let quoted_complete_file = shell_quote(&complete_file.to_string_lossy());
+    let quoted_notified_file = shell_quote(&notified_file.to_string_lossy());
+    format!(
+        "exec > >({{ /usr/bin/head -c {MAX_SHELL_JOB_OUTPUT_BYTES}; extra=$(/usr/bin/head -c 1 | /usr/bin/wc -c | /usr/bin/tr -d ' '); if [ \"${{extra:-0}}\" -gt 0 ]; then : > {quoted_truncated_file}; fi; /bin/cat >/dev/null; : > {quoted_complete_file}; if [ -e {quoted_notified_file} ]; then /bin/rm -f {quoted_output_file} {quoted_truncated_file} {quoted_complete_file}; fi; }}) 2>&1\nexec {quoted_bash} -c {quoted_command}"
+    )
+}
+
+fn read_shell_job_output(output_file: &Path) -> String {
+    let mut output = fs::read_to_string(output_file).unwrap_or_default();
+    if shell_job_truncated_file(output_file).exists() {
+        output.push_str(&String::from_utf8_lossy(SHELL_JOB_OUTPUT_TRUNCATED_MARKER));
+    }
+    output
+}
+
+fn take_shell_job_output(output_file: &Path) -> String {
+    let output = read_shell_job_output(output_file);
+    remove_shell_job_output(output_file);
+    output
+}
+
+fn remove_shell_job_output(output_file: &Path) {
+    let _ = fs::remove_file(output_file);
+    let _ = fs::remove_file(shell_job_truncated_file(output_file));
+    let _ = fs::remove_file(shell_job_output_complete_file(output_file));
+}
+
+fn recover_notified_shell_job_output_cleanup(records: Vec<ShellJobRecord>) {
+    for record in records {
+        let notified_file = format!("{}.notified", record.status_file);
+        if !Path::new(&notified_file).exists() {
+            continue;
+        }
+        let output_file = PathBuf::from(record.output_file);
+        if shell_job_output_ready(&output_file, record.pid) {
+            remove_shell_job_output(&output_file);
+        }
+    }
+}
+
+fn compact_shell_job_output(output: &str, max_chars: usize) -> String {
+    let marker = String::from_utf8_lossy(SHELL_JOB_OUTPUT_TRUNCATED_MARKER);
+    if let Some(prefix) = output.strip_suffix(marker.as_ref()) {
+        let marker = marker.trim();
+        let prefix_limit = max_chars.saturating_sub(marker.chars().count() + 1);
+        return format!("{}\n{marker}", compact_text(prefix, prefix_limit));
+    }
+    compact_text(&normalized_shell_output(output), max_chars)
 }
 
 fn write_status_if_empty(path: &Path, status: &str) {
@@ -234,13 +348,22 @@ fn write_status_if_empty(path: &Path, status: &str) {
 impl FileShellJobStore {
     pub fn new(memory_dir: &Path) -> Self {
         let dir = memory_dir.join("shell_jobs");
+        let spool_dir = shell_job_spool_dir(memory_dir);
         let _ = fs::create_dir_all(&dir);
-        Self {
+        let _ = fs::create_dir_all(&spool_dir);
+        let store = Self {
             index_file: dir.join("jobs.jsonl"),
             dir,
+            spool_dir,
             guard: MemGuard::for_memory_dir(memory_dir),
             watcher: ShellJobWatcher::new(),
-        }
+        };
+        let records = store
+            .guard
+            .with_read(|| store.records_unlocked())
+            .unwrap_or_default();
+        recover_notified_shell_job_output_cleanup(records);
+        store
     }
 
     pub fn spawn_background(
@@ -282,8 +405,9 @@ impl FileShellJobStore {
         turn_id: &str,
     ) -> std::io::Result<ShellJobRecord> {
         fs::create_dir_all(&self.dir)?;
+        fs::create_dir_all(&self.spool_dir)?;
         let id = unique_shell_id("job");
-        let output_file = self.dir.join(format!("{id}.out"));
+        let output_file = self.spool_dir.join(format!("{id}.out"));
         let status_file = self.dir.join(format!("{id}.status"));
         let output = OpenOptions::new()
             .create(true)
@@ -291,10 +415,11 @@ impl FileShellJobStore {
             .write(true)
             .open(&output_file)?;
         let stderr = output.try_clone()?;
+        let bounded_command = bounded_shell_command(clean, &output_file, &status_file);
         let mut command = Command::new(BASH_EXECUTABLE);
         command
             .arg("-c")
-            .arg(clean)
+            .arg(&bounded_command)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
@@ -303,7 +428,13 @@ impl FileShellJobStore {
         {
             command.process_group(0);
         }
-        let child = command.spawn()?;
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                remove_shell_job_output(&output_file);
+                return Err(error);
+            }
+        };
         let pid = child.id();
         self.watcher.register(pid, child, status_file.clone());
         Ok(ShellJobRecord {
@@ -357,6 +488,7 @@ impl FileShellJobStore {
             if runtime.should_cancel() {
                 terminate_process(record.pid);
                 write_status_if_empty(Path::new(&record.status_file), "cancelled");
+                remove_shell_job_output(Path::new(&record.output_file));
                 return bash_error(clean, "cancelled");
             }
             if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
@@ -369,7 +501,7 @@ impl FileShellJobStore {
                 };
                 runtime.on_long_running_command(&status);
                 let _ = self.append(&record);
-                let partial = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let partial = read_shell_job_output(Path::new(&record.output_file));
                 return BashCommandOutput {
                     command: clean.to_string(),
                     status: None,
@@ -383,18 +515,21 @@ impl FileShellJobStore {
                 };
             }
             if let Some(status) = read_process_status(&record.status_file) {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-                return BashCommandOutput {
-                    command: clean.to_string(),
-                    status: status.code,
-                    signal: status.signal,
-                    output: normalized_shell_output(&output),
-                    error: None,
-                };
+                let output_file = Path::new(&record.output_file);
+                if shell_job_output_ready(output_file, record.pid) {
+                    let output = take_shell_job_output(output_file);
+                    return BashCommandOutput {
+                        command: clean.to_string(),
+                        status: status.code,
+                        signal: status.signal,
+                        output: normalized_shell_output(&output),
+                        error: None,
+                    };
+                }
             }
             if started.elapsed() >= timeout {
                 let _ = self.append(&record);
-                let partial = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let partial = read_shell_job_output(Path::new(&record.output_file));
                 return BashCommandOutput {
                     command: clean.to_string(),
                     status: None,
@@ -523,44 +658,38 @@ impl FileShellJobStore {
     }
 
     fn refresh_record_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
+        if self.watcher.is_watching(record.pid) {
+            self.watcher.refresh_pid(record.pid);
+            if self.watcher.is_watching(record.pid) {
+                return running_shell_job(record);
+            }
+        }
         if self.record_finished(&record) {
             return self.exit_update_once_unlocked(record);
         }
-        if self.watcher.is_watching(record.pid) {
-            self.watcher.refresh_pid(record.pid);
-            if self.record_finished(&record) {
-                return self.exit_update_once_unlocked(record);
-            }
-            return ShellJobRefresh::Running(RunningShellJob {
-                pid: record.pid,
-                kind: record.kind,
-                command: record.command,
-                cwd: record.cwd,
-                session_id: record.session_id,
-                turn_id: record.turn_id,
-                created_at_ms: record.created_at_ms,
-            });
+        if process_running(record.pid) {
+            return running_shell_job(record);
         }
-        if !process_running(record.pid) {
-            write_status_if_empty(Path::new(&record.status_file), "exited");
-            return self.exit_update_once_unlocked(record);
-        }
-        ShellJobRefresh::Running(RunningShellJob {
-            pid: record.pid,
-            kind: record.kind,
-            command: record.command,
-            cwd: record.cwd,
-            session_id: record.session_id,
-            turn_id: record.turn_id,
-            created_at_ms: record.created_at_ms,
-        })
+        write_status_if_empty(Path::new(&record.status_file), "exited");
+        self.exit_update_once_unlocked(record)
     }
 
     fn exit_update_once_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
         let notified_file = format!("{}.notified", record.status_file);
+        let output_file = Path::new(&record.output_file);
         if Path::new(&notified_file).exists() {
+            if shell_job_output_ready(output_file, record.pid) {
+                remove_shell_job_output(output_file);
+            }
             return ShellJobRefresh::Finished;
         }
+        let output_ready =
+            wait_for_shell_job_output_ready(output_file, record.pid, Duration::from_millis(250));
+        let output = if output_ready {
+            take_shell_job_output(output_file)
+        } else {
+            read_shell_job_output(output_file)
+        };
         let _ = fs::write(&notified_file, now_ms().to_string());
         ShellJobRefresh::Exited(ShellJobExitUpdate {
             pid: record.pid,
@@ -575,14 +704,21 @@ impl FileShellJobStore {
                 .unwrap_or_else(|_| "unknown".to_string())
                 .trim()
                 .to_string(),
-            output: compact_text(
-                &normalized_shell_output(
-                    &fs::read_to_string(&record.output_file).unwrap_or_default(),
-                ),
-                4000,
-            ),
+            output: compact_shell_job_output(&output, 4000),
         })
     }
+}
+
+fn running_shell_job(record: ShellJobRecord) -> ShellJobRefresh {
+    ShellJobRefresh::Running(RunningShellJob {
+        pid: record.pid,
+        kind: record.kind,
+        command: record.command,
+        cwd: record.cwd,
+        session_id: record.session_id,
+        turn_id: record.turn_id,
+        created_at_ms: record.created_at_ms,
+    })
 }
 
 enum ShellJobRefresh {
