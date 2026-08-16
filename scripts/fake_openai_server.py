@@ -77,35 +77,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif "TTY_STRESS" in prompt:
             time.sleep(self.response_delay)
-            free_talk = (
-                "正在执行真实终端压力测试：验证 Thought / Action 面板在长进度、"
-                "长 Bash 命令、CJK 字符、box drawing 字符 │└─、以及用户中途补充"
-                "同时出现时仍然能稳定换行、保持边框宽度，并且不会重复残留旧行。"
-            )
-            content = (
-                "<response>"
-                "<free_talk><![CDATA["
-                + free_talk
-                + "]]></free_talk>"
-                "<working_still_action><action_json><![CDATA["
-                + json.dumps(
-                    [
-                        {
-                            "run_bash": {
-                                "cmd": (
-                                    "printf 'STRESS_ACTION_DONE\\n'; "
-                                    "sleep 1; "
-                                    "printf '长输出-一二三四五六七八九十-abcdefghijklmnopqrstuvwxyz-1234567890-│└─\\n'"
-                                ),
-                                "timeout_ms": 5000,
-                            },
-                        },
-                    ],
-                    ensure_ascii=False,
-                )
-                + "]]></action_json></working_still_action>"
-                "</response>"
-            )
+            content = tty_stress_scenario_response()
         elif "## USER" in prompt and "SUPPLEMENT_OK" in prompt:
             content = (
                 "<response>"
@@ -205,6 +177,28 @@ def xml_action(payload, free_talk):
     )
 
 
+
+def tty_stress_scenario_response():
+    free_talk = (
+        "正在执行真实终端压力测试：验证 Thought / Action 面板在长进度、"
+        "长 Bash 命令、CJK 字符、box drawing 字符 │└─、以及用户中途补充"
+        "同时出现时仍然能稳定换行、保持边框宽度，并且不会重复残留旧行。"
+    )
+    return xml_action(
+        {
+            "run_bash": {
+                "cmd": (
+                    "printf 'STRESS_ACTION_DONE\\n'; "
+                    "sleep 1; "
+                    "printf '长输出-一二三四五六七八九十-abcdefghijklmnopqrstuvwxyz-1234567890-│└─\\n'"
+                ),
+                "timeout_ms": 5000,
+            },
+        },
+        free_talk,
+    )
+
+
 def toolgen_scenario_response(prompt):
     if "[TOOL_GEN_TASK]" not in prompt:
         if "Action result: run_bash" in prompt and "TOOLGEN_E2E_SOURCE_DONE" in prompt:
@@ -288,6 +282,11 @@ def toolgen_scenario_response(prompt):
 def self_test():
     assert extract_prompt({"messages": [{"content": "hello"}]}) == "hello"
     assert extract_prompt({"instructions": "system", "input": "user"}) == "system\nuser"
+    stress = tty_stress_scenario_response()
+    assert "<actions>" in stress and "<run_bash>" in stress
+    assert "STRESS_ACTION_DONE" in stress
+    assert "<working_still_action>" not in stress
+    assert "<action_json>" not in stress
     source = toolgen_scenario_response("TOOLGEN_E2E_SOURCE")
     assert "<run_bash>" in source and "TOOLGEN_E2E_SOURCE_DONE" in source
     completed = toolgen_scenario_response(
