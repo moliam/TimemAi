@@ -38,6 +38,9 @@ It installs:
 - `timem-native-rs`: terminal release binary
 - `timem`: thin wrapper for the terminal UI
 - `timem-web`: local browser UI with embedded production assets
+- `resources/reminder_tips.json`: runtime-loaded default reminder schedules, normally under `~/.local/share/timem/resources`
+
+`TIMEM_SHELL_INSTALL_DIR` changes the binary directory. Resources follow the same prefix at `../share/timem/resources` unless `TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json` overrides are separate and are never overwritten by installation.
 
 Binary updates are installed with an atomic file replacement. This allows
 `./install.sh` to update an installation even while an older `timem-web`
@@ -220,6 +223,7 @@ git pull --ff-only
 ./uninstall.sh
 ```
 
+Uninstall removes the binaries and installed reminder resource. It does not remove user configuration, including a user-level `reminder_tips.json` override.
 If Rust was installed only for Timem, remove it separately:
 
 ```bash

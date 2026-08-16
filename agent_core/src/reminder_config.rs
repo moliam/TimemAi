@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::fs::File;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 pub const REMINDER_TIPS_FILE_NAME: &str = "reminder_tips.json";
+pub const TIMEM_RESOURCES_DIR_ENV: &str = "TIMEM_RESOURCES_DIR";
+const SHIPPED_REMINDER_TIPS: &str = include_str!("../../resources/reminder_tips.json");
 const MAX_SCHEDULES: usize = 32;
 const MAX_TIPS_PER_SCHEDULE: usize = 128;
 const MAX_TIP_BYTES: usize = 4_096;
@@ -26,28 +28,10 @@ pub struct ReminderScheduleConfig {
 
 impl Default for ReminderTipsConfig {
     fn default() -> Self {
-        Self {
-            schedules: vec![
-                ReminderScheduleConfig {
-                    every_minutes: Some(10),
-                    every_rounds: None,
-                    tips: vec![
-                        "TIPS: Remind the goal, don't get lost. If you get lost, say so promptly, and stop.".to_string(),
-                        "TIPS: Jump out. Take a look at the whole work's state. Make sure the whole picture is still in your control.".to_string(),
-                        "TIPS: Don't get stuck in a narrow line of thought. Don't be dragged too far by a superficial observation.".to_string(),
-                    ],
-                },
-                ReminderScheduleConfig {
-                    every_minutes: None,
-                    every_rounds: Some(8),
-                    tips: vec![
-                        "TIPS: A good inference has rigid deduction chain. If you say A causes B, there must be no hidden C in the middle.".to_string(),
-                        "TIPS: Don't make illusion correlation, such as A happens first, B happends later. Then A is the reason of B. This is super dangerous.".to_string(),
-                        "TIPS: A root cause can not only explain the current question, but can also predict real things.".to_string(),
-                    ],
-                },
-            ],
-        }
+        serde_json::from_str::<Self>(SHIPPED_REMINDER_TIPS)
+            .expect("shipped reminder tips must be valid JSON")
+            .validate()
+            .expect("shipped reminder tips must satisfy runtime limits")
     }
 }
 
@@ -122,40 +106,93 @@ pub fn reminder_tips_config_path(config_root: &Path) -> PathBuf {
     config_root.join(REMINDER_TIPS_FILE_NAME)
 }
 
-pub fn load_reminder_tips_config(config_root: &Path) -> ReminderTipsConfig {
-    let path = reminder_tips_config_path(config_root);
-    match read_config_text(&path) {
-        Ok(text) => match serde_json::from_str::<ReminderTipsConfig>(&text)
-            .map_err(|error| format!("reminder_tips_parse_failed:{error}"))
-            .and_then(ReminderTipsConfig::validate)
-        {
-            Ok(config) => config,
-            Err(error) => {
-                eprintln!(
-                    "[timem_config_warning] {error}; using built-in reminder defaults path={}",
-                    path.display()
-                );
-                ReminderTipsConfig::default()
-            }
-        },
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            let config = ReminderTipsConfig::default();
-            if let Err(write_error) = write_default_config(&path, &config) {
-                eprintln!(
-                    "[timem_config_warning] reminder_tips_default_write_failed:{write_error}; using built-in reminder defaults path={}",
-                    path.display()
-                );
-            }
-            config
-        }
-        Err(error) => {
-            eprintln!(
-                "[timem_config_warning] reminder_tips_read_failed:{error}; using built-in reminder defaults path={}",
-                path.display()
-            );
-            ReminderTipsConfig::default()
+pub fn default_resources_dir() -> PathBuf {
+    resource_dir_candidates_from_values(
+        std::env::var_os(TIMEM_RESOURCES_DIR_ENV).as_deref(),
+        std::env::current_exe().ok().as_deref(),
+        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources")),
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| PathBuf::from("resources"))
+}
+
+fn resource_dir_candidates() -> Vec<PathBuf> {
+    resource_dir_candidates_from_values(
+        std::env::var_os(TIMEM_RESOURCES_DIR_ENV).as_deref(),
+        std::env::current_exe().ok().as_deref(),
+        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources")),
+    )
+}
+
+fn resource_dir_candidates_from_values(
+    explicit: Option<&OsStr>,
+    executable: Option<&Path>,
+    source_resources: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = explicit.filter(|path| !path.is_empty()) {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(bin_dir) = executable.and_then(Path::parent) {
+        if let Some(prefix) = bin_dir.parent() {
+            candidates.push(prefix.join("share").join("timem").join("resources"));
         }
     }
+    if let Some(path) = source_resources {
+        candidates.push(path);
+    }
+    candidates.dedup();
+    candidates
+}
+
+pub fn load_reminder_tips_config(config_root: &Path) -> ReminderTipsConfig {
+    load_reminder_tips_config_from_resource_dirs(config_root, &resource_dir_candidates())
+}
+
+fn load_reminder_tips_config_from_resource_dirs(
+    config_root: &Path,
+    resource_dirs: &[PathBuf],
+) -> ReminderTipsConfig {
+    let user_path = reminder_tips_config_path(config_root);
+    match load_config_file(&user_path) {
+        Ok(Some(config)) => return config,
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!(
+                "[timem_config_warning] {error}; ignoring reminder tips override path={}",
+                user_path.display()
+            );
+        }
+    }
+
+    for resource_dir in resource_dirs {
+        let path = resource_dir.join(REMINDER_TIPS_FILE_NAME);
+        match load_config_file(&path) {
+            Ok(Some(config)) => return config,
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!(
+                    "[timem_config_warning] {error}; ignoring reminder tips resource path={}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    ReminderTipsConfig::default()
+}
+
+fn load_config_file(path: &Path) -> Result<Option<ReminderTipsConfig>, String> {
+    let text = match read_config_text(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("reminder_tips_read_failed:{error}")),
+    };
+    serde_json::from_str::<ReminderTipsConfig>(&text)
+        .map_err(|error| format!("reminder_tips_parse_failed:{error}"))?
+        .validate()
+        .map(Some)
 }
 
 fn read_config_text(path: &Path) -> std::io::Result<String> {
@@ -170,29 +207,6 @@ fn read_config_text(path: &Path) -> std::io::Result<String> {
     }
     String::from_utf8(bytes)
         .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error.to_string()))
-}
-
-fn write_default_config(path: &Path, config: &ReminderTipsConfig) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    match options.open(path) {
-        Ok(mut file) => {
-            file.write_all(&bytes).map_err(|error| error.to_string())?;
-            file.write_all(b"\n").map_err(|error| error.to_string())?;
-            file.sync_all().map_err(|error| error.to_string())
-        }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
 }
 
 #[cfg(test)]
