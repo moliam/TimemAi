@@ -668,6 +668,12 @@ enum WireEvent {
         turn_id: Option<String>,
         outcome: Value,
     },
+    TurnStarted {
+        session_id: String,
+        context_id: String,
+        worker_id: String,
+        turn: WebTurn,
+    },
     TurnUpdated {
         session_id: String,
         turn: WebTurn,
@@ -4754,6 +4760,7 @@ fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebT
         .ok_or_else(|| "turn_not_found".to_string())?)
 }
 
+#[cfg(test)]
 fn start_web_turn_with_command_id(
     state: &AppState,
     session_id: &str,
@@ -5013,6 +5020,7 @@ fn append_turn_user_entry(
     )
 }
 
+#[cfg(test)]
 fn append_turn_supplement_with_pending_attachments(
     state: &AppState,
     session_id: &str,
@@ -5762,50 +5770,48 @@ fn activate_core_started_turn(
     session_id: &str,
     worker_id: &str,
     command_id: Option<&str>,
-) {
-    if let Ok(mut sessions) = state.sessions.lock() {
-        if let Some(session) = sessions.get_mut(session_id) {
-            let command_turn_id = command_id.and_then(|command_id| {
-                session.turns.iter().rev().find_map(|turn| {
-                    let matches_command = turn
-                        .user_entries
-                        .iter()
-                        .any(|entry| entry.command_id.as_deref() == Some(command_id));
-                    (matches_command && turn.final_answer.is_none() && turn.completion.is_none())
-                        .then(|| turn.turn_id.clone())
-                })
-            });
-            let turn_id = command_turn_id
-                .or_else(|| session.pending_turn_id.clone())
-                .or_else(|| session.active_turn_id.clone());
+) -> Option<WebTurn> {
+    let mut sessions = state.sessions.lock().ok()?;
+    let session = sessions.get_mut(session_id)?;
+    let turn_id = if let Some(command_id) = command_id {
+        session.turns.iter().rev().find_map(|turn| {
+            let matches_command = turn
+                .user_entries
+                .iter()
+                .any(|entry| entry.command_id.as_deref() == Some(command_id));
+            (matches_command && turn.final_answer.is_none() && turn.completion.is_none())
+                .then(|| turn.turn_id.clone())
+        })?
+    } else {
+        session
+            .pending_turn_id
+            .clone()
+            .or_else(|| session.active_turn_id.clone())?
+    };
 
-            if let Some(turn_id) = turn_id {
-                if session.pending_turn_id.as_deref() == Some(turn_id.as_str()) {
-                    session.pending_turn_id = None;
-                }
-                session.active_turn_id = Some(turn_id.clone());
-                session.state = "working".to_string();
-                session.reported_session_working_worker_count = None;
-                if let Some(turn) = session
-                    .turns
-                    .iter_mut()
-                    .find(|turn| turn.turn_id == turn_id)
-                {
-                    turn.state = "working".to_string();
-                }
-            }
+    let turn_index = session
+        .turns
+        .iter()
+        .position(|turn| turn.turn_id == turn_id)?;
 
-            if let Some(worker) = session
-                .workers
-                .iter_mut()
-                .find(|worker| worker.worker_id == worker_id)
-            {
-                worker.state = "working".to_string();
-            }
-        }
+    if session.pending_turn_id.as_deref() == Some(turn_id.as_str()) {
+        session.pending_turn_id = None;
     }
-}
+    session.active_turn_id = Some(turn_id);
+    session.state = "working".to_string();
+    session.reported_session_working_worker_count = None;
+    session.turns[turn_index].state = "working".to_string();
 
+    if let Some(worker) = session
+        .workers
+        .iter_mut()
+        .find(|worker| worker.worker_id == worker_id)
+    {
+        worker.state = "working".to_string();
+    }
+
+    Some(session.turns[turn_index].clone())
+}
 fn handle_scoped_worker_event(
     state: &AppState,
     session_id: &str,
@@ -5818,7 +5824,20 @@ fn handle_scoped_worker_event(
             mark_core_command_accepted(state, session_id, &command_id);
         }
         CoreSessionWorkerEvent::TurnStarted { command_id } => {
-            activate_core_started_turn(state, session_id, worker_id, command_id.as_deref());
+            if let Some(turn) =
+                activate_core_started_turn(state, session_id, worker_id, command_id.as_deref())
+            {
+                publish_core_semantic(
+                    state,
+                    session_id,
+                    WireEvent::TurnStarted {
+                        session_id: session_id.to_string(),
+                        context_id: context_id.to_string(),
+                        worker_id: worker_id.to_string(),
+                        turn,
+                    },
+                );
+            }
         }
         CoreSessionWorkerEvent::Topics(events) => {
             for event in events {

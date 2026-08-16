@@ -586,12 +586,18 @@ function TimemApp() {
       setRevealedSessionApiKeys((current) => ({ ...current, [event.session_id]: event.api_key }));
       return;
     }
+    if (event.type === "turn_started") {
+      setSessions((current) => current.map((session) => {
+        if (session.session_id !== event.session_id) return session;
+        return updateSessionWorkerState(upsertTurn(session, event.turn), event.worker_id, "working");
+      }));
+      return;
+    }
     if (event.type === "turn_updated") {
       const consumedAttachmentIds = new Set(event.turn.user_entries.flatMap((entry) => entry.attachments ?? []).map((attachment) => attachment.id));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...upsertTurn(session, event.turn), attachments: session.attachments.filter((attachment) => !consumedAttachmentIds.has(attachment.id)) }
         : session));
-      if (event.turn.state !== "working") setCompletedTurnKey(`${event.session_id}:${event.turn.turn_id}`);
       return;
     }
     if (event.type === "host_error") {
