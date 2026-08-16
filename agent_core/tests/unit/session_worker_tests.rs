@@ -305,13 +305,23 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
         .expect("worker should atomically accept the restored batch");
 
     let mut accepted = Vec::new();
+    let mut turn_started = Vec::new();
+    let mut primary_accepted_before_start = false;
     let outcome = loop {
         match worker
             .events()
             .recv_timeout(Duration::from_secs(2))
             .expect("immediate model should finish the batched turn")
         {
-            CoreSessionWorkerEvent::CommandAccepted { command_id } => accepted.push(command_id),
+            CoreSessionWorkerEvent::CommandAccepted { command_id } => {
+                accepted.push(command_id);
+            }
+            CoreSessionWorkerEvent::TurnStarted { command_id } => {
+                primary_accepted_before_start = accepted
+                    .iter()
+                    .any(|accepted| accepted == "primary-command");
+                turn_started.push(command_id);
+            }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
             CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
@@ -328,6 +338,15 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
             "supplement-command-1",
             "supplement-command-2"
         ]
+    );
+    assert!(
+        primary_accepted_before_start,
+        "CommandAccepted must precede the authoritative TurnStarted boundary"
+    );
+    assert_eq!(
+        turn_started,
+        vec![Some("primary-command".to_string())],
+        "one Core turn should emit exactly one lifecycle start"
     );
     let prompts = prompts.lock().unwrap();
     assert_eq!(

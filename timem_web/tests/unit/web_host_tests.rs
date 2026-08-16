@@ -731,35 +731,64 @@ fn restore_redrives_unfinished_core_accepted_intent_into_the_new_worker() {
         Some("restore_supplement_2"),
     )
     .unwrap();
+
     {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
         for entry in &mut session.turns.last_mut().unwrap().user_entries {
             entry.delivery_state = Some(ChatCommandDeliveryState::CoreAccepted);
         }
+        session.turns.last_mut().unwrap().state = "restored".to_string();
         session.active_turn_id = None;
+        session.pending_turn_id = None;
         session.state = "ready".to_string();
+        for worker in &mut session.workers {
+            worker.state = "ready".to_string();
+        }
     }
-    assert!(state.sessions.lock().unwrap()[&session_id]
-        .turns
-        .last()
-        .unwrap()
-        .user_entries
-        .iter()
-        .all(|entry| entry.delivery_state == Some(ChatCommandDeliveryState::CoreAccepted)));
 
     resume_unfinished_core_command_after_restore(&state, &session_id).unwrap();
-    assert_eq!(
-        state.sessions.lock().unwrap()[&session_id]
-            .active_turn_id
-            .as_deref(),
-        Some(turn.turn_id.as_str())
-    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "ready");
+        assert_eq!(session.active_turn_id, None);
+        assert_eq!(session.pending_turn_id, None);
+        assert_eq!(session.turns.last().unwrap().state, "restored");
+        assert!(session.workers.iter().all(|worker| worker.state == "ready"));
+    }
+
     let deadline = Instant::now() + Duration::from_secs(2);
+    let mut observed_turn_started = false;
     loop {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
+            let is_matching_start = matches!(
+                &event,
+                CoreSessionWorkerEvent::TurnStarted {
+                    command_id: Some(started_command_id)
+                } if started_command_id == command_id
+            );
             handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+
+            if is_matching_start {
+                observed_turn_started = true;
+                let sessions = state.sessions.lock().unwrap();
+                let session = &sessions[&session_id];
+                assert_eq!(session.state, "working");
+                assert_eq!(
+                    session.active_turn_id.as_deref(),
+                    Some(turn.turn_id.as_str())
+                );
+                assert_eq!(session.pending_turn_id, None);
+                assert_eq!(session.turns.last().unwrap().state, "working");
+                assert!(session
+                    .workers
+                    .iter()
+                    .any(|worker| worker.state == "working"));
+            }
         }
+
         if state.sessions.lock().unwrap()[&session_id]
             .turns
             .last()
@@ -776,12 +805,73 @@ fn restore_redrives_unfinished_core_accepted_intent_into_the_new_worker() {
         );
         thread::sleep(Duration::from_millis(2));
     }
+    assert!(
+        observed_turn_started,
+        "restored work must cross the Core TurnStarted boundary"
+    );
 
     let manager = {
         let mut guard = state.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
     };
     manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn restore_submit_failure_keeps_session_ready_and_turn_restored() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "RESTORE_SUBMIT_FAILURE");
+    let command_id = "restore_command_without_live_worker";
+    let turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "must not look live when redrive submission fails",
+        Some(command_id),
+    )
+    .unwrap();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.turns.last_mut().unwrap().user_entries[0].delivery_state =
+            Some(ChatCommandDeliveryState::CoreAccepted);
+        session.turns.last_mut().unwrap().state = "restored".to_string();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.state = "ready".to_string();
+        for worker in &mut session.workers {
+            worker.state = "ready".to_string();
+        }
+    }
+
+    let old_manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+
+    let error = resume_unfinished_core_command_after_restore(&state, &session_id)
+        .expect_err("redrive must fail without the restored Core worker");
+    assert_eq!(error, "session_worker_not_found");
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "ready");
+        assert_eq!(session.active_turn_id, None);
+        assert_eq!(session.pending_turn_id, None);
+        assert_eq!(
+            session
+                .turns
+                .iter()
+                .find(|candidate| candidate.turn_id == turn.turn_id)
+                .unwrap()
+                .state,
+            "restored"
+        );
+        assert!(session.workers.iter().all(|worker| worker.state == "ready"));
+    }
+
+    old_manager.shutdown_all().unwrap();
 }
 
 #[test]
@@ -4173,6 +4263,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         history_has_more: false,
         resume_notice_pending: false,
         active_turn_id: None,
+        pending_turn_id: None,
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
         reported_session_working_worker_count: None,
@@ -6065,6 +6156,7 @@ fn selected_attachment_ids_stay_bound_to_their_messages() {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut("session_a").unwrap();
         session.active_turn_id = None;
+        session.pending_turn_id = None;
         session.state = "ready".to_string();
     }
     let second_ids = vec![second.id.clone()];
@@ -6149,13 +6241,22 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
         );
         thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(
-        state.sessions.lock().unwrap()[&session_id]
-            .active_turn_id
-            .as_deref(),
-        Some(first.turn_id.as_str()),
-        "the host must still expose the narrow stale-working window"
-    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        if session.active_turn_id.is_none() && session.pending_turn_id.is_none() {
+            assert_eq!(
+                session.state, "ready",
+                "when Core completion is already consumed, UI must be ready"
+            );
+        } else {
+            assert!(
+                session.active_turn_id.as_deref() == Some(first.turn_id.as_str())
+                    || session.pending_turn_id.as_deref() == Some(first.turn_id.as_str()),
+                "an unconsumed Core turn must remain correlated to the first task"
+            );
+        }
+    }
 
     let event = handle_command(
         &state,
@@ -6178,12 +6279,21 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
         second.user_entries[0].text,
         "run this after the final answer"
     );
-    assert_eq!(
-        state.sessions.lock().unwrap()[&session_id]
-            .active_turn_id
-            .as_deref(),
-        Some(second.turn_id.as_str())
-    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(
+            session.active_turn_id.as_deref() == Some(second.turn_id.as_str())
+                || session.pending_turn_id.as_deref() == Some(second.turn_id.as_str()),
+            "the new task must be correlated before or after Core TurnStarted"
+        );
+        if session.active_turn_id.is_none() {
+            assert_eq!(
+                session.state, "ready",
+                "a queued task must not manufacture Core working state"
+            );
+        }
+    }
 }
 
 #[test]
@@ -7075,7 +7185,7 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     let WireEvent::TurnUpdated { turn, .. } = event else {
         panic!("manual ToolGen must create a Web turn");
     };
-    assert_eq!(turn.state, "working");
+    assert_eq!(turn.state, "pending");
     assert!(turn.turn_id.starts_with("web_toolgen_turn_"));
     assert!(turn.user_entries.is_empty());
     drive_worker_until_session_ready(&state, &session_id, &prompts);

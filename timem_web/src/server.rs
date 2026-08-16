@@ -488,6 +488,10 @@ struct WebSession {
     #[serde(skip)]
     resume_notice_pending: bool,
     active_turn_id: Option<String>,
+    /// A durable Host intent that has not yet emitted Core TurnStarted.
+    /// This is routing metadata, not live working state.
+    #[serde(skip)]
+    pending_turn_id: Option<String>,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
     #[serde(skip)]
@@ -2596,6 +2600,7 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         .values()
         .any(|session| {
             session.active_turn_id.is_some()
+                || session.pending_turn_id.is_some()
                 || session.state == "working"
                 || !session.pending_unconsumed_supplements.is_empty()
                 || session.pending_work_instruction_turn.is_some()
@@ -3199,6 +3204,7 @@ fn create_session(
                 history_has_more: false,
                 resume_notice_pending: false,
                 active_turn_id: None,
+                pending_turn_id: None,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -3411,6 +3417,7 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
                 history_has_more: history_page.has_more,
                 resume_notice_pending: true,
                 active_turn_id: None,
+                pending_turn_id: None,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -3469,18 +3476,9 @@ fn resume_unfinished_core_command_after_restore(
                 .collect::<Vec<_>>();
             (!entries.is_empty()).then(|| (turn.turn_id.clone(), entries))
         });
-        if let Some((turn_id, ..)) = pending.as_ref() {
-            session.active_turn_id = Some(turn_id.clone());
-            session.state = "working".to_string();
-            session.reported_session_working_worker_count = None;
-            if let Some(turn) = session
-                .turns
-                .iter_mut()
-                .find(|turn| &turn.turn_id == turn_id)
-            {
-                turn.state = "working".to_string();
-            }
-        }
+        // Persisted history may restore chat content and an intent to redrive,
+        // but it is not evidence that the new Core process is executing.
+        // Keep the session ready and the turn restored until TurnStarted.
         pending
     };
     let Some((_turn_id, entries)) = pending else {
@@ -3763,7 +3761,10 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
         mcp_server_ids: session.mcp_server_ids.clone(),
         state: if session.state == "error" {
             StoredSessionState::Error
-        } else if session.active_turn_id.is_some() || session.state == "working" {
+        } else if session.active_turn_id.is_some()
+            || session.pending_turn_id.is_some()
+            || session.state == "working"
+        {
             StoredSessionState::Interrupted
         } else {
             StoredSessionState::Ready
@@ -3782,6 +3783,13 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
     }
 }
 
+fn current_turn_id(session: &WebSession) -> Option<&str> {
+    session
+        .active_turn_id
+        .as_deref()
+        .or(session.pending_turn_id.as_deref())
+}
+
 fn session_has_active_turn(state: &AppState, session_id: &str) -> Result<bool, String> {
     let sessions = state
         .sessions
@@ -3790,10 +3798,8 @@ fn session_has_active_turn(state: &AppState, session_id: &str) -> Result<bool, S
     let session = sessions
         .get(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
-    Ok(session
-        .active_turn_id
-        .as_ref()
-        .is_some_and(|turn_id| session.turns.iter().any(|turn| turn.turn_id == *turn_id)))
+    Ok(current_turn_id(session)
+        .is_some_and(|turn_id| session.turns.iter().any(|turn| turn.turn_id == turn_id)))
 }
 
 fn turn_for_command_id(
@@ -4202,7 +4208,7 @@ fn submit_turn_with_selected_attachments(
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| "session_not_found".to_string())?;
-            session.state = "working".to_string();
+            // Waiting for a Host decision is not evidence of Core execution.
             session.pending_work_instruction_turn = Some(PendingWorkInstructionTurn {
                 request_id: request_id.clone(),
                 text,
@@ -4694,7 +4700,7 @@ fn append_message(
         .get_mut(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
     let message_id = message.id.clone();
-    let turn_id = session.active_turn_id.clone();
+    let turn_id = current_turn_id(session).map(str::to_string);
     let role_for_history = message.role.clone();
     let text_for_history = message.text.clone();
     let created_at_ms = message.created_at_ms as i64;
@@ -4721,7 +4727,31 @@ fn append_message(
 
 #[cfg(test)]
 fn start_web_turn(state: &AppState, session_id: &str, text: &str) -> Result<WebTurn, String> {
-    start_web_turn_with_command_id(state, session_id, text, None)
+    let turn = start_web_turn_with_command_id(state, session_id, text, None)?;
+    let worker_id = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .map(|session| session.primary_worker_id.clone())
+        .ok_or_else(|| "session_not_found".to_string())?;
+
+    // This helper represents a turn already entered by Core. Production
+    // submission paths remain pending until the real TurnStarted event.
+    activate_core_started_turn(state, session_id, &worker_id, None);
+    Ok(state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .and_then(|session| {
+            session
+                .turns
+                .iter()
+                .find(|candidate| candidate.turn_id == turn.turn_id)
+                .cloned()
+        })
+        .ok_or_else(|| "turn_not_found".to_string())?)
 }
 
 fn start_web_turn_with_command_id(
@@ -4747,7 +4777,7 @@ fn start_web_turn_with_selected_attachments(
     let session = sessions
         .get_mut(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
-    if session.active_turn_id.is_some() {
+    if current_turn_id(session).is_some() {
         return Err("turn_already_active_use_supplement".to_string());
     }
     // Host state must not expose a turn that failed its durable write. Keep a
@@ -4757,7 +4787,7 @@ fn start_web_turn_with_selected_attachments(
     let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
     let turn = WebTurn {
         turn_id: unique_web_id("web_turn"),
-        state: "working".to_string(),
+        state: "pending".to_string(),
         created_at_ms: now_ms(),
         user_entries: vec![WebTurnUserEntry {
             kind: "task".to_string(),
@@ -4771,9 +4801,7 @@ fn start_web_turn_with_selected_attachments(
         final_answer: None,
         completion: None,
     };
-    session.state = "working".to_string();
-    session.active_turn_id = Some(turn.turn_id.clone());
-    session.reported_session_working_worker_count = None;
+    session.pending_turn_id = Some(turn.turn_id.clone());
     session.turns.push(turn.clone());
     if session.turns.len() > MAX_SESSION_TURNS {
         let excess = session.turns.len() - MAX_SESSION_TURNS;
@@ -4829,7 +4857,7 @@ fn submit_toolgen_turn(
         let session = sessions
             .get(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
-        if session.active_turn_id.is_some() {
+        if current_turn_id(session).is_some() {
             return Err("turn_already_active".to_string());
         }
         let turn = session
@@ -4903,7 +4931,7 @@ fn start_web_toolgen_turn(
     let session = sessions
         .get_mut(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
-    if session.active_turn_id.is_some() {
+    if current_turn_id(session).is_some() {
         return Err("turn_already_active".to_string());
     }
     let user_entries = user_instruction
@@ -4920,16 +4948,14 @@ fn start_web_toolgen_turn(
         .unwrap_or_default();
     let turn = WebTurn {
         turn_id: unique_web_id("web_toolgen_turn"),
-        state: "working".to_string(),
+        state: "pending".to_string(),
         created_at_ms,
         user_entries,
         events: Vec::new(),
         final_answer: None,
         completion: None,
     };
-    session.state = "working".to_string();
-    session.active_turn_id = Some(turn.turn_id.clone());
-    session.reported_session_working_worker_count = None;
+    session.pending_turn_id = Some(turn.turn_id.clone());
     session.pending_completion_message_id = None;
     session.turns.push(turn.clone());
     if session.turns.len() > MAX_SESSION_TURNS {
@@ -5031,9 +5057,8 @@ fn append_turn_user_entry_with_attachments(
         .get_mut(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
     let previous_session = session.clone();
-    let active_turn_id = session
-        .active_turn_id
-        .clone()
+    let active_turn_id = current_turn_id(session)
+        .map(str::to_string)
         .ok_or_else(|| "active_turn_not_found".to_string())?;
     if !session
         .turns
@@ -5110,8 +5135,20 @@ fn rollback_web_turn(
             session.turns.retain(|turn| turn.turn_id != turn_id);
             if session.active_turn_id.as_deref() == Some(turn_id) {
                 session.active_turn_id = None;
-                session.state = "ready".to_string();
             }
+            if session.pending_turn_id.as_deref() == Some(turn_id) {
+                session.pending_turn_id = None;
+            }
+            session.state = if session
+                .workers
+                .iter()
+                .any(|worker| worker.state == "working")
+            {
+                "working"
+            } else {
+                "ready"
+            }
+            .to_string();
             session.attachments.splice(0..0, attachments);
         }
     }
@@ -5130,7 +5167,7 @@ fn append_active_turn_event(
 ) -> Option<ActiveTurnEventRef> {
     let mut sessions = state.sessions.lock().ok()?;
     let session = sessions.get_mut(session_id)?;
-    let active_turn_id = session.active_turn_id.clone()?;
+    let active_turn_id = current_turn_id(session).map(str::to_string)?;
     let turn = session
         .turns
         .iter_mut()
@@ -5720,6 +5757,55 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
     }
 }
 
+fn activate_core_started_turn(
+    state: &AppState,
+    session_id: &str,
+    worker_id: &str,
+    command_id: Option<&str>,
+) {
+    if let Ok(mut sessions) = state.sessions.lock() {
+        if let Some(session) = sessions.get_mut(session_id) {
+            let command_turn_id = command_id.and_then(|command_id| {
+                session.turns.iter().rev().find_map(|turn| {
+                    let matches_command = turn
+                        .user_entries
+                        .iter()
+                        .any(|entry| entry.command_id.as_deref() == Some(command_id));
+                    (matches_command && turn.final_answer.is_none() && turn.completion.is_none())
+                        .then(|| turn.turn_id.clone())
+                })
+            });
+            let turn_id = command_turn_id
+                .or_else(|| session.pending_turn_id.clone())
+                .or_else(|| session.active_turn_id.clone());
+
+            if let Some(turn_id) = turn_id {
+                if session.pending_turn_id.as_deref() == Some(turn_id.as_str()) {
+                    session.pending_turn_id = None;
+                }
+                session.active_turn_id = Some(turn_id.clone());
+                session.state = "working".to_string();
+                session.reported_session_working_worker_count = None;
+                if let Some(turn) = session
+                    .turns
+                    .iter_mut()
+                    .find(|turn| turn.turn_id == turn_id)
+                {
+                    turn.state = "working".to_string();
+                }
+            }
+
+            if let Some(worker) = session
+                .workers
+                .iter_mut()
+                .find(|worker| worker.worker_id == worker_id)
+            {
+                worker.state = "working".to_string();
+            }
+        }
+    }
+}
+
 fn handle_scoped_worker_event(
     state: &AppState,
     session_id: &str,
@@ -5730,6 +5816,9 @@ fn handle_scoped_worker_event(
     match event {
         CoreSessionWorkerEvent::CommandAccepted { command_id } => {
             mark_core_command_accepted(state, session_id, &command_id);
+        }
+        CoreSessionWorkerEvent::TurnStarted { command_id } => {
+            activate_core_started_turn(state, session_id, worker_id, command_id.as_deref());
         }
         CoreSessionWorkerEvent::Topics(events) => {
             for event in events {
@@ -5987,6 +6076,7 @@ fn handle_scoped_worker_event(
                         .get_mut(session_id)
                         .map(|session| {
                             let turn_id = session.active_turn_id.take();
+                            session.pending_turn_id = None;
                             if let Some(active_turn_id) = turn_id.as_deref() {
                                 if let Some(turn) = session
                                     .turns
