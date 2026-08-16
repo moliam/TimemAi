@@ -127,17 +127,24 @@ fn finish_confirmation_is_unique_and_precedes_the_state_branch() {
 }
 
 #[test]
-fn recovered_final_answer_requires_an_unmodified_retry() {
+fn largest_complete_response_root_finds_prefixed_final_root() {
+    let raw = "preface<response><final_answer>done</final_answer></response>";
+    let (start, end) =
+        largest_complete_response_root(raw).expect("prefixed complete response root must be found");
+    assert_eq!(
+        &raw[start..end],
+        "<response><final_answer>done</final_answer></response>"
+    );
+    assert!(parse_response_fields(&raw[start..end]).is_some());
+}
+
+#[test]
+fn extracted_final_answer_requires_an_unmodified_retry() {
     for raw in [
         "preface<response><final_answer>done</final_answer></response>",
         "<response><final_answer>done</final_answer></response>trailing",
-        "<final_answer>done</final_answer>",
-        "<response><final_answer>done</final_answer>",
-        "<final_answer>done</final_answer></response>",
-        "preface<response><final_answer>done</final_answer>",
         "```xml\n<response><final_answer>done</final_answer></response>\n```",
         "preface<response><actions><run_bash><cmd>true</cmd></run_bash></actions><final_answer>done</final_answer></response>",
-        "<response><status>finished</status><final_answer>done</final_answer>",
     ] {
         let env = parse_xml_envelope(raw, &caps());
         assert_eq!(
@@ -148,6 +155,33 @@ fn recovered_final_answer_requires_an_unmodified_retry() {
         assert!(env.final_answer.is_empty(), "raw={raw}");
         assert!(env.continue_work, "raw={raw}");
         assert!(env.next_actions.is_empty(), "raw={raw}");
+    }
+}
+
+#[test]
+fn missing_response_boundaries_are_not_synthesized() {
+    for raw in [
+        "<final_answer>done</final_answer>",
+        "<response><final_answer>done</final_answer>",
+        "<final_answer>done</final_answer></response>",
+        "preface<response><final_answer>done</final_answer>",
+        "<response><actions><run_bash><cmd>true</cmd></run_bash></actions>",
+        "<actions><run_bash><cmd>true</cmd></run_bash></actions></response>",
+    ] {
+        let env = parse_xml_envelope(raw, &caps());
+        assert!(
+            env.repair_issue.is_some(),
+            "missing response boundary must be a protocol deviation: raw={raw}"
+        );
+        assert_ne!(
+            env.repair_issue.as_deref(),
+            Some("xml_recovered_final_answer_requires_retry"),
+            "incomplete roots are not extracted complete roots: raw={raw}"
+        );
+        assert!(env.final_answer.is_empty(), "raw={raw}");
+        assert!(env.next_actions.is_empty(), "raw={raw}");
+        assert!(env.action_groups.is_empty(), "raw={raw}");
+        assert!(env.accepted_response.is_none(), "raw={raw}");
     }
 }
 
@@ -500,7 +534,7 @@ fn xml_protocol_rejects_json_markdown_and_plain_text_roots() {
 }
 
 #[test]
-fn outer_text_around_first_response_root_is_recovered_as_free_talk() {
+fn outer_text_is_discarded_when_a_non_final_response_root_is_extracted() {
     let env = parse_xml_envelope(
         r#"prefix prose <actions><run_bash><cmd>must not execute</cmd></run_bash></actions>
 <response>
@@ -514,10 +548,14 @@ trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert_eq!(env.next_actions.len(), 1);
     assert_eq!(env.next_actions[0].input_str("cmd"), "printf safe");
+    assert_eq!(env.thought, "inside thought");
     assert_eq!(
-        env.thought,
-        "prefix prose <actions><run_bash><cmd>must not execute</cmd></run_bash></actions>\n\ntrailing prose <run_bash><cmd>also must not execute</cmd></run_bash>\n\ninside thought"
+        env.accepted_response.as_deref(),
+        Some(
+            "<response>\n  <free_talk>inside thought</free_talk>\n  <actions><run_bash><cmd>printf safe</cmd></run_bash></actions>\n</response>"
+        )
     );
+    assert!(!env.thought.contains("must not execute"));
     assert!(env.runtime_note.as_deref().is_some_and(|note| {
         note.starts_with("ERROR:")
             && note.contains("content outside <response>")
@@ -526,19 +564,39 @@ trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
 }
 
 #[test]
-fn adjacent_response_roots_keep_only_the_first_root_as_protocol() {
+fn multiple_response_roots_select_the_largest_complete_root() {
     let env = parse_xml_envelope(
-        "before<response><actions><run_bash><cmd>printf first</cmd></run_bash></actions></response><response><actions><run_bash><cmd>must not execute</cmd></run_bash></actions></response>after",
+        r#"before
+<response><actions><run_bash><cmd>must not execute</cmd></run_bash></actions></response>
+noise
+<response>
+  <free_talk>use the larger complete response</free_talk>
+  <actions><run_bash><cmd>printf selected</cmd></run_bash></actions>
+</response>
+after"#,
         &caps(),
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert!(env.final_answer.is_empty());
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(env.next_actions[0].input_str("cmd"), "printf selected");
+    assert_eq!(env.thought, "use the larger complete response");
+    let accepted = env.accepted_response.as_deref().unwrap();
+    assert!(accepted.contains("printf selected"));
+    assert!(!accepted.contains("must not execute"));
+}
+
+#[test]
+fn equal_sized_response_roots_keep_the_first_complete_root() {
+    let env = parse_xml_envelope(
+        "<response><actions><run_bash><cmd>printf first</cmd></run_bash></actions></response>\
+         <response><actions><run_bash><cmd>printf later</cmd></run_bash></actions></response>",
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert_eq!(env.next_actions.len(), 1);
     assert_eq!(env.next_actions[0].input_str("cmd"), "printf first");
-    assert!(env.thought.starts_with("before\n\n<response>"));
-    assert!(env.thought.contains("must not execute"));
-    assert!(env.thought.ends_with("</response>after"));
 }
 
 #[test]

@@ -68,6 +68,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                 next_actions: vec![],
                 action_groups: vec![],
                 context_compacts: vec![],
+                accepted_response: None,
                 memory_candidates: vec![],
                 runtime_note: None,
                 repair_issue: Some("invalid_json".to_string()),
@@ -84,6 +85,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
             next_actions: vec![],
             action_groups: vec![],
             context_compacts: vec![],
+            accepted_response: None,
             memory_candidates: vec![],
             runtime_note: None,
             repair_issue: Some("root_must_be_json_object".to_string()),
@@ -221,6 +223,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         action_groups,
         context_compacts,
         memory_candidates,
+        accepted_response: None,
         runtime_note,
         repair_issue,
     }

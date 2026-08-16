@@ -56,7 +56,7 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
 
 pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let trimmed = content.trim();
-    let (outer_free_talk, protocol_text) = split_outer_response_text(trimmed);
+    let (root_was_extracted, protocol_text) = split_outer_response_text(trimmed);
     if protocol_text.starts_with('{')
         || protocol_text.starts_with('[')
         || starts_with_markdown_protocol(protocol_text)
@@ -66,11 +66,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     if looks_like_external_tool_call_protocol(protocol_text) {
         return malformed_xml_response("external_tool_call_protocol");
     }
-    let (protocol_text, root_was_completed) = match complete_missing_response_root(protocol_text) {
-        Some(completed) => (completed, true),
-        None => (protocol_text.to_string(), false),
-    };
-
+    let protocol_text = protocol_text.to_string();
     let Some(response) = parse_response_fields(&protocol_text) else {
         if protocol_text.is_empty() {
             return malformed_xml_response("empty_response");
@@ -81,17 +77,13 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         return malformed_xml_response("xml_response_root_missing");
     };
 
-    let response_was_recovered = outer_free_talk.is_some() || root_was_completed;
+    let response_was_recovered = root_was_extracted;
     let mut repair_issue = response.flow_issue.clone();
     let has_status = response.has_status;
     let has_finish_confirm = response.has_finish_confirm;
     let mut final_answer = response.final_answer.clone();
     let toolgen_retrospect = response.toolgen_retrospect.clone();
-    let thought = match outer_free_talk.as_deref().filter(|text| !text.is_empty()) {
-        Some(outer) if response.free_talk.trim().is_empty() => outer.to_string(),
-        Some(outer) => format!("{outer}\n\n{}", response.free_talk),
-        None => response.free_talk.clone(),
-    };
+    let thought = response.free_talk.clone();
     let thought_keep_in_context = !thought.trim().is_empty();
 
     if response_was_recovered && !final_answer.trim().is_empty() {
@@ -149,53 +141,41 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         action_groups,
         context_compacts,
         memory_candidates: vec![],
-        runtime_note: match (outer_free_talk.is_some(), root_was_completed) {
-            (true, true) => Some(
-                "ERROR: The previous XML response had content outside <response> and a missing root boundary. Runtime recovered it for this non-final action round. In the next response, output nothing before <response> or after </response>, and close the root yourself."
-                    .to_string(),
-            ),
-            (true, false) => Some(
-                "ERROR: The previous XML response had content outside <response>. Runtime recovered it for this non-final action round. In the next response, begin exactly with <response>, end with </response>, and output nothing outside that root."
-                    .to_string(),
-            ),
-            (false, true) => Some(
-                "ERROR: The previous XML response omitted an outer response boundary. Runtime recovered it for this non-final action round. In the next response, return one complete <response>...</response> root and close it yourself."
-                    .to_string(),
-            ),
-            (false, false) => None,
-        },
+        accepted_response: Some(protocol_text.clone()),
+        runtime_note: root_was_extracted.then(|| {
+            "ERROR: The previous XML response had content outside <response>. Runtime extracted the largest complete response root for this non-final action round and discarded everything else. In the next response, begin exactly with <response>, end with </response>, and output nothing outside that root."
+                .to_string()
+        }),
         repair_issue,
     }
 }
 
-fn split_outer_response_text(text: &str) -> (Option<String>, &str) {
+fn split_outer_response_text(text: &str) -> (bool, &str) {
     let text = text.trim();
-    let Some(open_start) = find_open_tag(text, "response") else {
-        return (None, text);
-    };
-    let Some(open_end) = find_tag_end(text, open_start) else {
-        return (None, text);
-    };
-    let close_start = find_first_response_close(text, open_end + 1);
-    let protocol_end = close_start
-        .map(|start| start + "</response>".len())
-        .unwrap_or(text.len());
-    let leading = text[..open_start].trim();
-    let trailing = text[protocol_end..].trim();
-    let outer = match (leading.is_empty(), trailing.is_empty()) {
-        (true, true) => None,
-        (false, true) => Some(leading.to_string()),
-        (true, false) => Some(trailing.to_string()),
-        (false, false) => Some(format!("{leading}\n\n{trailing}")),
-    };
-    (outer, text[open_start..protocol_end].trim())
+    if let Some((start, end)) = largest_complete_response_root(text) {
+        let extracted = start != 0 || end != text.len();
+        return (extracted, text[start..end].trim());
+    }
+
+    // Recovery is extraction-only. Missing opening or closing response
+    // boundaries remain protocol deviations and are never synthesized.
+    (false, text)
 }
 
-fn find_first_response_close(text: &str, from: usize) -> Option<usize> {
-    let mut cursor = from;
-    while let Some(close_start) = find_close_tag(text, cursor, "response") {
-        if !is_inside_cdata(text, close_start)
-            && ![
+fn largest_complete_response_root(text: &str) -> Option<(usize, usize)> {
+    let mut open_cursor = 0usize;
+    let mut best_clean: Option<(usize, usize)> = None;
+    let mut best_repairable: Option<(usize, usize)> = None;
+
+    while open_cursor < text.len() {
+        let Some(open_rel) = find_open_tag(&text[open_cursor..], "response") else {
+            break;
+        };
+        let open_start = open_cursor + open_rel;
+        open_cursor = open_start.saturating_add("<response".len());
+
+        if is_inside_cdata(text, open_start)
+            || [
                 "free_talk",
                 "finish_confirm",
                 "final_answer",
@@ -203,78 +183,52 @@ fn find_first_response_close(text: &str, from: usize) -> Option<usize> {
                 "summary",
             ]
             .iter()
-            .any(|tag| is_inside_outer_text_field(text, close_start, tag))
+            .any(|tag| is_inside_outer_text_field(text, open_start, tag))
         {
-            return Some(close_start);
+            continue;
         }
-        cursor = close_start + "</response>".len();
-    }
-    None
-}
 
-fn complete_missing_response_root(text: &str) -> Option<String> {
-    const ROOT_BODY_TAGS: &[&str] = &[
-        "free_talk",
-        "finish_confirm",
-        "actions",
-        "context_compact",
-        "toolgen_retrospect",
-        "final_answer",
-        "status",
-    ];
+        let Some(open_end) = find_tag_end(text, open_start) else {
+            continue;
+        };
+        if is_self_closing_start_tag(&text[open_start..=open_end]) {
+            continue;
+        }
 
-    let text = text.trim();
-    if text.is_empty()
-        || text.starts_with("<?xml")
-        || text.starts_with("<response/")
-        || has_adjacent_response_roots(text)
-    {
-        return None;
-    }
-
-    let response_open = find_open_tag(text, "response");
-    let response_close = find_last_close_tag(text, 0, "response");
-
-    match (response_open, response_close) {
-        (Some(0), None) => {
-            let open_end = find_tag_end(text, 0)?;
-            if !text[..=open_end].eq_ignore_ascii_case("<response>") {
-                return None;
+        let mut close_cursor = open_end + 1;
+        while let Some(close_start) = find_close_tag(text, close_cursor, "response") {
+            close_cursor = close_start + "</response>".len();
+            if is_inside_cdata(text, close_start) {
+                continue;
             }
-            Some(format!("{text}</response>"))
-        }
-        (None, Some(close_start))
-            if close_start + "</response>".len() == text.len()
-                && starts_with_supported_response_field(text, ROOT_BODY_TAGS) =>
-        {
-            Some(format!("<response>{text}"))
-        }
-        (None, None) if starts_with_supported_response_field(text, ROOT_BODY_TAGS) => {
-            Some(format!("<response>{text}</response>"))
-        }
-        _ => None,
-    }
-}
 
-fn starts_with_supported_response_field(text: &str, tags: &[&str]) -> bool {
-    tags.iter().any(|tag| find_open_tag(text, tag) == Some(0))
-}
+            let end = close_start + "</response>".len();
+            let candidate = &text[open_start..end];
+            let Some(fields) = parse_response_fields(candidate) else {
+                continue;
+            };
 
-fn has_adjacent_response_roots(text: &str) -> bool {
-    let mut cursor = 0usize;
-    while let Some(close_rel) = text[cursor..].find("</response>") {
-        let close_start = cursor + close_rel;
-        let after = close_start + "</response>".len();
-        if !is_inside_cdata(text, close_start)
-            && !is_inside_outer_text_field(text, close_start, "free_talk")
-            && !is_inside_outer_text_field(text, close_start, "final_answer")
-            && find_open_tag(text[after..].trim_start(), "response") == Some(0)
-        {
-            return true;
+            // A literal </response> inside a text field can produce a
+            // repairable-but-truncated candidate. Keep scanning: a later close
+            // may form the actual outer root. Structurally clean candidates
+            // outrank repairable candidates; within each class, select the
+            // largest complete root and keep the first on equal length.
+            let slot = if fields.flow_issue.is_none() {
+                &mut best_clean
+            } else {
+                &mut best_repairable
+            };
+            let candidate_len = end.saturating_sub(open_start);
+            let current_len = slot
+                .map(|(start, end)| end.saturating_sub(start))
+                .unwrap_or_default();
+            if candidate_len > current_len {
+                *slot = Some((open_start, end));
+            }
         }
-        cursor = after;
     }
-    false
+
+    best_clean.or(best_repairable)
 }
 
 fn is_inside_outer_text_field(text: &str, pos: usize, tag: &str) -> bool {
@@ -569,6 +523,7 @@ fn malformed_xml_response(issue: &str) -> ParsedEnvelope {
         action_groups: vec![],
         context_compacts: vec![],
         memory_candidates: vec![],
+        accepted_response: None,
         runtime_note: None,
         repair_issue: Some(issue.to_string()),
     }
@@ -1524,7 +1479,7 @@ pub fn xml_repair_instruction_for_response(issue: &str, raw_response: &str) -> S
 fn xml_repair_cause(issue: &str) -> Option<String> {
     if issue == "xml_recovered_final_answer_requires_retry" {
         return Some(
-            "The previous output contained a final answer, but the runtime had to add a missing response boundary or extract content outside the response root. Terminal completion requires an unmodified protocol response."
+            "The previous output contained a final answer inside a response root extracted from surrounding content. Terminal completion requires one unmodified protocol response with nothing outside the root."
                 .to_string(),
         );
     }

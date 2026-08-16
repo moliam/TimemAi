@@ -304,6 +304,12 @@ pub struct ParsedEnvelope {
     pub action_groups: Vec<ParsedActionGroup>,
     pub context_compacts: Vec<ParsedContextCompact>,
     pub memory_candidates: Vec<String>,
+    /// Exact protocol response accepted by the runtime for assistant replay.
+    ///
+    /// XML recovery may extract a complete response root. In that case the
+    /// next prompt must replay this accepted response instead of the polluted
+    /// raw model output.
+    pub accepted_response: Option<String>,
     pub runtime_note: Option<String>,
     pub repair_issue: Option<String>,
 }
