@@ -7168,3 +7168,17 @@ fn toolrepo_detail_rename_and_future_prompt_hint_share_the_published_state() {
         .unwrap()
         .contains("Previously accumulated reusable scripts"));
 }
+
+#[test]
+fn friendly_journal_error_replaces_in_use_with_actionable_message() {
+    let data_dir = std::path::PathBuf::from("/tmp/timem_test_data");
+    let msg = friendly_journal_error("event_journal_in_use".to_string(), &data_dir, ".test_mem");
+    assert!(msg.contains("already running on this memory space"));
+    assert!(msg.contains("/tmp/timem_test_data"));
+    assert!(msg.contains(".test_mem"));
+    assert!(msg.contains("--space"));
+    assert!(msg.contains("--data-dir"));
+    assert!(!msg.contains("event_journal_in_use"));
+    let passthrough = friendly_journal_error("other_error".to_string(), &data_dir, ".test_mem");
+    assert_eq!(passthrough, "other_error");
+}
