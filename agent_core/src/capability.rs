@@ -667,6 +667,9 @@ impl CapabilityRegistry {
     pub fn render_tool_catalog_markdown(&self) -> String {
         self.tools
             .values()
+            // Keep capmgr registered and executable, but do not advertise it
+            // to the model as part of the prompt tool catalog.
+            .filter(|manifest| manifest.id != "capmgr")
             .map(render_tool_manifest_markdown)
             .collect::<Vec<_>>()
             .join("\n\n")
