@@ -34,13 +34,16 @@ echo "== kvc replay script =="
 scripts/kvc_replay_test.sh
 
 echo "== rust format =="
-cargo fmt --check
+cargo fmt --all -- --check
 
 echo "== rust clippy warnings =="
 scripts/clippy_check.sh
 
 echo "== rust tests =="
-cargo test --workspace
+cargo test --workspace --locked
+
+echo "== rust documentation =="
+cargo doc --workspace --all-features --no-deps --locked
 
 echo "== web dependencies =="
 pnpm --dir web_ui/timem-web install --frozen-lockfile

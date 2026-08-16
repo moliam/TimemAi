@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-cargo clippy --workspace --all-targets -- \
+cargo clippy --workspace --all-targets --all-features --locked -- \
   -D warnings \
   -A clippy::too_many_arguments \
   -A clippy::type_complexity \
