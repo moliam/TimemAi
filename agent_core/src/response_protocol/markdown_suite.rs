@@ -99,10 +99,7 @@ fn split_sections(text: &str) -> Vec<MdSection> {
 }
 
 fn is_terminal_text_heading(heading: &str) -> bool {
-    matches!(
-        heading.trim().to_ascii_lowercase().as_str(),
-        "answer" | "final_answer" | "final answer"
-    )
+    heading.trim().eq_ignore_ascii_case("final_answer")
 }
 
 fn extract_action_blocks(body: &str) -> Vec<String> {
@@ -113,7 +110,7 @@ fn extract_action_blocks(body: &str) -> Vec<String> {
     for line in body.lines() {
         let trimmed = line.trim();
         if !in_action_block {
-            if trimmed.starts_with("```action") || trimmed.starts_with("```json") {
+            if trimmed.starts_with("```action") {
                 in_action_block = true;
                 current_block = String::new();
             }
@@ -143,18 +140,11 @@ fn is_protocol_heading(heading: &str) -> bool {
     matches!(
         heading.trim().to_ascii_lowercase().as_str(),
         "status"
-            | "answer"
             | "final_answer"
-            | "final answer"
             | "free_talk"
-            | "free talk"
-            | "freetalk"
             | "toolgen_retrospect"
-            | "toolgen retrospect"
             | "working_still_action"
             | "context compact"
-            | "context_compact"
-            | "compact"
     )
 }
 
@@ -184,58 +174,6 @@ fn parse_action_groups_value(
     super::parse_action_workflow_value(value, "actions", capabilities)
 }
 
-fn extract_fenced_json(text: &str) -> Option<String> {
-    let start_marker = "```json";
-    let start = text.find(start_marker)?;
-    let after_marker = start + start_marker.len();
-    let rest = &text[after_marker..];
-    let newline = rest.find("\n").map(|i| i + 1).unwrap_or(0);
-    let json_start = after_marker + newline;
-    let end_marker = "```";
-    let end = text[json_start..].find(end_marker)?;
-    let json_content = text[json_start..json_start + end].trim().to_string();
-    if json_content.is_empty() {
-        None
-    } else {
-        Some(json_content)
-    }
-}
-
-fn fenced_json_looks_like_response_protocol(text: &str) -> bool {
-    let Some(fenced) = extract_fenced_json(text) else {
-        return false;
-    };
-    if fenced_json_contains_protocol_markers(&fenced) {
-        return true;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(&fenced) else {
-        return false;
-    };
-    super::json_suite::is_likely_response_envelope(&value)
-        || super::is_tool_action_object(&value)
-        || value.as_array().is_some_and(|items| {
-            !items.is_empty() && items.iter().all(super::is_tool_action_object)
-        })
-}
-
-fn fenced_json_contains_protocol_markers(fenced: &str) -> bool {
-    contains_protocol_json_markers(fenced)
-}
-
-fn contains_protocol_json_markers(text: &str) -> bool {
-    [
-        "\"status\"",
-        "\"final_answer\"",
-        "\"next_actions\"",
-        "\"context_compact\"",
-        "\"context_compacts\"",
-        "\"memory_candidates\"",
-        "\"action\"",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
-}
-
 fn has_unclosed_code_fence(text: &str) -> bool {
     text.matches("```").count() % 2 == 1
 }
@@ -263,97 +201,16 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         return malformed_markdown_response("empty_response");
     }
 
-    // JSON fallback
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        return super::json_suite::parse_envelope(content, capabilities);
-    }
-
     if looks_like_external_tool_call_protocol(trimmed) {
         return malformed_markdown_response("external_tool_call_protocol");
     }
 
-    // Fenced-JSON extraction for legacy full-response JSON. Do not treat JSON
-    // examples inside a Markdown-section response as the response envelope.
-    if let Some(fenced) = extract_fenced_json(trimmed) {
-        if (fenced.starts_with('{') || fenced.starts_with('['))
-            && extract_markdown_protocol_candidate(trimmed).is_none()
-            && fenced_json_looks_like_response_protocol(trimmed)
-        {
-            return super::json_suite::parse_envelope(&fenced, capabilities);
+    let Some(candidate) = extract_markdown_protocol_candidate(trimmed) else {
+        if has_unclosed_code_fence(trimmed) {
+            return malformed_markdown_response("unclosed_markdown_code_fence");
         }
-    }
-
-    let protocol_candidate = extract_markdown_protocol_candidate(trimmed);
-    let candidate = protocol_candidate.unwrap_or(trimmed);
-    let has_sections = candidate.contains("\n## ") || candidate.starts_with("## ");
-    let has_action_blocks = candidate.contains("```action")
-        || (has_sections
-            && candidate.contains("```json")
-            && fenced_json_looks_like_response_protocol(candidate));
-    if protocol_candidate.is_none() && !has_action_blocks {
-        if candidate.contains("```") {
-            if candidate.contains("```json") && fenced_json_contains_protocol_markers(candidate) {
-                return super::json_suite::parse_envelope(content, capabilities);
-            }
-            if fenced_json_looks_like_response_protocol(candidate) {
-                return super::json_suite::parse_envelope(content, capabilities);
-            }
-            if has_unclosed_code_fence(candidate) {
-                return malformed_markdown_response("unclosed_markdown_code_fence");
-            }
-            return ParsedEnvelope {
-                final_answer: candidate.to_string(),
-                toolgen_retrospect: String::new(),
-                continue_work: false,
-                thought: String::new(),
-                thought_keep_in_context: false,
-                next_actions: vec![],
-                action_groups: vec![],
-                context_compacts: vec![],
-                memory_candidates: vec![],
-                runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
-                repair_issue: None,
-            };
-        }
-        if candidate.contains('{') && contains_protocol_json_markers(candidate) {
-            return super::json_suite::parse_envelope(content, capabilities);
-        }
-        return ParsedEnvelope {
-            final_answer: candidate.to_string(),
-            toolgen_retrospect: String::new(),
-            continue_work: false,
-            thought: String::new(),
-            thought_keep_in_context: false,
-            next_actions: vec![],
-            action_groups: vec![],
-            context_compacts: vec![],
-            memory_candidates: vec![],
-            runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
-            repair_issue: None,
-        };
-    }
-
-    if !has_sections && !has_action_blocks {
-        if candidate.contains("```")
-            || (candidate.contains('{') && contains_protocol_json_markers(candidate))
-        {
-            return super::json_suite::parse_envelope(content, capabilities);
-        }
-        return ParsedEnvelope {
-            final_answer: candidate.to_string(),
-            toolgen_retrospect: String::new(),
-            continue_work: false,
-            thought: String::new(),
-            thought_keep_in_context: false,
-            next_actions: vec![],
-            action_groups: vec![],
-            context_compacts: vec![],
-            memory_candidates: vec![],
-            runtime_note: Some("auto_wrapped_prose_as_final_answer".to_string()),
-            repair_issue: None,
-        };
-    }
-
+        return malformed_markdown_response("markdown_response_sections_required");
+    };
     let sections = split_sections(candidate);
 
     let mut status_raw = String::new();
@@ -368,32 +225,29 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     for section in &sections {
         match section.heading.as_str() {
             "status" => status_raw = section.body.trim().to_lowercase(),
-            "answer" | "final_answer" | "final answer" => {
+            "final_answer" => {
                 final_answer = section.body.clone();
             }
-            "toolgen_retrospect" | "toolgen retrospect" => {
+            "toolgen_retrospect" => {
                 toolgen_retrospect = section.body.trim().to_string();
             }
-            "free_talk" | "free talk" | "freetalk" => {
+            "free_talk" => {
                 thought = section.body.trim().to_string();
                 thought_keep_in_context = !thought.is_empty();
             }
             "working_still_action" => {
                 actions_body = section.body.clone();
             }
-            "context compact" | "context_compact" | "compact" => {
+            "context compact" => {
                 context_compact_body = section.body.clone();
-            }
-            "" if !has_sections && has_action_blocks && actions_body.is_empty() => {
-                actions_body = section.body.clone();
             }
             _ => {}
         }
     }
 
     let continue_work = match status_raw.as_str() {
-        "finished" | "done" | "complete" => false,
-        "working" | "in_progress" | "in progress" => true,
+        "finished" => false,
+        "working" => true,
         "" => actions_body.is_empty() || final_answer.is_empty(),
         _ => {
             repair_issue = Some("status_must_be_working_or_finished".to_string());
@@ -407,21 +261,8 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
     if !actions_body.is_empty() {
         let blocks = extract_action_blocks(&actions_body);
 
-        let trimmed_actions_body = actions_body.trim();
-        if blocks.is_empty()
-            && (trimmed_actions_body.starts_with('{') || trimmed_actions_body.starts_with('['))
-        {
-            if let Ok(value) = serde_json::from_str::<Value>(trimmed_actions_body) {
-                match parse_action_groups_value(&value, capabilities) {
-                    Ok(groups) => {
-                        next_actions.extend(groups.iter().flat_map(|group| group.actions.clone()));
-                        action_groups.extend(groups);
-                    }
-                    Err(issue) => repair_issue = Some(issue),
-                }
-            } else {
-                repair_issue = Some("actions_section_invalid_json".to_string());
-            }
+        if blocks.is_empty() {
+            repair_issue = Some("actions_section_requires_action_fence".to_string());
         } else {
             for (idx, block) in blocks.iter().enumerate() {
                 match serde_json::from_str::<Value>(block) {
@@ -450,18 +291,12 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
         repair_issue = Some("final_answer_required_when_status_finished".to_string());
     }
     if repair_issue.is_none() && !toolgen_retrospect.trim().is_empty() {
-        let retrospect_index = sections.iter().position(|section| {
-            matches!(
-                section.heading.as_str(),
-                "toolgen_retrospect" | "toolgen retrospect"
-            )
-        });
-        let final_index = sections.iter().position(|section| {
-            matches!(
-                section.heading.as_str(),
-                "answer" | "final_answer" | "final answer"
-            )
-        });
+        let retrospect_index = sections
+            .iter()
+            .position(|section| matches!(section.heading.as_str(), "toolgen_retrospect"));
+        let final_index = sections
+            .iter()
+            .position(|section| matches!(section.heading.as_str(), "final_answer"));
         if continue_work || final_answer.trim().is_empty() {
             repair_issue = Some("toolgen_retrospect_requires_final_answer".to_string());
         } else if match retrospect_index.zip(final_index) {
@@ -471,12 +306,7 @@ pub fn parse_markdown_envelope(content: &str, capabilities: &CapabilityRegistry)
             repair_issue = Some("toolgen_retrospect_must_precede_final_answer".to_string());
         }
     }
-    if repair_issue.is_none()
-        && !final_answer.trim().is_empty()
-        && status_raw != "finished"
-        && status_raw != "done"
-        && status_raw != "complete"
-    {
+    if repair_issue.is_none() && !final_answer.trim().is_empty() && status_raw != "finished" {
         repair_issue = Some("final_answer_requires_status_finished".to_string());
     }
     let runtime_note: Option<String> = None;
@@ -532,9 +362,6 @@ fn parse_context_compact_section(
             in_summary = false;
         } else if let Some(rest) = trimmed.strip_prefix("offload:") {
             offload_delta_ids = split_id_list(rest);
-            in_summary = false;
-        } else if let Some(rest) = trimmed.strip_prefix("delta_ids:") {
-            discard_delta_ids = split_id_list(rest);
             in_summary = false;
         } else if let Some(rest) = trimmed.strip_prefix("summary:") {
             in_summary = true;

@@ -83,7 +83,6 @@ validate_one xml "$TMP_XML" \
   'Return one XML `<response>` root.' \
   '`<response>`' \
   '`<final_answer>`' \
-  '## XML-native actions' \
   '<actions>' \
   '<parallel>' \
   '<run_bash timeout_ms="5000">' \

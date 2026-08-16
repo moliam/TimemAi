@@ -57,19 +57,7 @@ pub struct ParsedAction {
 }
 impl ParsedAction {
     pub fn audit_input(&self) -> Value {
-        let mut input = self.raw_input.clone();
-        if self.action == "self_tool" {
-            if let Some(object) = input.as_object_mut() {
-                if let Some(key) = object.get("key").and_then(Value::as_str) {
-                    if crate::self_tool::is_sensitive_env_key(key)
-                        || crate::self_tool::is_memory_path_env_key(key)
-                    {
-                        object.insert("value".to_string(), serde_json::json!("<redacted>"));
-                    }
-                }
-            }
-        }
-        input
+        self.raw_input.clone()
     }
 
     pub fn input_str(&self, key: &str) -> String {
@@ -129,21 +117,11 @@ impl ParsedAction {
     }
 
     pub fn timeout_ms(&self, default_ms: u64) -> u64 {
-        self.input_u64("timeout_ms")
-            .or_else(|| {
-                self.input_u64("timeout_sec")
-                    .map(|seconds| seconds.saturating_mul(1000))
-            })
-            .unwrap_or(default_ms)
+        self.input_u64("timeout_ms").unwrap_or(default_ms)
     }
 
     pub fn timeout_ms_i64(&self, default_ms: i64) -> i64 {
-        self.input_i64("timeout_ms")
-            .or_else(|| {
-                self.input_i64("timeout_sec")
-                    .map(|seconds| seconds.saturating_mul(1000))
-            })
-            .unwrap_or(default_ms)
+        self.input_i64("timeout_ms").unwrap_or(default_ms)
     }
 
     pub fn shell_timeout_ms(&self) -> u64 {
@@ -156,11 +134,6 @@ impl ParsedAction {
 
     pub fn background(&self) -> bool {
         self.input_bool("background")
-            || self
-                .raw_input
-                .get("mode")
-                .and_then(Value::as_str)
-                .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("background"))
     }
 }
 
@@ -172,9 +145,6 @@ pub(crate) fn parse_action_object(
     let Some(object) = value.as_object() else {
         return Err(format!("{label}.action_missing"));
     };
-    if object.contains_key("order") || object.contains_key("actions") {
-        return Err(format!("{label}.old_group_object_not_supported"));
-    }
     if object.len() != 1 {
         return Err(format!("{label}.action_missing"));
     }

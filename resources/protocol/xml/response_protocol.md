@@ -5,48 +5,38 @@ write anything before or after it.
 
 ## Response shape
 
-Inside `<response>`, write optional `<free_talk>` first, then exactly one state
-branch:
+Inside `<response>`, write optional `<free_talk>` first, expressing your thought.
+Then, if you think the task should stop now, add a `<finish_confirm>` label and starts exactly with prefix:
+CONFIRM_PREFIX: "Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action."
+Then, follow exactly one state branch:
 
-- `<actions>`: runtime work is still required.
-- `<context_compact>`: old dynamic context should be replaced by a summary.
-- `<final_answer>`: the current user request is complete.
+- `<actions>`: work should continue, generate actions.
+- `<context_compact>`: maintain/reorganize dynamic context for future better work.
+- `<final_answer>`: the current user task is completed.
 
-`<free_talk>` is a brief visible working note. `<final_answer>` is raw Markdown
-for the user. Neither field contains protocol tags.
+`<free_talk>` is a brief user-visible working thought.
+`<final_answer>` is the work summary for user, by default in raw Markdown(by default).
+`<actions>` are those function provided by capability catalog. Refer to capabiltiy for available actions.
 
-## XML-native actions
-
-Inside `<actions>`, direct child tools execute sequentially in document order.
-Tools inside `<parallel>` execute concurrently. Do not nest `<parallel>`.
-
-Use the exact tool id from the capability catalog as the element name. Tool
-arguments are attributes or child elements:
-
-- Short scalar values may be attributes.
-- String, object, and array values should be child elements.
-- An array contains `<item>` children.
-- An object contains children named after its fields.
-- The type shown beside each tool option determines string, number, integer,
-  boolean, array, and object values. Do not add JSON or `type` wrappers.
-- For a nullable option, a self-closing argument such as `<value/>` means null.
-- Do not provide the same argument as both an attribute and a child.
-- Close every tool element before closing its surrounding `<parallel>`.
-- Escape XML text normally. For commands or other strings containing `<`, `>`,
-  or `&`, a leaf element may use `<![CDATA[...]]>`; its content is passed
-  literally. Do not emit XML declarations, DTDs, custom entity declarations,
-  or comments.
+Note: For commands or other special strings containing such as `<`, `>`,
+or `&`, a leaf element may use `<![CDATA[...]]>`; its content is passed
+  literally.
 
 Before sending, verify that there is exactly one `<response>` root, exactly one
 state branch, and that every opened tool/group tag has its matching close tag.
 When using `<actions>`, do not append a second fallback or final response.
 
-## Format examples — EXAMPLES ONLY
-
+## RESPONSE EXAMPLES
 These demonstrate protocol shape; they are not requests to execute.
 
-First inspect in parallel, then run one sequential test:
+EXAMPLE1: All user's tasks are finished
+<response>
+  <free_talk>The reason for the bug has been thoroughly investigated.</free_talk>
+  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action. Yes, the deduction chain is solid, no jump in thought. The bug can be ABA confirmed.</finish_confirm>
+  <final_answer>I have finish the debug task. The reason is: .... </final_answer>
+</response>
 
+EXAMPLE2: Task ongoing. First inspect in parallel, then run one sequential test:
 <response>
   <free_talk>I will inspect the workspace, then run its test.</free_talk>
   <actions>
@@ -67,30 +57,32 @@ First inspect in parallel, then run one sequential test:
   </actions>
 </response>
 
-For a schema-declared array argument named `files`, write
-`<files><item>README.md</item><item>package.json</item></files>`. For a
-schema-declared object argument named `options`, write field children such as
-`<options><mode>strict</mode><limit>20</limit></options>`.
-
-## Context compact
-
-Use `<context_compact>` only for long-context maintenance. Include at least one
-of `<discard>` or `<offload>`, plus `<summary>`:
-
+EXAMPLE3: Planned to stop, but "think twice" changes your idea and you continue the work.
 <response>
-  <free_talk>Old completed work is crowding the active task.</free_talk>
+  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action. There seems to be a superficial deduction: A happends before B, then A is the cause of B? Could be super wrong. Let me check more.</finish_confirm>
+  <actions><run_bash><cmd>pwd</cmd></run_bash></actions>
+</response>
+
+EXAMPLE3: context compact
+<response>
+  <free_talk>Context window is running out. Need to compress for more room. Let me discard some, and offload some stale/redundant contexts.</free_talk>
   <context_compact>
-    <discard>pd_1</discard>
+    <discard>pd_1,pd_3,pd_8,pd_9,pd_10,pd_11</discard>
     <offload>pd_2</offload>
-    <summary>Task A is complete. Current task: B. Next: verify C.</summary>
+    <summary>
+    The current user's task is: ...
+    The whole picture of active works' status are:
+     A: completed,
+     B: todo
+     C: todo
+     ...
+
+    Distilled/Need-to-keep useful history from optimized deltas: ....
+    </summary>
   </context_compact>
 </response>
 
-Only target runtime-provided dynamic delta ids. Do not target the static system
-prompt. Runtime writes offloaded content to scratch and returns its id.
-
-## Final answer
-
-<response>
-  <final_answer>The requested change is complete and verified.</final_answer>
-</response>
+discard: just throw from the context.
+offload: will be saved into scratch memory, the runtime will return a id with which you can retrieve the pd back using `memmgr`.
+`context_compact` should only targets runtime-provided dynamic delta ids. Do not target the static system
+prompt.
