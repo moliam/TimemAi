@@ -74,7 +74,7 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
     assert_eq!(
         blocks[2].text,
-        "Please continue the work and respond as protocol requires:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
     assert_eq!(blocks[2].cache, CacheControl::None);
 }

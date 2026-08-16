@@ -4,7 +4,7 @@ use crate::response_protocol::ResponseProtocolSuite;
 use crate::{PromptDelta, PromptSlice};
 
 pub(crate) const RESPONSE_TRAILER: &str =
-    "Please continue the work and respond as protocol requires:";
+    "Please continue the work and respond as protocol requires in user's language:";
 
 pub(crate) fn formatted_response_trailer(
     _response_shape_hint: &str,
