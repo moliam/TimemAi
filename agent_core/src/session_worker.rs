@@ -64,12 +64,14 @@ impl CoreSessionWorkerConfig {
 #[derive(Clone, Debug)]
 pub struct CoreSessionWorkerRuntime {
     working_workers: Arc<AtomicUsize>,
+    working_workers_by_session: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl CoreSessionWorkerRuntime {
     pub fn new() -> Self {
         Self {
             working_workers: Arc::new(AtomicUsize::new(0)),
+            working_workers_by_session: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -77,42 +79,73 @@ impl CoreSessionWorkerRuntime {
         self.working_workers.load(Ordering::SeqCst)
     }
 
-    fn begin_worker_turn(&self) -> WorkingWorkerGuard {
+    fn session_working_worker_count(&self, session_id: &str) -> usize {
+        self.working_workers_by_session
+            .lock()
+            .map(|counts| counts.get(session_id).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    fn begin_worker_turn(&self, session_id: &str) -> WorkingWorkerGuard {
         let active = Arc::new(AtomicBool::new(true));
         self.working_workers.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut counts) = self.working_workers_by_session.lock() {
+            *counts.entry(session_id.to_string()).or_insert(0) += 1;
+        }
         WorkingWorkerGuard {
             working_workers: Arc::clone(&self.working_workers),
+            working_workers_by_session: Arc::clone(&self.working_workers_by_session),
+            session_id: session_id.to_string(),
             active,
         }
     }
 
-    fn finish_worker_turn_if_active(&self, active: &Arc<AtomicBool>) -> usize {
+    fn finish_worker_turn_if_active(
+        &self,
+        session_id: &str,
+        active: &Arc<AtomicBool>,
+    ) -> (usize, usize) {
         if active.swap(false, Ordering::SeqCst) {
-            self.working_workers
+            let global_count = self
+                .working_workers
                 .fetch_sub(1, Ordering::SeqCst)
-                .saturating_sub(1)
+                .saturating_sub(1);
+            let session_count =
+                decrement_session_working_count(&self.working_workers_by_session, session_id);
+            (global_count, session_count)
         } else {
-            self.working_worker_count()
+            (
+                self.working_worker_count(),
+                self.session_working_worker_count(session_id),
+            )
         }
     }
 
     fn model_response_global_status(
         &self,
+        session_id: &str,
         continue_work: bool,
         active: Option<&Arc<AtomicBool>>,
     ) -> CoreGlobalWorkerStatus {
-        let visible_count = if continue_work {
-            self.working_worker_count()
+        let (global_count, session_count) = if continue_work {
+            (
+                self.working_worker_count(),
+                self.session_working_worker_count(session_id),
+            )
         } else if let Some(active) = active {
-            self.finish_worker_turn_if_active(active)
+            self.finish_worker_turn_if_active(session_id, active)
         } else {
-            self.working_worker_count()
+            (
+                self.working_worker_count(),
+                self.session_working_worker_count(session_id),
+            )
         };
-        CoreGlobalWorkerStatus::new(visible_count)
+        CoreGlobalWorkerStatus::with_session_working_worker_count(global_count, session_count)
     }
 
     fn enrich_topic_events(
         &self,
+        session_id: &str,
         events: Vec<CoreTopicEvent>,
         active: Option<&Arc<AtomicBool>>,
     ) -> Vec<CoreTopicEvent> {
@@ -122,9 +155,11 @@ impl CoreSessionWorkerRuntime {
                 let Some(model_response) = event.as_model_response() else {
                     return event;
                 };
-                event.with_global_worker_status(
-                    self.model_response_global_status(model_response.continue_work, active),
-                )
+                event.with_global_worker_status(self.model_response_global_status(
+                    session_id,
+                    model_response.continue_work,
+                    active,
+                ))
             })
             .collect()
     }
@@ -138,7 +173,27 @@ impl Default for CoreSessionWorkerRuntime {
 
 struct WorkingWorkerGuard {
     working_workers: Arc<AtomicUsize>,
+    working_workers_by_session: Arc<Mutex<BTreeMap<String, usize>>>,
+    session_id: String,
     active: Arc<AtomicBool>,
+}
+
+fn decrement_session_working_count(
+    counts: &Arc<Mutex<BTreeMap<String, usize>>>,
+    session_id: &str,
+) -> usize {
+    let Ok(mut counts) = counts.lock() else {
+        return 0;
+    };
+    let Some(count) = counts.get_mut(session_id) else {
+        return 0;
+    };
+    *count = count.saturating_sub(1);
+    let remaining = *count;
+    if remaining == 0 {
+        counts.remove(session_id);
+    }
+    remaining
 }
 
 impl WorkingWorkerGuard {
@@ -151,6 +206,7 @@ impl Drop for WorkingWorkerGuard {
     fn drop(&mut self) {
         if self.active.swap(false, Ordering::SeqCst) {
             self.working_workers.fetch_sub(1, Ordering::SeqCst);
+            decrement_session_working_count(&self.working_workers_by_session, &self.session_id);
         }
     }
 }
@@ -1040,7 +1096,7 @@ impl CoreSessionWorker {
                         }
                         let context_id = identity.context_id.clone();
                         let outcome = {
-                            let working = runtime.begin_worker_turn();
+                            let working = runtime.begin_worker_turn(&identity.session_id);
                             ui.current_turn_active = Some(working.active_handle());
                             let outcome = loop {
                                 let main_outcome = run_session_turn_with_model_client(
@@ -1105,7 +1161,7 @@ impl CoreSessionWorker {
                             let _ = event_tx
                                 .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
                         }
-                        let working = runtime.begin_worker_turn();
+                        let working = runtime.begin_worker_turn(&identity.session_id);
                         ui.current_turn_active = Some(working.active_handle());
                         let toolgen_runner = ToolGenRunner {
                             core: &mut core,
@@ -1517,7 +1573,11 @@ impl TurnUi for WorkerTurnUi {
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         let events = self
             .runtime
-            .enrich_topic_events(events.to_vec(), self.current_turn_active.as_ref())
+            .enrich_topic_events(
+                &self.session_id,
+                events.to_vec(),
+                self.current_turn_active.as_ref(),
+            )
             .into_iter()
             .map(|mut event| {
                 event.session_id = self.session_id.clone();

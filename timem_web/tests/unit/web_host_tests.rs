@@ -4070,6 +4070,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         active_turn_id: None,
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
+        reported_session_working_worker_count: None,
         work_instruction_mode: WorkInstructionLoadMode::Off,
         work_instruction_allowed: None,
         pending_work_instruction_turn: None,
@@ -4557,6 +4558,162 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
         "ready"
     );
     assert_eq!(session.turns.last().unwrap().state, "finished");
+}
+
+#[test]
+fn primary_turn_finish_preserves_explicitly_reported_active_subworker() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+    let sub_context_id = "context_session_a_active_sub".to_string();
+    let sub_worker_id = "worker_session_a_active_sub".to_string();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.contexts.push(WebContext {
+            context_id: sub_context_id.clone(),
+            current_dir: "/work/active-subtask".to_string(),
+            worker_ids: vec![sub_worker_id.clone()],
+        });
+        session.workers.push(WebWorker {
+            worker_id: sub_worker_id.clone(),
+            context_id: sub_context_id,
+            display_name: "Active subtask".to_string(),
+            ordinal: 99,
+            state: "working".to_string(),
+            parent_worker_id: Some(primary_worker_id.clone()),
+        });
+    }
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Finished,
+            json!({
+                "status": "ALL_FINISHED",
+                "final_answer": "primary done",
+                "continue_work": false,
+                "global": {
+                    "working_worker_count": 1,
+                    "session_working_worker_count": 1
+                }
+            }),
+        )
+        .with_worker_scope(primary_context_id.clone(), primary_worker_id.clone())]),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: agent_core::TurnOutcome::final_response(
+                "primary done",
+                agent_core::UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "working");
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == primary_worker_id)
+            .unwrap()
+            .state,
+        "ready"
+    );
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == sub_worker_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+}
+
+#[test]
+fn primary_turn_finish_ignores_other_sessions_global_worker_count() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Finished,
+            json!({
+                "status": "ALL_FINISHED",
+                "final_answer": "primary done",
+                "continue_work": false,
+                "global": {
+                    "working_worker_count": 1,
+                    "session_working_worker_count": 0
+                }
+            }),
+        )
+        .with_worker_scope(primary_context_id.clone(), primary_worker_id.clone())]),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: agent_core::TurnOutcome::final_response(
+                "primary done",
+                agent_core::UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "ready");
+    assert!(session
+        .workers
+        .iter()
+        .all(|worker| worker.state != "working"));
 }
 
 #[test]

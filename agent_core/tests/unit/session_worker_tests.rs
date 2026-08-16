@@ -2238,7 +2238,7 @@ impl ModelClient for WorkerCountModel {
 fn drain_worker_count_event(
     events: &Receiver<CoreSessionWorkerEvent>,
     label: &str,
-    counts: &mut Vec<usize>,
+    counts: &mut Vec<(usize, usize)>,
     finished: &mut bool,
 ) {
     if *finished {
@@ -2250,7 +2250,12 @@ fn drain_worker_count_event(
                 events
                     .iter()
                     .filter_map(CoreTopicEvent::as_model_response)
-                    .map(|topic| topic.global.working_worker_count),
+                    .map(|topic| {
+                        (
+                            topic.global.working_worker_count,
+                            topic.global.session_working_worker_count,
+                        )
+                    }),
             );
         }
         Ok(CoreSessionWorkerEvent::TurnFinished { outcome }) => {
@@ -2270,7 +2275,7 @@ fn drain_worker_count_event(
 fn collect_two_worker_model_response_counts(
     events_a: &Receiver<CoreSessionWorkerEvent>,
     events_b: &Receiver<CoreSessionWorkerEvent>,
-) -> Vec<usize> {
+) -> Vec<(usize, usize)> {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut counts = Vec::new();
     let mut finished_a = false;
@@ -2288,11 +2293,11 @@ fn collect_two_worker_model_response_counts(
 }
 
 #[test]
-fn shared_worker_runtime_publishes_global_working_count_on_model_response_topics() {
+fn shared_worker_runtime_distinguishes_global_and_cross_session_working_counts() {
     let runtime = CoreSessionWorkerRuntime::new();
     let barrier = Arc::new(Barrier::new(2));
-    let dir_a = tmp_dir("worker_count_a");
-    let dir_b = tmp_dir("worker_count_b");
+    let dir_a = tmp_dir("worker_count_cross_session_a");
+    let dir_b = tmp_dir("worker_count_cross_session_b");
     let mut core_a = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
@@ -2309,10 +2314,11 @@ fn shared_worker_runtime_publishes_global_working_count_on_model_response_topics
     );
     core_a.set_bash_approval_mode(BashApprovalMode::Approve);
     core_b.set_bash_approval_mode(BashApprovalMode::Approve);
+
     let worker_a = CoreSessionWorker::spawn_with_runtime_model_client(
         core_a,
         test_config(),
-        test_worker_config(&dir_a, "worker_count_a", 1),
+        test_worker_config(&dir_a, "worker_count_session_a", 1),
         runtime.clone(),
         WorkerCountModel {
             first_call_barrier: Arc::clone(&barrier),
@@ -2322,7 +2328,7 @@ fn shared_worker_runtime_publishes_global_working_count_on_model_response_topics
     let worker_b = CoreSessionWorker::spawn_with_runtime_model_client(
         core_b,
         test_config(),
-        test_worker_config(&dir_b, "worker_count_b", 2),
+        test_worker_config(&dir_b, "worker_count_session_b", 2),
         runtime.clone(),
         WorkerCountModel {
             first_call_barrier: barrier,
@@ -2342,21 +2348,141 @@ fn shared_worker_runtime_publishes_global_working_count_on_model_response_topics
 
     handle_a.run_turn("worker count a", None).unwrap();
     handle_b.run_turn("worker count b", None).unwrap();
-
     let all_counts = collect_two_worker_model_response_counts(worker_a.events(), worker_b.events());
 
     assert!(
-        all_counts.contains(&2),
-        "at least one progress response should see both workers active: {all_counts:?}"
+        all_counts.contains(&(2, 1)),
+        "two active workers in separate sessions must report global=2 and session=1: {all_counts:?}"
     );
     assert!(
-        all_counts.contains(&0),
-        "the last final response should tell UI no workers remain active: {all_counts:?}"
+        all_counts.iter().any(|(global, session)| *global == 1 && *session == 0),
+        "a session's final response must reach session=0 while another session remains active: {all_counts:?}"
+    );
+    assert!(
+        all_counts.contains(&(0, 0)),
+        "the last final response must report no remaining workers: {all_counts:?}"
+    );
+    assert!(
+        all_counts.iter().all(|(global, session)| session <= global),
+        "session count must never exceed global count: {all_counts:?}"
     );
     assert_eq!(runtime.working_worker_count(), 0);
 
     worker_a.shutdown().unwrap();
     worker_b.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir_a);
+    let _ = std::fs::remove_dir_all(dir_b);
+}
+
+#[test]
+fn shared_worker_runtime_reports_same_session_worker_count() {
+    let runtime = CoreSessionWorkerRuntime::new();
+    let barrier = Arc::new(Barrier::new(2));
+    let dir_a = tmp_dir("worker_count_same_session_a");
+    let dir_b = tmp_dir("worker_count_same_session_b");
+    let mut core_a = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir_a,
+    );
+    let mut core_b = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir_b,
+    );
+    core_a.set_bash_approval_mode(BashApprovalMode::Approve);
+    core_b.set_bash_approval_mode(BashApprovalMode::Approve);
+
+    let config_a = CoreSessionWorkerConfig::new(
+        CoreSessionWorkerIdentity::new_scoped(
+            "worker_count_shared_session",
+            "context_a",
+            "worker_a",
+            1,
+            None,
+            None,
+        ),
+        CoreSessionWorkerWorkspace::new(
+            &dir_a,
+            dir_a.join("audit").join("api_audit.json"),
+            "test_worker",
+            "test_machine",
+        ),
+    );
+    let config_b = CoreSessionWorkerConfig::new(
+        CoreSessionWorkerIdentity::new_scoped(
+            "worker_count_shared_session",
+            "context_b",
+            "worker_b",
+            2,
+            None,
+            Some("worker_a".to_string()),
+        ),
+        CoreSessionWorkerWorkspace::new(
+            &dir_b,
+            dir_b.join("audit").join("api_audit.json"),
+            "test_worker",
+            "test_machine",
+        ),
+    );
+
+    let worker_a = CoreSessionWorker::spawn_with_runtime_model_client(
+        core_a,
+        test_config(),
+        config_a,
+        runtime.clone(),
+        WorkerCountModel {
+            first_call_barrier: Arc::clone(&barrier),
+            call_no: 0,
+        },
+    );
+    let worker_b = CoreSessionWorker::spawn_with_runtime_model_client(
+        core_b,
+        test_config(),
+        config_b,
+        runtime.clone(),
+        WorkerCountModel {
+            first_call_barrier: barrier,
+            call_no: 0,
+        },
+    );
+    let handle_a = worker_a.handle();
+    let handle_b = worker_b.handle();
+    let _ = worker_a
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    let _ = worker_b
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+
+    handle_a.run_turn("same session worker a", None).unwrap();
+    handle_b.run_turn("same session worker b", None).unwrap();
+    let all_counts = collect_two_worker_model_response_counts(worker_a.events(), worker_b.events());
+
+    assert!(
+        all_counts.contains(&(2, 2)),
+        "two active workers in one session must report global=2 and session=2: {all_counts:?}"
+    );
+    assert!(
+        all_counts.iter().all(|(global, session)| global == session),
+        "when all active workers share one session, both counts must match: {all_counts:?}"
+    );
+    assert!(
+        all_counts.contains(&(0, 0)),
+        "the last final response must report no remaining workers: {all_counts:?}"
+    );
+    assert_eq!(runtime.working_worker_count(), 0);
+
+    worker_a.shutdown().unwrap();
+    worker_b.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir_a);
+    let _ = std::fs::remove_dir_all(dir_b);
 }
 
 trait WorkerEventTestExt {
