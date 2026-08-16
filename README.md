@@ -51,20 +51,16 @@ can use different models or endpoints without changing the others.
 
 ### Reminder tips configuration
 
-On first startup, Timem creates one user-level global `reminder_tips.json`.
-Both `timem` and `timem-web` load the same file at startup, across all projects,
-mem spaces, and Sessions:
+The default schedules live in `resources/reminder_tips.json`. `install.sh` installs that file under the installation prefix, normally `~/.local/share/timem/resources/reminder_tips.json`, and both `timem` and `timem-web` load it at startup.
+
+To customize tips globally for the current user, create `reminder_tips.json` in one of these locations. A user file takes precedence over the installed resource and is never overwritten or removed by install/uninstall:
 
 - macOS: `~/Library/Application Support/TimemAi/reminder_tips.json`
 - Linux: `${XDG_CONFIG_HOME:-~/.config}/timem/reminder_tips.json`
-- Override: set `TIMEM_CONFIG_DIR` to the directory that should contain the file.
+- Config override: set `TIMEM_CONFIG_DIR` to the directory containing the user file.
+- Resource override: set `TIMEM_RESOURCES_DIR` to an alternate resources directory.
 
-A schedule may trigger by active minutes or completed model rounds; when
-`NONE` is randomly selected, that period is consumed without adding anything
-to the prompt. Project-local `.timem_data` directories never hold this program
-configuration.
-
-Restart Timem after editing the file so the new schedules are loaded.
+A schedule may trigger by active minutes or completed model rounds; when `NONE` is randomly selected, that period is consumed without adding anything to the prompt. Project-local `.timem_data` directories never hold this program configuration. Restart Timem after editing either the user override or installed resource.
 
 ```json
 {
@@ -81,10 +77,7 @@ Restart Timem after editing the file so the new schedules are loaded.
 }
 ```
 
-Each schedule must set exactly one of `every_minutes` or `every_rounds` to a
-positive integer and provide a non-empty `tips` list. Invalid configuration is
-reported as a warning and safely falls back to the built-in defaults; it never
-prevents Timem from starting.
+Each schedule must set exactly one of `every_minutes` or `every_rounds` to a positive integer and provide a non-empty `tips` list. Invalid user or resource configuration is reported as a warning and safely falls through to the next valid source or the embedded safety fallback; it never prevents Timem from starting.
 
 ## Optional Environment Configuration
 

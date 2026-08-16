@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 fn tmp_dir(name: &str) -> PathBuf {
     let now = std::time::SystemTime::now()
@@ -12,102 +13,152 @@ fn tmp_dir(name: &str) -> PathBuf {
     ))
 }
 
-#[test]
-fn missing_file_is_created_and_loaded_with_both_schedule_types() {
-    let dir = tmp_dir("create_default");
-    let config = load_reminder_tips_config(&dir);
-    let path = reminder_tips_config_path(&dir);
-    assert!(path.is_file());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-    assert!(config
-        .schedules
-        .iter()
-        .any(|item| item.every_minutes == Some(10)));
-    assert!(config
-        .schedules
-        .iter()
-        .any(|item| item.every_rounds == Some(8)));
-    let _ = fs::remove_dir_all(dir);
+fn write_config(path: &Path, json: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, json).unwrap();
 }
 
 #[test]
-fn default_config_contains_the_shipped_time_and_reasoning_tips() {
+fn missing_user_override_loads_resource_without_creating_user_file() {
+    let root = tmp_dir("resource_default");
+    let config_root = root.join("config");
+    let resources = root.join("resources");
+    write_config(
+        &resources.join(REMINDER_TIPS_FILE_NAME),
+        r#"{"schedules":[{"every_rounds":3,"tips":["TIPS: installed resource"]}]}"#,
+    );
+
+    let config = load_reminder_tips_config_from_resource_dirs(
+        &config_root,
+        std::slice::from_ref(&resources),
+    );
+
+    assert_eq!(config.schedules[0].every_rounds, Some(3));
+    assert_eq!(config.schedules[0].tips, ["TIPS: installed resource"]);
+    assert!(
+        !reminder_tips_config_path(&config_root).exists(),
+        "loading shipped resources must not create a user override"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn user_override_takes_precedence_over_installed_resource() {
+    let root = tmp_dir("user_precedence");
+    let config_root = root.join("config");
+    let resources = root.join("resources");
+    write_config(
+        &reminder_tips_config_path(&config_root),
+        r#"{"schedules":[{"every_rounds":2,"tips":["TIPS: user override"]}]}"#,
+    );
+    write_config(
+        &resources.join(REMINDER_TIPS_FILE_NAME),
+        r#"{"schedules":[{"every_rounds":3,"tips":["TIPS: installed resource"]}]}"#,
+    );
+
+    let config = load_reminder_tips_config_from_resource_dirs(
+        &config_root,
+        std::slice::from_ref(&resources),
+    );
+
+    assert_eq!(config.schedules[0].every_rounds, Some(2));
+    assert_eq!(config.schedules[0].tips, ["TIPS: user override"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_user_override_falls_through_to_valid_resource() {
+    let root = tmp_dir("invalid_user");
+    let config_root = root.join("config");
+    let resources = root.join("resources");
+    write_config(&reminder_tips_config_path(&config_root), "not json");
+    write_config(
+        &resources.join(REMINDER_TIPS_FILE_NAME),
+        r#"{"schedules":[{"every_minutes":4,"tips":["TIPS: resource fallback"]}]}"#,
+    );
+
+    let config = load_reminder_tips_config_from_resource_dirs(
+        &config_root,
+        std::slice::from_ref(&resources),
+    );
+
+    assert_eq!(config.schedules[0].every_minutes, Some(4));
+    assert_eq!(config.schedules[0].tips, ["TIPS: resource fallback"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn first_valid_resource_candidate_wins() {
+    let root = tmp_dir("resource_precedence");
+    let first = root.join("first");
+    let second = root.join("second");
+    write_config(
+        &first.join(REMINDER_TIPS_FILE_NAME),
+        r#"{"schedules":[{"every_rounds":5,"tips":["TIPS: first"]}]}"#,
+    );
+    write_config(
+        &second.join(REMINDER_TIPS_FILE_NAME),
+        r#"{"schedules":[{"every_rounds":6,"tips":["TIPS: second"]}]}"#,
+    );
+
+    let config =
+        load_reminder_tips_config_from_resource_dirs(&root.join("config"), &[first, second]);
+
+    assert_eq!(config.schedules[0].every_rounds, Some(5));
+    assert_eq!(config.schedules[0].tips, ["TIPS: first"]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn default_config_is_parsed_from_the_shipped_resource() {
+    let parsed = serde_json::from_str::<ReminderTipsConfig>(SHIPPED_REMINDER_TIPS)
+        .unwrap()
+        .validate()
+        .unwrap();
     let config = ReminderTipsConfig::default();
+
+    assert_eq!(config, parsed);
     assert_eq!(config.schedules.len(), 2);
     assert_eq!(config.schedules[0].every_minutes, Some(10));
     assert_eq!(config.schedules[1].every_rounds, Some(8));
-    assert_eq!(config.schedules[0].tips.len(), 3);
-    assert_eq!(config.schedules[1].tips.len(), 3);
     assert!(config
         .schedules
         .iter()
         .flat_map(|item| &item.tips)
         .all(|tip| tip == "NONE" || (tip.starts_with("TIPS: ") && tip.is_ascii())));
-    assert!(config.schedules[0].tips.iter().any(|tip| tip
-        == "TIPS: Remind the goal, don't get lost. If you get lost, say so promptly, and stop."));
 }
 
 #[test]
-fn concurrent_first_start_creates_one_complete_config_without_blocking_any_caller() {
-    use std::sync::{Arc, Barrier};
+fn missing_or_unusable_sources_fall_back_without_blocking_startup() {
+    let root = tmp_dir("fallback");
+    let config_root_is_file = root.join("config-is-file");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&config_root_is_file, "not a directory").unwrap();
 
-    let dir = tmp_dir("concurrent_first_start");
-    let workers = 16;
-    let barrier = Arc::new(Barrier::new(workers));
-    let handles = (0..workers)
-        .map(|_| {
-            let dir = dir.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                load_reminder_tips_config(&dir)
-            })
-        })
-        .collect::<Vec<_>>();
-    for handle in handles {
-        assert_eq!(handle.join().unwrap(), ReminderTipsConfig::default());
-    }
-    let text = fs::read_to_string(reminder_tips_config_path(&dir)).unwrap();
     assert_eq!(
-        serde_json::from_str::<ReminderTipsConfig>(&text)
-            .unwrap()
-            .validate()
-            .unwrap(),
+        load_reminder_tips_config_from_resource_dirs(&config_root_is_file, &[]),
         ReminderTipsConfig::default()
     );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn unusable_config_root_falls_back_to_defaults_without_blocking_startup() {
-    let root_is_a_file = tmp_dir("root_is_file");
-    fs::write(&root_is_a_file, "not a directory").unwrap();
     assert_eq!(
-        load_reminder_tips_config(&root_is_a_file),
+        load_reminder_tips_config_from_resource_dirs(&root.join("missing-config"), &[]),
         ReminderTipsConfig::default()
     );
-    let _ = fs::remove_file(root_is_a_file);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn custom_file_preserves_none_as_a_selectable_noop() {
-    let dir = tmp_dir("custom_none");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        reminder_tips_config_path(&dir),
+    let root = tmp_dir("custom_none");
+    let config_root = root.join("config");
+    write_config(
+        &reminder_tips_config_path(&config_root),
         r#"{"schedules":[{"every_rounds":3,"tips":["NONE","TIPS: custom"]}]}"#,
-    )
-    .unwrap();
-    let config = load_reminder_tips_config(&dir);
+    );
+
+    let config = load_reminder_tips_config_from_resource_dirs(&config_root, &[]);
+
     assert_eq!(config.schedules[0].tips, ["NONE", "TIPS: custom"]);
-    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -148,31 +199,39 @@ fn invalid_schedule_shapes_and_bounds_are_rejected() {
 }
 
 #[test]
-fn malformed_file_falls_back_without_preventing_startup() {
-    let dir = tmp_dir("malformed");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(reminder_tips_config_path(&dir), "not json").unwrap();
+fn oversized_override_falls_through_without_unbounded_read() {
+    let root = tmp_dir("oversized");
+    let config_root = root.join("config");
+    write_config(
+        &reminder_tips_config_path(&config_root),
+        &" ".repeat(MAX_CONFIG_BYTES as usize + 1),
+    );
+
     assert_eq!(
-        load_reminder_tips_config(&dir),
+        load_reminder_tips_config_from_resource_dirs(&config_root, &[]),
         ReminderTipsConfig::default()
     );
-    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn oversized_file_falls_back_without_unbounded_read_or_startup_failure() {
-    let dir = tmp_dir("oversized");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        reminder_tips_config_path(&dir),
-        vec![b' '; MAX_CONFIG_BYTES as usize + 1],
-    )
-    .unwrap();
+fn resource_candidates_follow_override_install_prefix_and_source_order() {
+    let explicit = OsStr::new("/opt/timem-resources");
+    let executable = Path::new("/home/alice/.local/bin/timem-web");
+    let source = PathBuf::from("/checkout/resources");
+
     assert_eq!(
-        load_reminder_tips_config(&dir),
-        ReminderTipsConfig::default()
+        resource_dir_candidates_from_values(Some(explicit), Some(executable), Some(source.clone())),
+        vec![
+            PathBuf::from("/opt/timem-resources"),
+            PathBuf::from("/home/alice/.local/share/timem/resources"),
+            source,
+        ]
     );
-    let _ = fs::remove_dir_all(dir);
+    assert_eq!(
+        resource_dir_candidates_from_values(None, Some(executable), None),
+        vec![PathBuf::from("/home/alice/.local/share/timem/resources")]
+    );
 }
 
 #[test]

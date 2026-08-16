@@ -140,8 +140,9 @@ pub use prompt_cache::{
 pub use prompt_components::{PromptComponent, PromptComponentRole};
 pub use redaction::{redact_value, REDACTED};
 pub use reminder_config::{
-    default_config_root, load_reminder_tips_config, reminder_tips_config_path,
-    ReminderScheduleConfig, ReminderTipsConfig, REMINDER_TIPS_FILE_NAME,
+    default_config_root, default_resources_dir, load_reminder_tips_config,
+    reminder_tips_config_path, ReminderScheduleConfig, ReminderTipsConfig, REMINDER_TIPS_FILE_NAME,
+    TIMEM_RESOURCES_DIR_ENV,
 };
 pub use response_protocol::ResponseProtocolKind;
 use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};

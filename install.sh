@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${TIMEM_SHELL_INSTALL_DIR:-$HOME/.local/bin}"
+RESOURCE_DIR="${TIMEM_RESOURCES_DIR:-$(dirname "$INSTALL_DIR")/share/timem/resources}"
+REMINDER_TIPS_SOURCE="$ROOT_DIR/resources/reminder_tips.json"
 ENV_TEMPLATE="$ROOT_DIR/env_template"
 BIN_NAME="timem-native-rs"
 WEB_BIN_NAME="timem-web"
@@ -186,6 +188,21 @@ install_binary_atomically() {
   fi
 }
 
+
+install_resource_atomically() {
+  local source="$1"
+  local destination="$2"
+  local temporary
+
+  mkdir -p "$(dirname "$destination")"
+  temporary="$(mktemp "${destination}.tmp.XXXXXX")"
+  if ! cp "$source" "$temporary" || ! chmod 644 "$temporary" || ! mv -f "$temporary" "$destination"; then
+    rm -f "$temporary"
+    echo "error: failed to install resource $destination atomically." >&2
+    return 1
+  fi
+}
+
 main() {
   OS_KIND="$(detect_os)"
   ensure_build_dependencies "$OS_KIND"
@@ -197,6 +214,7 @@ main() {
   mkdir -p "$INSTALL_DIR"
   install_binary_atomically "$ROOT_DIR/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
   install_binary_atomically "$ROOT_DIR/target/release/$WEB_BIN_NAME" "$INSTALL_DIR/$WEB_BIN_NAME"
+  install_resource_atomically "$REMINDER_TIPS_SOURCE" "$RESOURCE_DIR/reminder_tips.json"
 
   cat > "$INSTALL_DIR/$COMMAND_NAME" <<SH
 #!/usr/bin/env bash
@@ -211,6 +229,7 @@ SH
   echo "  binary:  $INSTALL_DIR/$BIN_NAME"
   echo "  command: $INSTALL_DIR/$COMMAND_NAME"
   echo "  web:     $INSTALL_DIR/$WEB_BIN_NAME"
+  echo "  resources: $RESOURCE_DIR"
   echo "  env template: $ENV_TEMPLATE"
   echo "  uninstall: $ROOT_DIR/uninstall.sh"
   echo
