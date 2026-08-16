@@ -563,7 +563,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("activity.detail?.split");
     expect(source).toContain("const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();");
     expect(source).toContain('const running = status === "running" || status === "background_running";');
-    expect(source).toContain("const [open, setOpen] = useState(() => !bashActivity);");
+    expect(source).toContain("const [open, setOpen] = useState(false);");
     expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
     expect(source).toContain("const toolName = toolDisplayName(activity.tool_name || activity.title);");
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;');
@@ -587,7 +587,7 @@ describe("assistant-ui thread integration", () => {
     expect(viewModelSource).toContain('if (name === "run_bash") return "Bash";');
     expect(viewModelSource).toContain('if (name === "memmgr") return "MemMgr";');
     expect(viewModelSource).toContain('if (name === "capmgr") return "CapMgr";');
-    expect(viewModelSource).toContain('if (name === "self_tool") return "Self tool";');
+    expect(viewModelSource).toContain('if (name === "self_tool") return "Self Tool";');
   });
 
   it("carries the live working marker into the completed Thought Action chip", () => {
@@ -1474,7 +1474,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.work-collapse-toggle[aria-expanded="true"] .work-collapse-arrow { transform: rotate(90deg); }');
     expect(styles).toContain(".turn-assistant-frame.collapsed-work");
     expect(styles).toContain("overflow-y: auto;");
-    expect(source).toContain("followLatest.current = remaining < 36");
+    expect(source).toContain("followLatest.current = isNearScrollBottom({"); expect(source).toContain("const observer = new ResizeObserver(() => {"); expect(source).toContain("if (!followLatest.current) return;"); expect(source).toContain("observer.observe(content);"); expect(source).toContain("return () => observer.disconnect();");
     expect(source).toContain('className="turn-new-updates"');
   });
 
@@ -1497,7 +1497,7 @@ describe("assistant-ui thread integration", () => {
 
   it("coalesces tool lifecycles and renders tools as compact subordinate rows", () => {
     expect(source).toContain("coalesceActionLifecycle(turn.events)");
-    expect(source).toContain("<ToolActivity activity={activity}/>");
+    expect(source).toContain('<ToolActivityGroup key="tool-activity-group" summary={toolActivitySummary}/>'); expect(source).toContain("summarizeToolActivities("); expect(source).toContain('className={`tool-activity-group ${summary.status}`}');
     expect(source).toContain("tool-activity-status");
     expect(styles).toContain(".tool-activity");
   });
