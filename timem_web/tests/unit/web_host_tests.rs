@@ -706,6 +706,144 @@ fn restore_does_not_revive_an_old_unfinished_turn_after_a_newer_turn_completed()
 }
 
 #[test]
+fn core_turn_started_immediately_publishes_authoritative_live_state() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CORE_STARTED_WIRE");
+    let command_id = "core_started_wire_command";
+    let pending_turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "wait for the Core boundary",
+        Some(command_id),
+    )
+    .unwrap();
+    let (context_id, worker_id) = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "ready");
+        assert_eq!(session.active_turn_id, None);
+        assert_eq!(
+            session.pending_turn_id.as_deref(),
+            Some(pending_turn.turn_id.as_str())
+        );
+        assert_eq!(session.turns.last().unwrap().state, "pending");
+        assert!(session.workers.iter().all(|worker| worker.state == "ready"));
+        let worker = session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == session.primary_worker_id)
+            .unwrap();
+        (worker.context_id.clone(), worker.worker_id.clone())
+    };
+    let mut events = state.events.subscribe();
+
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnStarted {
+            command_id: Some(command_id.to_string()),
+        },
+    );
+
+    let published = drain_wire_events(&mut events);
+    let started_turn = published
+        .iter()
+        .find_map(|event| match event {
+            WireEvent::TurnStarted {
+                session_id: event_session_id,
+                context_id: event_context_id,
+                worker_id: event_worker_id,
+                turn,
+            } => {
+                assert_eq!(event_session_id, &session_id);
+                assert_eq!(event_context_id, &context_id);
+                assert_eq!(event_worker_id, &worker_id);
+                Some(turn)
+            }
+            _ => None,
+        })
+        .expect("Core TurnStarted must immediately publish browser live state");
+    assert_eq!(started_turn.turn_id, pending_turn.turn_id);
+    assert_eq!(started_turn.state, "working");
+    assert!(published
+        .iter()
+        .all(|event| !matches!(event, WireEvent::WorkerActivity { .. })));
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.state, "working");
+    assert_eq!(
+        session.active_turn_id.as_deref(),
+        Some(pending_turn.turn_id.as_str())
+    );
+    assert_eq!(session.pending_turn_id, None);
+    assert_eq!(session.turns.last().unwrap().state, "working");
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == worker_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+}
+
+#[test]
+fn unmatched_core_turn_started_does_not_activate_an_unrelated_pending_intent() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "UNMATCHED_CORE_STARTED");
+    let pending_turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "this intent belongs to another command",
+        Some("expected_command"),
+    )
+    .unwrap();
+    let (context_id, worker_id) = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.pending_turn_id.as_deref(),
+            Some(pending_turn.turn_id.as_str())
+        );
+        let worker = session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == session.primary_worker_id)
+            .unwrap();
+        (worker.context_id.clone(), worker.worker_id.clone())
+    };
+    let mut events = state.events.subscribe();
+
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnStarted {
+            command_id: Some("different_command".to_string()),
+        },
+    );
+
+    assert!(drain_wire_events(&mut events)
+        .iter()
+        .all(|event| !matches!(event, WireEvent::TurnStarted { .. })));
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.state, "ready");
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(
+        session.pending_turn_id.as_deref(),
+        Some(pending_turn.turn_id.as_str())
+    );
+    assert_eq!(session.turns.last().unwrap().state, "pending");
+    assert!(session.workers.iter().all(|worker| worker.state == "ready"));
+}
+
+#[test]
 fn restore_redrives_unfinished_core_accepted_intent_into_the_new_worker() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "RESTORE_CORE_ACCEPTED");

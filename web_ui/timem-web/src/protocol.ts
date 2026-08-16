@@ -218,6 +218,7 @@ export type WireEvent =
   | { type: "core_topic"; turn_id?: string | null; turn_event_id?: string | null; event: CoreTopicEvent }
   | { type: "worker_activity"; session_id: string; context_id: string; worker_id: string; turn_id?: string | null; turn_event_id?: string | null; event: Record<string, unknown> }
   | { type: "turn_finished"; session_id: string; turn_id?: string | null; outcome: { text?: string; message_id?: string | null; completion?: TurnCompletion } }
+  | { type: "turn_started"; session_id: string; context_id: string; worker_id: string; turn: WebTurn }
   | { type: "turn_updated"; session_id: string; turn: WebTurn }
   | { type: "host_error"; message: string }
   | { type: "host_config_updated"; key: string; value: string; session_env_defaults: Record<string, string> }

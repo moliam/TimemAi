@@ -64,6 +64,7 @@ describe("production wire delivery contract", () => {
     "core_topic",
     "worker_activity",
     "turn_finished",
+    "turn_started",
     "turn_updated",
     "host_config_updated",
     "file_uploaded",

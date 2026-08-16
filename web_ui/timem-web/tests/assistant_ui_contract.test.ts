@@ -11,6 +11,19 @@ const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const logo = readFileSync(new URL("../public/timem_logo.png", import.meta.url));
 const viteConfig = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
 
+describe("Agent Core live-state delivery", () => {
+  it("uses the explicit Core turn_started event for turn and worker working state", () => {
+    expect(protocolSource).toContain('type: "turn_started"');
+    expect(source).toContain('if (event.type === "turn_started")');
+    expect(source).toContain('updateSessionWorkerState(upsertTurn(session, event.turn), event.worker_id, "working")');
+  });
+
+  it("does not infer completion from pending, restored, or other turn updates", () => {
+    expect(source).not.toContain('event.turn.state !== "working"');
+    expect(source).toMatch(/if \(event\.type === "turn_finished"\)[\s\S]*?setCompletedTurnKey/);
+  });
+});
+
 describe("assistant-ui thread integration", () => {
   it("keeps a visible boot state before the React bundle mounts", () => {
     expect(html).toContain('<div id="root">');
@@ -1368,9 +1381,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const lifecycleEvents = useMemo(() => coalesceActionLifecycle(turn.events), [turn.events]);");
   });
 
-  it("releases a stuck send affordance from the authoritative turn completion", () => {
+  it("releases a stuck send affordance only from the authoritative turn completion", () => {
     expect(source).toContain('setCompletedTurnKey(`${event.session_id}:${event.turn_id ?? ""}`);');
-    expect(source).toContain('if (event.turn.state !== "working") setCompletedTurnKey(`${event.session_id}:${event.turn.turn_id}`);');
+    expect(source).not.toContain('if (event.turn.state !== "working") setCompletedTurnKey');
     expect(source).toContain('completedTurnKey.startsWith(`${activeSessionId}:`)');
     expect(source).toContain('releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)');
     expect(source).toContain('applyQueuedMessagesAck(nextQueues, ack.command_id, ack.status, ack.error, clientId("queued"))');

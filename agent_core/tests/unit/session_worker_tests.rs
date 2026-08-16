@@ -2050,13 +2050,28 @@ fn session_worker_shutdown_skips_queued_turns() {
     handle
         .run_turn("first active turn", None)
         .expect("worker should accept first turn");
+    let mut observed_turn_started = false;
     loop {
         match worker
             .events()
             .recv_timeout(Duration::from_secs(2))
             .expect("worker should emit first model request")
         {
-            CoreSessionWorkerEvent::ModelRequest { .. } => break,
+            CoreSessionWorkerEvent::TurnStarted { command_id } => {
+                assert_eq!(command_id, None);
+                assert!(
+                    !observed_turn_started,
+                    "one Core turn must emit exactly one TurnStarted event"
+                );
+                observed_turn_started = true;
+            }
+            CoreSessionWorkerEvent::ModelRequest { .. } => {
+                assert!(
+                    observed_turn_started,
+                    "TurnStarted must precede the first model request"
+                );
+                break;
+            }
             CoreSessionWorkerEvent::Topics(_) => {}
             other => panic!("unexpected event before first model request: {other:?}"),
         }
