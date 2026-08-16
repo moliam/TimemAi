@@ -1005,7 +1005,8 @@ pub async fn run_from_env() -> Result<(), String> {
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
     let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
-    let event_journal = EventJournal::open(event_journal_path(&initial_mem))?;
+    let event_journal = EventJournal::open(event_journal_path(&initial_mem))
+                .map_err(|error| friendly_journal_error(error, &template.data_dir, &template.initial_space))?;
     let mem = Arc::new(Mutex::new(initial_mem));
     let state = AppState {
         token: token.clone(),
@@ -1379,6 +1380,20 @@ fn current_session_store(state: &AppState) -> Result<SessionStore, String> {
 
 fn command_dedup_path(mem: &WebMemState) -> PathBuf {
     mem.layout.memory_dir().join("web_command_dedup.json")
+}
+
+fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
+    if error == "event_journal_in_use" {
+        let space_dir = absolute_path(RuntimeDataLayout::new(data_dir, space).space_dir());
+        format!(
+            "Timem Web is already running on this memory space.\n\n  data dir: {}\n  space:    {}\n  location:  {}\n\nOptions:\n  - Use a different space:   timem-web --space <name>\n  - Use a different data dir: timem-web --data-dir <path>\n  - Or stop the other Timem Web instance first.",
+            data_dir.display(),
+            space,
+            space_dir.display(),
+        )
+    } else {
+        error
+    }
 }
 
 fn event_journal_path(mem: &WebMemState) -> PathBuf {
@@ -2534,7 +2549,8 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         WebMemState::new(data_root, path.to_string())?
     };
     let next_command_dedup = load_command_dedup_resilient(&command_dedup_path(&next_mem))?;
-    let next_event_journal = EventJournal::open(event_journal_path(&next_mem))?;
+    let next_event_journal = EventJournal::open(event_journal_path(&next_mem))
+                .map_err(|error| friendly_journal_error(error, next_mem.layout.data_root(), &next_mem.space))?;
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
     if current_path == next_path {
