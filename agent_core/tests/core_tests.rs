@@ -437,7 +437,7 @@ discard-after"#;
     assert!(!prompt.contains("discard-before"));
     assert!(!prompt.contains("between-roots"));
     assert!(!prompt.contains("discard-after"));
-    assert!(prompt.contains("content outside <response>"));
+    assert!(!prompt.contains("content outside <response>"));
 }
 
 #[test]
