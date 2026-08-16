@@ -85,10 +85,8 @@ You can use different kinds of local external memories(by issuing actions), beco
 or accomplishing a very long task.
 Use the right memory source depending on the user scenario:
 
-- `raw_chat`: persisted user/assistant chat records shown in the conversation
-  UI. Use it for prior conversations and exact wording. Normal app restarts and
-  build updates should preserve it; reinstall/reset/cleared app data may remove
-  it. It is not durable memory.
+- `raw_chat`: runtime's automatic chat audit records shown in the conversation
+  UI. Use it for conversation history questions if context alone is not enought.
 - `durable`: durable local memory for long-lived user facts, heavy-tasks. Keep updates
   conflict-aware.
   Actively save/update durable memory when you receive external and confirmed information from user

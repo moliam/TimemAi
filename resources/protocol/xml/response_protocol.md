@@ -5,9 +5,10 @@ write anything before or after it.
 
 ## Response shape
 
-Inside `<response>`, write optional `<free_talk>` first, expressing your thought.
-Then, if you think the task should stop now, add a `<finish_confirm>` label and starts exactly with prefix:
-CONFIRM_PREFIX: "Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action."
+Start with `<response>` label.
+Then, optionally, write `<free_talk>` first, expressing your thought.
+Then, if you think the task may stop now, add a `<finish_confirm>` label and starts exactly with prefix:
+CONFIRM_PREFIX: "Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action."
 Then, follow exactly one state branch:
 
 - `<actions>`: work should continue, generate actions.
@@ -18,13 +19,8 @@ Then, follow exactly one state branch:
 `<final_answer>` is the work summary for user, by default in raw Markdown(by default).
 `<actions>` are those function provided by capability catalog. Refer to capabiltiy for available actions.
 
-Note: For commands or other special strings containing such as `<`, `>`,
-or `&`, a leaf element may use `<![CDATA[...]]>`; its content is passed
-  literally.
-
-Before sending, verify that there is exactly one `<response>` root, exactly one
-state branch, and that every opened tool/group tag has its matching close tag.
-When using `<actions>`, do not append a second fallback or final response.
+Note: inside xml label, if strings containing such as `<`, `>`,
+or `&`, should use `<![CDATA[...]]>` to wrap it.
 
 ## RESPONSE EXAMPLES
 These demonstrate protocol shape; they are not requests to execute.
@@ -32,13 +28,13 @@ These demonstrate protocol shape; they are not requests to execute.
 EXAMPLE1: All user's tasks are finished
 <response>
   <free_talk>The reason for the bug has been thoroughly investigated.</free_talk>
-  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action. Yes, the deduction chain is solid, no jump in thought. The bug can be ABA confirmed.</finish_confirm>
+  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Yes, the deduction chain is solid, no jump in thought. The bug can be ABA confirmed.</finish_confirm>
   <final_answer>I have finish the debug task. The reason is: .... </final_answer>
 </response>
 
 EXAMPLE2: Task ongoing. First inspect in parallel, then run one sequential test:
 <response>
-  <free_talk>I will inspect the workspace, then run its test.</free_talk>
+  <free_talk>I will inspect the workspace, then run its test. For performance serveral commands can be issued simutaneously. </free_talk>
   <actions>
     <parallel>
       <run_bash timeout_ms="5000">
@@ -59,7 +55,7 @@ EXAMPLE2: Task ongoing. First inspect in parallel, then run one sequential test:
 
 EXAMPLE3: Planned to stop, but "think twice" changes your idea and you continue the work.
 <response>
-  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action. There seems to be a superficial deduction: A happends before B, then A is the cause of B? Could be super wrong. Let me check more.</finish_confirm>
+  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. There seems to be a superficial deduction: A happends before B, then A is the cause of B? Could be super wrong. Let me check more.</finish_confirm>
   <actions><run_bash><cmd>pwd</cmd></run_bash></actions>
 </response>
 

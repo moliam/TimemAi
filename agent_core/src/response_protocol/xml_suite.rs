@@ -10,7 +10,7 @@ pub struct XmlSuiteV1;
 const XML_RESPONSE_PROTOCOL_SECTION: &str =
     include_str!("../../../resources/protocol/xml/response_protocol.md");
 
-pub const FINISH_CONFIRM_PREFIX: &str = "Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action.";
+pub const FINISH_CONFIRM_PREFIX: &str = "Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action.";
 
 impl ResponseProtocolSuite for XmlSuiteV1 {
     fn name(&self) -> &str {

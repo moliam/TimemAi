@@ -120,7 +120,7 @@ fn default_config_is_parsed_from_the_shipped_resource() {
     assert_eq!(config, parsed);
     assert_eq!(config.schedules.len(), 2);
     assert_eq!(config.schedules[0].every_minutes, Some(10));
-    assert_eq!(config.schedules[1].every_rounds, Some(8));
+    assert_eq!(config.schedules[1].every_rounds, Some(10));
     assert!(config
         .schedules
         .iter()
