@@ -1975,7 +1975,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const status = activity.tool_status || "running";
   const running = status === "running" || status === "background_running";
   const bashActivity = activity.tool_name === "run_bash";
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(() => !bashActivity);
   const invocationPreview = toolInvocationPreview(activity);
   const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
   const toolName = toolDisplayName(activity.tool_name || activity.title);
@@ -1985,7 +1985,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     <b>{toolName}</b>
     <span className="tool-activity-status">{humanizeToolStatus(status)}</span>
     {activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}
-    {!hasExpandableDetail && invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}
+    {invocationPreview && <code className="tool-activity-command" title={invocationPreview}>{invocationPreview}</code>}
   </>;
   if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>
     {summaryContent}
