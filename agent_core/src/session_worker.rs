@@ -220,6 +220,11 @@ pub enum CoreSessionWorkerEvent {
     CommandAccepted {
         command_id: String,
     },
+    /// Core has entered turn execution and now owns live working state.
+    /// Hosts must not infer this state from history or command enqueueing.
+    TurnStarted {
+        command_id: Option<String>,
+    },
     Topics(Vec<CoreTopicEvent>),
     ModelRequest {
         round: u32,
@@ -1098,13 +1103,17 @@ impl CoreSessionWorker {
                                 mailbox.queue.extend(initial_supplements);
                             }
                         }
-                        if let Some(command_id) = command_id {
-                            let _ = event_tx
-                                .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                        if let Some(command_id) = command_id.as_ref() {
+                            let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
+                                command_id: command_id.clone(),
+                            });
                         }
                         let context_id = identity.context_id.clone();
                         let outcome = {
                             let working = runtime.begin_worker_turn(&identity.session_id);
+                            let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
+                                command_id: command_id.clone(),
+                            });
                             ui.current_turn_active = Some(working.active_handle());
                             let outcome = loop {
                                 let main_outcome = run_session_turn_with_model_client(
@@ -1165,11 +1174,15 @@ impl CoreSessionWorker {
                             continue;
                         }
                         cancel_requested.store(false, Ordering::SeqCst);
-                        if let Some(command_id) = command_id {
-                            let _ = event_tx
-                                .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                        if let Some(command_id) = command_id.as_ref() {
+                            let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
+                                command_id: command_id.clone(),
+                            });
                         }
                         let working = runtime.begin_worker_turn(&identity.session_id);
+                        let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
+                            command_id: command_id.clone(),
+                        });
                         ui.current_turn_active = Some(working.active_handle());
                         let toolgen_runner = ToolGenRunner {
                             core: &mut core,
