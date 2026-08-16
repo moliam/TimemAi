@@ -4349,9 +4349,6 @@ fn update_session_runtime_setting(
     key: &str,
     value: &str,
 ) -> Result<(String, WebSessionRuntimeProfile), String> {
-    if session_has_active_turn(state, session_id)? {
-        return Err("session_runtime_update_while_working".to_string());
-    }
     if key == "TIMEM_MAX_ROUNDS" {
         let max_rounds = parse_round_budget(value)?;
         let normalized_value = round_budget_value(max_rounds);

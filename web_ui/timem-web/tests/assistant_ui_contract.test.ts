@@ -1087,10 +1087,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('title={`Reset ${optionLabel} to current value`}');
     expect(source).toContain('aria-label={`Reset ${optionLabel} to current value`}');
     expect(source).toContain("const resetDraft = () => setDrafts((current) => { const { [option.key]: _removed, ...rest } = current; return rest; });");
-    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending && !sessionWorking) { event.preventDefault(); onUpdate(option.key, value); }');
+    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending) { event.preventDefault(); onUpdate(option.key, value); }');
     expect(source).toContain('if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); }');
     expect(source).toContain("onClick={resetDraft}");
-    expect(source).toContain('disabled={pending || !dirty || sessionWorking}');
+    expect(source).toContain('disabled={pending || !dirty}');
     expect(source).toContain('(pendingRuntimeLabel || credentialPending) && <p className="runtime-pending-status" role="status" aria-live="polite">');
     expect(styles).toContain(".runtime-options label > div input, .runtime-options label > div select { flex: 1 1 auto; }");
     expect(styles).toContain(".runtime-reset { flex: none; }");

@@ -21,6 +21,7 @@ fn failed_durable_supplement_append_releases_command_id_for_retry() {
         shutdown_requested: Arc::new(AtomicBool::new(false)),
         reply_tx,
         accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
+        pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
     };
 
     assert_eq!(
@@ -57,6 +58,7 @@ fn recovered_turn_batch_rejects_duplicate_ids_and_rolls_back_closed_send() {
         shutdown_requested: Arc::new(AtomicBool::new(false)),
         reply_tx,
         accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
+        pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
     };
     assert_eq!(
         handle.run_turn_batch_with_command_ids(
@@ -790,6 +792,7 @@ fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
         phase: Some("toolgen".to_string()),
         accept_supplements: false,
         pending_bash_always_allow: false,
+        pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
     };
     let waiter = std::thread::spawn(move || {
         ui.request_host_decision_topic(
@@ -3039,6 +3042,125 @@ fn wait_for_stress_turn_finished(
             other => panic!("{label} unexpected worker event: {other:?}"),
         }
     }
+}
+
+#[test]
+fn update_runtime_config_applies_before_next_model_request_of_active_turn() {
+    use crate::RuntimeConfigField;
+    use std::sync::mpsc;
+
+    struct BlockingConfigCapturingModel {
+        captured: Arc<Mutex<Vec<ModelServiceConfig>>>,
+        first_call_entered: mpsc::Sender<()>,
+        release_first_call: mpsc::Receiver<()>,
+        calls: usize,
+    }
+
+    impl ModelClient for BlockingConfigCapturingModel {
+        fn call_model(
+            &mut self,
+            config: &ModelServiceConfig,
+            _prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.captured.lock().unwrap().push(config.clone());
+            self.calls += 1;
+            if self.calls == 1 {
+                self.first_call_entered.send(()).unwrap();
+                self.release_first_call
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test should release the first model request");
+                return Ok(LlmResponse {
+                    content: "## Status working ## Working_Still_Action ```action {\"self_tool\":{\"type\":\"params\"}} ```"
+                        .to_string(),
+                    model_name: config.model.clone(),
+                    usage: UsageStats::zero(),
+                    truncated: false,
+                });
+            }
+            Ok(LlmResponse {
+                content: "## Status finished ## Final_Answer Done".to_string(),
+                model_name: config.model.clone(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("active_turn_runtime_config_update");
+    let core = AgentCore::new(
+        "You are Timem. {{ response_protocol }} {{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (first_call_entered_tx, first_call_entered_rx) = mpsc::channel();
+    let (release_first_call_tx, release_first_call_rx) = mpsc::channel();
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "active_turn_runtime_config_update", 1),
+        BlockingConfigCapturingModel {
+            captured: Arc::clone(&captured),
+            first_call_entered: first_call_entered_tx,
+            release_first_call: release_first_call_rx,
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+
+    match worker.events().recv_timeout(Duration::from_secs(2)) {
+        Ok(CoreSessionWorkerEvent::Topics(_)) => {}
+        other => panic!("expected lifecycle topics, got: {other:?}"),
+    }
+
+    handle.run_turn("hello", None).expect("turn should start");
+    first_call_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first model request should start");
+
+    handle
+        .update_runtime_config(RuntimeConfigField::Model, "hot-model".to_string())
+        .expect("active-turn model update should succeed");
+    handle
+        .update_runtime_config(RuntimeConfigField::MaxOutput, "16000".to_string())
+        .expect("active-turn output update should succeed");
+    release_first_call_tx
+        .send(())
+        .expect("first model request should be released");
+
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("timed out waiting for turn finish: {error}"),
+        }
+    }
+
+    let captured = captured.lock().unwrap();
+    assert!(
+        captured.len() >= 2,
+        "the active turn should make another model request after the update"
+    );
+    assert_ne!(captured[0].model, "hot-model");
+    assert_ne!(captured[0].max_llm_output_tokens, 16_000);
+    assert!(
+        captured[1..]
+            .iter()
+            .all(|config| config.model == "hot-model"),
+        "every model request after the in-flight request should use the updated model"
+    );
+    assert!(
+        captured[1..]
+            .iter()
+            .all(|config| config.max_llm_output_tokens == 16_000),
+        "every model request after the in-flight request should use the updated output limit"
+    );
+
+    worker.shutdown().unwrap();
 }
 
 #[test]
