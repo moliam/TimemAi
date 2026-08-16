@@ -627,6 +627,7 @@ fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
             text: "perform exactly once".to_string(),
             input_kind: None,
             source_turn_id: None,
+            attachment_ids: None,
         },
     )
     .unwrap()
@@ -5115,6 +5116,7 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
             text: "continue".to_string(),
             input_kind: None,
             source_turn_id: None,
+            attachment_ids: None,
         },
     )
     .unwrap();
@@ -5895,6 +5897,7 @@ fn stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task() {
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "new task with file".to_string(),
+            attachment_ids: None,
         },
     )
     .unwrap()
@@ -5912,6 +5915,108 @@ fn stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task() {
 }
 
 #[test]
+fn selected_attachment_ids_stay_bound_to_their_messages() {
+    let state = routing_test_state();
+    let first = WebAttachment {
+        id: "upload_first".to_string(),
+        name: "first.png".to_string(),
+        path: "/tmp/timem-web/first.png".to_string(),
+        bytes: 10,
+    };
+    let second = WebAttachment {
+        id: "upload_second".to_string(),
+        name: "second.png".to_string(),
+        path: "/tmp/timem-web/second.png".to_string(),
+        bytes: 20,
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.attachments = vec![first.clone(), second.clone()];
+    }
+
+    let first_ids = vec![first.id.clone()];
+    let first_turn = start_web_turn_with_selected_attachments(
+        &state,
+        "session_a",
+        "first queued message",
+        Some(&first_ids),
+        Some("queued_first"),
+    )
+    .unwrap();
+
+    assert_eq!(first_turn.user_entries[0].attachments, vec![first.clone()]);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        assert_eq!(sessions["session_a"].attachments, vec![second.clone()]);
+        assert!(sessions["session_a"]
+            .consumed_attachment_ids
+            .contains(&first.id));
+        assert!(!sessions["session_a"]
+            .consumed_attachment_ids
+            .contains(&second.id));
+    }
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    let second_ids = vec![second.id.clone()];
+    let second_turn = start_web_turn_with_selected_attachments(
+        &state,
+        "session_a",
+        "second queued message",
+        Some(&second_ids),
+        Some("queued_second"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        second_turn.user_entries[0].attachments,
+        vec![second.clone()]
+    );
+    assert!(state.sessions.lock().unwrap()["session_a"]
+        .attachments
+        .is_empty());
+}
+
+#[test]
+fn explicit_empty_attachment_ids_leave_other_queued_files_pending() {
+    let state = routing_test_state();
+    let attachment = WebAttachment {
+        id: "upload_reserved_for_later".to_string(),
+        name: "later.png".to_string(),
+        path: "/tmp/timem-web/later.png".to_string(),
+        bytes: 30,
+    };
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .attachments
+        .push(attachment.clone());
+
+    let turn = start_web_turn_with_selected_attachments(
+        &state,
+        "session_a",
+        "message without files",
+        Some(&[]),
+        Some("queued_without_files"),
+    )
+    .unwrap();
+
+    assert!(turn.user_entries[0].attachments.is_empty());
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"].attachments,
+        vec![attachment]
+    );
+}
+
+#[test]
 fn immediate_message_after_core_finalization_starts_a_new_turn() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "FINAL_RACE");
@@ -5923,6 +6028,7 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
             text: "finish immediately".to_string(),
             input_kind: None,
             source_turn_id: None,
+            attachment_ids: None,
         },
     )
     .unwrap()
@@ -5953,6 +6059,7 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "run this after the final answer".to_string(),
+            attachment_ids: None,
         },
     )
     .unwrap()
@@ -6233,6 +6340,7 @@ fn stale_supplement_after_cancel_completion_starts_a_new_turn() {
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "new instruction after stop".to_string(),
+            attachment_ids: None,
         },
     )
     .unwrap()
@@ -6855,6 +6963,7 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
             text: String::new(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id.clone()),
+            attachment_ids: None,
         },
     )
     .unwrap()
@@ -6911,6 +7020,7 @@ fn manual_toolgen_adds_optional_guidance_as_user_component() {
             text: "Prefer a Python CLI with JSON output.".to_string(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id),
+            attachment_ids: None,
         },
     )
     .unwrap()
@@ -6952,6 +7062,7 @@ fn manual_toolgen_publishes_tool_and_retains_the_complete_web_event_chain() {
             text: "Keep the generated CLI deterministic.".to_string(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id.clone()),
+            attachment_ids: None,
         },
     )
     .unwrap();
@@ -7021,6 +7132,7 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
             text: String::new(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some("missing_turn".to_string()),
+            attachment_ids: None,
         },
     )
     .unwrap_err();
@@ -7041,6 +7153,7 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
             text: String::new(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(unfinished.turn_id),
+            attachment_ids: None,
         },
     )
     .unwrap_err();
@@ -7052,6 +7165,7 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
         text: String::new(),
         input_kind: Some("toolgen".to_string()),
         source_turn_id: Some(source_turn_id.clone()),
+        attachment_ids: None,
     };
     assert!(handle_command(&state, TEST_PORT, request())
         .unwrap()

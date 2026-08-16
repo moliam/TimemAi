@@ -132,6 +132,14 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".stop-button.sending svg");
     expect(styles).toContain(".send-button.sending svg, .stop-button.sending svg");
     expect(source).toContain('aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"}');
+    expect(source).toContain("const submitDraftAsSupplement = () => {");
+    expect(source).toContain('event.key !== "Enter" || event.nativeEvent.isComposing');
+    expect(source).toContain("event.metaKey || event.ctrlKey");
+    expect(source).toContain("submitDraftAsSupplement();");
+    expect(source).toContain('clientId("supplement")');
+    expect(source).toContain("availableAttachments.map((attachment) => attachment.id)");
+    expect(source).toContain("attachmentIds?: readonly string[], forceSupplement = false");
+    expect(source).toMatch(/attachmentIds,\s+forceSupplement,/);
   });
 
   it("loads older stored history explicitly and preserves the reading position", () => {

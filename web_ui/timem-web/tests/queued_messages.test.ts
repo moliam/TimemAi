@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
   text: `message ${id}`,
   createdAtMs: index,
-}));
+attachmentIds: index === 0 ? ["upload-a"] : [], }));
 
 describe("queued messages", () => {
+ it("keeps attachment ids bound to their queued message", () => {
+ const ids = reservedQueuedAttachmentIds([
+ { id: "one", text: "first", createdAtMs: 1, attachmentIds: ["upload-a", "upload-b"] },
+ { id: "two", text: "second", createdAtMs: 2, attachmentIds: ["upload-b", "upload-c"] },
+ ]);
+ expect(ids).toEqual(new Set(["upload-a", "upload-b", "upload-c"]));
+ });
   it("limits the collapsed queue to four rows", () => {
     expect(COLLAPSED_QUEUE_LIMIT).toBe(4);
     expect(messages.slice(0, COLLAPSED_QUEUE_LIMIT).map(({ id }) => id)).toEqual(["a", "b", "c", "d"]);
@@ -93,8 +100,8 @@ describe("queued messages", () => {
     expect(saveQueuedMessages(storage, scope, { session_a: [{ id: "tab-a", text: "A", createdAtMs: 1 }] })).toBe(true);
     expect(saveQueuedMessages(storage, scope, { session_b: [{ id: "tab-b", text: "B", createdAtMs: 2 }] })).toBe(true);
     expect(loadQueuedMessages(storage, scope)).toEqual({
-      session_a: [{ id: "tab-a", text: "A", createdAtMs: 1 }],
-      session_b: [{ id: "tab-b", text: "B", createdAtMs: 2 }],
+      session_a: [{ id: "tab-a", text: "A", createdAtMs: 1, attachmentIds: [] }],
+      session_b: [{ id: "tab-b", text: "B", createdAtMs: 2, attachmentIds: [] }],
     });
   });
 

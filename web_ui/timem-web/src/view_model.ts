@@ -171,6 +171,8 @@ export function composerSendDecision(
   text: string,
   isCancelling: boolean,
   isMemSwitching = false,
+attachmentIds?: readonly string[],
+forceSupplement = false,
 ): ComposerSendDecision {
   if (!session) return { kind: "skip", reason: "no_session" };
   const trimmed = text.trim();
@@ -181,9 +183,9 @@ export function composerSendDecision(
     kind: "send",
     text: trimmed,
     clearDraftOnSuccess: true,
-    command: session.state === "working"
-      ? { type: "turn_supplement", session_id: session.session_id, text: trimmed }
-      : { type: "turn_submit", session_id: session.session_id, text: trimmed },
+    command: forceSupplement || session.state === "working"
+ ? { type: "turn_supplement", session_id: session.session_id, text: trimmed, ...(attachmentIds === undefined ? {} : { attachment_ids: [...attachmentIds] }) }
+ : { type: "turn_submit", session_id: session.session_id, text: trimmed, ...(attachmentIds === undefined ? {} : { attachment_ids: [...attachmentIds] }) },
   };
 }
 

@@ -14,10 +14,11 @@ import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shou
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import { summarizeToolActivities, ToolActivitySummary } from "./activity_groups";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
+import { clipboardImageFiles } from "./clipboard_images";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -856,14 +857,16 @@ function TimemApp() {
     };
   }, [pushActivity, receive]);
 
-  const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string): boolean => {
+  const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement = false): boolean => {
     const targetSession = sessionsRef.current.find((session) => session.session_id === sessionId);
     const decision = composerSendDecision(
       targetSession,
       text,
       targetSession ? cancellingSessionIds.current.has(targetSession.session_id) : false,
       pendingMemSwitch,
-    );
+    attachmentIds,
+ forceSupplement,
+ );
     if (decision.kind === "skip") {
       if (decision.reason === "cancelling" && targetSession) {
         pushActivity({ id: clientId(), sessionId: targetSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() });
@@ -1400,7 +1403,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
   toolGenSessionBusy: boolean;
   onLoadMoreHistory: (session: Session) => void;
   onSend: (text: string, commandId?: string) => boolean;
-  onSendForSession: (sessionId: string, text: string, commandId?: string) => boolean;
+  onSendForSession: (sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement?: boolean) => boolean;
   onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
@@ -1439,6 +1442,11 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
   const queueExpanded = !!activeSessionId && expandedQueueSessionIds.has(activeSessionId);
   const visibleQueuedMessages = queueExpanded ? queuedMessages : queuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
   const hiddenQueuedMessageCount = Math.max(0, queuedMessages.length - COLLAPSED_QUEUE_LIMIT);
+ const reservedAttachmentIds = useMemo(() => reservedQueuedAttachmentIds(queuedMessages), [queuedMessages]);
+ const availableAttachments = useMemo(
+   () => (activeSession?.attachments ?? []).filter((attachment) => !reservedAttachmentIds.has(attachment.id)),
+   [activeSession?.attachments, reservedAttachmentIds],
+ );
   const submittingDraft = !!activeSessionId && submittingDraftSessionIds.has(activeSessionId);
   const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Queue message" : "Send message";
   const lockedControlHint = sessionInteractionLocked ? sessionInteractionLockReason : "";
@@ -1565,7 +1573,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     for (const { sessionId, message: next } of dispatches) {
       if (!claimQueuedMessage(queuedMessageClaimsRef.current, sessionId, queuedMessagesBySessionRef.current[sessionId] ?? [], next.id)) continue;
       queuedDispatchSessionIdsRef.current.add(sessionId);
-      if (!onSendForSession(sessionId, next.text, next.id)) {
+      if (!onSendForSession(sessionId, next.text, next.id, next.attachmentIds)) {
         queuedDispatchSessionIdsRef.current.delete(sessionId);
         releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, next.id);
         updateQueuedMessages((current) => ({
@@ -1649,7 +1657,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     const nextQueues = {
       ...queuedMessagesBySessionRef.current,
-      [reserved.sessionId]: [...(queuedMessagesBySessionRef.current[reserved.sessionId] ?? []), { id: clientId("queued"), text: reserved.text, createdAtMs: Date.now() }],
+      [reserved.sessionId]: [...(queuedMessagesBySessionRef.current[reserved.sessionId] ?? []), { id: clientId("queued"), text: reserved.text, createdAtMs: Date.now(), attachmentIds: availableAttachments.map((attachment) => attachment.id) }],
     };
     const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
     if (sent) updateQueuedMessages(() => nextQueues);
@@ -1662,7 +1670,31 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
   };
 
-  const toggleQueuedMessages = () => {
+  const submitDraftAsSupplement = () => {
+ if (uploadingAttachment || sessionInteractionLocked) return;
+ const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
+ if (reserved === null) return;
+ setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+ const sent = onSendForSession(
+ reserved.sessionId,
+ reserved.text,
+ clientId("supplement"),
+ availableAttachments.map((attachment) => attachment.id),
+ true,
+ );
+ const nextDrafts = finishSessionDraftSubmission(
+ submittingDraftSessionIdsRef,
+ draftsBySession,
+ reserved.sessionId,
+ reserved.text,
+ sent,
+ );
+ setDraftsBySession(nextDrafts);
+ if (!submittingDraftSessionIdsRef.current.has(reserved.sessionId)) submittingDraftStartedAtRef.current.delete(reserved.sessionId);
+ setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+};
+
+const toggleQueuedMessages = () => {
     if (!activeSessionId) return;
     setExpandedQueueSessionIds((current) => {
       const next = new Set(current);
@@ -1755,10 +1787,10 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
           const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
           const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
           const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));
-          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span>{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</p>}<div>{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
+          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span>{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}{message.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{message.attachmentIds.length} 个附件</small>}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</p>}<div>{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
           if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSession.session_id, queuedMessagesBySession[activeSession.session_id] ?? [], message.id)) return;
           setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-          if (!onSend(message.text, message.id)) {
+          if (!onSendForSession(activeSession.session_id, message.text, message.id, message.attachmentIds)) {
             releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSession.session_id, message.id);
             setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
             updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: "消息尚未安全保存，请检查浏览器存储后重试" } : candidate) }));
@@ -1767,7 +1799,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
           if (message.deliveryError) updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: undefined } : candidate) }));
         }}>{claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>;
         })}</div></section>}
-        {!!activeSession && (!!activeSession.attachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{activeSession.attachments.map((attachment) => {
+        {!!activeSession && (!!availableAttachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{availableAttachments.map((attachment) => {
           const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);
           const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `${sessionInteractionLockReason} · cannot remove ${attachment.name}` : `Remove ${attachment.name}`;
           return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removeLabel} aria-label={removeLabel} aria-busy={removing || undefined} disabled={removing || sessionInteractionLocked} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
@@ -1782,12 +1814,18 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
             disabled={!activeSession || sessionInteractionLocked}
             onChange={(event) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, event.target.value))}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                submitDraft();
-              }
-            }}
-          />
+ if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+ if (event.metaKey || event.ctrlKey) {
+ event.preventDefault();
+ submitDraftAsSupplement();
+ return;
+ }
+ if (!event.shiftKey) {
+ event.preventDefault();
+ submitDraft();
+ }
+ }}
+ />
           <div className="composer-actions"><span className="composer-cwd-inline" title={activeSession?.current_dir}>{activeSession && <><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></>}</span><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void cancelActiveSessionTurn()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>

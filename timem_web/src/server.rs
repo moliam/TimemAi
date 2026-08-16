@@ -852,12 +852,16 @@ enum ClientCommand {
         session_id: String,
         #[serde(default)]
         text: String,
+        #[serde(default)]
+        attachment_ids: Option<Vec<String>>,
         input_kind: Option<String>,
         source_turn_id: Option<String>,
     },
     TurnSupplement {
         session_id: String,
         text: String,
+        #[serde(default)]
+        attachment_ids: Option<Vec<String>>,
     },
     TurnCancel {
         session_id: String,
@@ -2253,6 +2257,7 @@ fn handle_command_with_id(
         ClientCommand::TurnSubmit {
             session_id,
             text,
+            attachment_ids,
             input_kind,
             source_turn_id,
         } => {
@@ -2270,6 +2275,9 @@ fn handle_command_with_id(
                 }
             }
             let turn = if input_kind.as_deref() == Some("toolgen") {
+                if attachment_ids.is_some() {
+                    return Err("toolgen_attachments_not_supported".to_string());
+                }
                 submit_toolgen_turn(
                     state,
                     &session_id,
@@ -2284,18 +2292,34 @@ fn handle_command_with_id(
                     return Err("unsupported_turn_input_kind".to_string());
                 }
                 let text = nonempty_text(text, "turn text")?;
-                submit_or_supplement_turn(state, &session_id, text, command_id)?
+                submit_or_supplement_turn(
+                    state,
+                    &session_id,
+                    text,
+                    attachment_ids.as_deref(),
+                    command_id,
+                )?
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
         }
-        ClientCommand::TurnSupplement { session_id, text } => {
+        ClientCommand::TurnSupplement {
+            session_id,
+            text,
+            attachment_ids,
+        } => {
             if let Some(command_id) = command_id {
                 if let Some(turn) = turn_for_command_id(state, &session_id, command_id)? {
                     return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
                 }
             }
             let text = nonempty_text(text, "supplement")?;
-            let turn = append_supplement_or_submit_turn(state, &session_id, text, command_id)?;
+            let turn = append_supplement_or_submit_turn(
+                state,
+                &session_id,
+                text,
+                attachment_ids.as_deref(),
+                command_id,
+            )?;
             let event = WireEvent::TurnUpdated { session_id, turn };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
@@ -3819,26 +3843,35 @@ fn submit_or_supplement_turn(
     state: &AppState,
     session_id: &str,
     text: String,
+    attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
     if session_has_active_turn(state, session_id)? {
-        if let Some(turn) = try_append_turn_supplement(state, session_id, text.clone(), command_id)?
+        if let Some(turn) =
+            try_append_turn_supplement(state, session_id, text.clone(), attachment_ids, command_id)?
         {
             return Ok(turn);
         }
     }
-    submit_turn_with_command_id(state, session_id, text, command_id)
+    submit_turn_with_selected_attachments(state, session_id, text, attachment_ids, command_id)
 }
 
 fn append_supplement_or_submit_turn(
     state: &AppState,
     session_id: &str,
     text: String,
+    attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
-    match try_append_turn_supplement(state, session_id, text.clone(), command_id)? {
+    match try_append_turn_supplement(state, session_id, text.clone(), attachment_ids, command_id)? {
         Some(turn) => Ok(turn),
-        None => submit_turn_with_command_id(state, session_id, text, command_id),
+        None => submit_turn_with_selected_attachments(
+            state,
+            session_id,
+            text,
+            attachment_ids,
+            command_id,
+        ),
     }
 }
 
@@ -3846,22 +3879,25 @@ fn try_append_turn_supplement(
     state: &AppState,
     session_id: &str,
     text: String,
+    attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
 ) -> Result<Option<WebTurn>, String> {
     if !session_has_active_turn(state, session_id)? {
         return Ok(None);
     }
     let worker_handle = primary_worker_handle(state, session_id)?;
-    let pending_attachments = state
-        .sessions
-        .lock()
-        .map_err(|_| "session_store_poisoned")?
-        .get(session_id)
-        .ok_or_else(|| "session_not_found".to_string())?
-        .attachments
-        .clone();
+    let selected_attachments = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        pending_attachments_for_ids(session, attachment_ids)?
+    };
     let mut worker_supplement_text = text.clone();
-    if let Some(context) = uploaded_files_context(&pending_attachments) {
+    if let Some(context) = uploaded_files_context(&selected_attachments) {
         worker_supplement_text.push_str("\n\n");
         worker_supplement_text.push_str(&context);
     }
@@ -3870,10 +3906,11 @@ fn try_append_turn_supplement(
         worker_supplement_text,
         command_id.map(str::to_string),
         || {
-            appended_turn = Some(append_turn_supplement_with_pending_attachments(
+            appended_turn = Some(append_turn_supplement_with_selected_attachments(
                 state,
                 session_id,
                 text.clone(),
+                attachment_ids,
                 command_id,
             )?);
             Ok(())
@@ -4097,6 +4134,16 @@ fn submit_turn_with_command_id(
     text: String,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
+    submit_turn_with_selected_attachments(state, session_id, text, None, command_id)
+}
+
+fn submit_turn_with_selected_attachments(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+    attachment_ids: Option<&[String]>,
+    command_id: Option<&str>,
+) -> Result<WebTurn, String> {
     validate_session_model_service_config(state, session_id)?;
     apply_pending_session_mcp(state, session_id)?;
     let request = {
@@ -4116,7 +4163,13 @@ fn submit_turn_with_command_id(
         }
     };
     if let Some(request) = request {
-        let turn = start_web_turn_with_command_id(state, session_id, &text, command_id)?;
+        let turn = start_web_turn_with_selected_attachments(
+            state,
+            session_id,
+            &text,
+            attachment_ids,
+            command_id,
+        )?;
         publish_semantic(
             state,
             WireEvent::TurnUpdated {
@@ -4184,7 +4237,13 @@ fn submit_turn_with_command_id(
         });
         return Ok(turn);
     }
-    let turn = start_web_turn_with_command_id(state, session_id, &text, command_id)?;
+    let turn = start_web_turn_with_selected_attachments(
+        state,
+        session_id,
+        &text,
+        attachment_ids,
+        command_id,
+    )?;
     // Publish the authoritative turn before allowing Core to emit activity for
     // it. Otherwise a fast worker event can overtake the direct command reply.
     if let Err(error) = publish_semantic(
@@ -4660,6 +4719,16 @@ fn start_web_turn_with_command_id(
     text: &str,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
+    start_web_turn_with_selected_attachments(state, session_id, text, None, command_id)
+}
+
+fn start_web_turn_with_selected_attachments(
+    state: &AppState,
+    session_id: &str,
+    text: &str,
+    attachment_ids: Option<&[String]>,
+    command_id: Option<&str>,
+) -> Result<WebTurn, String> {
     let mut sessions = state
         .sessions
         .lock()
@@ -4674,7 +4743,7 @@ fn start_web_turn_with_command_id(
     // complete pre-mutation image because this mutation also consumes pending
     // attachments and may evict bounded turn/message history.
     let previous_session = session.clone();
-    let attachments = std::mem::take(&mut session.attachments);
+    let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
     let turn = WebTurn {
         turn_id: unique_web_id("web_turn"),
         state: "working".to_string(),
@@ -4896,7 +4965,15 @@ fn append_turn_user_entry(
     kind: &str,
     text: String,
 ) -> Result<WebTurn, String> {
-    append_turn_user_entry_with_attachments(state, session_id, kind, text, Vec::new(), false, None)
+    append_turn_user_entry_with_attachments(
+        state,
+        session_id,
+        kind,
+        text,
+        Vec::new(),
+        Some(&[]),
+        None,
+    )
 }
 
 fn append_turn_supplement_with_pending_attachments(
@@ -4905,13 +4982,23 @@ fn append_turn_supplement_with_pending_attachments(
     text: String,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
+    append_turn_supplement_with_selected_attachments(state, session_id, text, None, command_id)
+}
+
+fn append_turn_supplement_with_selected_attachments(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+    attachment_ids: Option<&[String]>,
+    command_id: Option<&str>,
+) -> Result<WebTurn, String> {
     append_turn_user_entry_with_attachments(
         state,
         session_id,
         "supplement",
         text,
         Vec::new(),
-        true,
+        attachment_ids,
         command_id,
     )
 }
@@ -4922,7 +5009,7 @@ fn append_turn_user_entry_with_attachments(
     kind: &str,
     text: String,
     attachments: Vec<WebAttachment>,
-    take_pending_attachments: bool,
+    attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
     let mut sessions = state
@@ -4937,16 +5024,23 @@ fn append_turn_user_entry_with_attachments(
         .active_turn_id
         .clone()
         .ok_or_else(|| "active_turn_not_found".to_string())?;
+    if !session
+        .turns
+        .iter()
+        .any(|turn| turn.turn_id == active_turn_id)
+    {
+        return Err("active_turn_not_found".to_string());
+    }
+    let attachments = if attachments.is_empty() {
+        take_pending_attachments_for_ids(session, attachment_ids)?
+    } else {
+        attachments
+    };
     let turn = session
         .turns
         .iter_mut()
         .find(|turn| turn.turn_id == active_turn_id)
-        .ok_or_else(|| "active_turn_not_found".to_string())?;
-    let attachments = if attachments.is_empty() && take_pending_attachments {
-        std::mem::take(&mut session.attachments)
-    } else {
-        attachments
-    };
+        .expect("active turn existence checked before attachment consumption");
     turn.user_entries.push(WebTurnUserEntry {
         kind: kind.to_string(),
         text,
@@ -5342,6 +5436,52 @@ async fn store_upload(
     }
     session.attachments.push(file.clone());
     Ok(file)
+}
+
+fn pending_attachments_for_ids(
+    session: &WebSession,
+    attachment_ids: Option<&[String]>,
+) -> Result<Vec<WebAttachment>, String> {
+    let Some(attachment_ids) = attachment_ids else {
+        return Ok(session.attachments.clone());
+    };
+    let mut seen = BTreeSet::new();
+    let mut selected = Vec::with_capacity(attachment_ids.len());
+    for attachment_id in attachment_ids {
+        if !seen.insert(attachment_id.as_str()) {
+            return Err("duplicate_attachment_id".to_string());
+        }
+        let attachment = session
+            .attachments
+            .iter()
+            .find(|attachment| attachment.id == *attachment_id)
+            .cloned()
+            .ok_or_else(|| "pending_attachment_not_found".to_string())?;
+        selected.push(attachment);
+    }
+    Ok(selected)
+}
+
+fn take_pending_attachments_for_ids(
+    session: &mut WebSession,
+    attachment_ids: Option<&[String]>,
+) -> Result<Vec<WebAttachment>, String> {
+    let selected = pending_attachments_for_ids(session, attachment_ids)?;
+    if attachment_ids.is_none() {
+        session.attachments.clear();
+    } else {
+        let selected_ids = selected
+            .iter()
+            .map(|attachment| attachment.id.as_str())
+            .collect::<BTreeSet<_>>();
+        session
+            .attachments
+            .retain(|attachment| !selected_ids.contains(attachment.id.as_str()));
+    }
+    session
+        .consumed_attachment_ids
+        .extend(selected.iter().map(|attachment| attachment.id.clone()));
+    Ok(selected)
 }
 
 fn remove_pending_attachment(
