@@ -869,7 +869,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('activity.toolgen_phase === "published"');
     expect(source).toContain("const scrollItems = useMemo(() => visibleItems.filter");
     expect(source).toContain('className="turn-persistent-toolgen" aria-label="ToolGen result"');
-    expect(source).toContain("scrollItems.map(({ event, activity })");
+    expect(source).toContain("scrollItems.map(({ event, activity }, index)");
     expect(styles).toContain(".turn-persistent-toolgen");
     expect(source).toContain('title="Scroll to latest work update"');
     expect(source).toContain('aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`}');
@@ -1505,7 +1505,7 @@ describe("assistant-ui thread integration", () => {
 
   it("coalesces tool lifecycles and renders tools as compact subordinate rows", () => {
     expect(source).toContain("coalesceActionLifecycle(turn.events)");
-    expect(source).toContain('<ToolActivityGroup key="tool-activity-group" summary={toolActivitySummary}/>'); expect(source).toContain("summarizeToolActivities("); expect(source).toContain('className={`tool-activity-group ${summary.status}`}');
+    expect(source).toContain('<ToolActivityGroup key={`tool-activity-group-${event.event_id}`} summary={summary}/>'); expect(source).toContain("summarizeConsecutiveToolActivities("); expect(source).toContain('className={`tool-activity-group ${summary.status}`}');
     expect(source).toContain("tool-activity-status");
     expect(styles).toContain(".tool-activity");
   });

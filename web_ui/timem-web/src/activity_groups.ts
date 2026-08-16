@@ -35,3 +35,46 @@ export function summarizeToolActivities(activities: Activity[]): ToolActivitySum
     activities: tools,
   };
 }
+
+
+export type ToolActivityRun = {
+  startIndex: number;
+  summary: ToolActivitySummary;
+};
+
+/**
+ * Groups each consecutive run of tool activities independently.
+ *
+ * Visible non-tool activities, such as free-talk/thought updates, close the
+ * current run. Null entries are ignored because they represent events that do
+ * not render in the work stream and should not split adjacent tool lifecycle
+ * events.
+ */
+export function summarizeConsecutiveToolActivities(
+  activities: readonly (Activity | null)[],
+): ToolActivityRun[] {
+  const runs: ToolActivityRun[] = [];
+  let startIndex = -1;
+  let tools: Activity[] = [];
+
+  const flush = () => {
+    if (startIndex < 0 || tools.length === 0) return;
+    const summary = summarizeToolActivities(tools);
+    if (summary) runs.push({ startIndex, summary });
+    startIndex = -1;
+    tools = [];
+  };
+
+  activities.forEach((activity, index) => {
+    if (activity === null) return;
+    if (activity.tone === "action") {
+      if (startIndex < 0) startIndex = index;
+      tools.push(activity);
+      return;
+    }
+    flush();
+  });
+  flush();
+
+  return runs;
+}

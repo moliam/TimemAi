@@ -13,7 +13,7 @@ import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, me
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
-import { summarizeToolActivities, ToolActivitySummary } from "./activity_groups";
+import { summarizeConsecutiveToolActivities, ToolActivitySummary } from "./activity_groups";
 import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
@@ -1870,13 +1870,14 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  const scrollItems = useMemo(() => visibleItems.filter(
  ({ event }) => !persistentToolGenEventIds.has(event.event_id)
  ), [persistentToolGenEventIds, visibleItems]);
- const toolActivitySummary = useMemo(() => summarizeToolActivities(
- scrollItems
- .map(({ activity }) => activity)
- .filter((activity): activity is Activity => activity !== null)
- ), [scrollItems]);
- const firstToolEventId = useMemo(() => scrollItems
- .find(({ activity }) => activity?.tone === "action")?.event.event_id, [scrollItems]);
+ const toolActivityRuns = useMemo(
+ () => summarizeConsecutiveToolActivities(scrollItems.map(({ activity }) => activity)),
+ [scrollItems],
+ );
+ const toolActivityRunByStartIndex = useMemo(
+ () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
+ [toolActivityRuns],
+ );
  const omitted = lifecycleItems.length - visibleItems.length;
  const hasVisibleProcess = processActivities.length > 0 || decisions.length > 0 || turn.state === "working";
   const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
@@ -1944,7 +1945,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
           if (followLatest.current) setPendingUpdates(0);
         }}>
-          <div className="turn-work-content" ref={workContentRef}> {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>} {scrollItems.map(({ event, activity }) => { if (activity?.tone === "action") return event.event_id === firstToolEventId && toolActivitySummary ? <ToolActivityGroup key="tool-activity-group" summary={toolActivitySummary}/> : null; return activity ? <ActivityView key={event.event_id} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
+          <div className="turn-work-content" ref={workContentRef}> {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>} {scrollItems.map(({ event, activity }, index) => { if (activity?.tone === "action") { const summary = toolActivityRunByStartIndex.get(index); return summary ? <ToolActivityGroup key={`tool-activity-group-${event.event_id}`} summary={summary}/> : null; } return activity ? <ActivityView key={event.event_id} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
           {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
           {visibleItems.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>} </div>
         </div>
@@ -2039,7 +2040,7 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
  const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${summary.status}`;
  return <details className={`tool-activity-group ${summary.status}`} open={open} aria-busy={running || undefined} onToggle={(event) => setOpen(event.currentTarget.open)}>
  <summary aria-label={summaryLabel} title={open ? "收起工具活动" : "展开工具活动"}>
- <span className="tool-activity-group-icon"><Wrench size={14}/></span>
+ <span className="tool-activity-group-icon tool-command-symbol" aria-hidden="true">&gt;_</span>
  <b>{summary.label}</b>
  <span className="tool-activity-group-status">· {summary.status}</span>
  <ChevronRight className="tool-activity-chevron" size={14}/>
@@ -2060,7 +2061,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const toolName = toolDisplayName(activity.tool_name || activity.title);
   const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
   const summaryContent = <>
-    <span className="tool-activity-icon">{activity.tool_name === "run_bash" ? <Terminal size={14}/> : <Wrench size={14}/>}</span>
+    <span className="tool-activity-icon tool-command-symbol" aria-hidden="true">&gt;_</span>
     <b>{toolName}</b>
     <span className="tool-activity-status">{humanizeToolStatus(status)}</span>
     {activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}
