@@ -1005,8 +1005,9 @@ pub async fn run_from_env() -> Result<(), String> {
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
     let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
-    let event_journal = EventJournal::open(event_journal_path(&initial_mem))
-                .map_err(|error| friendly_journal_error(error, &template.data_dir, &template.initial_space))?;
+    let event_journal = EventJournal::open(event_journal_path(&initial_mem)).map_err(|error| {
+        friendly_journal_error(error, &template.data_dir, &template.initial_space)
+    })?;
     let mem = Arc::new(Mutex::new(initial_mem));
     let state = AppState {
         token: token.clone(),
@@ -2549,8 +2550,10 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         WebMemState::new(data_root, path.to_string())?
     };
     let next_command_dedup = load_command_dedup_resilient(&command_dedup_path(&next_mem))?;
-    let next_event_journal = EventJournal::open(event_journal_path(&next_mem))
-                .map_err(|error| friendly_journal_error(error, next_mem.layout.data_root(), &next_mem.space))?;
+    let next_event_journal =
+        EventJournal::open(event_journal_path(&next_mem)).map_err(|error| {
+            friendly_journal_error(error, next_mem.layout.data_root(), &next_mem.space)
+        })?;
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
     if current_path == next_path {
@@ -6325,6 +6328,7 @@ impl WorkerTemplate {
             "TIMEM_ENABLE_THINKING",
             "TIMEM_REASONING_EFFORT",
             "TIMEM_STREAM",
+            "TIMEM_OPENAI_CACHE_MODE",
         ] {
             if let Some(value) = env_overrides.get(key) {
                 agent_core::apply_openai_compatible_env_value(
@@ -6384,6 +6388,15 @@ impl WorkerTemplate {
             "TIMEM_STREAM".to_string(),
             settings.config.openai_compatible.stream.to_string(),
         );
+        env.insert(
+            "TIMEM_OPENAI_CACHE_MODE".to_string(),
+            settings
+                .config
+                .openai_compatible
+                .cache_mode
+                .label()
+                .to_string(),
+        );
         env
     }
 
@@ -6434,6 +6447,7 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_ENABLE_THINKING",
     "TIMEM_REASONING_EFFORT",
     "TIMEM_STREAM",
+    "TIMEM_OPENAI_CACHE_MODE",
 ];
 
 fn parse_round_budget(value: &str) -> Result<u32, String> {
@@ -6552,6 +6566,15 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
     env.insert(
         "TIMEM_STREAM".to_string(),
         settings.config.openai_compatible.stream.to_string(),
+    );
+    env.insert(
+        "TIMEM_OPENAI_CACHE_MODE".to_string(),
+        settings
+            .config
+            .openai_compatible
+            .cache_mode
+            .label()
+            .to_string(),
     );
     env
 }
@@ -6710,6 +6733,7 @@ impl WebLaunchOptions {
             enable_thinking: None,
             reasoning_effort: None,
             stream: None,
+            openai_cache_mode: None,
             local_api_key: agent_core::LocalLLMKeyFile::load(
                 &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../key"),
             )

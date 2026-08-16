@@ -59,6 +59,7 @@ fn model_and_base_url_defaults_do_not_require_service_identity() {
 #[test]
 fn openai_compatible_request_uses_messages_and_structured_output() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
     config.model = "qwen-plus".to_string();
     config.max_llm_output_tokens = 2048;
     let body = build_model_request(
@@ -79,6 +80,76 @@ fn openai_compatible_request_uses_messages_and_structured_output() {
 }
 
 #[test]
+fn openai_compatible_cache_mode_auto_uses_server_side_prefix_caching_without_wire_marks() {
+    let config = config(ApiProtocol::OpenAiCompatible);
+    let body = build_model_request(
+        &config,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::System,
+            text: "stable prefix".to_string(),
+            cache: ModelCacheControl::Ephemeral,
+        }],
+        StructuredOutputHint::None,
+    );
+
+    assert!(body["messages"][0].get("cache_control").is_none());
+    let prepared = prepare_model_request(
+        &config,
+        "[BEGIN SYSTEM PROMPT]\nstable prefix\n[END SYSTEM PROMPT]",
+    );
+    assert_eq!(prepared.cache_wire_mode, "auto");
+    assert_eq!(prepared.cache_mark_count, 0);
+    assert!(!prepared.cache_fallback);
+}
+
+#[test]
+fn openai_compatible_cache_mode_off_does_not_send_wire_marks() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Off;
+    let body = build_model_request(
+        &config,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::System,
+            text: "stable prefix".to_string(),
+            cache: ModelCacheControl::Ephemeral,
+        }],
+        StructuredOutputHint::None,
+    );
+
+    assert!(body["messages"][0].get("cache_control").is_none());
+    let prepared = prepare_model_request(
+        &config,
+        "[BEGIN SYSTEM PROMPT]\nstable prefix\n[END SYSTEM PROMPT]",
+    );
+    assert_eq!(prepared.cache_wire_mode, "off");
+    assert_eq!(prepared.cache_mark_count, 0);
+}
+
+#[test]
+fn openai_compatible_cache_mode_ephemeral_sends_planned_wire_marks() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
+    let prepared = prepare_model_request(
+        &config,
+        "[BEGIN SYSTEM PROMPT]\nstable prefix\n[END SYSTEM PROMPT]",
+    );
+
+    assert_eq!(
+        prepared.body["messages"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert_eq!(prepared.cache_wire_mode, "ephemeral");
+    let actual_mark_count = prepared.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message.get("cache_control").is_some())
+        .count();
+    assert!(actual_mark_count > 0);
+    assert_eq!(prepared.cache_mark_count, actual_mark_count);
+}
+
+#[test]
 fn openai_compatible_request_supports_official_thinking_stream_options() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
     config.model = "ZHIPU/GLM-5.2".to_string();
@@ -86,6 +157,7 @@ fn openai_compatible_request_supports_official_thinking_stream_options() {
         enable_thinking: Some(true),
         reasoning_effort: Some("max".to_string()),
         stream: true,
+        cache_mode: OpenAiCompatibleCacheMode::Auto,
     };
 
     let body = build_model_request(
@@ -238,7 +310,8 @@ fn openai_responses_request_uses_official_shape() {
 
 #[test]
 fn openai_compatible_request_splits_static_and_dynamic_prompt() {
-    let config = config(ApiProtocol::OpenAiCompatible);
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nsecret\n[END DELTA]";
 
     let prepared = prepare_model_request(&config, prompt);
@@ -259,6 +332,7 @@ fn openai_compatible_request_splits_static_and_dynamic_prompt() {
 fn openai_compatible_request_maps_cache_strategy_to_messages() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
     config.model = "qwen-plus".to_string();
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
     let mut prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
     for idx in 1..=5 {
         prompt.push_str(&format!(
@@ -289,7 +363,8 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
 
 #[test]
 fn openai_compatible_request_sends_the_current_response_trailer_as_an_uncached_tail() {
-    let config = config(ApiProtocol::OpenAiCompatible);
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires in user's language:";
 
     let prepared = prepare_model_request(&config, prompt);
@@ -463,6 +538,9 @@ fn model_request_audit_event_is_redacted_and_ui_neutral() {
     assert_eq!(audit["endpoint"], config.endpoint());
     assert_eq!(audit["structured_output"], "json_object");
     assert!(audit["prompt_cache_plan"].is_array());
+    assert_eq!(audit["prompt_cache_wire"]["mode"], "auto");
+    assert_eq!(audit["prompt_cache_wire"]["mark_count"], 0);
+    assert_eq!(audit["prompt_cache_wire"]["fallback"], false);
     let audit_text = audit.to_string();
     assert!(audit_text.contains("***REDACTED***"));
     assert!(!audit_text.contains("sk-sensitive-token"));
@@ -488,6 +566,37 @@ fn model_response_audit_event_is_redacted() {
     let audit_text = audit.to_string();
     assert!(audit_text.contains("***REDACTED***"));
     assert!(!audit_text.contains("sk-sensitive-token"));
+}
+
+#[test]
+fn openai_compatible_response_counts_cache_creation_token_variants() {
+    for (details, top_level, expected) in [
+        (json!({"cached_creation_tokens": 321}), json!({}), 321),
+        (json!({"cache_creation_tokens": 654}), json!({}), 654),
+        (json!({}), json!({"cache_creation_input_tokens": 987}), 987),
+    ] {
+        let mut usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 10,
+            "total_tokens": 1010,
+            "prompt_tokens_details": details,
+        });
+        for (key, value) in top_level.as_object().unwrap() {
+            usage[key] = value.clone();
+        }
+        let response = parse_model_response(
+            &config(ApiProtocol::OpenAiCompatible),
+            &json!({
+                "choices": [{
+                    "message": {"content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": usage,
+            }),
+        )
+        .unwrap();
+        assert_eq!(response.usage.cache_created_tokens, expected);
+    }
 }
 
 #[test]

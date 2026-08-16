@@ -44,6 +44,9 @@
 # export TIMEM_ENABLE_THINKING=true
 # export TIMEM_REASONING_EFFORT=max
 # export TIMEM_STREAM=true
+# OpenAI-compatible cache wire mode:
+# auto (default, server-side stable-prefix caching), off, or ephemeral
+# export TIMEM_OPENAI_CACHE_MODE=auto
 
 # Maximum LLM input context window. Accepts plain numbers or K suffix, such as 100K.
 # export TIMEM_MAX_LLM_INPUT=100K

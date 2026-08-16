@@ -270,3 +270,75 @@ fn openai_compatible_thinking_options_reject_invalid_env_values() {
         assert!(error.contains(key), "unexpected error for {key}: {error}");
     }
 }
+
+#[test]
+fn openai_cache_mode_defaults_to_auto_and_accepts_all_documented_values() {
+    let default_config = model_service_config_from_sources(
+        &ModelServiceConfigSource::default(),
+        &env(&[("TIMEM_API_KEY", "k")]),
+    )
+    .unwrap();
+    assert_eq!(
+        default_config.openai_compatible.cache_mode,
+        OpenAiCompatibleCacheMode::Auto
+    );
+
+    for (value, expected) in [
+        ("auto", OpenAiCompatibleCacheMode::Auto),
+        ("off", OpenAiCompatibleCacheMode::Off),
+        ("ephemeral", OpenAiCompatibleCacheMode::Ephemeral),
+    ] {
+        let config = model_service_config_from_sources(
+            &ModelServiceConfigSource::default(),
+            &env(&[("TIMEM_API_KEY", "k"), ("TIMEM_OPENAI_CACHE_MODE", value)]),
+        )
+        .unwrap();
+        assert_eq!(config.openai_compatible.cache_mode, expected);
+    }
+}
+
+#[test]
+fn openai_cache_mode_source_overrides_environment_and_invalid_values_fail() {
+    let config = model_service_config_from_sources(
+        &ModelServiceConfigSource {
+            openai_cache_mode: Some("off".to_string()),
+            ..ModelServiceConfigSource::default()
+        },
+        &env(&[
+            ("TIMEM_API_KEY", "k"),
+            ("TIMEM_OPENAI_CACHE_MODE", "ephemeral"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        config.openai_compatible.cache_mode,
+        OpenAiCompatibleCacheMode::Off
+    );
+
+    let error = model_service_config_from_sources(
+        &ModelServiceConfigSource::default(),
+        &env(&[
+            ("TIMEM_API_KEY", "k"),
+            ("TIMEM_OPENAI_CACHE_MODE", "forever"),
+        ]),
+    )
+    .unwrap_err();
+    assert!(error.contains("invalid_TIMEM_OPENAI_CACHE_MODE"));
+}
+
+#[test]
+fn dynamic_openai_cache_mode_application_is_validated() {
+    let mut options = OpenAiCompatibleOptions::default();
+    assert!(apply_openai_compatible_env_value(
+        &mut options,
+        "TIMEM_OPENAI_CACHE_MODE",
+        "ephemeral",
+    )
+    .unwrap());
+    assert_eq!(options.cache_mode, OpenAiCompatibleCacheMode::Ephemeral);
+    assert!(
+        apply_openai_compatible_env_value(&mut options, "TIMEM_OPENAI_CACHE_MODE", "invalid",)
+            .unwrap_err()
+            .contains("invalid_TIMEM_OPENAI_CACHE_MODE")
+    );
+}

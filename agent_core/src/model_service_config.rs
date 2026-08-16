@@ -1,6 +1,7 @@
 use crate::{
-    default_api_protocol, default_base_url, default_model, parse_api_protocol, parse_token_count,
-    ApiProtocol, ModelServiceConfig, OpenAiCompatibleOptions,
+    default_api_protocol, default_base_url, default_model, parse_api_protocol,
+    parse_openai_compatible_cache_mode, parse_token_count, ApiProtocol, ModelServiceConfig,
+    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -20,6 +21,7 @@ pub struct ModelServiceConfigSource {
     pub enable_thinking: Option<bool>,
     pub reasoning_effort: Option<String>,
     pub stream: Option<bool>,
+    pub openai_cache_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +190,13 @@ fn model_service_config_from_sources_with_key_policy(
             None => false,
         },
     };
+    let cache_mode = source
+        .openai_cache_mode
+        .clone()
+        .or_else(|| env.get("TIMEM_OPENAI_CACHE_MODE").cloned())
+        .map(|value| parse_openai_compatible_cache_mode(&value))
+        .transpose()?
+        .unwrap_or(OpenAiCompatibleCacheMode::Auto);
     Ok(ModelServiceConfig {
         model,
         base_url,
@@ -201,6 +210,7 @@ fn model_service_config_from_sources_with_key_policy(
             enable_thinking,
             reasoning_effort,
             stream,
+            cache_mode,
         },
     })
 }
@@ -240,6 +250,9 @@ pub fn apply_openai_compatible_env_value(
         }
         "TIMEM_STREAM" => {
             options.stream = parse_bool_env(key, value)?;
+        }
+        "TIMEM_OPENAI_CACHE_MODE" => {
+            options.cache_mode = parse_openai_compatible_cache_mode(value)?;
         }
         _ => return Ok(false),
     }

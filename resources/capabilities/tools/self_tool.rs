@@ -115,7 +115,7 @@ fn execute_path_action(core: &AgentCore) -> String {
 fn execute_params_action(core: &AgentCore) -> String {
     let safe_env = &core.self_tool.env;
     format!(
-        "Action result: self_tool\ntype: params\nname: {}\nversion: {}\npid: {}\nmodel: {}\nassistant_name: {}\napi_protocol: {}\nresponse_protocol: {}\nbase_url: {}\napi_key_configured: {}\ntimeout_secs: {}\nmax_llm_input_tokens: {}\nmax_llm_output_tokens: {}\nmax_steps: {}\nbash_approval: {}\nwork_instructions: {}\nenable_thinking: {}\nreasoning_effort: {}\nstream: {}\ncapability_tools: {}\ncapability_skills: {}\nnote: Only known runtime parameters are returned. Credentials and arbitrary environment variables are excluded.",
+        "Action result: self_tool\ntype: params\nname: {}\nversion: {}\npid: {}\nmodel: {}\nassistant_name: {}\napi_protocol: {}\nresponse_protocol: {}\nbase_url: {}\napi_key_configured: {}\ntimeout_secs: {}\nmax_llm_input_tokens: {}\nmax_llm_output_tokens: {}\nmax_steps: {}\nbash_approval: {}\nwork_instructions: {}\nenable_thinking: {}\nreasoning_effort: {}\nstream: {}\nopenai_cache_mode: {}\ncapability_tools: {}\ncapability_skills: {}\nnote: Only known runtime parameters are returned. Credentials and arbitrary environment variables are excluded.",
         core.self_tool.about.name,
         core.self_tool.about.version,
         core.self_tool.process.pid,
@@ -136,6 +136,7 @@ fn execute_params_action(core: &AgentCore) -> String {
         env_param(safe_env, "TIMEM_ENABLE_THINKING"),
         env_param(safe_env, "TIMEM_REASONING_EFFORT"),
         env_param(safe_env, "TIMEM_STREAM"),
+        env_param(safe_env, "TIMEM_OPENAI_CACHE_MODE"),
         core.capabilities.tool_count(),
         core.capabilities.skill_count(),
     )

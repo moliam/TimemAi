@@ -870,7 +870,9 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids, vec!["pd_1"]);
     assert!(!prompt.contains("先分析"));
     assert!(!prompt.contains("Final Answer:\n结论"));
-    assert!(prompt.ends_with("Please continue the work and respond as protocol requires in user's language:"));
+    assert!(prompt.ends_with(
+        "Please continue the work and respond as protocol requires in user's language:"
+    ));
     assert!(!prompt.contains("Now please fulfill your response part"));
     let prompt = match core.begin_turn("继续", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,

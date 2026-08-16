@@ -67,7 +67,9 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     assert!(!rendered.contains("slice_id:"));
     assert!(!rendered.contains("prompt_type:"));
     assert!(!rendered.contains("HIDDEN"));
-    assert!(rendered.ends_with("Please continue the work and respond as protocol requires in user's language:"));
+    assert!(rendered.ends_with(
+        "Please continue the work and respond as protocol requires in user's language:"
+    ));
     assert!(!rendered.contains("one Markdown response with one state branch"));
 }
 

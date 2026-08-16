@@ -688,6 +688,10 @@ fn shell_session_env_values(
         "TIMEM_STREAM".to_string(),
         config.openai_compatible.stream.to_string(),
     );
+    env.insert(
+        "TIMEM_OPENAI_CACHE_MODE".to_string(),
+        config.openai_compatible.cache_mode.label().to_string(),
+    );
     env
 }
 

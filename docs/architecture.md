@@ -1478,7 +1478,12 @@ a default local key-file path, but key-file parsing and conversion into model se
 configuration are core `model_service_config` responsibilities.
 
 OpenAI-compatible Session profiles may additionally set
-`TIMEM_ENABLE_THINKING`, `TIMEM_REASONING_EFFORT`, and `TIMEM_STREAM`. Core owns
+`TIMEM_ENABLE_THINKING`, `TIMEM_REASONING_EFFORT`, `TIMEM_STREAM`, and
+`TIMEM_OPENAI_CACHE_MODE`. The cache mode accepts `auto` (default), `off`, or
+`ephemeral`. `auto` relies on the provider's stable-prefix prompt cache and sends
+no Anthropic-style message field. `ephemeral` enables the compatibility
+extension and performs one unmarked retry only when a 4xx response explicitly
+rejects the `cache_control` schema. Core owns
 validation and request-body injection. When streaming is enabled, model service
 transport collects SSE `delta.content` and the final usage event into the same
 `LlmResponse` contract used by non-streaming model services. It counts but does not
