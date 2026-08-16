@@ -67,7 +67,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     assert!(!rendered.contains("slice_id:"));
     assert!(!rendered.contains("prompt_type:"));
     assert!(!rendered.contains("HIDDEN"));
-    assert!(rendered.ends_with("Please continue the work and respond as protocol requires:"));
+    assert!(rendered.ends_with("Please continue the work and respond as protocol requires in user's language:"));
     assert!(!rendered.contains("one Markdown response with one state branch"));
 }
 
@@ -81,7 +81,7 @@ fn formatted_response_trailer_parser_extracts_heading_free_trailer() {
     assert_eq!(prefix, "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]");
     assert_eq!(
         trailer.as_deref(),
-        Some("Please continue the work and respond as protocol requires:")
+        Some("Please continue the work and respond as protocol requires in user's language:")
     );
 }
 
@@ -89,15 +89,15 @@ fn formatted_response_trailer_parser_extracts_heading_free_trailer() {
 fn formatted_response_trailer_is_protocol_neutral_and_does_not_repeat_the_shape() {
     assert_eq!(
         formatted_response_trailer("one-root label <response>...</response>", "Ai7"),
-        "Please continue the work and respond as protocol requires:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
     assert_eq!(
         formatted_response_trailer("one JSON object {...}", "Ai7"),
-        "Please continue the work and respond as protocol requires:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
     assert_eq!(
         formatted_response_trailer("one Markdown response with one state branch", "Ai7"),
-        "Please continue the work and respond as protocol requires:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
 }
 

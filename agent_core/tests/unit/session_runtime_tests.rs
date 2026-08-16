@@ -2365,7 +2365,7 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     assert_eq!(first_blocks[2].cache, crate::CacheControl::None);
     assert_eq!(
         first_blocks[2].text,
-        "Please continue the work and respond as protocol requires:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
     assert!(first_blocks
         .iter()

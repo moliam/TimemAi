@@ -197,7 +197,7 @@ fn anthropic_request_maps_cache_strategy_blocks_to_content_blocks() {
 #[test]
 fn anthropic_request_sends_the_current_response_trailer_as_an_uncached_tail() {
     let config = config(ApiProtocol::Anthropic);
-    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires:";
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires in user's language:";
 
     let prepared = prepare_model_request(&config, prompt);
     let content = prepared.body["messages"][0]["content"].as_array().unwrap();
@@ -209,7 +209,7 @@ fn anthropic_request_sends_the_current_response_trailer_as_an_uncached_tail() {
     }));
     assert_eq!(
         content.last().unwrap()["text"],
-        "Please continue the work and respond as protocol requires:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
     assert!(content.last().unwrap().get("cache_control").is_none());
 }
@@ -290,7 +290,7 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
 #[test]
 fn openai_compatible_request_sends_the_current_response_trailer_as_an_uncached_tail() {
     let config = config(ApiProtocol::OpenAiCompatible);
-    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires:";
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires in user's language:";
 
     let prepared = prepare_model_request(&config, prompt);
     let messages = prepared.body["messages"].as_array().unwrap();
@@ -302,7 +302,7 @@ fn openai_compatible_request_sends_the_current_response_trailer_as_an_uncached_t
     }));
     assert_eq!(
         messages.last().unwrap()["content"],
-        "Please continue the work and respond as protocol requires:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
     assert!(messages.last().unwrap().get("cache_control").is_none());
 }
