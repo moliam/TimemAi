@@ -6,6 +6,17 @@ fn caps() -> CapabilityRegistry {
     CapabilityRegistry::builtin()
 }
 
+fn assert_sections_required(input: &str) {
+    let env = parse_markdown_envelope(input, &caps());
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("markdown_response_sections_required")
+    );
+    assert!(env.final_answer.is_empty());
+    assert!(env.continue_work);
+    assert!(env.next_actions.is_empty());
+}
+
 fn documented_markdown_examples(text: &str) -> Vec<String> {
     text.split("## -------- Example")
         .skip(1)
@@ -46,11 +57,8 @@ fn documented_markdown_response_examples_parse_with_runtime_parser() {
 }
 
 #[test]
-fn plain_prose_becomes_final_answer() {
-    let env = parse_markdown_envelope("Hello world", &caps());
-    assert_eq!(env.final_answer, "Hello world");
-    assert!(!env.continue_work);
-    assert!(env.repair_issue.is_none());
+fn plain_prose_requires_protocol_sections() {
+    assert_sections_required("Hello world");
 }
 
 #[test]
@@ -77,32 +85,21 @@ fn external_tool_call_protocol_requests_repair_instead_of_plain_answer() {
 }
 
 #[test]
-fn json_fallback() {
+fn top_level_json_is_plain_text_in_markdown_protocol() {
     let input = r#"{"status":"finished","final_answer":"done"}"#;
-    let env = parse_markdown_envelope(input, &caps());
-    assert_eq!(env.final_answer, "done");
-    assert!(!env.continue_work);
+    assert_sections_required(input);
 }
 
 #[test]
-fn fenced_json_response_protocol_still_parses() {
+fn fenced_json_is_plain_text_in_markdown_protocol() {
     let input = "```json\n{\"status\":\"finished\",\"final_answer\":\"done\"}\n```";
-    let env = parse_markdown_envelope(input, &caps());
-
-    assert!(env.repair_issue.is_none());
-    assert_eq!(env.final_answer, "done");
-    assert!(!env.continue_work);
+    assert_sections_required(input);
 }
 
 #[test]
 fn plain_answer_with_json_code_block_stays_plain_answer() {
     let input = "Here is a config example:\n```json\n{\"foo\":\"bar\"}\n```";
-    let env = parse_markdown_envelope(input, &caps());
-
-    assert!(env.repair_issue.is_none());
-    assert_eq!(env.final_answer, input);
-    assert!(!env.continue_work);
-    assert!(env.next_actions.is_empty());
+    assert_sections_required(input);
 }
 
 #[test]
@@ -157,40 +154,31 @@ not a real progress section
 #[test]
 fn plain_answer_with_inline_braces_stays_plain_answer() {
     let input = "Rust uses `{}` placeholders and blocks like `fn main() {}`.";
-    let env = parse_markdown_envelope(input, &caps());
-
-    assert!(env.repair_issue.is_none());
-    assert_eq!(env.final_answer, input);
-    assert!(!env.continue_work);
-    assert!(env.next_actions.is_empty());
+    assert_sections_required(input);
 }
 
 #[test]
-fn prose_before_protocol_json_still_extracts_protocol_payload() {
+fn prose_before_json_stays_plain_text() {
     let input = "先说明一下。\n{\"status\":\"finished\",\"final_answer\":\"ok\"}";
-    let env = parse_markdown_envelope(input, &caps());
-
-    assert!(env.repair_issue.is_none());
-    assert_eq!(env.final_answer, "ok");
-    assert!(!env.continue_work);
+    assert_sections_required(input);
 }
 
 #[test]
-fn malformed_fenced_json_with_protocol_markers_requests_repair() {
+fn malformed_fenced_json_is_not_treated_as_a_second_response_protocol() {
     let input =
             "```json\n{\"working_still_action\":{\"action\":\"run_bash\",\"args\":{\"cmd\":\"bad dangling \\ path and raw \n newline\n```";
-    let env = parse_markdown_envelope(input, &caps());
-
-    assert_eq!(env.repair_issue.as_deref(), Some("invalid_json"));
-    assert!(env.final_answer.is_empty());
+    assert_sections_required(input);
 }
 
 #[test]
-fn unclosed_fenced_json_with_protocol_markers_requests_repair() {
+fn unclosed_fenced_json_requests_markdown_fence_repair() {
     let input = "```json\n{\"working_still_action\":{\"action\":\"run_bash\",\"args\":{\"cmd\":\"bad dangling \\ path";
     let env = parse_markdown_envelope(input, &caps());
 
-    assert_eq!(env.repair_issue.as_deref(), Some("invalid_json"));
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("unclosed_markdown_code_fence")
+    );
     assert!(env.final_answer.is_empty());
 }
 
@@ -218,8 +206,7 @@ fn sections_parsed_correctly() {
 #[test]
 fn missing_structure_triggers_repair() {
     let input = "something { \"action\": \"run_bash\" }";
-    let env = parse_markdown_envelope(input, &caps());
-    assert!(env.repair_issue.is_some());
+    assert_sections_required(input);
 }
 
 #[test]
@@ -248,15 +235,15 @@ fn parses_context_compact_section() {
 }
 
 #[test]
-fn actions_section_json_fence_still_parses_action() {
+fn actions_section_rejects_json_fence() {
     let input = "## Free_talk\nchecking\n\n## Working_Still_Action\n```json\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```";
     let env = parse_markdown_envelope(input, &caps());
 
-    assert!(env.repair_issue.is_none());
-    assert!(env.continue_work);
-    assert_eq!(env.next_actions.len(), 1);
-    assert_eq!(env.next_actions[0].action, "run_bash");
-    assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("actions_section_requires_action_fence")
+    );
+    assert!(env.next_actions.is_empty());
 }
 
 #[test]
@@ -287,7 +274,7 @@ checking
 }
 
 #[test]
-fn actions_section_rejects_old_group_object() {
+fn actions_section_rejects_noncanonical_group_object() {
     let input = r#"## Free_talk
 checking
 
@@ -304,10 +291,7 @@ checking
 ```"#;
     let env = parse_markdown_envelope(input, &caps());
 
-    assert_eq!(
-        env.repair_issue.as_deref(),
-        Some("actions.old_group_object_not_supported")
-    );
+    assert_eq!(env.repair_issue.as_deref(), Some("actions.action_missing"));
     assert!(env.next_actions.is_empty());
 }
 
@@ -403,50 +387,34 @@ fn extracts_markdown_protocol_after_preface() {
 }
 
 #[test]
-fn action_block_without_sections_is_working_protocol() {
+fn action_block_without_protocol_section_is_plain_text() {
     let input = "```action\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```";
-    let env = parse_markdown_envelope(input, &caps());
-
-    assert!(env.repair_issue.is_none());
-    assert!(env.continue_work);
-    assert_eq!(env.next_actions.len(), 1);
-    assert_eq!(env.next_actions[0].action, "run_bash");
+    assert_sections_required(input);
 }
 
 #[test]
-fn actions_section_accepts_bare_json_array() {
+fn actions_section_rejects_bare_json_array() {
     let input = "## Free_talk\nchecking\n\n## Working_Still_Action\n[{\"run_bash\":{\"cmd\":\"pwd\"}},{\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}}]";
     let env = parse_markdown_envelope(input, &caps());
 
-    assert!(env.repair_issue.is_none());
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("actions_section_requires_action_fence")
+    );
     assert!(env.continue_work);
-    assert_eq!(env.next_actions.len(), 2);
-    assert_eq!(env.next_actions[0].action, "run_bash");
-    assert_eq!(env.next_actions[1].action, "memmgr");
-    assert_eq!(env.next_actions[1].input_str("op"), "sql");
+    assert!(env.next_actions.is_empty());
 }
 
 #[test]
 fn non_protocol_markdown_heading_stays_plain_answer() {
     let input = "## Notes\nThis is ordinary markdown, not the response protocol.";
-    let env = parse_markdown_envelope(input, &caps());
-
-    assert!(env.repair_issue.is_none());
-    assert!(!env.continue_work);
-    assert_eq!(env.final_answer, input);
-    assert!(env.next_actions.is_empty());
+    assert_sections_required(input);
 }
 
 #[test]
-fn malformed_action_block_is_not_downgraded_to_plain_answer() {
+fn action_block_without_the_required_section_stays_plain_text() {
     let input = "some preface\n```action\n{\"run_bash\":\"cmd=pwd\"}\n```";
-    let env = parse_markdown_envelope(input, &caps());
-
-    assert_eq!(
-        env.repair_issue.as_deref(),
-        Some("actions.args_must_be_object")
-    );
-    assert!(env.final_answer.is_empty());
+    assert_sections_required(input);
 }
 
 #[test]

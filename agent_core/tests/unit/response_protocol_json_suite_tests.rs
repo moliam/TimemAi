@@ -71,21 +71,22 @@ fn documented_json_response_examples_parse_with_runtime_parser() {
 }
 
 #[test]
-fn unwraps_common_fields_envelope_without_repair() {
+fn rejects_noncanonical_fields_envelope() {
     let env = parse_envelope(
         r#"{"fields":{"status":"ALL_FINISHED","final_answer":"ok"}}"#,
         &caps(),
     );
 
-    assert!(env.repair_issue.is_none());
-    assert!(!env.continue_work);
-    assert_eq!(env.final_answer, "ok");
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("unexpected_top_level_field:fields")
+    );
 }
 
 #[test]
 fn parses_context_compact_field() {
     let env = parse_envelope(
-        r#"{"free_talk":"整理上下文","context_compact":{"delta_ids":["pd_a"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+        r#"{"free_talk":"整理上下文","context_compact":{"discard":["pd_a"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
         &caps(),
     );
 
@@ -210,7 +211,7 @@ fn diverse_confusing_json_responses_keep_strict_execution_boundary() {
             json!({
                 "free_talk": "compact before continuing",
                 "free_talk": "compacting",
-                "context_compact": {"delta_ids": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
+                "context_compact": {"discard": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
                 "working_still_action": {"run_bash": {"cmd": "pwd"}}
             }),
             vec!["run_bash"],
@@ -235,7 +236,7 @@ fn diverse_confusing_json_responses_keep_strict_execution_boundary() {
             "self tool read",
             json!({
                 "free_talk": "checking self",
-                "working_still_action": {"self_tool": {"type": "about_me", "op": "read"}}
+                "working_still_action": {"self_tool": {"type": "params"}}
             }),
             vec!["self_tool"],
         ),
@@ -260,9 +261,9 @@ fn diverse_confusing_json_responses_keep_strict_execution_boundary() {
             "actions.args_must_be_object",
         ),
         (
-            "old group object rejected",
+            "noncanonical group object rejected",
             json!({"free_talk":"bad","working_still_action":[{"order":"parallel"}]}),
-            "actions[0].old_group_object_not_supported",
+            "actions[0].args_must_be_object",
         ),
         (
             "old action args object rejected",
@@ -339,7 +340,7 @@ fn malformed_response_variants_return_repair_issues_without_panic() {
             "final_answer_must_not_start_with_runtime_progress_marker",
         ),
         (
-            r#"{"status":"working","free_talk":"compact","context_compact":{"delta_ids":["pd_a"]}}"#,
+            r#"{"status":"working","free_talk":"compact","context_compact":{"discard":["pd_a"]}}"#,
             "context_compact[0].summary_required",
         ),
     ];
@@ -377,4 +378,18 @@ fn malformed_truncated_json_returns_invalid_json_without_panic() {
     assert_eq!(env.repair_issue.as_deref(), Some("invalid_json"));
     assert!(env.continue_work);
     assert!(env.next_actions.is_empty());
+}
+
+#[test]
+fn rejects_wrappers_prose_and_implicitly_repaired_json() {
+    for raw in [
+        "```json\n{\"status\":\"ALL_FINISHED\",\"final_answer\":\"done\"}\n```",
+        "preface\n{\"status\":\"ALL_FINISHED\",\"final_answer\":\"done\"}",
+        "{\"status\":\"ALL_FINISHED\",\"final_answer\":\"say \"done\" now\"}",
+    ] {
+        let env = parse_envelope(raw, &caps());
+        assert_eq!(env.repair_issue.as_deref(), Some("invalid_json"), "{raw}");
+        assert!(env.final_answer.is_empty(), "{raw}");
+        assert!(env.continue_work, "{raw}");
+    }
 }

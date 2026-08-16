@@ -63,18 +63,18 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     assert!(parts.new_delta.contains("delta1"));
     assert!(!parts
         .new_delta
-        .contains("Now please fulfill your response part"));
+        .contains("Please continue the work and respond as protocol requires"));
 
     let blocks = plan_prompt_cache(&prompt);
     assert_eq!(blocks.len(), 3);
     assert!(blocks[1].text.contains("delta1"));
     assert!(!blocks[1]
         .text
-        .contains("Now please fulfill your response part"));
+        .contains("Please continue the work and respond as protocol requires"));
     assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
     assert_eq!(
         blocks[2].text,
-        "Now please fulfill your response part like one-root label <response>...</response>:"
+        "Please continue the work and respond as protocol requires:"
     );
     assert_eq!(blocks[2].cache, CacheControl::None);
 }
