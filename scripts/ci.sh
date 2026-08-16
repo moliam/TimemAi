@@ -40,7 +40,7 @@ echo "== rust clippy warnings =="
 scripts/clippy_check.sh
 
 echo "== rust tests =="
-cargo test --workspace --locked
+cargo test --workspace --locked -- --test-threads=1
 
 echo "== rust documentation =="
 cargo doc --workspace --all-features --no-deps --locked
