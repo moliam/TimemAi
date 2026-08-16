@@ -449,26 +449,33 @@ fn turn_focus_reminder_schedule_respects_periods_and_skips_backlog() {
 }
 
 #[test]
-fn turn_reasoning_reminder_schedule_injects_every_eight_completed_rounds() {
+fn turn_reasoning_reminder_schedule_uses_configured_round_interval() {
     let config = crate::ReminderTipsConfig::default();
-    let tips = config.schedules[1].tips.clone();
+    let schedule = &config.schedules[1];
+    let interval = schedule
+        .every_rounds
+        .expect("reasoning reminder should define a round interval");
+    let tips = schedule.tips.clone();
     let mut schedules = TurnReminderSchedules::new("turn_test", &config);
 
     assert!(tips
         .iter()
         .all(|reminder| reminder.starts_with("TIPS: ") && reminder.is_ascii()));
 
-    assert!(schedules.take_due_rounds(7).is_empty());
-    let first = schedules.take_due_rounds(8);
+    assert!(schedules.take_due_rounds(interval - 1).is_empty());
+    let first = schedules.take_due_rounds(interval);
     assert_eq!(first.len(), 1);
     assert!(tips.contains(&first[0]));
-    assert!(schedules.take_due_rounds(8).is_empty());
-    assert!(schedules.take_due_rounds(15).is_empty());
+    assert!(schedules.take_due_rounds(interval).is_empty());
+    assert!(schedules
+        .take_due_rounds(interval.saturating_mul(2) - 1)
+        .is_empty());
 
-    let second = schedules.take_due_rounds(16);
+    let second_boundary = interval.saturating_mul(2);
+    let second = schedules.take_due_rounds(second_boundary);
     assert_eq!(second.len(), 1);
     assert!(tips.contains(&second[0]));
-    assert!(schedules.take_due_rounds(16).is_empty());
+    assert!(schedules.take_due_rounds(second_boundary).is_empty());
 }
 
 #[test]
@@ -520,15 +527,20 @@ fn independent_schedules_due_at_one_boundary_are_each_consumed_once() {
 }
 
 #[test]
-fn session_turn_injects_reasoning_reminder_before_the_ninth_model_request() {
+fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
     let dir = tmp_dir("turn_reasoning_reminder");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new("STATIC", test_profile(), &dir);
-    core.set_max_rounds(12);
+    let reminder_config = crate::ReminderTipsConfig::default();
+    let reasoning_schedule = &reminder_config.schedules[1];
+    let interval = reasoning_schedule
+        .every_rounds
+        .expect("reasoning reminder should define a round interval");
+    core.set_max_rounds(interval.saturating_add(4));
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let working = r#"{"status":"working","free_talk":"继续查证。","working_still_action":[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":1}}]}"#;
-    let mut responses = (0..8)
+    let mut responses = (0..interval)
         .map(|_| Ok(llm(working, 1_000, false)))
         .collect::<Vec<_>>();
     responses.push(Ok(llm(
@@ -556,21 +568,24 @@ fn session_turn_injects_reasoning_reminder_before_the_ninth_model_request() {
     );
 
     assert_eq!(outcome.text, "完成。");
-    assert_eq!(model.prompts.len(), 9);
-    let reasoning_tips = crate::ReminderTipsConfig::default().schedules[1]
-        .tips
-        .clone();
-    assert!(model.prompts[..8].iter().all(|prompt| reasoning_tips
+    let reminder_prompt_index =
+        usize::try_from(interval).expect("round interval should fit usize");
+    assert_eq!(model.prompts.len(), reminder_prompt_index + 1);
+    let reasoning_tips = reasoning_schedule.tips.clone();
+    assert!(model.prompts[..reminder_prompt_index]
         .iter()
-        .all(|reminder| !prompt.contains(reminder))));
+        .all(|prompt| reasoning_tips
+            .iter()
+            .all(|reminder| !prompt.contains(reminder))));
     assert_eq!(
         reasoning_tips
             .iter()
-            .filter(|reminder| model.prompts[8].contains(reminder.as_str()))
+            .filter(|reminder| model.prompts[reminder_prompt_index]
+                .contains(reminder.as_str()))
             .count(),
         1
     );
-    assert!(model.prompts[8].contains("## SYSTEM"));
+    assert!(model.prompts[reminder_prompt_index].contains("## SYSTEM"));
 }
 
 #[test]
