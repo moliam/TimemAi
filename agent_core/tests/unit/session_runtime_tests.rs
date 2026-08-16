@@ -36,7 +36,7 @@ fn test_config() -> ModelServiceConfig {
         timeout_secs: 1,
         max_llm_input_tokens: 100_000,
         max_llm_output_tokens: 10_000,
-        response_protocol: crate::ResponseProtocolKind::Markdown,
+        response_protocol: crate::ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
@@ -52,8 +52,33 @@ fn usage(prompt_tokens: u32, completion_tokens: u32) -> UsageStats {
 }
 
 fn llm(content: impl Into<String>, prompt_tokens: u32, truncated: bool) -> LlmResponse {
+    let mut content = content.into();
+    let xml_issue = crate::response_protocol::xml_suite::parse_xml_envelope(
+        &content,
+        &CapabilityRegistry::builtin(),
+    )
+    .repair_issue;
+    if matches!(
+        xml_issue.as_deref(),
+        Some(
+            "finish_confirm_required_before_final_answer"
+                | "xml_recovered_final_answer_requires_retry"
+        )
+    ) && !content.contains("<finish_confirm")
+    {
+        let confirmed = format!(
+            "<finish_confirm>{}</finish_confirm>",
+            crate::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
+        );
+        if let Some(insertion_point) = content
+            .find("<toolgen_retrospect")
+            .or_else(|| content.find("<final_answer"))
+        {
+            content.insert_str(insertion_point, &confirmed);
+        }
+    }
     LlmResponse {
-        content: content.into(),
+        content,
         model_name: "test-model".to_string(),
         usage: usage(prompt_tokens, 10),
         truncated,
@@ -416,16 +441,153 @@ fn session_turn_uses_model_service_config_response_protocol_over_core_state() {
 #[test]
 fn turn_focus_reminder_schedule_respects_periods_and_skips_backlog() {
     let interval = Duration::from_secs(10 * 60);
-    let mut schedule = TurnFocusReminderSchedule::new("turn_test", interval);
+    let config = crate::ReminderTipsConfig::default();
+    let tips = config.schedules[0].tips.clone();
+    let mut schedules = TurnReminderSchedules::new("turn_test", &config);
 
-    assert_eq!(schedule.take_due(interval - Duration::from_nanos(1)), None);
-    let first = schedule.take_due(interval).unwrap();
-    assert!(TURN_FOCUS_REMINDERS.contains(&first));
-    assert_eq!(schedule.take_due(interval + Duration::from_secs(1)), None);
+    assert!(tips
+        .iter()
+        .all(|reminder| reminder.starts_with("TIPS: ") && reminder.is_ascii()));
 
-    let jumped = schedule.take_due(interval * 4).unwrap();
-    assert!(TURN_FOCUS_REMINDERS.contains(&jumped));
-    assert_eq!(schedule.take_due(interval * 4), None);
+    assert!(schedules
+        .take_due_time(interval - Duration::from_nanos(1))
+        .is_empty());
+    let first = schedules.take_due_time(interval);
+    assert_eq!(first.len(), 1);
+    assert!(tips.contains(&first[0]));
+    assert!(schedules
+        .take_due_time(interval + Duration::from_secs(1))
+        .is_empty());
+
+    let jumped = schedules.take_due_time(interval * 4);
+    assert_eq!(jumped.len(), 1);
+    assert!(tips.contains(&jumped[0]));
+    assert!(schedules.take_due_time(interval * 4).is_empty());
+}
+
+#[test]
+fn turn_reasoning_reminder_schedule_injects_every_eight_completed_rounds() {
+    let config = crate::ReminderTipsConfig::default();
+    let tips = config.schedules[1].tips.clone();
+    let mut schedules = TurnReminderSchedules::new("turn_test", &config);
+
+    assert!(tips
+        .iter()
+        .all(|reminder| reminder.starts_with("TIPS: ") && reminder.is_ascii()));
+
+    assert!(schedules.take_due_rounds(7).is_empty());
+    let first = schedules.take_due_rounds(8);
+    assert_eq!(first.len(), 1);
+    assert!(tips.contains(&first[0]));
+    assert!(schedules.take_due_rounds(8).is_empty());
+    assert!(schedules.take_due_rounds(15).is_empty());
+
+    let second = schedules.take_due_rounds(16);
+    assert_eq!(second.len(), 1);
+    assert!(tips.contains(&second[0]));
+    assert!(schedules.take_due_rounds(16).is_empty());
+}
+
+#[test]
+fn none_selection_skips_injection_but_consumes_the_due_period() {
+    let config = crate::ReminderTipsConfig {
+        schedules: vec![crate::ReminderScheduleConfig {
+            every_minutes: None,
+            every_rounds: Some(2),
+            tips: vec!["NONE".to_string()],
+        }],
+    };
+    let mut schedules = TurnReminderSchedules::new("turn_none", &config);
+    assert!(schedules.take_due_rounds(2).is_empty());
+    assert_eq!(schedules.rounds[0].last_emitted_period, 1);
+    assert!(schedules.take_due_rounds(2).is_empty());
+}
+
+#[test]
+fn independent_schedules_due_at_one_boundary_are_each_consumed_once() {
+    let config = crate::ReminderTipsConfig {
+        schedules: vec![
+            crate::ReminderScheduleConfig {
+                every_minutes: Some(1),
+                every_rounds: None,
+                tips: vec!["TIPS: time".to_string()],
+            },
+            crate::ReminderScheduleConfig {
+                every_minutes: None,
+                every_rounds: Some(1),
+                tips: vec!["TIPS: round".to_string()],
+            },
+            crate::ReminderScheduleConfig {
+                every_minutes: None,
+                every_rounds: Some(1),
+                tips: vec!["NONE".to_string()],
+            },
+        ],
+    };
+    let mut schedules = TurnReminderSchedules::new("turn_same_boundary", &config);
+
+    assert_eq!(
+        schedules.take_due_time(Duration::from_secs(60)),
+        ["TIPS: time"]
+    );
+    assert_eq!(schedules.take_due_rounds(1), ["TIPS: round"]);
+    assert!(schedules.take_due_time(Duration::from_secs(60)).is_empty());
+    assert!(schedules.take_due_rounds(1).is_empty());
+    assert_eq!(schedules.rounds[1].last_emitted_period, 1);
+}
+
+#[test]
+fn session_turn_injects_reasoning_reminder_before_the_ninth_model_request() {
+    let dir = tmp_dir("turn_reasoning_reminder");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    core.set_max_rounds(12);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let working = r#"{"status":"working","free_talk":"继续查证。","working_still_action":[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":1}}]}"#;
+    let mut responses = (0..8)
+        .map(|_| Ok(llm(working, 1_000, false)))
+        .collect::<Vec<_>>();
+    responses.push(Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"完成。"}"#,
+        1_100,
+        false,
+    )));
+    let mut model = ReplayModel::new(responses);
+
+    let outcome = run_session_turn_with_model_client_and_focus_interval(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "持续检查并得出结论",
+            session: "reasoning_session",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+        Duration::from_secs(24 * 60 * 60),
+    );
+
+    assert_eq!(outcome.text, "完成。");
+    assert_eq!(model.prompts.len(), 9);
+    let reasoning_tips = crate::ReminderTipsConfig::default().schedules[1]
+        .tips
+        .clone();
+    assert!(model.prompts[..8].iter().all(|prompt| reasoning_tips
+        .iter()
+        .all(|reminder| !prompt.contains(reminder))));
+    assert_eq!(
+        reasoning_tips
+            .iter()
+            .filter(|reminder| model.prompts[8].contains(reminder.as_str()))
+            .count(),
+        1
+    );
+    assert!(model.prompts[8].contains("## SYSTEM"));
 }
 
 #[test]
@@ -467,10 +629,13 @@ fn session_turn_injects_due_focus_reminder_before_the_next_model_request() {
     assert_eq!(outcome.text, "提醒后完成。");
     assert_eq!(model.inner.prompts.len(), 2);
     assert!(model.inner.prompts[1].contains("## SYSTEM"));
+    let focus_tips = crate::ReminderTipsConfig::default().schedules[0]
+        .tips
+        .clone();
     assert_eq!(
-        TURN_FOCUS_REMINDERS
+        focus_tips
             .iter()
-            .filter(|reminder| model.inner.prompts[1].contains(**reminder))
+            .filter(|reminder| model.inner.prompts[1].contains(reminder.as_str()))
             .count(),
         1
     );
@@ -527,6 +692,7 @@ fn session_turn_repairs_empty_model_content() {
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Ok(llm("", 1_000, false)),
@@ -872,9 +1038,7 @@ fn session_turn_xml_outer_text_becomes_free_talk_and_continues_action() {
         Ok(llm(
             r#"<free_talk>search memory</free_talk>
 <response>
-  <working_still_action>
-    <action_json><![CDATA[[{"memmgr":{"type":"raw_chat","op":"search","search_text":"fixture","limit":1}}]]]></action_json>
-  </working_still_action>
+  <actions><memmgr type="raw_chat" op="search" limit="1"><search_text>fixture</search_text></memmgr></actions>
 </response>"#,
             1_000,
             false,
@@ -909,6 +1073,8 @@ fn session_turn_xml_outer_text_becomes_free_talk_and_continues_action() {
     assert!(model.prompts[1].contains("## TIMEM_ASSISTANT"));
     assert!(model.prompts[1].contains("<free_talk>search memory</free_talk>"));
     assert!(model.prompts[1].contains("Action result: memmgr"));
+    assert!(model.prompts[1].contains("TIPS: The previous XML response had content outside"));
+    assert!(model.prompts[1].contains("begin exactly with <response>"));
     let repair_events = read_audit_events(&audit)
         .into_iter()
         .filter(|event| event["type"] == "model_repair_request")
@@ -965,6 +1131,61 @@ fn session_turn_retries_a_recovered_final_answer_before_finishing() {
     assert!(events
         .iter()
         .any(|event| { event["issue"] == "xml_recovered_final_answer_requires_retry" }));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_turn_never_accepts_a_recovered_final_answer_after_retry_exhaustion() {
+    let dir = tmp_dir("xml_recovered_final_retry_exhausted");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    let mut ui = RetryRecordingUi::default();
+    let mut model = ReplayModel::new((0..6).map(|attempt| {
+        Ok(llm(
+            format!(
+                "preface<response><final_answer>must not finish {attempt}</final_answer></response>"
+            ),
+            1_000 + attempt,
+            false,
+        ))
+    }));
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "finish only with an exact response",
+            session: "xml_recovered_final_retry_exhausted_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "");
+    assert_eq!(
+        outcome.repair_issue.as_deref(),
+        Some("xml_recovered_final_answer_requires_retry")
+    );
+    assert_eq!(
+        outcome.stop_reason,
+        Some(TurnStopReason::ProtocolRepairFailed)
+    );
+    assert_eq!(outcome.stats.repair_calls, 5);
+    assert_eq!(model.prompts.len(), 6);
+    let events = read_audit_events(&audit);
+    assert_eq!(audit_event_count(&events, "model_repair_request"), 5);
+    assert_eq!(
+        audit_event(&events, "turn_final").unwrap()["assistant_output"],
+        ""
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1034,8 +1255,8 @@ This is all answer text.
 }
 
 #[test]
-fn session_turn_xml_malformed_action_json_still_repairs() {
-    let dir = tmp_dir("xml_malformed_action_json_repairs");
+fn session_turn_xml_invalid_native_action_still_repairs() {
+    let dir = tmp_dir("xml_invalid_native_action_repairs");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
@@ -1046,11 +1267,7 @@ fn session_turn_xml_malformed_action_json_still_repairs() {
         Ok(llm(
             r#"<response>
 <free_talk>Need a local check.</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-{"run_bash":{"cmd":"pwd",}}
-]]></action_json>
-</working_still_action>
+<actions><run_bash/></actions>
 </response>"#,
             1_000,
             false,
@@ -1089,12 +1306,9 @@ fn session_turn_xml_malformed_action_json_still_repairs() {
         .filter_map(CoreTopicEvent::as_model_repair)
         .collect::<Vec<_>>();
     assert_eq!(repair_topics.len(), 1);
-    assert!(
-        repair_topics[0]
-            .issue
-            .starts_with("actions[0].invalid_json:trailing comma"),
-        "{}",
-        repair_topics[0].issue
+    assert_eq!(
+        repair_topics[0].issue,
+        "actions[0][0].input.any_required:cmd|loop_cmd"
     );
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
@@ -1401,6 +1615,7 @@ fn sequential_group_with_long_timeout_command_uses_host_decision_path() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = DeclineLongRunningCommandUi::default();
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -1465,6 +1680,7 @@ fn session_turn_executes_parallel_action_group_before_next_group() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -1534,6 +1750,7 @@ fn session_turn_cancels_parallel_long_running_bash_actions() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let started = Instant::now();
     let mut ui = CancelAfterDelayUi {
         started,
@@ -1607,6 +1824,7 @@ fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_act
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let started = Instant::now();
     let mut ui = CancelAfterDelayUi {
         started,
@@ -1672,6 +1890,7 @@ fn session_turn_stop_cancels_parallel_bash_after_approval() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let started = Instant::now();
     let mut ui = ApproveAndCancelAfterDelayUi {
         started,
@@ -1736,6 +1955,7 @@ fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_orde
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -1810,6 +2030,7 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = ApproveAllUi {
         approval_requests: 0,
     };
@@ -2106,9 +2327,7 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
         Ok(llm(
             r#"<response>
 <free_talk>查询 scratch 后继续。</free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}]]]></action_json>
-</working_still_action>
+<actions><memmgr type="scratch" op="search" limit="3"><search_text></search_text></memmgr></actions>
 </response>"#,
             5_000,
             false,
@@ -2146,11 +2365,11 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     assert_eq!(first_blocks[2].cache, crate::CacheControl::None);
     assert_eq!(
         first_blocks[2].text,
-        crate::prompt_render::formatted_response_trailer(
-            "one-root label <response>...</response>",
-            "TIMEM_ASSISTANT",
-        )
+        "Please continue the work and respond as protocol requires:"
     );
+    assert!(first_blocks
+        .iter()
+        .all(|block| !block.text.contains("one-root label")));
 
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
     assert!(second_parts.static_prompt.contains("test static prompt"));
@@ -2238,6 +2457,7 @@ fn session_turn_preserves_cache_plan_with_markdown_response_protocol() {
     );
     core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -2320,17 +2540,7 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
         Ok(llm(
             r#"<response>
 <free_talk>查询 scratch 后继续。</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[{"memmgr": {
-    "type": "scratch",
-    "op": "search",
-    "search_text": "",
-    "limit": 3
-  }
-}]
-]]></action_json>
-</working_still_action>
+<actions><memmgr type="scratch" op="search" limit="3"><search_text></search_text></memmgr></actions>
 </response>"#,
             5_000,
             false,
@@ -2504,7 +2714,11 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
 
     let prompt = &second_model.prompts[0];
     let assistant = prompt.find("## Ai4").unwrap();
-    let raw = prompt.find(raw_first_response).unwrap();
+    let raw = prompt
+        .find("<free_talk>raw planning note</free_talk>")
+        .unwrap();
+    assert!(prompt.contains("<finish_confirm>"));
+    assert!(prompt.contains("<final_answer>visible answer</final_answer>"));
     let user = prompt.find("second user input").unwrap();
     assert!(assistant < raw);
     assert!(raw < user);
@@ -2627,6 +2841,9 @@ impl ModelClient for ShrinkReplayModel {
         self.prompts.push(prompt.to_string());
         if self.prompts.len() == 1 {
             assert!(prompt.contains("mode=force_shrink_required"));
+            assert!(prompt.contains(
+                "TIPS: You can update your job list plan, steer and optimize your work based on the above work."
+            ));
             let mut delta_ids = prompt_field_values(prompt, "delta_id");
             delta_ids.sort();
             delta_ids.dedup();
@@ -2641,6 +2858,9 @@ impl ModelClient for ShrinkReplayModel {
         assert!(prompt.contains("Action result: context_compact"));
         assert!(prompt.contains("Context compact summary"));
         assert!(!prompt.contains("mode=force_shrink_required"));
+        assert!(!prompt.contains(
+            "TIPS: You can update your job list plan, steer and optimize your work based on the above work."
+        ));
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
             1_200,
@@ -2696,7 +2916,7 @@ fn session_turn_can_cancel_before_model_call_without_network() {
 }
 
 #[test]
-fn session_turn_shows_plain_text_after_protocol_repair_failure() {
+fn session_turn_accepts_a_protocol_compliant_repair() {
     let dir = tmp_dir("plain_text_repair_fallback");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -2705,7 +2925,7 @@ fn session_turn_shows_plain_text_after_protocol_repair_failure() {
     let mut model = ReplayModel::new([
         Ok(llm("{not valid json}", 5_000, false)),
         Ok(llm(
-            "提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`",
+            r#"{"status":"ALL_FINISHED","final_answer":"提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`"}"#,
             5_100,
             false,
         )),
@@ -2731,10 +2951,7 @@ fn session_turn_shows_plain_text_after_protocol_repair_failure() {
         outcome.text,
         "提交成功！\n\n**commit `a91a7b8`** — `refactor: simplify app_context_policy`"
     );
-    assert_eq!(
-        outcome.repair_issue.as_deref(),
-        Some("invalid_json_plain_text_fallback")
-    );
+    assert_eq!(outcome.repair_issue, None);
     assert_eq!(model.prompts.len(), 2);
     assert!(model.prompts[1].contains("response is not protocol compliant"));
     let events = read_audit_events(&audit);
@@ -2876,6 +3093,7 @@ fn session_turn_markdown_repair_keeps_markdown_protocol_instruction() {
     );
     core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -3691,6 +3909,7 @@ fn session_turn_scratch_context_offload_records_id_and_continues() {
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
     let mut model = ScratchOffloadReplayModel {
         prompts: Vec::new(),
@@ -3777,6 +3996,7 @@ fn session_turn_context_compact_emits_structured_topic() {
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = RecordingTopicUi::default();
     let mut model = CompactThenFinishModel {
         prompts: Vec::new(),
@@ -3820,6 +4040,7 @@ fn session_turn_markdown_protocol_executes_actions_and_emits_topic_events() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = RecordingTopicUi::default();
     let mut model = ReplayModel::new([
         Ok(llm(
@@ -3927,7 +4148,11 @@ impl ModelClient for StoryReplayModel {
             2 => Ok(llm("{这不是合法 JSON，但应该走协议修复}", 2_100, false)),
             3 => {
                 assert!(prompt.contains("response is not protocol compliant"));
-                Ok(llm("畸形回复已恢复为用户可读文本。", 2_200, false))
+                Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"畸形回复已按协议修复。"}"#,
+                    2_200,
+                    false,
+                ))
             }
             4 => Ok(llm(
                 r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"upsert","id":"project_code","content":"测试项目代号是 OMEGA-7"}}]}"#,
@@ -4015,7 +4240,7 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
     let additional_contexts = [None, None, None, Some(long_work_context.as_str()), None];
     let expected_outputs = [
         "你好，我在。",
-        "畸形回复已恢复为用户可读文本。",
+        "畸形回复已按协议修复。",
         "已记录测试项目代号。",
         "测试项目代号是 OMEGA-7。",
         "上下文已转存并压缩，可以继续。",
@@ -4090,7 +4315,7 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
     assert_eq!(audit_event_count(&events, "turn_start"), inputs.len());
     assert_eq!(audit_event_count(&events, "turn_final"), inputs.len());
     let audit_json = serde_json::to_string(&events).unwrap();
-    assert!(audit_json.contains("畸形回复已恢复为用户可读文本。"));
+    assert!(audit_json.contains("畸形回复已按协议修复。"));
     assert!(audit_json.contains("上下文已转存并压缩，可以继续。"));
     let _ = std::fs::remove_dir_all(dir);
 }

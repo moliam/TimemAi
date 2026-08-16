@@ -1,5 +1,28 @@
 use super::*;
 
+#[test]
+fn product_default_and_explicit_unlimited_have_no_round_limit() {
+    assert_eq!(configured_round_budget(None), UNLIMITED_ROUND_BUDGET);
+    assert_eq!(
+        configured_round_budget(Some("unlimited")),
+        UNLIMITED_ROUND_BUDGET
+    );
+}
+
+#[test]
+fn benchmark_round_budget_accepts_three_hundred() {
+    assert_eq!(configured_round_budget(Some("300")), 300);
+}
+
+#[test]
+fn invalid_round_budget_uses_product_default() {
+    assert_eq!(configured_round_budget(Some("0")), DEFAULT_ROUND_BUDGET);
+    assert_eq!(
+        configured_round_budget(Some("not-a-number")),
+        DEFAULT_ROUND_BUDGET
+    );
+}
+
 fn test_core(name: &str) -> AgentCore {
     let dir = std::env::temp_dir().join(format!(
         "timem_prompt_component_test_{}_{}",

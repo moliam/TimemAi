@@ -109,6 +109,23 @@ fn test_config() -> ModelServiceConfig {
     }
 }
 
+fn confirmed_xml_response(content: &str) -> String {
+    let confirmed = format!(
+        "<finish_confirm>{}</finish_confirm>",
+        crate::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
+    );
+    let insertion_point = content
+        .find("<toolgen_retrospect")
+        .or_else(|| content.find("<final_answer"))
+        .expect("confirmed XML response must contain a final branch");
+    format!(
+        "{}{}{}",
+        &content[..insertion_point],
+        confirmed,
+        &content[insertion_point..]
+    )
+}
+
 fn test_worker_config(
     dir: &std::path::Path,
     session_id: &str,
@@ -556,7 +573,7 @@ impl ModelClient for ToolGenWorkflowModel {
             if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
                 (
                     "toolgen_finish",
-                    "<response><toolgen_retrospect>Created reusable-line-counter; runtime validation returned status: ready.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></response>".to_string(),
+                    confirmed_xml_response("<response><toolgen_retrospect>Created reusable-line-counter; runtime validation returned status: ready.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></response>"),
                 )
             } else {
                 let marker = "Write the new tool files only in this temporary staging directory:\n";
@@ -589,19 +606,20 @@ impl ModelClient for ToolGenWorkflowModel {
                 .unwrap();
                 (
                     "toolgen_publish",
-                    format!("<response><free_talk>Writing and validating the reusable line counter.</free_talk><working_still_action><action_json><![CDATA[[{{\"toolgen\":{{\"op\":\"publish\",\"draft_path\":{}}}}}]]]></action_json></working_still_action></response>", serde_json::to_string(draft).unwrap()),
+                    format!("<response><free_talk>Writing and validating the reusable line counter.</free_talk><actions><toolgen op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>"),
                 )
             }
         } else if prompt.contains("Action result: self_tool") {
             (
                 "main_finish",
-                "<response><final_answer>Main task completed.</final_answer></response>"
-                    .to_string(),
+                confirmed_xml_response(
+                    "<response><final_answer>Main task completed.</final_answer></response>",
+                ),
             )
         } else {
             (
                 "main_action",
-                "<response><working_still_action><action_json><![CDATA[[{\"self_tool\":{\"type\":\"about_me\",\"op\":\"read\"}}]]]></action_json></working_still_action></response>".to_string(),
+                "<response><actions><self_tool type=\"params\"/></actions></response>".to_string(),
             )
         };
         let prompt_tokens = if phase.starts_with("toolgen") {
@@ -864,9 +882,9 @@ impl ModelClient for LongToolGenWorkflowModel {
             *calls
         };
         let content = if call <= 11 {
-            format!("<response><free_talk>ToolGen round {call}.</free_talk><working_still_action><action_json><![CDATA[[{{\"self_tool\":{{\"type\":\"about_me\",\"op\":\"read\"}}}}]]]></action_json></working_still_action></response>")
+            format!("<response><free_talk>ToolGen round {call}.</free_talk><actions><self_tool type=\"params\"/></actions></response>")
         } else if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
-            "<response><toolgen_retrospect>Created long-running-tool after normal runtime validation.</toolgen_retrospect><final_answer>Extended ToolGen workflow completed.</final_answer></response>".to_string()
+            confirmed_xml_response("<response><toolgen_retrospect>Created long-running-tool after normal runtime validation.</toolgen_retrospect><final_answer>Extended ToolGen workflow completed.</final_answer></response>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";
             let draft = prompt
@@ -896,7 +914,7 @@ impl ModelClient for LongToolGenWorkflowModel {
                 .to_string(),
             )
             .unwrap();
-            format!("<response><free_talk>Publishing after {call} normal model calls.</free_talk><working_still_action><action_json><![CDATA[[{{\"toolgen\":{{\"op\":\"publish\",\"draft_path\":{}}}}}]]]></action_json></working_still_action></response>", serde_json::to_string(draft).unwrap())
+            format!("<response><free_talk>Publishing after {call} normal model calls.</free_talk><actions><toolgen op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>")
         };
         Ok(LlmResponse {
             content,
@@ -919,6 +937,7 @@ fn toolgen_completion_instruction_tracks_the_active_response_protocol() {
     let json = toolgen_completion_instruction(ResponseProtocolKind::Json);
     let markdown = toolgen_completion_instruction(ResponseProtocolKind::Markdown);
     assert!(xml.contains("<toolgen_retrospect>"));
+    assert!(xml.contains("<finish_confirm>"));
     assert!(xml.contains("<final_answer>"));
     assert!(json.contains("\"toolgen_retrospect\""));
     assert!(json.contains("\"status\":\"ALL_FINISHED\""));
@@ -1021,10 +1040,9 @@ impl ModelClient for FailingToolGenModel {
             *self.child_calls.lock().unwrap() += 1;
             "not xml".to_string()
         } else if prompt.contains("Action result: self_tool") {
-            "<response><final_answer>Main task survives ToolGen failure.</final_answer></response>"
-                .to_string()
+            confirmed_xml_response("<response><final_answer>Main task survives ToolGen failure.</final_answer></response>")
         } else {
-            "<response><working_still_action><action_json><![CDATA[[{\"self_tool\":{\"type\":\"about_me\",\"op\":\"read\"}}]]]></action_json></working_still_action></response>".to_string()
+            "<response><actions><self_tool type=\"params\"/></actions></response>".to_string()
         };
         Ok(LlmResponse {
             content,
@@ -2088,7 +2106,7 @@ impl ModelClient for WorkerCountModel {
         self.call_no += 1;
         let content = if self.call_no == 1 {
             self.first_call_barrier.wait();
-            "## Status\nworking\n\n## Free_talk\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"self_tool\":{\"type\":\"about_me\",\"op\":\"read\"}}\n```"
+            "## Status\nworking\n\n## Free_talk\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"self_tool\":{\"type\":\"params\"}}\n```"
                     .to_string()
         } else {
             "## Status\nfinished\n\n## Final_Answer\nWORKER_COUNT_DONE".to_string()
@@ -2324,7 +2342,7 @@ fn protocol_turn_payload(protocol: ResponseProtocolKind, answer: &str, free_talk
             format!("## Free_talk\n{free_talk}\n\n## Status\nfinished\n\n## Final_Answer\n{answer}")
         }
         ResponseProtocolKind::Xml => {
-            format!("<response><free_talk>{free_talk}</free_talk><final_answer>{answer}</final_answer></response>")
+            confirmed_xml_response(&format!("<response><free_talk>{free_talk}</free_talk><final_answer>{answer}</final_answer></response>"))
         }
     }
 }
@@ -2458,9 +2476,7 @@ fn stress_action_response(worker_idx: usize, turn_idx: usize, step_idx: usize) -
         3 => (
             "self_tool",
             serde_json::json!({
-                "type": "env",
-                "op": "read",
-                "key": marker,
+                "type": "params",
             }),
         ),
         _ => (
@@ -3030,16 +3046,35 @@ fn update_runtime_config_changes_worker_model_service_config() {
 
     struct ConfigCapturingModel {
         captured_config: Arc<Mutex<Option<ModelServiceConfig>>>,
+        captured_prompt: Arc<Mutex<String>>,
+        calls: usize,
     }
     impl ModelClient for ConfigCapturingModel {
         fn call_model(
             &mut self,
             config: &ModelServiceConfig,
-            _prompt: &str,
+            prompt: &str,
             _audit_file: &std::path::Path,
             _should_cancel: &mut dyn FnMut() -> bool,
         ) -> Result<LlmResponse, String> {
             *self.captured_config.lock().unwrap() = Some(config.clone());
+            *self.captured_prompt.lock().unwrap() = prompt.to_string();
+            self.calls += 1;
+            if self.calls == 1 {
+                return Ok(LlmResponse {
+                    content: "## Status
+working
+
+## Working_Still_Action
+```action
+{\"self_tool\":{\"type\":\"params\"}}
+```"
+                    .to_string(),
+                    model_name: config.model.clone(),
+                    usage: UsageStats::zero(),
+                    truncated: false,
+                });
+            }
             Ok(LlmResponse {
                 content: "## Status
 finished
@@ -3065,12 +3100,15 @@ Done"
         &dir,
     );
     let captured = Arc::new(Mutex::new(None));
+    let captured_prompt = Arc::new(Mutex::new(String::new()));
     let worker = CoreSessionWorker::spawn_with_model_client(
         core,
         test_config(),
         test_worker_config(&dir, "update_runtime_config_test", 1),
         ConfigCapturingModel {
             captured_config: Arc::clone(&captured),
+            captured_prompt: Arc::clone(&captured_prompt),
+            calls: 0,
         },
     );
     let handle = worker.handle();
@@ -3119,6 +3157,17 @@ Done"
     assert_eq!(config.max_llm_output_tokens, 16_000);
     assert_eq!(config.base_url, "http://new-url/v1");
     assert_eq!(config.api_key, "updated-secret");
+    let prompt = captured_prompt.lock().unwrap();
+    assert_eq!(
+        prompt
+            .matches("User changes some runtime config, retrieve again when you need it.")
+            .count(),
+        1
+    );
+    assert!(prompt.contains("model: \"updated-model\""));
+    assert!(prompt.contains("base_url: \"http://new-url/v1\""));
+    assert!(prompt.contains("max_llm_output_tokens: \"16000\""));
+    assert!(!prompt.contains("updated-secret"));
 
     let _ = worker.shutdown();
     let _ = std::fs::remove_dir_all(dir);
