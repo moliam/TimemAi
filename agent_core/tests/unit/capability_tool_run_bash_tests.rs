@@ -1,4 +1,5 @@
 use super::*;
+use crate::LongRunningCommandDecision;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 struct NeverCancelRuntime;
@@ -30,11 +31,11 @@ impl ActionRuntime for CancelAfterFileRuntime {
 }
 
 #[derive(Default)]
-struct CancelAfterLongRunningPromptRuntime {
-    prompts: Vec<LongRunningCommandStatus>,
+struct CaptureLongRunningStatusRuntime {
+    statuses: Vec<LongRunningCommandStatus>,
 }
 
-impl ActionRuntime for CancelAfterLongRunningPromptRuntime {
+impl ActionRuntime for CaptureLongRunningStatusRuntime {
     fn should_cancel(&mut self) -> bool {
         false
     }
@@ -43,8 +44,8 @@ impl ActionRuntime for CancelAfterLongRunningPromptRuntime {
         &mut self,
         status: &LongRunningCommandStatus,
     ) -> LongRunningCommandDecision {
-        self.prompts.push(status.clone());
-        LongRunningCommandDecision::Cancel
+        self.statuses.push(status.clone());
+        LongRunningCommandDecision::Continue
     }
 }
 
@@ -115,18 +116,18 @@ fn normal_bash_rejects_non_positive_timeout() {
 #[test]
 fn normal_bash_positive_timeout_reports_long_running_status_to_runtime() {
     let _guard = set_long_running_command_prompt_after_for_tests(Duration::from_millis(50));
-    let mut runtime = CancelAfterLongRunningPromptRuntime::default();
-    let result = execute_one_bash("sleep 2; printf should_not_finish", 5000, &mut runtime);
+    let mut runtime = CaptureLongRunningStatusRuntime::default();
+    let result = execute_one_bash("sleep 1; printf finished", 5000, &mut runtime);
 
-    assert!(result.contains("cancelled before it completed"), "{result}");
-    assert_eq!(runtime.prompts.len(), 1);
-    assert_eq!(runtime.prompts[0].action, "run_bash");
-    assert_eq!(
-        runtime.prompts[0].command,
-        "sleep 2; printf should_not_finish"
-    );
-    assert_eq!(runtime.prompts[0].timeout_ms, Some(5000));
-    assert!(runtime.prompts[0].elapsed >= Duration::from_millis(50));
+    assert!(result.contains("Exit code: 0"), "{result}");
+    assert!(result.contains("finished"), "{result}");
+    assert!(!runtime.statuses.is_empty());
+    let status = &runtime.statuses[0];
+    assert_eq!(status.action, "run_bash");
+    assert_eq!(status.command, "sleep 1; printf finished");
+    assert_ne!(status.pid, 0);
+    assert_eq!(status.timeout_ms, Some(5000));
+    assert!(status.elapsed >= Duration::from_millis(50));
 }
 
 #[cfg(unix)]

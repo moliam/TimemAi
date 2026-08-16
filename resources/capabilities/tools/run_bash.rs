@@ -2,7 +2,7 @@ use crate::response_protocol::ParsedAction;
 use crate::MemGuard;
 use crate::{
     ActionExecution, ActionRuntime, AgentCore, ApprovalRequest, BashApprovalMode,
-    LongRunningCommandDecision, LongRunningCommandStatus, PendingApproval, PendingApprovedAction,
+    LongRunningCommandStatus, PendingApproval, PendingApprovedAction,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,6 +84,10 @@ impl ShellJobExitUpdate {
 }
 
 impl RunningShellJob {
+    pub fn elapsed_ms(&self) -> i64 {
+        now_ms().saturating_sub(self.created_at_ms).max(0)
+    }
+
     pub fn description(&self) -> &'static str {
         match self.kind.as_str() {
             "timeout" => "old job timeout",
@@ -348,7 +352,7 @@ impl FileShellJobStore {
         };
         let started = Instant::now();
         let timeout = Duration::from_millis(timeout_ms as u64);
-        let mut next_long_running_check = long_running_command_prompt_after();
+        let next_long_running_check = long_running_command_prompt_after();
         loop {
             if runtime.should_cancel() {
                 terminate_process(record.pid);
@@ -359,16 +363,24 @@ impl FileShellJobStore {
                 let status = LongRunningCommandStatus {
                     action: "run_bash".to_string(),
                     command: clean.to_string(),
+                    pid: record.pid,
                     elapsed: started.elapsed(),
                     timeout_ms: Some(timeout_ms),
                 };
-                if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
-                    terminate_process(record.pid);
-                    write_status_if_empty(Path::new(&record.status_file), "cancelled");
-                    return bash_error(clean, "cancelled_by_user");
-                }
-                next_long_running_check =
-                    next_long_running_check.saturating_add(long_running_command_prompt_after());
+                runtime.on_long_running_command(&status);
+                let _ = self.append(&record);
+                let partial = fs::read_to_string(&record.output_file).unwrap_or_default();
+                return BashCommandOutput {
+                    command: clean.to_string(),
+                    status: None,
+                    signal: None,
+                    output: compact_text(&partial, 2000),
+                    error: Some(format!(
+                        "long_running_still_running:{}:{}",
+                        record.pid,
+                        status.elapsed.as_millis()
+                    )),
+                };
             }
             if let Some(status) = read_process_status(&record.status_file) {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
@@ -457,13 +469,17 @@ impl FileShellJobStore {
         let mut out = String::from("RUNNING JOB LIST:");
         for job in jobs {
             out.push_str(&format!(
-                "\npid={}, {}, cwd={}, cmd={}, still running",
+                "\npid={}, {}, cwd={}, cmd={}, elapsed_ms={}, still running",
                 job.pid,
                 job.description(),
                 job.cwd,
-                compact_text(&job.command, 500)
+                compact_text(&job.command, 500),
+                job.elapsed_ms()
             ));
         }
+        out.push_str(
+            "\nContinue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because a command is still running.",
+        );
         Some(out)
     }
 
@@ -1265,6 +1281,18 @@ pub struct BashCommandOutput {
 impl BashCommandOutput {
     pub fn to_action_result(&self, action_name: &str) -> String {
         if let Some(error) = &self.error {
+            if let Some(details) = error.strip_prefix("long_running_still_running:") {
+                let (pid, elapsed_ms) = details.split_once(':').unwrap_or((details, "unknown"));
+                let mut out = format!(
+                    "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nCommand: {}\nPID: {}\nElapsed: {} ms\nStatus: still running\nThe command has not finished. Continue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because this command is still running.",
+                    action_name, self.command, pid, elapsed_ms
+                );
+                if !self.output.trim().is_empty() {
+                    out.push_str("\nPartial output:\n");
+                    out.push_str(&compact_text(&self.output, 2000));
+                }
+                return out;
+            }
             if let Some(pid) = error.strip_prefix("timeout_still_running:") {
                 let mut out = format!(
                     "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.\nCommand: {}",
@@ -1356,14 +1384,11 @@ fn execute_one_bash_structured_with_prompt_after(
             let status = LongRunningCommandStatus {
                 action: "run_bash".to_string(),
                 command: command.to_string(),
+                pid: child.id(),
                 elapsed: started.elapsed(),
                 timeout_ms: Some(timeout_ms),
             };
-            if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
-                terminate_process(child.id());
-                let _ = child.wait();
-                return bash_error(command, "cancelled_by_user");
-            }
+            runtime.on_long_running_command(&status);
             next_long_running_check =
                 next_long_running_check.saturating_add(long_running_prompt_after);
         }

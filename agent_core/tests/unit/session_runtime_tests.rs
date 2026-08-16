@@ -387,23 +387,6 @@ impl TurnUi for SupplementAndExpansionUi {
     }
 }
 
-#[derive(Default)]
-struct DeclineLongRunningCommandUi {
-    requests: Vec<LongRunningCommandContinueRequest>,
-}
-
-impl TurnUi for DeclineLongRunningCommandUi {
-    fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
-        match request {
-            HostDecisionRequest::LongRunningCommandContinue(request) => {
-                self.requests.push(request);
-                HostDecision::Decline
-            }
-            other => other.safe_default().into(),
-        }
-    }
-}
-
 #[test]
 fn session_turn_uses_model_service_config_response_protocol_over_core_state() {
     let dir = tmp_dir("runtime_config_protocol_wins");
@@ -1554,16 +1537,17 @@ fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
 }
 
 #[test]
-fn session_turn_long_positive_timeout_command_decline_becomes_user_supplement() {
+fn session_turn_long_running_command_hands_status_to_next_model_round() {
     let _guard = crate::shell_exec::set_long_running_command_prompt_after_for_tests(
         Duration::from_millis(50),
     );
-    let dir = tmp_dir("long_command_decline_supplement");
+    let dir = tmp_dir("long_command_model_follow_up");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
-    let mut ui = DeclineLongRunningCommandUi::default();
+    let mut ui = NoopTurnUi;
+    let command = "sleep 2; printf should_not_finish";
     let mut model = ReplayModel::new([
         Ok(llm(
             r#"{"status":"working","free_talk":"运行一个长命令。","working_still_action":[{"run_bash":{"cmd":"sleep 2; printf should_not_finish","timeout_ms":5000}}]}"#,
@@ -1571,7 +1555,7 @@ fn session_turn_long_positive_timeout_command_decline_becomes_user_supplement() 
             false,
         )),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"已按用户停止等待后的补充继续处理。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"模型已收到长命令状态并继续判断。"}"#,
             1_100,
             false,
         )),
@@ -1593,35 +1577,51 @@ fn session_turn_long_positive_timeout_command_decline_becomes_user_supplement() 
         &mut model,
     );
 
-    assert_eq!(outcome.text, "已按用户停止等待后的补充继续处理。");
-    assert_eq!(ui.requests.len(), 1);
-    assert_eq!(ui.requests[0].command, "sleep 2; printf should_not_finish");
-    assert_eq!(ui.requests[0].timeout_ms, Some(5000));
-    assert!(model.prompts[1].contains("user cancels the command"));
-    assert!(model.prompts[1].contains("You can initiate action to check current working status"));
-    let prompt = core.render_prompt();
-    assert!(prompt.contains("The command was cancelled before it completed"));
+    assert_eq!(outcome.text, "模型已收到长命令状态并继续判断。");
+    assert_eq!(model.prompts.len(), 2);
+    let follow_up = &model.prompts[1];
+    assert!(
+        follow_up.contains("LONG_RUNNING_COMMAND_STATUS"),
+        "{follow_up}"
+    );
+    assert!(follow_up.contains(command), "{follow_up}");
+    assert!(follow_up.contains("PID:"), "{follow_up}");
+    assert!(follow_up.contains("Elapsed:"), "{follow_up}");
+    assert!(follow_up.contains("Status: still running"), "{follow_up}");
+    assert!(
+        follow_up.contains("Continue the task by deciding whether to wait, inspect, terminate"),
+        "{follow_up}"
+    );
+    assert!(
+        !follow_up.contains("user cancels the command"),
+        "{follow_up}"
+    );
     let events = read_audit_events(&audit);
-    assert_eq!(audit_event_count(&events, "user_supplement"), 1);
+    assert_eq!(audit_event_count(&events, "user_supplement"), 0);
+
+    let cancelled = core
+        .shell_jobs
+        .cancel_unfinished_for_session("test_session");
+    assert!(!cancelled.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
-fn sequential_group_with_long_timeout_command_uses_host_decision_path() {
+fn sequential_group_with_long_timeout_command_hands_status_to_model() {
     let _guard = crate::shell_exec::set_long_running_command_prompt_after_for_tests(
         Duration::from_millis(50),
     );
-    let dir = tmp_dir("sequential_long_timeout_decline");
+    let dir = tmp_dir("sequential_long_timeout_model_follow_up");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Markdown;
-    let mut ui = DeclineLongRunningCommandUi::default();
+    let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
             r#"## Free_talk
 启动顺序动作组。
-
 ## Working_Still_Action
 ```action
 [
@@ -1635,9 +1635,8 @@ fn sequential_group_with_long_timeout_command_uses_host_decision_path() {
         Ok(llm(
             r#"## Status
 finished
-
 ## Final_Answer
-已按停止等待后的补充继续。"#,
+模型已根据长命令状态继续。"#,
             1_200,
             false,
         )),
@@ -1659,17 +1658,27 @@ finished
         &mut model,
     );
 
-    assert_eq!(outcome.text, "已按停止等待后的补充继续。");
-    assert!(!ui.requests.is_empty());
-    assert_eq!(
-        ui.requests.last().map(|request| request.command.as_str()),
-        Some("sleep 2; printf late")
+    assert_eq!(outcome.text, "模型已根据长命令状态继续。");
+    assert_eq!(model.prompts.len(), 2);
+    let follow_up = &model.prompts[1];
+    assert!(follow_up.contains("quick"), "{follow_up}");
+    assert!(
+        follow_up.contains("LONG_RUNNING_COMMAND_STATUS"),
+        "{follow_up}"
     );
-    assert!(model.prompts[1].contains("quick"));
-    assert!(model.prompts[1].contains("user cancels the command"));
-    assert!(core
-        .render_prompt()
-        .contains("The command was cancelled before it completed"));
+    assert!(follow_up.contains("sleep 2; printf late"), "{follow_up}");
+    assert!(follow_up.contains("PID:"), "{follow_up}");
+    assert!(follow_up.contains("Elapsed:"), "{follow_up}");
+    assert!(follow_up.contains("Status: still running"), "{follow_up}");
+    assert!(
+        !follow_up.contains("user cancels the command"),
+        "{follow_up}"
+    );
+
+    let cancelled = core
+        .shell_jobs
+        .cancel_unfinished_for_session("test_session");
+    assert!(!cancelled.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
 

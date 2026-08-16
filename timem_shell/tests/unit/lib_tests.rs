@@ -276,7 +276,7 @@ fn shell_renders_stopped_turn_text_from_core_summary() {
 }
 
 #[test]
-fn shell_appends_running_job_list_after_final_answer() {
+fn shell_does_not_append_running_job_list_after_final_answer() {
     let outcome = TurnOutcome::final_response(
         "任务完成。",
         UsageStats::zero(),
@@ -295,9 +295,9 @@ fn shell_appends_running_job_list_after_final_answer() {
     }]);
 
     let rendered = render_turn_outcome_text(&outcome);
-    assert!(rendered.starts_with("任务完成。"));
-    assert!(rendered.contains("RUNNING JOB LIST:"));
-    assert!(rendered.contains("pid=12345, old job timeout, cmd=sleep 30, still running"));
+    assert_eq!(rendered, "任务完成。");
+    assert!(!rendered.contains("RUNNING JOB LIST:"));
+    assert!(!rendered.contains("pid=12345"));
 }
 
 #[test]

@@ -651,6 +651,7 @@ pub enum LongRunningCommandDecision {
 pub struct LongRunningCommandStatus {
     pub action: String,
     pub command: String,
+    pub pid: u32,
     pub elapsed: Duration,
     pub timeout_ms: Option<i64>,
 }
@@ -1149,12 +1150,16 @@ impl AgentCore {
         let mut text = String::from("RUNNING JOB LIST:");
         for job in running {
             text.push_str(&format!(
-                "\npid={}, {}, cmd={}, still running",
+                "\npid={}, {}, cmd={}, elapsed_ms={}, still running",
                 job.pid,
                 job.description(),
                 compact_text(&job.command, 500),
+                job.elapsed_ms(),
             ));
         }
+        text.push_str(
+            "\nContinue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because a command is still running.",
+        );
         self.submit_prompt_component(
             PromptComponentRole::system(),
             "running_job_list",
