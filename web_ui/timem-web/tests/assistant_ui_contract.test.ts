@@ -563,12 +563,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("activity.detail?.split");
     expect(source).toContain("const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();");
     expect(source).toContain('const running = status === "running" || status === "background_running";');
-    expect(source).toContain("const [open, setOpen] = useState(true);");
+    expect(source).toContain("const [open, setOpen] = useState(() => !bashActivity);");
     expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
     expect(source).toContain("const toolName = toolDisplayName(activity.tool_name || activity.title);");
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;');
     expect(source).toContain("const summaryContent = <>");
-    expect(source).toContain("!hasExpandableDetail && invocationPreview");
+    expect(source).toContain('className="tool-activity-command" title={invocationPreview}');
+    expect(source).not.toContain("!hasExpandableDetail && invocationPreview");
     expect(source).toContain('open={open} onToggle={(event) => setOpen(event.currentTarget.open)}');
     expect(source).toContain('aria-busy={running || undefined} open={open}');
     expect(source).toContain('aria-label={summaryLabel}');
@@ -579,7 +580,6 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".tool-activity summary:focus-visible { background: #1f1f1f; box-shadow: inset 2px 0 0 #4d8fd7; }");
     expect(styles).toContain(':root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }');
     expect(source).toContain("toolDisplayName(activity.tool_name || activity.title)");
-    expect(source).toContain("{!hasExpandableDetail && invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}");
     expect(source).toContain('if (status === "background_running") return "background running";');
     expect(source).toContain('if (status === "timeout") return "timed out";');
     expect(styles).toContain(".tool-activity-static");
@@ -657,7 +657,10 @@ describe("assistant-ui thread integration", () => {
   it("renders Bash activity commands with the interface font at normal weight", () => {
     expect(source).toContain('const bashActivity = activity.tool_name === "run_bash";');
     expect(source).toContain('bashActivity ? "bash-activity" : ""');
+    expect(styles).toContain(".tool-activity.bash-activity .tool-activity-command");
     expect(styles).toContain(".tool-activity.bash-activity .tool-activity-body .code-block code *");
+    expect(styles).toContain(".tool-activity-command { min-width: 0; overflow: hidden; color: #737373;");
+    expect(styles).toContain("text-overflow: ellipsis; white-space: nowrap;");
     expect(styles).toContain("font-family: var(--ui-font);");
     expect(styles).toContain("font-weight: 400;");
   });

@@ -813,7 +813,7 @@ button:disabled { cursor: not-allowed; }
 .tool-activity b { color: #b8b8b8; font-size: 12px; font-weight: 550; }
 .tool-activity-status { color: #747474; font-size: 10px; }
 .tool-activity.running .tool-activity-status { color: #a89878; }
-.tool-activity summary code { min-width: 0; overflow: hidden; color: #7f7f7f; background: transparent; font: 10px/1.4 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.tool-activity-command { min-width: 0; overflow: hidden; color: #737373; background: transparent; font: 10px/1.4 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .tool-activity-chevron { color: #696969; transition: transform .15s ease; }
 .tool-activity[open] .tool-activity-chevron { transform: rotate(90deg); }
 .tool-activity-body { max-height: 280px; overflow: auto; margin: 0 0 5px 22px; padding: 0; border: 0; }
@@ -822,7 +822,7 @@ button:disabled { cursor: not-allowed; }
 .tool-activity-body .code-block figcaption { display: none; }
 .tool-activity-body .code-block pre { max-height: 160px; padding: 5px 3px; background: transparent; font-size: 11px; line-height: 1.55; }
 .tool-activity-body .code-block code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.tool-activity.bash-activity summary code,
+.tool-activity.bash-activity .tool-activity-command,
 .tool-activity.bash-activity .tool-activity-body .code-block pre,
 .tool-activity.bash-activity .tool-activity-body .code-block code,
 .tool-activity.bash-activity .tool-activity-body .code-block code * {
@@ -1147,7 +1147,7 @@ button:disabled { cursor: not-allowed; }
 .turn-work-item.thinking, .turn-work-item.thinking .message-content { font-size: max(14px, var(--content-size)); }
 .tool-activity b, .tool-activity-status, .tool-activity-duration { line-height: 1.35; }
 .tool-activity-status, .tool-activity-duration { font-size: 11px; }
-.tool-activity summary code { font-size: 11px; }
+.tool-activity-command { font-size: 11px; }
 .tool-activity-body { max-width: calc(100% - 21px); }
 .tool-activity-body .code-block, .tool-activity-body pre { max-width: 100%; }
 .markdown-body { line-height: 1.65; }
