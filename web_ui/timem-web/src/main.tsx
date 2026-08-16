@@ -12,6 +12,7 @@ import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { createFrameEventQueue } from "./frame_event_queue";
+import { formatTokens } from "./token_format";
 import { applyQueuedMessagesAck, claimQueuedMessage, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
@@ -2266,11 +2267,6 @@ function completionFactTitle(label: string, completion: NonNullable<ChatMessage[
 function isNotableStopReason(reason: string | null | undefined) {
   if (!reason) return false;
   return !["finished", "completed", "all_finished", "final_answer"].includes(reason.toLowerCase());
-}
-
-function formatTokens(value: number | undefined) {
-  if (!value) return value === 0 ? "0" : undefined;
-  return value >= 1000 ? `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}K` : String(value);
 }
 
 function formatOptionalTokens(value: number | undefined) {
