@@ -4,7 +4,7 @@ mod server;
 #[tokio::main]
 async fn main() {
     if let Err(error) = server::run_from_env().await {
-        eprintln!("[timem_web_error] {error}");
+        eprintln!("\nTimem Web could not start.\n\n{error}\n");
         std::process::exit(2);
     }
 }
