@@ -142,10 +142,10 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         context_compacts,
         memory_candidates: vec![],
         accepted_response: Some(protocol_text.clone()),
-        runtime_note: root_was_extracted.then(|| {
-            "ERROR: The previous XML response had content outside <response>. Runtime extracted the largest complete response root for this non-final action round and discarded everything else. In the next response, begin exactly with <response>, end with </response>, and output nothing outside that root."
-                .to_string()
-        }),
+        // A complete recovered response is already the canonical replay value.
+        // Do not turn successfully discarded outer noise into a new prompt
+        // error; genuine structural failures still use `repair_issue` below.
+        runtime_note: None,
         repair_issue,
     }
 }

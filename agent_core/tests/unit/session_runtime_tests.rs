@@ -1060,8 +1060,8 @@ discard-after"#,
     assert!(!model.prompts[1].contains("<free_talk>search memory</free_talk>"));
     assert!(!model.prompts[1].contains("discard-after"));
     assert!(model.prompts[1].contains("Action result: memmgr"));
-    assert!(model.prompts[1].contains("ERROR: The previous XML response had content outside"));
-    assert!(model.prompts[1].contains("begin exactly with <response>"));
+    assert!(!model.prompts[1].contains("ERROR: The previous XML response had content outside"));
+    assert!(!model.prompts[1].contains("begin exactly with <response>"));
 
     let repair_events = read_audit_events(&audit)
         .into_iter()

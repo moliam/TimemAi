@@ -556,11 +556,7 @@ trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
         )
     );
     assert!(!env.thought.contains("must not execute"));
-    assert!(env.runtime_note.as_deref().is_some_and(|note| {
-        note.starts_with("ERROR:")
-            && note.contains("content outside <response>")
-            && note.contains("begin exactly with <response>")
-    }));
+    assert!(env.runtime_note.is_none());
 }
 
 #[test]
