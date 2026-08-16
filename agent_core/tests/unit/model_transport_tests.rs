@@ -1,5 +1,5 @@
 use super::*;
-use crate::LocalLLMKeyFile;
+use crate::{read_audit_doc, LocalLLMKeyFile};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -154,6 +154,193 @@ fn large_stdout_and_stderr_are_drained_without_pipe_deadlock() {
     assert!(output.status.success());
     assert_eq!(output.stdout.len(), 2 * 1024 * 1024);
     assert_eq!(output.stderr.len(), 2 * 1024 * 1024);
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut expected_len = None;
+
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+
+        if expected_len.is_none() {
+            if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                expected_len = Some(header_end + 4 + content_len);
+            }
+        }
+
+        if expected_len.is_some_and(|length| request.len() >= length) {
+            break;
+        }
+    }
+
+    String::from_utf8_lossy(&request).to_string()
+}
+
+fn http_json_response(status: &str, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+#[test]
+fn explicit_cache_schema_rejection_retries_once_without_cache_control() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+
+        let (mut first, _) = listener.accept().unwrap();
+        requests.push(read_http_request(&mut first));
+        let first_body = r#"{"error":{"message":"Unknown field cache_control is not permitted"}}"#;
+        first
+            .write_all(&http_json_response("400 Bad Request", first_body))
+            .unwrap();
+
+        let (mut second, _) = listener.accept().unwrap();
+        requests.push(read_http_request(&mut second));
+        let second_body = r#"{
+            "choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}
+        }"#;
+        second
+            .write_all(&http_json_response("200 OK", second_body))
+            .unwrap();
+
+        requests
+    });
+
+    let mut config = LocalLLMKeyFile {
+        api_key: "test-key".to_string(),
+        available_models: vec!["test-model".to_string()],
+    }
+    .to_model_service_config("test-model");
+    config.base_url = format!("http://{addr}/v1");
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
+
+    let audit_file = std::env::temp_dir().join(format!(
+        "timem_cache_fallback_audit_{}_{}.jsonl",
+        std::process::id(),
+        crate::now_ms()
+    ));
+    let _ = std::fs::remove_file(&audit_file);
+
+    let response = call_model(
+        &config,
+        "[BEGIN SYSTEM PROMPT]\nstable prefix\n[END SYSTEM PROMPT]",
+        &audit_file,
+    )
+    .unwrap();
+    assert_eq!(response.content, "ok");
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].contains(r#""cache_control""#));
+    assert!(!requests[1].contains(r#""cache_control""#));
+
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let request_events = audit["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "llm_request")
+        .collect::<Vec<_>>();
+    assert_eq!(request_events.len(), 2);
+    assert_eq!(request_events[0]["prompt_cache_wire"]["mode"], "ephemeral");
+    assert!(
+        request_events[0]["prompt_cache_wire"]["mark_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(request_events[0]["prompt_cache_wire"]["fallback"], false);
+    assert_eq!(
+        request_events[1]["prompt_cache_wire"]["mode"],
+        "auto-fallback"
+    );
+    assert_eq!(request_events[1]["prompt_cache_wire"]["mark_count"], 0);
+    assert_eq!(request_events[1]["prompt_cache_wire"]["fallback"], true);
+
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn unrelated_client_error_does_not_retry_without_cache_control() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        let body = r#"{"error":{"message":"Invalid API key"}}"#;
+        stream
+            .write_all(&http_json_response("401 Unauthorized", body))
+            .unwrap();
+        request
+    });
+
+    let mut config = LocalLLMKeyFile {
+        api_key: "test-key".to_string(),
+        available_models: vec!["test-model".to_string()],
+    }
+    .to_model_service_config("test-model");
+    config.base_url = format!("http://{addr}/v1");
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
+
+    let audit_file = std::env::temp_dir().join(format!(
+        "timem_cache_no_fallback_audit_{}_{}.jsonl",
+        std::process::id(),
+        crate::now_ms()
+    ));
+    let _ = std::fs::remove_file(&audit_file);
+
+    let error = call_model(
+        &config,
+        "[BEGIN SYSTEM PROMPT]\nstable prefix\n[END SYSTEM PROMPT]",
+        &audit_file,
+    )
+    .unwrap_err();
+    assert!(error.starts_with("model_http_401:"));
+
+    let request = server.join().unwrap();
+    assert!(request.contains(r#""cache_control""#));
+
+    let audit = read_audit_doc(&audit_file).unwrap();
+    let request_count = audit["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "llm_request")
+        .count();
+    assert_eq!(request_count, 1);
+
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]

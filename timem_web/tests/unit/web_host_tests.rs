@@ -3326,6 +3326,7 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
     let overrides = BTreeMap::from([
         ("TIMEM_MODEL".to_string(), "session-model".to_string()),
         ("TIMEM_STREAM".to_string(), "true".to_string()),
+        ("TIMEM_OPENAI_CACHE_MODE".to_string(), "off".to_string()),
         (
             "TIMEM_API_KEY".to_string(),
             "session-only-secret".to_string(),
@@ -3378,6 +3379,15 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
         "session-only-secret"
     );
     assert!(restored.runtime.settings.config.openai_compatible.stream);
+    assert_eq!(
+        restored
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .cache_mode,
+        agent_core::OpenAiCompatibleCacheMode::Off
+    );
     assert!(!serde_json::to_string(restored)
         .unwrap()
         .contains("session-only-secret"));

@@ -112,10 +112,12 @@ pub use model_api::{
     build_model_request, default_api_protocol, default_base_url, default_model,
     interpret_model_http_response, is_default_base_url, is_default_model, model_http_error_message,
     model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
-    parse_model_response, plan_structured_output, prepare_model_http_request,
-    prepare_model_request, prompt_cache_plan_audit, ApiProtocol, ModelCacheControl,
+    parse_model_response, parse_openai_compatible_cache_mode, plan_structured_output,
+    prepare_model_http_request, prepare_model_request, prompt_cache_plan_audit,
+    without_openai_compatible_cache_control, ApiProtocol, ModelCacheControl,
     ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole, ModelServiceConfig,
-    OpenAiCompatibleOptions, PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
+    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, PreparedModelHttpRequest,
+    PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,

@@ -1087,6 +1087,10 @@ fn shell_and_session_env_keep_openai_thinking_stream_options() {
         ("TIMEM_ENABLE_THINKING".to_string(), "true".to_string()),
         ("TIMEM_REASONING_EFFORT".to_string(), "max".to_string()),
         ("TIMEM_STREAM".to_string(), "true".to_string()),
+        (
+            "TIMEM_OPENAI_CACHE_MODE".to_string(),
+            "ephemeral".to_string(),
+        ),
     ]);
     let config = model_service_config_from_env(&CliOptions::default(), &env).unwrap();
     assert_eq!(config.openai_compatible.enable_thinking, Some(true));
@@ -1110,6 +1114,10 @@ fn shell_and_session_env_keep_openai_thinking_stream_options() {
         Some("max")
     );
     assert_eq!(stored.get("TIMEM_STREAM").map(String::as_str), Some("true"));
+    assert_eq!(
+        stored.get("TIMEM_OPENAI_CACHE_MODE").map(String::as_str),
+        Some("ephemeral")
+    );
 }
 
 #[test]

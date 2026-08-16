@@ -1,7 +1,9 @@
 use crate::{
     append_audit_event, interpret_model_http_response, model_request_audit_event,
-    model_response_audit_event, prepare_model_http_request, LlmResponse, ModelClient,
-    ModelServiceConfig,
+    model_response_audit_event, prepare_model_http_request,
+    without_openai_compatible_cache_control, ApiProtocol, LlmResponse, ModelClient,
+    ModelHttpResponseInterpretation, ModelServiceConfig, OpenAiCompatibleCacheMode,
+    PreparedModelHttpRequest,
 };
 use std::io::{Read, Write};
 use std::path::Path;
@@ -38,15 +40,31 @@ pub fn call_model_with_cancel(
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<LlmResponse, String> {
     let http_request = prepare_model_http_request(config, prompt);
+    let first = execute_model_http_request(config, &http_request, audit_file, should_cancel)?;
+
+    if should_retry_without_openai_cache_control(config, &http_request, &first) {
+        let fallback_request = without_openai_compatible_cache_control(&http_request);
+        return execute_model_http_request(config, &fallback_request, audit_file, should_cancel)?
+            .result;
+    }
+
+    first.result
+}
+
+fn execute_model_http_request(
+    config: &ModelServiceConfig,
+    http_request: &PreparedModelHttpRequest,
+    audit_file: &Path,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<ModelHttpResponseInterpretation, String> {
     let _ = append_audit_event(
         audit_file,
         &model_request_audit_event(config, &http_request.model_request),
     );
-
     let body =
         serde_json::to_string(&http_request.model_request.body).map_err(|e| e.to_string())?;
     let command = build_curl_command(config.timeout_secs);
-    let curl_config = build_curl_config(&http_request, &body);
+    let curl_config = build_curl_config(http_request, &body);
     let output =
         run_command_with_input_and_cancel(command, curl_config.into_bytes(), should_cancel)?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -64,7 +82,47 @@ pub fn call_model_with_cancel(
         audit_file,
         &model_response_audit_event(interpreted.status, &interpreted.raw_json),
     );
-    interpreted.result
+    Ok(interpreted)
+}
+
+fn should_retry_without_openai_cache_control(
+    config: &ModelServiceConfig,
+    request: &PreparedModelHttpRequest,
+    response: &ModelHttpResponseInterpretation,
+) -> bool {
+    if config.api_protocol != ApiProtocol::OpenAiCompatible
+        || config.openai_compatible.cache_mode != OpenAiCompatibleCacheMode::Ephemeral
+        || request.model_request.cache_fallback
+        || request.model_request.cache_mark_count == 0
+        || !(400..500).contains(&response.status)
+    {
+        return false;
+    }
+
+    let error = response.raw_json.to_string().to_ascii_lowercase();
+    let names_cache_control = error.contains("cache_control") || error.contains("cache control");
+    let rejects_schema = [
+        "unknown field",
+        "unknown parameter",
+        "unknown property",
+        "unrecognized field",
+        "unrecognized parameter",
+        "unsupported field",
+        "unsupported parameter",
+        "not supported",
+        "extra field",
+        "extra input",
+        "additional properties",
+        "not permitted",
+        "not allowed",
+        "unexpected field",
+        "unexpected parameter",
+        "unexpected property",
+    ]
+    .iter()
+    .any(|indicator| error.contains(indicator));
+
+    names_cache_control && rejects_schema
 }
 
 fn build_curl_command(timeout_secs: u64) -> Command {

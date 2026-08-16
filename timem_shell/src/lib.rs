@@ -689,6 +689,7 @@ pub fn model_service_config_from_env(
             enable_thinking: None,
             reasoning_effort: None,
             stream: None,
+            openai_cache_mode: None,
             local_api_key: LocalLLMKeyFile::load(&local_llm_key_file_path())
                 .ok()
                 .map(|file| file.api_key),

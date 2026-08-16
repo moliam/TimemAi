@@ -71,11 +71,41 @@ pub struct ModelServiceConfig {
     pub openai_compatible: OpenAiCompatibleOptions,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OpenAiCompatibleCacheMode {
+    #[default]
+    Auto,
+    Off,
+    Ephemeral,
+}
+
+impl OpenAiCompatibleCacheMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+            Self::Ephemeral => "ephemeral",
+        }
+    }
+}
+
+pub fn parse_openai_compatible_cache_mode(
+    value: &str,
+) -> Result<OpenAiCompatibleCacheMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(OpenAiCompatibleCacheMode::Auto),
+        "off" => Ok(OpenAiCompatibleCacheMode::Off),
+        "ephemeral" => Ok(OpenAiCompatibleCacheMode::Ephemeral),
+        _ => Err("invalid_TIMEM_OPENAI_CACHE_MODE: expected auto, off, or ephemeral".to_string()),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenAiCompatibleOptions {
     pub enable_thinking: Option<bool>,
     pub reasoning_effort: Option<String>,
     pub stream: bool,
+    pub cache_mode: OpenAiCompatibleCacheMode,
 }
 
 impl ModelServiceConfig {
@@ -129,6 +159,9 @@ pub struct PreparedModelRequest {
     pub body: Value,
     pub prompt_cache_plan: Value,
     pub structured_output: StructuredOutputHint,
+    pub cache_wire_mode: String,
+    pub cache_mark_count: usize,
+    pub cache_fallback: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,10 +215,15 @@ pub fn prepare_model_request(
     let prompt_blocks = plan_prompt_cache(rendered_prompt);
     let structured_output = plan_structured_output(config);
     let model_blocks = model_prompt_blocks(&prompt_blocks);
+    let body = build_model_request(config, &model_blocks, structured_output);
+    let cache_mark_count = count_cache_control_marks(&body);
     PreparedModelRequest {
-        body: build_model_request(config, &model_blocks, structured_output),
+        body,
         prompt_cache_plan: prompt_cache_plan_audit(&prompt_blocks),
         structured_output,
+        cache_wire_mode: cache_wire_mode(config).to_string(),
+        cache_mark_count,
+        cache_fallback: false,
     }
 }
 
@@ -228,6 +266,11 @@ pub fn model_request_audit_event(
         "endpoint": config.endpoint(),
         "prompt_cache_plan": prepared_request.prompt_cache_plan,
         "structured_output": structured_output_label(prepared_request.structured_output),
+        "prompt_cache_wire": {
+            "mode": prepared_request.cache_wire_mode,
+            "mark_count": prepared_request.cache_mark_count,
+            "fallback": prepared_request.cache_fallback,
+        },
         "body": redact_value(&prepared_request.body),
     })
 }
@@ -313,7 +356,9 @@ fn build_openai_compatible_request(
                 "role": role_label(block.role),
                 "content": block.text,
             });
-            apply_cache_control(&mut message, block.cache);
+            if config.openai_compatible.cache_mode == OpenAiCompatibleCacheMode::Ephemeral {
+                apply_cache_control(&mut message, block.cache);
+            }
             message
         })
         .collect::<Vec<_>>();
@@ -402,6 +447,50 @@ fn apply_cache_control(value: &mut Value, cache: ModelCacheControl) {
     }
 }
 
+fn cache_wire_mode(config: &ModelServiceConfig) -> &'static str {
+    match config.api_protocol {
+        ApiProtocol::OpenAiCompatible => config.openai_compatible.cache_mode.label(),
+        ApiProtocol::Anthropic => "ephemeral",
+        ApiProtocol::OpenAiResponses => "auto",
+    }
+}
+
+fn count_cache_control_marks(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => values.iter().map(count_cache_control_marks).sum(),
+        Value::Object(values) => {
+            usize::from(values.contains_key("cache_control"))
+                + values
+                    .values()
+                    .map(count_cache_control_marks)
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+pub fn without_openai_compatible_cache_control(
+    request: &PreparedModelHttpRequest,
+) -> PreparedModelHttpRequest {
+    let mut request = request.clone();
+    if let Some(messages) = request
+        .model_request
+        .body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+    {
+        for message in messages {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("cache_control");
+            }
+        }
+    }
+    request.model_request.cache_wire_mode = "auto-fallback".to_string();
+    request.model_request.cache_mark_count = count_cache_control_marks(&request.model_request.body);
+    request.model_request.cache_fallback = true;
+    request
+}
+
 fn apply_structured_output(value: &mut Value, structured_output: StructuredOutputHint) {
     if structured_output == StructuredOutputHint::JsonObject {
         if let Some(map) = value.as_object_mut() {
@@ -444,6 +533,20 @@ pub fn parse_model_response(
                 .and_then(Value::as_u64)
                 .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
                 .unwrap_or(0) as u32;
+            let cache_created_tokens = usage
+                .pointer("/prompt_tokens_details/cached_creation_tokens")
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    usage
+                        .pointer("/prompt_tokens_details/cache_creation_tokens")
+                        .and_then(Value::as_u64)
+                })
+                .or_else(|| {
+                    usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(Value::as_u64)
+                })
+                .unwrap_or(0) as u32;
             (
                 content,
                 UsageStats {
@@ -452,7 +555,7 @@ pub fn parse_model_response(
                     completion_tokens,
                     total_tokens,
                     cached_tokens,
-                    cache_created_tokens: 0,
+                    cache_created_tokens,
                     ..UsageStats::zero()
                 },
                 finish_reason == "length" || finish_reason == "max_tokens",
