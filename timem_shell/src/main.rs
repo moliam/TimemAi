@@ -28,25 +28,26 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
     append_audit, apply_workspace_command_to_path, bash_approval_mode_from_sources,
-    capabilities_dir_from_sources, combine_additional_contexts, default_data_root,
-    estimate_prompt_context_tokens, format_token_count, host_start_audit_event, layout_for_space,
-    load_workspace_dirs_from_path, local_time_label, model_service_config_from_env,
-    observation_events_from_core_topic_events, observation_panel_width_for_terminal,
-    parse_cli_args, render_final_response_at, render_prof_report_data, render_shell_status_bar,
-    render_thinking_view_at, render_turn_outcome_text, run_session_turn,
-    runtime_active_elapsed_secs, runtime_info_context, runtime_profile_report,
-    shell_status_message_from_core_topic, stale_context_decision_request, topic_event_status_hint,
-    work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
-    work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
-    CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
-    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
-    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
-    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
-    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
-    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
-    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
-    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
-    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
+    capabilities_dir_from_sources, combine_additional_contexts, default_config_root,
+    default_data_root, estimate_prompt_context_tokens, format_token_count, host_start_audit_event,
+    layout_for_space, load_reminder_tips_config, load_workspace_dirs_from_path, local_time_label,
+    model_service_config_from_env, observation_events_from_core_topic_events,
+    observation_panel_width_for_terminal, parse_cli_args, render_final_response_at,
+    render_prof_report_data, render_shell_status_bar, render_thinking_view_at,
+    render_turn_outcome_text, run_session_turn, runtime_active_elapsed_secs, runtime_info_context,
+    runtime_profile_report, shell_status_message_from_core_topic, stale_context_decision_request,
+    topic_event_status_hint, work_instruction_load_report, work_instruction_load_request,
+    work_instruction_load_topic_event, work_instruction_mode_from_sources, workspace_config_file,
+    workspace_reference_context, CoreMemoryActivity, CoreTopicEvent, HostDecision,
+    HostDecisionRequest, HostStatusMessage, ModelDirection, NoopTurnUi, ObservationEvent,
+    ObservationPanel, OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
+    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
+    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot,
+    StaleContextDecisionRequest, ThinkingViewSnapshot, TurnInput, TurnUi,
+    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
+    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
+    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, SPINNER_ICONS,
+    TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -148,6 +149,7 @@ fn main() {
         work_instruction_mode,
     ));
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
+    core.set_reminder_tips_config(load_reminder_tips_config(&default_config_root()));
     core.set_response_protocol(response_protocol);
     core.configure_self_tool_runtime(
         effective_session_env.clone().into_iter().collect(),
