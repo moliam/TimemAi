@@ -83,6 +83,7 @@ export type Session = {
     timeout_secs: number;
     max_llm_input_tokens: number;
     max_llm_output_tokens: number;
+    max_rounds: string;
     bash_approval: string;
     work_instructions: string;
     api_key_configured: boolean;

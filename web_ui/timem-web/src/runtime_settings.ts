@@ -6,6 +6,7 @@ type SessionRuntimeProfile = {
   base_url: string;
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
+  max_rounds: string;
   bash_approval: string;
   work_instructions: string;
 };
@@ -21,6 +22,7 @@ export function sessionRuntimeOptions(
     TIMEM_BASE_URL: profile.base_url,
     TIMEM_MAX_LLM_INPUT: String(profile.max_llm_input_tokens),
     TIMEM_MAX_LLM_OUTPUT: String(profile.max_llm_output_tokens),
+    TIMEM_MAX_ROUNDS: profile.max_rounds,
     TIMEM_BASH_APPROVAL: profile.bash_approval,
     TIMEM_WORK_INSTRUCTIONS: profile.work_instructions,
   };
@@ -30,6 +32,7 @@ export function sessionRuntimeOptions(
 }
 
 export function runtimeOptionLabel(key: string): string {
+  if (key === "TIMEM_MAX_ROUNDS") return "MAX STEPS";
   return key.startsWith("TIMEM_") ? key.slice("TIMEM_".length) : key;
 }
 
