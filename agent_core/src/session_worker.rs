@@ -590,29 +590,37 @@ impl CoreSessionWorkerHandle {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
-        self.pending_runtime_updates
-            .lock()
-            .map_err(|_| "core_runtime_update_poisoned".to_string())?
-            .push(PendingRuntimeUpdate::Config {
-                field,
-                value: value.clone(),
-            });
-        self.command_tx
-            .send(CoreSessionWorkerCommand::RuntimeConfigUpdated)
-            .map_err(|_| "core_session_worker_stopped".to_string())
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::Config { field, value },
+            CoreSessionWorkerCommand::RuntimeConfigUpdated,
+        )
     }
 
     pub fn update_max_rounds(&self, max_rounds: u32) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
-        self.pending_runtime_updates
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::MaxRounds(max_rounds),
+            CoreSessionWorkerCommand::MaxRoundsUpdated,
+        )
+    }
+
+    fn enqueue_runtime_update(
+        &self,
+        update: PendingRuntimeUpdate,
+        notification: CoreSessionWorkerCommand,
+    ) -> Result<(), String> {
+        let mut pending = self
+            .pending_runtime_updates
             .lock()
-            .map_err(|_| "core_runtime_update_poisoned".to_string())?
-            .push(PendingRuntimeUpdate::MaxRounds(max_rounds));
-        self.command_tx
-            .send(CoreSessionWorkerCommand::MaxRoundsUpdated)
-            .map_err(|_| "core_session_worker_stopped".to_string())
+            .map_err(|_| "core_runtime_update_poisoned".to_string())?;
+        pending.push(update);
+        if self.command_tx.send(notification).is_err() {
+            pending.pop();
+            return Err("core_session_worker_stopped".to_string());
+        }
+        Ok(())
     }
 
     pub fn update_api_key(&self, api_key: String) -> Result<(), String> {

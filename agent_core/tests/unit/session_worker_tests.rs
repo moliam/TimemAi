@@ -45,6 +45,47 @@ fn failed_durable_supplement_append_releases_command_id_for_retry() {
 }
 
 #[test]
+fn failed_runtime_update_notification_rolls_back_pending_update() {
+    use crate::RuntimeConfigField;
+
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    drop(command_rx);
+    let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+    let pending_runtime_updates = Arc::new(Mutex::new(Vec::new()));
+    let handle = CoreSessionWorkerHandle {
+        command_tx,
+        supplement_mailbox: Arc::new(Mutex::new(SupplementMailbox {
+            accepting: false,
+            queue: Vec::new(),
+        })),
+        cancel_requested: Arc::new(AtomicBool::new(false)),
+        cancel_generation: Arc::new(AtomicU64::new(0)),
+        shutdown_requested: Arc::new(AtomicBool::new(false)),
+        reply_tx,
+        accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
+        pending_runtime_updates: Arc::clone(&pending_runtime_updates),
+    };
+
+    assert_eq!(
+        handle.update_runtime_config(RuntimeConfigField::Model, "orphan-model".to_string()),
+        Err("core_session_worker_stopped".to_string())
+    );
+    assert!(
+        pending_runtime_updates.lock().unwrap().is_empty(),
+        "failed model update must not remain pending"
+    );
+
+    assert_eq!(
+        handle.update_max_rounds(77),
+        Err("core_session_worker_stopped".to_string())
+    );
+    assert!(
+        pending_runtime_updates.lock().unwrap().is_empty(),
+        "failed max-rounds update must not remain pending"
+    );
+}
+
+#[test]
 fn recovered_turn_batch_rejects_duplicate_ids_and_rolls_back_closed_send() {
     let (command_tx, command_rx) = std::sync::mpsc::channel();
     drop(command_rx);
