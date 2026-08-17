@@ -1394,7 +1394,7 @@ function WorkerRolePanel({ session, selectedRoleIds, disabled, mobileOpen, onClo
       {session && session.roles.length === 0 && <div className="worker-role-empty">还没有 Role。创建一个，安排重复的工作步骤、要求。</div>}
       {!session && <div className="worker-role-empty">Select a session to manage its roles.</div>}
     </div>
-    {session && <form className="worker-role-editor" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+    {session && <form className={`worker-role-editor ${editingId ? "editing" : "creating"}`} onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
       <input value={name} maxLength={80} disabled={disabled} placeholder="称呼，例如：严谨审查员" aria-label="Role name" onChange={(event) => setName(event.target.value)}/>
       <textarea value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" aria-label="Role description" onChange={(event) => setDescription(event.target.value)}/>
