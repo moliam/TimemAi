@@ -5502,12 +5502,14 @@ fn append_turn_user_entry(
     append_turn_user_entry_with_attachments(
         state,
         session_id,
-        kind,
-        text,
-        Vec::new(),
-        Some(&[]),
-        None,
-        Vec::new(),
+        TurnUserEntryInput {
+            kind,
+            text,
+            attachments: Vec::new(),
+            attachment_ids: Some(&[]),
+            command_id: None,
+            worker_roles: Vec::new(),
+        },
     )
 }
 
@@ -5539,25 +5541,39 @@ fn append_turn_supplement_with_selected_attachments(
     append_turn_user_entry_with_attachments(
         state,
         session_id,
-        "supplement",
-        text,
-        Vec::new(),
-        attachment_ids,
-        command_id,
-        worker_roles,
+        TurnUserEntryInput {
+            kind: "supplement",
+            text,
+            attachments: Vec::new(),
+            attachment_ids,
+            command_id,
+            worker_roles,
+        },
     )
+}
+
+struct TurnUserEntryInput<'a> {
+    kind: &'a str,
+    text: String,
+    attachments: Vec<WebAttachment>,
+    attachment_ids: Option<&'a [String]>,
+    command_id: Option<&'a str>,
+    worker_roles: Vec<WorkerRole>,
 }
 
 fn append_turn_user_entry_with_attachments(
     state: &AppState,
     session_id: &str,
-    kind: &str,
-    text: String,
-    attachments: Vec<WebAttachment>,
-    attachment_ids: Option<&[String]>,
-    command_id: Option<&str>,
-    worker_roles: Vec<WorkerRole>,
+    input: TurnUserEntryInput<'_>,
 ) -> Result<WebTurn, String> {
+    let TurnUserEntryInput {
+        kind,
+        text,
+        attachments,
+        attachment_ids,
+        command_id,
+        worker_roles,
+    } = input;
     let mut sessions = state
         .sessions
         .lock()

@@ -391,7 +391,7 @@ fn worker_role_display_name(name: &str) -> String {
 
 fn worker_role_full_instruction(name: &str, description: &str) -> String {
     format!(
-        "## SYSTEM\nUser involves the worker role '{}' for this input. When you work for this task, comply this worker's methodology: {}",
+        "## SYSTEM\nUser involves the worker role ‘{}’ for this round input's related task. When you work for this task, comply this worker's methodology: {}",
         worker_role_display_name(name),
         description
     )
@@ -399,7 +399,7 @@ fn worker_role_full_instruction(name: &str, description: &str) -> String {
 
 fn worker_role_reference_instruction(name: &str) -> String {
     format!(
-        "## SYSTEM\nUser involves the worker role '{}' for this input (also used in the above). Refer to this role's description above for working methodology.",
+        "## SYSTEM\nUser involves the worker role ‘{}’ for this round input's related task (also used in the above). Refer to this role's description above for working methodology.",
         worker_role_display_name(name)
     )
 }
@@ -3910,6 +3910,17 @@ impl AgentCore {
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
         event.payload["status"] = json!(Self::action_finish_status(action, result));
+        if action.action == "self_tool"
+            && action.input_lower("type") == "cwd"
+            && result
+                .lines()
+                .nth(2)
+                .is_some_and(|line| line.starts_with("CWD changed to "))
+        {
+            event.payload["context_state"] = json!({
+                "cwd": self.current_prompt_cwd().display().to_string(),
+            });
+        }
         if let Some(pid) = action_result_pid(result) {
             event.payload["pid"] = json!(pid);
         }
