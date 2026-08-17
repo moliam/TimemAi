@@ -1565,9 +1565,9 @@ body {
 .worker-role-editor { margin-top: auto; display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid #2b2b2b; }
 .worker-role-editor > strong { color: #bdbdbd; font-size: 11px; }
 .worker-role-editor input, .worker-role-editor textarea { width: 100%; border: 1px solid #343434; border-radius: 7px; background: #202020; color: #e8e8e8; font-family: var(--ui-font); outline: none; }
-.worker-role-editor input::placeholder, .worker-role-editor textarea::placeholder { font-size: 10px; }
-.worker-role-editor input { height: 34px; padding: 0 9px; font-size: 11px; line-height: 1.4; }
-.worker-role-editor textarea { min-height: 112px; resize: vertical; padding: 9px; font-size: 10px; line-height: 1.5; }
+.worker-role-editor input::placeholder, .worker-role-editor textarea::placeholder { font-size: inherit; }
+.worker-role-editor input { height: 34px; padding: 0 9px; font-size: var(--content-size); line-height: 1.4; }
+.worker-role-editor textarea { min-height: 112px; resize: vertical; padding: 9px; font-size: var(--content-size); line-height: 1.5; }
 .worker-role-editor.editing textarea { height: clamp(160px, 30dvh, 360px); min-height: min(160px, 30dvh); max-height: min(48dvh, 480px); }
 .worker-role-editor input:focus, .worker-role-editor textarea:focus { border-color: #577d72; box-shadow: 0 0 0 2px #577d7226; }
 .worker-role-editor > div { display: flex; justify-content: flex-end; gap: 6px; }
