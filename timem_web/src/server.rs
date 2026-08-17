@@ -1,4 +1,8 @@
 use crate::event_journal::EventJournal;
+use crate::worker_roles::{
+    load_roles, normalize_role_fields, roles_path_for_history, save_roles, WorkerRole,
+    MAX_WORKER_ROLES,
+};
 use agent_core::mcp::{McpRuntime, McpServerConfig, McpServerReport, McpStore, McpTool};
 use agent_core::session_store::{
     ChatCommandDeliveryState, ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole,
@@ -479,6 +483,7 @@ struct WebSession {
     active_context_id: String,
     primary_worker_id: String,
     attachments: Vec<WebAttachment>,
+    roles: Vec<WorkerRole>,
     #[serde(skip)]
     consumed_attachment_ids: BTreeSet<String>,
     messages: Vec<WebChatMessage>,
@@ -578,6 +583,8 @@ struct WebTurnUserEntry {
     command_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delivery_state: Option<ChatCommandDeliveryState>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    worker_roles: Vec<WorkerRole>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -594,6 +601,7 @@ struct PendingWorkInstructionTurn {
     text: String,
     attachments: Vec<WebAttachment>,
     command_id: Option<String>,
+    worker_roles: Vec<WorkerRole>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -635,6 +643,10 @@ enum WireEvent {
     },
     SessionDeleted {
         session_id: String,
+    },
+    WorkerRolesUpdated {
+        session_id: String,
+        roles: Vec<WorkerRole>,
     },
     ChatMessageDeleted {
         session_id: String,
@@ -870,6 +882,21 @@ enum ClientCommand {
         role: String,
         role_index: usize,
     },
+    WorkerRoleCreate {
+        session_id: String,
+        name: String,
+        description: String,
+    },
+    WorkerRoleUpdate {
+        session_id: String,
+        role_id: String,
+        name: String,
+        description: String,
+    },
+    WorkerRoleDelete {
+        session_id: String,
+        role_id: String,
+    },
     TurnSubmit {
         session_id: String,
         #[serde(default)]
@@ -878,12 +905,20 @@ enum ClientCommand {
         attachment_ids: Option<Vec<String>>,
         input_kind: Option<String>,
         source_turn_id: Option<String>,
+        #[serde(default)]
+        role_id: Option<String>,
+        #[serde(default)]
+        role_ids: Vec<String>,
     },
     TurnSupplement {
         session_id: String,
         text: String,
         #[serde(default)]
         attachment_ids: Option<Vec<String>>,
+        #[serde(default)]
+        role_id: Option<String>,
+        #[serde(default)]
+        role_ids: Vec<String>,
     },
     TurnCancel {
         session_id: String,
@@ -976,6 +1011,9 @@ impl ClientCommand {
             | Self::SessionStop { session_id }
             | Self::SessionDelete { session_id }
             | Self::ChatMessageDelete { session_id, .. }
+            | Self::WorkerRoleCreate { session_id, .. }
+            | Self::WorkerRoleUpdate { session_id, .. }
+            | Self::WorkerRoleDelete { session_id, .. }
             | Self::TurnSubmit { session_id, .. }
             | Self::TurnSupplement { session_id, .. }
             | Self::TurnCancel { session_id }
@@ -1412,6 +1450,88 @@ fn current_mem_state(state: &AppState) -> Result<WebMemState, String> {
         .lock()
         .map(|mem| mem.clone())
         .map_err(|_| "mem_state_poisoned".to_string())
+}
+
+fn worker_roles_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    roles_path_for_history(&current_session_store(state)?.history_path_for_session(session_id))
+}
+
+fn ensure_unique_worker_role_name(
+    roles: &[WorkerRole],
+    name: &str,
+    except_role_id: Option<&str>,
+) -> Result<(), String> {
+    if roles.iter().any(|role| {
+        Some(role.id.as_str()) != except_role_id && role.name.eq_ignore_ascii_case(name)
+    }) {
+        return Err("worker_role_name_duplicate".to_string());
+    }
+    Ok(())
+}
+
+fn mutate_worker_roles(
+    state: &AppState,
+    session_id: &str,
+    mutation: impl FnOnce(&mut Vec<WorkerRole>) -> Result<(), String>,
+) -> Result<Vec<WorkerRole>, String> {
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    let mut roles = session.roles.clone();
+    mutation(&mut roles)?;
+    save_roles(&worker_roles_path(state, session_id)?, &roles)?;
+    session.roles = roles.clone();
+    Ok(roles)
+}
+
+fn resolve_worker_roles(
+    state: &AppState,
+    session_id: &str,
+    role_ids: &[String],
+    legacy_role_id: Option<&str>,
+) -> Result<Vec<WorkerRole>, String> {
+    let mut requested_ids =
+        Vec::with_capacity(role_ids.len() + usize::from(legacy_role_id.is_some()));
+    for role_id in role_ids.iter().map(String::as_str).chain(legacy_role_id) {
+        if !requested_ids.iter().any(|existing| existing == &role_id) {
+            requested_ids.push(role_id);
+        }
+    }
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    requested_ids
+        .into_iter()
+        .map(|role_id| {
+            session
+                .roles
+                .iter()
+                .find(|role| role.id == role_id)
+                .cloned()
+                .ok_or_else(|| "worker_role_not_found".to_string())
+        })
+        .collect()
+}
+
+fn worker_roles_context(roles: &[WorkerRole]) -> Option<String> {
+    (!roles.is_empty()).then(|| {
+        roles
+            .iter()
+            .map(|role| format!(
+            "## SYSTEM\nUser involves the worker role '{}' for this input. When you work for this task, comply this worker's role description: {}",
+            role.name, role.description
+            ))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    })
 }
 
 fn current_session_store(state: &AppState) -> Result<SessionStore, String> {
@@ -2293,12 +2413,73 @@ fn handle_command_with_id(
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
+        ClientCommand::WorkerRoleCreate {
+            session_id,
+            name,
+            description,
+        } => {
+            let (name, description) = normalize_role_fields(&name, &description)?;
+            let roles = mutate_worker_roles(state, &session_id, |roles| {
+                if roles.len() >= MAX_WORKER_ROLES {
+                    return Err("worker_role_limit_reached".to_string());
+                }
+                ensure_unique_worker_role_name(roles, &name, None)?;
+                roles.push(WorkerRole {
+                    id: unique_web_id("role"),
+                    name,
+                    description,
+                });
+                Ok(())
+            })?;
+            let event = WireEvent::WorkerRolesUpdated { session_id, roles };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::WorkerRoleUpdate {
+            session_id,
+            role_id,
+            name,
+            description,
+        } => {
+            let (name, description) = normalize_role_fields(&name, &description)?;
+            let roles = mutate_worker_roles(state, &session_id, |roles| {
+                ensure_unique_worker_role_name(roles, &name, Some(&role_id))?;
+                let role = roles
+                    .iter_mut()
+                    .find(|role| role.id == role_id)
+                    .ok_or_else(|| "worker_role_not_found".to_string())?;
+                role.name = name;
+                role.description = description;
+                Ok(())
+            })?;
+            let event = WireEvent::WorkerRolesUpdated { session_id, roles };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::WorkerRoleDelete {
+            session_id,
+            role_id,
+        } => {
+            let roles = mutate_worker_roles(state, &session_id, |roles| {
+                let before = roles.len();
+                roles.retain(|role| role.id != role_id);
+                if roles.len() == before {
+                    return Err("worker_role_not_found".to_string());
+                }
+                Ok(())
+            })?;
+            let event = WireEvent::WorkerRolesUpdated { session_id, roles };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
         ClientCommand::TurnSubmit {
             session_id,
             text,
             attachment_ids,
             input_kind,
             source_turn_id,
+            role_id,
+            role_ids,
         } => {
             if let Some(command_id) = command_id {
                 if let Some(turn) = turn_for_command_id(state, &session_id, command_id)? {
@@ -2314,6 +2495,9 @@ fn handle_command_with_id(
                 }
             }
             let turn = if input_kind.as_deref() == Some("toolgen") {
+                if role_id.is_some() || !role_ids.is_empty() {
+                    return Err("toolgen_worker_role_not_supported".to_string());
+                }
                 if attachment_ids.is_some() {
                     return Err("toolgen_attachments_not_supported".to_string());
                 }
@@ -2337,6 +2521,8 @@ fn handle_command_with_id(
                     text,
                     attachment_ids.as_deref(),
                     command_id,
+                    &role_ids,
+                    role_id.as_deref(),
                 )?
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
@@ -2345,6 +2531,8 @@ fn handle_command_with_id(
             session_id,
             text,
             attachment_ids,
+            role_id,
+            role_ids,
         } => {
             if let Some(command_id) = command_id {
                 if let Some(turn) = turn_for_command_id(state, &session_id, command_id)? {
@@ -2358,6 +2546,8 @@ fn handle_command_with_id(
                 text,
                 attachment_ids.as_deref(),
                 command_id,
+                &role_ids,
+                role_id.as_deref(),
             )?;
             let event = WireEvent::TurnUpdated { session_id, turn };
             publish_semantic(state, event.clone())?;
@@ -3232,6 +3422,7 @@ fn create_session(
                 active_context_id: String::new(),
                 primary_worker_id: String::new(),
                 attachments: Vec::new(),
+                roles: Vec::new(),
                 consumed_attachment_ids: BTreeSet::new(),
                 messages: Vec::new(),
                 turns: Vec::new(),
@@ -3401,6 +3592,19 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
     let tool_repo = session_tool_repo(state, &stored.session_id)?;
+    let roles_path = roles_path_for_history(
+        &current_session_store(state)?.history_path_for_session(&stored.session_id),
+    )?;
+    let roles = match load_roles(&roles_path) {
+        Ok(roles) => roles,
+        Err(error) => {
+            eprintln!(
+                "[timem_web_warning] worker_roles_restore_failed session_id={:?} reason={error}",
+                stored.session_id
+            );
+            Vec::new()
+        }
+    };
     {
         let mut sessions = state
             .sessions
@@ -3445,6 +3649,7 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
                 active_context_id: String::new(),
                 primary_worker_id: String::new(),
                 attachments: Vec::new(),
+                roles,
                 consumed_attachment_ids: BTreeSet::new(),
                 messages,
                 turns,
@@ -3526,7 +3731,7 @@ fn resume_unfinished_core_command_after_restore(
     } else {
         worker.run_turn_batch_with_command_ids(
             text,
-            session_context(state, session_id, &attachments)?,
+            session_context_with_roles(state, session_id, &attachments, &[])?,
             Some(command_id),
             entries
                 .iter()
@@ -3632,6 +3837,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                         created_at_ms: created_at_ms as u128,
                         command_id,
                         delivery_state,
+                        worker_roles: Vec::new(),
                     }),
                     ChatHistoryRole::Assistant => {
                         turn.final_answer = Some(content);
@@ -3647,6 +3853,42 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 mut extra,
                 ..
             } => {
+                if kind == ChatHistoryEventKind::RuntimeNotice
+                    && extra.get("notice_type").and_then(Value::as_str)
+                        == Some("worker_role_context")
+                {
+                    let roles = extra
+                        .get("worker_roles")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<Vec<WorkerRole>>(value).ok())
+                        .or_else(|| {
+                            extra
+                                .get("worker_role")
+                                .cloned()
+                                .and_then(|value| serde_json::from_value::<WorkerRole>(value).ok())
+                                .map(|role| vec![role])
+                        });
+                    if let Some(roles) = roles {
+                        let entry_created_at_ms = extra
+                            .get("user_entry_created_at_ms")
+                            .and_then(Value::as_i64)
+                            .map(|value| value as u128);
+                        let entry = turns.get_mut(&turn_id).and_then(|turn| {
+                            let index = match entry_created_at_ms {
+                                Some(created_at_ms) => turn
+                                    .user_entries
+                                    .iter()
+                                    .position(|entry| entry.created_at_ms == created_at_ms),
+                                None => turn.user_entries.len().checked_sub(1),
+                            };
+                            index.and_then(|index| turn.user_entries.get_mut(index))
+                        });
+                        if let Some(entry) = entry {
+                            entry.worker_roles = roles;
+                        }
+                    }
+                    continue;
+                }
                 if kind == ChatHistoryEventKind::RuntimeNotice
                     && extra.get("kind").and_then(Value::as_str) == Some("command_delivery")
                 {
@@ -3885,7 +4127,7 @@ fn redeliver_recorded_turn(
     } else {
         worker.run_turn_with_command_id(
             entry.text.clone(),
-            session_context(state, session_id, &entry.attachments)?,
+            session_context_with_roles(state, session_id, &entry.attachments, &entry.worker_roles)?,
             Some(command_id.to_string()),
         )
     }
@@ -3897,15 +4139,30 @@ fn submit_or_supplement_turn(
     text: String,
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
+    role_ids: &[String],
+    legacy_role_id: Option<&str>,
 ) -> Result<WebTurn, String> {
+    let worker_roles = resolve_worker_roles(state, session_id, role_ids, legacy_role_id)?;
     if session_has_active_turn(state, session_id)? {
-        if let Some(turn) =
-            try_append_turn_supplement(state, session_id, text.clone(), attachment_ids, command_id)?
-        {
+        if let Some(turn) = try_append_turn_supplement(
+            state,
+            session_id,
+            text.clone(),
+            attachment_ids,
+            command_id,
+            worker_roles.clone(),
+        )? {
             return Ok(turn);
         }
     }
-    submit_turn_with_selected_attachments(state, session_id, text, attachment_ids, command_id)
+    submit_turn_with_selected_attachments(
+        state,
+        session_id,
+        text,
+        attachment_ids,
+        command_id,
+        worker_roles,
+    )
 }
 
 fn append_supplement_or_submit_turn(
@@ -3914,8 +4171,18 @@ fn append_supplement_or_submit_turn(
     text: String,
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
+    role_ids: &[String],
+    legacy_role_id: Option<&str>,
 ) -> Result<WebTurn, String> {
-    match try_append_turn_supplement(state, session_id, text.clone(), attachment_ids, command_id)? {
+    let worker_roles = resolve_worker_roles(state, session_id, role_ids, legacy_role_id)?;
+    match try_append_turn_supplement(
+        state,
+        session_id,
+        text.clone(),
+        attachment_ids,
+        command_id,
+        worker_roles.clone(),
+    )? {
         Some(turn) => Ok(turn),
         None => submit_turn_with_selected_attachments(
             state,
@@ -3923,6 +4190,7 @@ fn append_supplement_or_submit_turn(
             text,
             attachment_ids,
             command_id,
+            worker_roles,
         ),
     }
 }
@@ -3933,6 +4201,7 @@ fn try_append_turn_supplement(
     text: String,
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
 ) -> Result<Option<WebTurn>, String> {
     if !session_has_active_turn(state, session_id)? {
         return Ok(None);
@@ -3948,14 +4217,14 @@ fn try_append_turn_supplement(
             .ok_or_else(|| "session_not_found".to_string())?;
         pending_attachments_for_ids(session, attachment_ids)?
     };
-    let mut worker_supplement_text = text.clone();
-    if let Some(context) = uploaded_files_context(&selected_attachments) {
-        worker_supplement_text.push_str("\n\n");
-        worker_supplement_text.push_str(&context);
-    }
+    let uploaded_context = uploaded_files_context(&selected_attachments);
+    let role_context = worker_roles_context(&worker_roles);
+    let additional_context =
+        combine_additional_contexts([uploaded_context.as_deref(), role_context.as_deref()]);
     let mut appended_turn = None;
-    let accepted = worker_handle.try_add_user_supplement_with_command_id_after(
-        worker_supplement_text,
+    let accepted = worker_handle.try_add_user_supplement_with_context_and_command_id_after(
+        text.clone(),
+        additional_context,
         command_id.map(str::to_string),
         || {
             appended_turn = Some(append_turn_supplement_with_selected_attachments(
@@ -3964,6 +4233,7 @@ fn try_append_turn_supplement(
                 text.clone(),
                 attachment_ids,
                 command_id,
+                worker_roles.clone(),
             )?);
             Ok(())
         },
@@ -4186,7 +4456,7 @@ fn submit_turn_with_command_id(
     text: String,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
-    submit_turn_with_selected_attachments(state, session_id, text, None, command_id)
+    submit_turn_with_selected_attachments(state, session_id, text, None, command_id, Vec::new())
 }
 
 fn submit_turn_with_selected_attachments(
@@ -4195,6 +4465,7 @@ fn submit_turn_with_selected_attachments(
     text: String,
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
 ) -> Result<WebTurn, String> {
     validate_session_model_service_config(state, session_id)?;
     apply_pending_session_mcp(state, session_id)?;
@@ -4215,12 +4486,13 @@ fn submit_turn_with_selected_attachments(
         }
     };
     if let Some(request) = request {
-        let turn = start_web_turn_with_selected_attachments(
+        let turn = start_web_turn_with_selected_attachments_and_roles(
             state,
             session_id,
             &text,
             attachment_ids,
             command_id,
+            worker_roles.clone(),
         )?;
         publish_semantic(
             state,
@@ -4249,6 +4521,7 @@ fn submit_turn_with_selected_attachments(
                 text,
                 attachments,
                 command_id: command_id.map(str::to_string),
+                worker_roles,
             });
         }
         let wire_payload = event.wire_payload();
@@ -4289,12 +4562,13 @@ fn submit_turn_with_selected_attachments(
         });
         return Ok(turn);
     }
-    let turn = start_web_turn_with_selected_attachments(
+    let turn = start_web_turn_with_selected_attachments_and_roles(
         state,
         session_id,
         &text,
         attachment_ids,
         command_id,
+        worker_roles.clone(),
     )?;
     // Publish the authoritative turn before allowing Core to emit activity for
     // it. Otherwise a fast worker event can overtake the direct command reply.
@@ -4312,7 +4586,7 @@ fn submit_turn_with_selected_attachments(
     let attachments = turn.user_entries[0].attachments.clone();
     if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
         text,
-        session_context(state, session_id, &attachments)?,
+        session_context_with_roles(state, session_id, &attachments, &worker_roles)?,
         command_id.map(str::to_string),
     ) {
         rollback_web_turn(state, session_id, &turn.turn_id, attachments);
@@ -4354,7 +4628,12 @@ fn resolve_work_instruction_decision(
     }
     primary_worker_handle(state, session_id)?.run_turn_with_command_id(
         pending.text,
-        session_context(state, session_id, &pending.attachments)?,
+        session_context_with_roles(
+            state,
+            session_id,
+            &pending.attachments,
+            &pending.worker_roles,
+        )?,
         pending.command_id,
     )?;
     Ok(true)
@@ -4893,15 +5172,41 @@ fn start_web_turn_with_command_id(
     text: &str,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
-    start_web_turn_with_selected_attachments(state, session_id, text, None, command_id)
+    start_web_turn_with_selected_attachments_and_roles(
+        state,
+        session_id,
+        text,
+        None,
+        command_id,
+        Vec::new(),
+    )
 }
 
+#[cfg(test)]
 fn start_web_turn_with_selected_attachments(
     state: &AppState,
     session_id: &str,
     text: &str,
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
+) -> Result<WebTurn, String> {
+    start_web_turn_with_selected_attachments_and_roles(
+        state,
+        session_id,
+        text,
+        attachment_ids,
+        command_id,
+        Vec::new(),
+    )
+}
+
+fn start_web_turn_with_selected_attachments_and_roles(
+    state: &AppState,
+    session_id: &str,
+    text: &str,
+    attachment_ids: Option<&[String]>,
+    command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
 ) -> Result<WebTurn, String> {
     let mut sessions = state
         .sessions
@@ -4929,6 +5234,7 @@ fn start_web_turn_with_selected_attachments(
             created_at_ms: now_ms(),
             command_id: command_id.map(str::to_string),
             delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
+            worker_roles,
         }],
         events: Vec::new(),
         final_answer: None,
@@ -4964,6 +5270,15 @@ fn start_web_turn_with_selected_attachments(
         created_at_ms,
         text.to_string(),
     )
+    .and_then(|()| {
+        append_worker_roles_history(
+            state,
+            session_id,
+            &turn_id,
+            created_at_ms,
+            &turn.user_entries[0].worker_roles,
+        )
+    })
     .and_then(|()| persist_web_session(state, session_id));
     if let Err(error) = persist_result {
         if let Ok(mut sessions) = state.sessions.lock() {
@@ -5076,6 +5391,7 @@ fn start_web_toolgen_turn(
                 created_at_ms,
                 command_id: command_id.map(str::to_string),
                 delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
+                worker_roles: Vec::new(),
             }]
         })
         .unwrap_or_default();
@@ -5143,6 +5459,7 @@ fn append_turn_user_entry(
         Vec::new(),
         Some(&[]),
         None,
+        Vec::new(),
     )
 }
 
@@ -5153,7 +5470,14 @@ fn append_turn_supplement_with_pending_attachments(
     text: String,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
-    append_turn_supplement_with_selected_attachments(state, session_id, text, None, command_id)
+    append_turn_supplement_with_selected_attachments(
+        state,
+        session_id,
+        text,
+        None,
+        command_id,
+        Vec::new(),
+    )
 }
 
 fn append_turn_supplement_with_selected_attachments(
@@ -5162,6 +5486,7 @@ fn append_turn_supplement_with_selected_attachments(
     text: String,
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
 ) -> Result<WebTurn, String> {
     append_turn_user_entry_with_attachments(
         state,
@@ -5171,6 +5496,7 @@ fn append_turn_supplement_with_selected_attachments(
         Vec::new(),
         attachment_ids,
         command_id,
+        worker_roles,
     )
 }
 
@@ -5182,6 +5508,7 @@ fn append_turn_user_entry_with_attachments(
     attachments: Vec<WebAttachment>,
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
 ) -> Result<WebTurn, String> {
     let mut sessions = state
         .sessions
@@ -5218,6 +5545,7 @@ fn append_turn_user_entry_with_attachments(
         created_at_ms: now_ms(),
         command_id: command_id.map(str::to_string),
         delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
+        worker_roles,
     });
     if turn.user_entries.len() > MAX_TURN_USER_ENTRIES {
         let excess = turn.user_entries.len() - MAX_TURN_USER_ENTRIES;
@@ -5235,6 +5563,10 @@ fn append_turn_user_entry_with_attachments(
         .map(|entry| entry.text.clone())
         .unwrap_or_default();
     let history_kind = last_entry.as_ref().map(|entry| entry.kind.as_str());
+    let worker_roles = last_entry
+        .as_ref()
+        .map(|entry| entry.worker_roles.clone())
+        .unwrap_or_default();
     drop(sessions);
     let persist_result = append_chat_history_message(
         state,
@@ -5248,6 +5580,15 @@ fn append_turn_user_entry_with_attachments(
         created_at_ms,
         content,
     )
+    .and_then(|()| {
+        append_worker_roles_history(
+            state,
+            session_id,
+            &active_turn_id,
+            created_at_ms,
+            &worker_roles,
+        )
+    })
     .and_then(|()| persist_web_session(state, session_id));
     if let Err(error) = persist_result {
         if let Ok(mut sessions) = state.sessions.lock() {
@@ -5399,6 +5740,50 @@ fn append_chat_history_event(
     }
 }
 
+fn append_worker_roles_history(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+    created_at_ms: i64,
+    worker_roles: &[WorkerRole],
+) -> Result<(), String> {
+    if worker_roles.is_empty() {
+        return Ok(());
+    }
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        "notice_type".to_string(),
+        Value::String("worker_role_context".to_string()),
+    );
+    extra.insert(
+        "worker_roles".to_string(),
+        serde_json::to_value(worker_roles)
+            .map_err(|_| "worker_role_history_serialize_failed".to_string())?,
+    );
+    extra.insert(
+        "user_entry_created_at_ms".to_string(),
+        Value::from(created_at_ms),
+    );
+    current_session_store(state)?.append_history_record(
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: turn_id.to_string(),
+            created_at_ms,
+            kind: ChatHistoryEventKind::RuntimeNotice,
+            content: format!(
+                "Worker roles applied: {}",
+                worker_roles
+                    .iter()
+                    .map(|role| role.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            extra,
+        },
+    )
+}
+
 fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEventKind {
     if source == "core_topic" {
         let topic_name = payload
@@ -5453,10 +5838,20 @@ fn decision_summary(topic_name: &str, decision: HostDecision, payload: &Value) -
     }
 }
 
+#[cfg(test)]
 fn session_context(
     state: &AppState,
     session_id: &str,
     attachments: &[WebAttachment],
+) -> Result<Option<String>, String> {
+    session_context_with_roles(state, session_id, attachments, &[])
+}
+
+fn session_context_with_roles(
+    state: &AppState,
+    session_id: &str,
+    attachments: &[WebAttachment],
+    worker_roles: &[WorkerRole],
 ) -> Result<Option<String>, String> {
     let session = {
         let mut sessions = state
@@ -5507,11 +5902,13 @@ fn session_context(
         WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => None,
     };
     let uploaded_files = uploaded_files_context(attachments);
+    let worker_roles = worker_roles_context(worker_roles);
     Ok(combine_additional_contexts([
         runtime.as_deref(),
         resume_notice.as_deref(),
         instructions.as_deref(),
         uploaded_files.as_deref(),
+        worker_roles.as_deref(),
         tool_repo_hint.as_deref(),
     ]))
 }
@@ -6208,6 +6605,11 @@ fn handle_scoped_worker_event(
                 return;
             }
             let should_resubmit_unconsumed_supplements = outcome.stop_reason.is_none();
+            // A stopped turn does not emit a final model-response topic after the
+            // worker guard is released. The last reported count therefore still
+            // includes this primary worker. Remove that stale primary contribution
+            // before deriving the authoritative session state.
+            let stopped_while_primary_was_active = outcome.stop_reason.is_some();
             let completion = json!({
                 "stats": outcome.stats,
                 "latest_usage": outcome.latest_usage,
@@ -6216,54 +6618,60 @@ fn handle_scoped_worker_event(
                 "stop_reason": outcome.stop_reason.map(|reason| format!("{reason:?}")),
                 "toolgen_retrospect": outcome.toolgen_retrospect,
             });
-            let (message_id, turn_id) =
-                if let Ok(mut sessions) = state.sessions.lock() {
-                    sessions
-                        .get_mut(session_id)
-                        .map(|session| {
-                            let turn_id = session.active_turn_id.take();
-                            session.pending_turn_id = None;
-                            if let Some(active_turn_id) = turn_id.as_deref() {
-                                if let Some(turn) = session
-                                    .turns
-                                    .iter_mut()
-                                    .find(|turn| turn.turn_id == active_turn_id)
-                                {
-                                    turn.state = "finished".to_string();
-                                    turn.completion = Some(completion.clone());
+            let (message_id, turn_id) = if let Ok(mut sessions) = state.sessions.lock() {
+                sessions
+                    .get_mut(session_id)
+                    .map(|session| {
+                        let turn_id = session.active_turn_id.take();
+                        session.pending_turn_id = None;
+                        if let Some(active_turn_id) = turn_id.as_deref() {
+                            if let Some(turn) = session
+                                .turns
+                                .iter_mut()
+                                .find(|turn| turn.turn_id == active_turn_id)
+                            {
+                                turn.state = "finished".to_string();
+                                turn.completion = Some(completion.clone());
+                            }
+                        }
+                        let reported_session_working = session
+                            .reported_session_working_worker_count
+                            .take()
+                            .map(|count| {
+                                count.saturating_sub(usize::from(stopped_while_primary_was_active))
+                            });
+                        if reported_session_working.unwrap_or(0) == 0 {
+                            for worker in &mut session.workers {
+                                if worker.state == "working" {
+                                    worker.state = "ready".to_string();
                                 }
                             }
-                            let reported_session_working =
-                                session.reported_session_working_worker_count.take();
-                            if reported_session_working.unwrap_or(0) == 0 {
-                                for worker in &mut session.workers {
-                                    if worker.state == "working" {
-                                        worker.state = "ready".to_string();
-                                    }
-                                }
-                            }
-                            session.state =
-                                if session.workers.iter().any(|worker| worker.state == "error") {
-                                    "error"
-                                } else if session
+                        }
+                        session.state =
+                            if session.workers.iter().any(|worker| worker.state == "error") {
+                                "error"
+                            } else if session
+                                .workers
+                                .iter()
+                                .all(|worker| worker.state == "stopped")
+                            {
+                                "stopped"
+                            } else if reported_session_working.unwrap_or(0) > 0
+                                || session
                                     .workers
                                     .iter()
-                                    .all(|worker| worker.state == "stopped")
-                                {
-                                    "stopped"
-                                } else if reported_session_working.unwrap_or(0) > 0
-                                    || session
-                                        .workers
-                                        .iter()
-                                        .any(|worker| worker.state == "working")
-                                {
-                                    "working"
-                                } else {
-                                    "ready"
-                                }
-                                .to_string();
-                            let message_id = session.pending_completion_message_id.take().and_then(
-                                |message_id| {
+                                    .any(|worker| worker.state == "working")
+                            {
+                                "working"
+                            } else {
+                                "ready"
+                            }
+                            .to_string();
+                        let message_id =
+                            session
+                                .pending_completion_message_id
+                                .take()
+                                .and_then(|message_id| {
                                     session
                                         .messages
                                         .iter_mut()
@@ -6272,14 +6680,13 @@ fn handle_scoped_worker_event(
                                             message.completion = Some(completion.clone());
                                             message.id.clone()
                                         })
-                                },
-                            );
-                            (message_id, turn_id)
-                        })
-                        .unwrap_or((None, None))
-                } else {
-                    (None, None)
-                };
+                                });
+                        (message_id, turn_id)
+                    })
+                    .unwrap_or((None, None))
+            } else {
+                (None, None)
+            };
             if let Some(turn_id) = turn_id.as_deref() {
                 let mut extra = BTreeMap::new();
                 extra.insert("completion".to_string(), completion.clone());
