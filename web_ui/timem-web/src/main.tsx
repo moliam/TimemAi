@@ -14,7 +14,7 @@ import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shou
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import { summarizeConsecutiveToolActivities, ToolActivitySummary } from "./activity_groups";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearQueuedMessagesPause, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, loadQueuedMessagesPause, QueuedMessage, queuedMessageKey, QueuedMessagesPauseState, queuedMessagesPauseStorageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, saveQueuedMessagesPause, selectQueuedDispatches } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
@@ -129,6 +129,7 @@ function TimemApp() {
   const [pendingUploadFiles, setPendingUploadFiles] = useState<Record<string, { name: string; bytes: number }>>({});
   const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
   const [completedTurnKey, setCompletedTurnKey] = useState("");
+  const [queuePauseRequest, setQueuePauseRequest] = useState<{ key: string; reason: string } | null>(null);
   const [commandAcks, setCommandAcks] = useState<Record<string, Extract<WireEvent, { type: "command_ack" }>>>({});
   const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
     setCommandAcks((current) => Object.fromEntries(Object.entries(current).filter(([commandId]) => !commandIds.has(commandId))));
@@ -732,7 +733,12 @@ function TimemApp() {
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? finishTurn(attachTurnCompletion(session, event.outcome.message_id, event.outcome.completion ?? {}), event.turn_id, event.outcome.completion ?? {})
         : session));
-      setCompletedTurnKey(`${event.session_id}:${event.turn_id ?? ""}`);
+      const completedKey = `${event.session_id}:${event.turn_id ?? ""}`;
+      setCompletedTurnKey(completedKey);
+      const stopReason = event.outcome.completion?.stop_reason;
+      if (typeof stopReason === "string" && stopReason.length > 0) {
+        setQueuePauseRequest({ key: completedKey, reason: stopReason });
+      }
       return;
     }
     if (event.type !== "core_topic") return;
@@ -1097,6 +1103,7 @@ function TimemApp() {
           activeSession={activeSession}
           sessions={sessions}
           completedTurnKey={completedTurnKey}
+          queuePauseRequest={queuePauseRequest}
           commandAcks={commandAcks}
           onConsumeCommandAcks={consumeCommandAcks}
           reliableStorageScope={server ? reliableStorageScope(window.location.origin, server.mem.space_dir) : ""}
@@ -1387,10 +1394,11 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisi
   />);
 });
 
-function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen }: {
+function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequest, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen }: {
   activeSession: Session | undefined;
   sessions: Session[];
   completedTurnKey: string;
+  queuePauseRequest: { key: string; reason: string } | null;
   commandAcks: Record<string, Extract<WireEvent, { type: "command_ack" }>>;
   onConsumeCommandAcks: (commandIds: ReadonlySet<string>) => void;
   reliableStorageScope: string;
@@ -1431,6 +1439,8 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
   const queuedDispatchSessionIdsRef = useRef<Set<string>>(new Set());
   const queuedMessageClaimsRef = useRef<Set<string>>(new Set());
   const [queuedMessageClaims, setQueuedMessageClaims] = useState<Set<string>>(() => new Set());
+ const [queuedMessagesPause, setQueuedMessagesPause] = useState<QueuedMessagesPauseState | null>(null);
+ const processedQueuePauseRequestKeyRef = useRef("");
   const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());
   const submittingDraftStartedAtRef = useRef<Map<string, number>>(new Map());
   const [submittingDraftSessionIds, setSubmittingDraftSessionIds] = useState<Set<string>>(() => new Set());
@@ -1441,6 +1451,23 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     queuedMessagesBySessionRef.current = next;
     setQueuedMessagesBySession(next);
   }, [reliableStorageScope]);
+ const releaseAllQueuedDispatches = useCallback(() => {
+ queuedDispatchSessionIdsRef.current.clear();
+ queuedMessageClaimsRef.current.clear();
+ setQueuedMessageClaims(new Set());
+ setDraggedQueueMessageId(undefined);
+ }, []);
+ const pauseQueuedMessages = useCallback((reason: string) => {
+ const pause: QueuedMessagesPauseState = { paused: true, reason, stoppedAtMs: Date.now() };
+ if (reliableStorageScope) saveQueuedMessagesPause(window.localStorage, reliableStorageScope, pause);
+ releaseAllQueuedDispatches();
+ setQueuedMessagesPause(pause);
+ }, [releaseAllQueuedDispatches, reliableStorageScope]);
+ const resumeQueuedMessages = useCallback(() => {
+ if (reliableStorageScope && !clearQueuedMessagesPause(window.localStorage, reliableStorageScope)) return false;
+ setQueuedMessagesPause(null);
+ return true;
+ }, [reliableStorageScope]);
   const turns = activeSession?.turns ?? [];
   const activeSessionId = activeSession?.session_id;
   const draft = draftForSession(draftsBySession, activeSessionId);
@@ -1494,35 +1521,42 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     viewport.style.scrollBehavior = previousBehavior;
   }, [activeSessionId]);
 
-  useEffect(() => {
-    if (!reliableStorageScope) return;
-    const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
-    queuedMessagesBySessionRef.current = restored;
-    queuedMessageClaimsRef.current.clear();
-    queuedDispatchSessionIdsRef.current.clear();
-    setQueuedMessageClaims(new Set());
-    setQueuedMessagesBySession(restored);
-  }, [reliableStorageScope]);
+ useEffect(() => {
+ if (!reliableStorageScope) return;
+ const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
+ const restoredPause = loadQueuedMessagesPause(window.localStorage, reliableStorageScope);
+ queuedMessagesBySessionRef.current = restored;
+ releaseAllQueuedDispatches();
+ setQueuedMessagesBySession(restored);
+ setQueuedMessagesPause(restoredPause);
+ }, [releaseAllQueuedDispatches, reliableStorageScope]);
 
-  useEffect(() => {
-    const syncCrossTabQueues = (event: StorageEvent) => {
-      if (!reliableStorageScope || !event.key?.startsWith(`${queuedMessagesStorageKey(reliableStorageScope)}:`)) return;
-      const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
-      queuedMessagesBySessionRef.current = restored;
-      for (const [sessionId, messages] of Object.entries(restored)) {
-        if (messages.some((message) => message.deliveryError)) queuedDispatchSessionIdsRef.current.delete(sessionId);
-      }
-      for (const key of Array.from(queuedMessageClaimsRef.current)) {
-        if (!Object.entries(restored).some(([sessionId, messages]) => messages.some((message) => queuedMessageKey(sessionId, message.id) === key))) {
-          queuedMessageClaimsRef.current.delete(key);
-        }
-      }
-      setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-      setQueuedMessagesBySession(restored);
-    };
-    window.addEventListener("storage", syncCrossTabQueues);
-    return () => window.removeEventListener("storage", syncCrossTabQueues);
-  }, [reliableStorageScope]);
+ useEffect(() => {
+ const syncCrossTabQueues = (event: StorageEvent) => {
+ if (!reliableStorageScope || !event.key) return;
+ if (event.key === queuedMessagesPauseStorageKey(reliableStorageScope)) {
+ const restoredPause = loadQueuedMessagesPause(window.localStorage, reliableStorageScope);
+ if (restoredPause) releaseAllQueuedDispatches();
+ setQueuedMessagesPause(restoredPause);
+ return;
+ }
+ if (!event.key.startsWith(`${queuedMessagesStorageKey(reliableStorageScope)}:`)) return;
+ const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
+ queuedMessagesBySessionRef.current = restored;
+ for (const [sessionId, messages] of Object.entries(restored)) {
+ if (messages.some((message) => message.deliveryError)) queuedDispatchSessionIdsRef.current.delete(sessionId);
+ }
+ for (const key of Array.from(queuedMessageClaimsRef.current)) {
+ if (!Object.entries(restored).some(([sessionId, messages]) => messages.some((message) => queuedMessageKey(sessionId, message.id) === key))) {
+ queuedMessageClaimsRef.current.delete(key);
+ }
+ }
+ setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+ setQueuedMessagesBySession(restored);
+ };
+ window.addEventListener("storage", syncCrossTabQueues);
+ return () => window.removeEventListener("storage", syncCrossTabQueues);
+ }, [releaseAllQueuedDispatches, reliableStorageScope]);
 
   useEffect(() => {
     if (sessionIds.length === 0) return;
@@ -1569,7 +1603,9 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
   }, [commandAcks, onConsumeCommandAcks, reliableStorageScope]);
 
   useEffect(() => {
-    if (sessionInteractionLocked) return;
+ const pendingPauseRequest = queuePauseRequest
+ && processedQueuePauseRequestKeyRef.current !== queuePauseRequest.key;
+ if (sessionInteractionLocked || queuedMessagesPause || pendingPauseRequest) return;
     for (const session of sessions) {
       if (session.state === "working") {
         queuedDispatchSessionIdsRef.current.delete(session.session_id);
@@ -1591,7 +1627,13 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
       }
     }
     setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-  }, [editingQueuedMessage?.sessionId, onSendForSession, queuedMessagesBySession, sessionInteractionLocked, sessions, updateQueuedMessages]);
+ }, [editingQueuedMessage?.sessionId, onSendForSession, queuePauseRequest, queuedMessagesBySession, queuedMessagesPause, sessionInteractionLocked, sessions, updateQueuedMessages]);
+
+ useEffect(() => {
+ if (!queuePauseRequest || processedQueuePauseRequestKeyRef.current === queuePauseRequest.key) return;
+ processedQueuePauseRequestKeyRef.current = queuePauseRequest.key;
+ pauseQueuedMessages(queuePauseRequest.reason);
+ }, [pauseQueuedMessages, queuePauseRequest]);
 
   useEffect(() => {
     if (!completedTurnKey) return;
@@ -1666,7 +1708,10 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
       [reserved.sessionId]: [...(queuedMessagesBySessionRef.current[reserved.sessionId] ?? []), { id: clientId("queued"), text: reserved.text, createdAtMs: Date.now(), attachmentIds: availableAttachments.map((attachment) => attachment.id) }],
     };
     const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
-    if (sent) updateQueuedMessages(() => nextQueues);
+ if (sent) {
+ updateQueuedMessages(() => nextQueues);
+ resumeQueuedMessages();
+ }
     // Release the synchronous deduplication lock before publishing the React state
     // snapshot. Calling the mutating helper inside a deferred state updater would
     // leave the next lock snapshot stale and keep the composer stuck on Sending.
@@ -1732,26 +1777,9 @@ const toggleQueuedMessages = () => {
     setEditingQueuedMessage(undefined);
   };
 
-  const cancelActiveSessionTurn = async () => {
- if (activeSessionId) {
- const previous = queuedMessagesBySessionRef.current;
- const next = clearSessionQueuedMessages(previous, activeSessionId);
-
- // Stop is an explicit discard boundary. Keep memory cleared even if
- // localStorage cleanup fails, preventing stale automatic dispatch.
- if (reliableStorageScope) {
- saveQueuedMessages(window.localStorage, reliableStorageScope, next, previous);
- }
- queuedMessagesBySessionRef.current = next;
- setQueuedMessagesBySession(next);
- releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, activeSessionId);
- setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
- queuedDispatchSessionIdsRef.current.delete(activeSessionId);
- setEditingQueuedMessage((current) =>
- current?.sessionId === activeSessionId ? undefined : current,
- );
- setDraggedQueueMessageId(undefined);
- }
+ const cancelActiveSessionTurn = async () => {
+ pauseQueuedMessages("CancelledByUser");
+ setEditingQueuedMessage(undefined);
  await onCancel();
  };
 
@@ -1789,7 +1817,7 @@ const toggleQueuedMessages = () => {
       />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
-        {!!activeSession && queuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"}`} aria-label={`${queuedMessages.length} queued message${queuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>上一条完成后自动发送</small>{hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${queuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}</header><div className="queued-message-items">{visibleQueuedMessages.map((message) => {
+        {!!activeSession && queuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${queuedMessages.length} queued message${queuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>{queuedMessagesPause ? "自动续发已暂停，手动发送仍可用" : "上一条完成后自动发送"}</small>{queuedMessagesPause && <button type="button" className="queued-message-resume" onClick={resumeQueuedMessages}>继续发送</button>}{hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${queuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}</header><div className="queued-message-items">{visibleQueuedMessages.map((message) => {
           const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
           const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
           const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));

@@ -17,6 +17,67 @@ export function queuedMessagesStorageKey(scope: string, messageId?: string) {
   return messageId === undefined ? base : `${base}:${encodeURIComponent(messageId)}`;
 }
 
+export type QueuedMessagesPauseState = {
+ paused: true;
+ reason?: string;
+ stoppedAtMs: number;
+};
+
+export function queuedMessagesPauseStorageKey(scope: string) {
+ return `${queuedMessagesStorageKey(scope)}-pause`;
+}
+
+export function loadQueuedMessagesPause(
+ storage: Pick<Storage, "getItem">,
+ scope: string,
+): QueuedMessagesPauseState | null {
+ try {
+ const raw = storage.getItem(queuedMessagesPauseStorageKey(scope));
+ if (!raw || raw.length > MAX_STORED_MESSAGE_BYTES) return null;
+ const value = JSON.parse(raw) as Partial<QueuedMessagesPauseState>;
+ if (
+ value?.paused !== true
+ || typeof value.stoppedAtMs !== "number"
+ || !Number.isFinite(value.stoppedAtMs)
+ || value.stoppedAtMs < 0
+ || (value.reason !== undefined && typeof value.reason !== "string")
+ ) return null;
+ return {
+ paused: true,
+ stoppedAtMs: value.stoppedAtMs,
+ ...(value.reason === undefined ? {} : { reason: value.reason }),
+ };
+ } catch {
+ return null;
+ }
+}
+
+export function saveQueuedMessagesPause(
+ storage: Pick<Storage, "setItem">,
+ scope: string,
+ pause: QueuedMessagesPauseState,
+) {
+ try {
+ storage.setItem(queuedMessagesPauseStorageKey(scope), JSON.stringify(pause));
+ return true;
+ } catch {
+ return false;
+ }
+}
+
+export function clearQueuedMessagesPause(
+ storage: Pick<Storage, "removeItem">,
+ scope: string,
+) {
+ try {
+ storage.removeItem(queuedMessagesPauseStorageKey(scope));
+ return true;
+ } catch {
+ return false;
+ }
+}
+
+
 type StoredQueuedMessage = { sessionId: string; position: number; message: QueuedMessage };
 
 function parseStoredQueuedMessage(raw: string | null): StoredQueuedMessage | null {
