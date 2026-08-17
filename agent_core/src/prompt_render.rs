@@ -5,6 +5,29 @@ use crate::{PromptDelta, PromptSlice};
 
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
+pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize = 32 * 1024;
+
+pub(crate) fn truncate_action_result_for_prompt(text: &str) -> String {
+    if text.len() <= MAX_ACTION_RESULT_PROMPT_BYTES {
+        return text.to_string();
+    }
+    let mut retained_budget = MAX_ACTION_RESULT_PROMPT_BYTES;
+    loop {
+        let mut retained_end = retained_budget.min(text.len());
+        while retained_end > 0 && !text.is_char_boundary(retained_end) {
+            retained_end -= 1;
+        }
+        let truncated_words = text[retained_end..].split_whitespace().count();
+        let notice = format!(
+            "[Too long, {truncated_words} words truncated.  Issue new actions  if necessary]"
+        );
+        let next_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(notice.len() + 1);
+        if next_budget == retained_budget {
+            return format!("{}\n{notice}", text[..retained_end].trim_end());
+        }
+        retained_budget = next_budget;
+    }
+}
 
 pub(crate) fn formatted_response_trailer(
     _response_shape_hint: &str,
@@ -74,7 +97,8 @@ pub(crate) fn render_static_prompt(
     let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
     let with_protocol = with_protocol.replace("{{STARTUP_STAMP}}", startup_stamp);
     // 2. Fill {{TOOL_CATALOG}} and {{SKILL_HEADERS}} from capabilities
-    let with_caps = capabilities.enrich_static_prompt(&with_protocol);
+    let with_caps = capabilities
+        .enrich_static_prompt_for_protocol(&with_protocol, protocol_suite.lang_format());
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
     let static_prompt = prompt_spec::enrich_static_prompt_with_response_schema(
         &with_caps,
@@ -125,7 +149,11 @@ pub(crate) fn render_prompt_with_rendered_static(
                 ));
             }
             out.push('\n');
-            out.push_str(slice.text.trim());
+            if is_action_result {
+                out.push_str(truncate_action_result_for_prompt(&slice.text).trim());
+            } else {
+                out.push_str(slice.text.trim());
+            }
             out.push('\n');
             last_was_action_result = is_action_result;
         }

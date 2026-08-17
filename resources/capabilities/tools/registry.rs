@@ -1,10 +1,16 @@
 use crate::response_protocol::ParsedAction;
-use crate::{capmgr, memmgr, self_tool, shell_exec, toolgen};
+use crate::{capmgr, memmgr, readfile, self_tool, shell_exec, toolgen};
 use crate::{ActionExecution, ActionRuntime, AgentCore};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] =
-    &["memmgr", "capmgr", "run_bash", "self_tool", "toolgen"];
+pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
+    "memmgr",
+    "capmgr",
+    "readfile",
+    "run_bash",
+    "self_tool",
+    "toolgen",
+];
 
 type BuiltinToolCallback =
     fn(&mut AgentCore, &ParsedAction, &mut dyn ActionRuntime) -> ActionExecution;
@@ -35,6 +41,7 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
     match binding_name {
         "capmgr" => Some(execute_capmgr),
         "memmgr" => Some(execute_memmgr),
+        "readfile" => Some(execute_readfile),
         "self_tool" => Some(execute_self_tool),
         "run_bash" => Some(execute_run_bash),
         "toolgen" => Some(execute_toolgen),
@@ -72,6 +79,14 @@ fn execute_self_tool(
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(self_tool::execute_action(core, action))
+}
+
+fn execute_readfile(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
+    ActionExecution::Completed(readfile::execute_action(core, action))
 }
 
 fn execute_run_bash(

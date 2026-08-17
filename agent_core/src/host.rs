@@ -1680,6 +1680,13 @@ pub trait TurnUi {
         Vec::new()
     }
 
+    fn drain_user_supplements_with_context(&mut self) -> Vec<UserSupplement> {
+        self.drain_user_supplements()
+            .into_iter()
+            .map(UserSupplement::from)
+            .collect()
+    }
+
     fn apply_pending_runtime_updates(
         &mut self,
         _core: &mut crate::AgentCore,
@@ -1766,11 +1773,51 @@ pub trait TurnUi {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSupplement {
+    pub text: String,
+    pub additional_context: Option<String>,
+}
+
+impl UserSupplement {
+    pub fn new(text: impl Into<String>, additional_context: Option<String>) -> Self {
+        Self {
+            text: text.into(),
+            additional_context,
+        }
+    }
+}
+
+impl From<String> for UserSupplement {
+    fn from(text: String) -> Self {
+        Self::new(text, None)
+    }
+}
+
 pub fn normalize_user_supplements(supplements: Vec<String>) -> Vec<String> {
     supplements
         .into_iter()
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+        .collect()
+}
+
+pub fn normalize_user_supplements_with_context(
+    supplements: Vec<UserSupplement>,
+) -> Vec<UserSupplement> {
+    supplements
+        .into_iter()
+        .filter_map(|mut supplement| {
+            supplement.text = supplement.text.trim().to_string();
+            if supplement.text.is_empty() {
+                return None;
+            }
+            supplement.additional_context = supplement
+                .additional_context
+                .map(|context| context.trim().to_string())
+                .filter(|context| !context.is_empty());
+            Some(supplement)
+        })
         .collect()
 }
 

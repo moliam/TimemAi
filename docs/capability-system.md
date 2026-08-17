@@ -94,12 +94,11 @@ errors become protocol repair before execution. Tool executors return natural
 language action results for runtime semantics such as storage conflicts, SQL
 safety failures, shell approval, missing files, timeouts, or invalid prompt
 references. A manifest can expose only capabilities with an existing binding.
-Built-in tools must document both input and output schema; runtime overlay
-tools may omit output schema while they are experimental.
-The IDL is intentionally data, not Rust code: the same `input_schema` and
-`output_schema` blocks drive generic runtime validation and are exposed by
-`capmgr op=load kind=tool`. The static prompt receives a shorter Markdown
-capability guide derived from the manifests, not a full schema dump.
+The `input_schema` is intentionally data, not Rust code: it drives generic
+model-action validation and is exposed by `capmgr op=load kind=tool`. Tool
+results remain executor-owned evidence described by `prompt_result`; manifests
+do not declare an unused output contract. The static prompt receives a shorter
+Markdown capability guide derived from the manifests, not a full schema dump.
 
 Built-in tools live as capability packages under
 `resources/capabilities/tools/`. Each package has a `{tool}.yaml` manifest and,

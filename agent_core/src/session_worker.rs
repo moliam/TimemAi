@@ -293,6 +293,7 @@ struct SupplementMailbox {
 
 struct QueuedSupplement {
     text: String,
+    additional_context: Option<String>,
     command_id: Option<String>,
 }
 
@@ -341,6 +342,24 @@ impl CoreSessionWorkerHandle {
         command_id: Option<String>,
         supplements: Vec<(String, Option<String>)>,
     ) -> Result<(), String> {
+        self.run_turn_batch_with_supplements(
+            input,
+            additional_context,
+            command_id,
+            supplements
+                .into_iter()
+                .map(|(text, command_id)| (crate::UserSupplement::from(text), command_id))
+                .collect(),
+        )
+    }
+
+    pub fn run_turn_batch_with_supplements(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        supplements: Vec<(crate::UserSupplement, Option<String>)>,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
@@ -380,7 +399,11 @@ impl CoreSessionWorkerHandle {
                 command_id: command_id.clone(),
                 initial_supplements: supplements
                     .into_iter()
-                    .map(|(text, command_id)| QueuedSupplement { text, command_id })
+                    .map(|(supplement, command_id)| QueuedSupplement {
+                        text: supplement.text,
+                        additional_context: supplement.additional_context,
+                        command_id,
+                    })
                     .collect(),
                 cancel_generation,
             })
@@ -447,6 +470,7 @@ impl CoreSessionWorkerHandle {
                 }
                 mailbox.queue.push(QueuedSupplement {
                     text: supplement.into(),
+                    additional_context: None,
                     command_id: None,
                 });
                 true
@@ -475,6 +499,7 @@ impl CoreSessionWorkerHandle {
         before_enqueue()?;
         mailbox.queue.push(QueuedSupplement {
             text: supplement.into(),
+            additional_context: None,
             command_id: None,
         });
         Ok(true)
@@ -483,6 +508,24 @@ impl CoreSessionWorkerHandle {
     pub fn try_add_user_supplement_with_command_id_after<F>(
         &self,
         supplement: impl Into<String>,
+        command_id: Option<String>,
+        before_enqueue: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        self.try_add_user_supplement_with_context_and_command_id_after(
+            supplement,
+            None,
+            command_id,
+            before_enqueue,
+        )
+    }
+
+    pub fn try_add_user_supplement_with_context_and_command_id_after<F>(
+        &self,
+        supplement: impl Into<String>,
+        additional_context: Option<String>,
         command_id: Option<String>,
         before_enqueue: F,
     ) -> Result<bool, String>
@@ -515,6 +558,7 @@ impl CoreSessionWorkerHandle {
         }
         mailbox.queue.push(QueuedSupplement {
             text: supplement.into(),
+            additional_context,
             command_id,
         });
         Ok(true)
@@ -1139,7 +1183,10 @@ impl CoreSessionWorker {
                                     if !supplements.is_empty() {
                                         let _ = event_tx.send(
                                             CoreSessionWorkerEvent::UnconsumedSupplements {
-                                                supplements,
+                                                supplements: supplements
+                                                    .into_iter()
+                                                    .map(|supplement| supplement.text)
+                                                    .collect(),
                                             },
                                         );
                                     }
@@ -1149,10 +1196,20 @@ impl CoreSessionWorker {
                                 if supplements.is_empty() {
                                     break main_outcome;
                                 }
-                                input = supplements.join("\n\n");
-                                additional_context = Some(
-                                    "These user messages arrived while the previous response was being finalized. Address them before finalizing again."
-                                        .to_string(),
+                                input = supplements
+                                    .iter()
+                                    .map(|supplement| supplement.text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+                                let supplement_contexts = supplements
+                                    .iter()
+                                    .filter_map(|supplement| {
+                                        supplement.additional_context.as_deref()
+                                    })
+                                    .collect::<Vec<_>>();
+                                additional_context = crate::combine_additional_contexts(
+                                    std::iter::once(Some("These user messages arrived while the previous response was being finalized. Address them before finalizing again."))
+                                        .chain(supplement_contexts.into_iter().map(Some)),
                                 );
                             };
                             ui.current_turn_active = None;
@@ -1381,6 +1438,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
         );
         ui.begin_toolgen_run(before.len());
         let mut input = request.user_instruction.clone().unwrap_or_default();
+        let mut additional_context = None;
         let mut outcome = loop {
             let current = run_session_turn_with_model_client(
                 core,
@@ -1391,7 +1449,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                     audit_file: &workspace.audit_file,
                     runtime: &workspace.runtime,
                     run_bash_target: &workspace.run_bash_target,
-                    additional_context: None,
+                    additional_context: additional_context.as_deref(),
                 },
                 ui,
                 Some(profiler),
@@ -1402,7 +1460,12 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                 if !supplements.is_empty() {
                     let _ = ui
                         .event_tx
-                        .send(CoreSessionWorkerEvent::UnconsumedSupplements { supplements });
+                        .send(CoreSessionWorkerEvent::UnconsumedSupplements {
+                            supplements: supplements
+                                .into_iter()
+                                .map(|supplement| supplement.text)
+                                .collect(),
+                        });
                 }
                 break current;
             }
@@ -1410,7 +1473,17 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
             if supplements.is_empty() {
                 break current;
             }
-            input = supplements.join("\n\n");
+            input = supplements
+                .iter()
+                .map(|supplement| supplement.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            additional_context = crate::combine_additional_contexts(
+                supplements
+                    .iter()
+                    .filter_map(|supplement| supplement.additional_context.as_deref())
+                    .map(Some),
+            );
         };
         core.disable_toolgen_capability();
         let after = match repo.list() {
@@ -1567,7 +1640,7 @@ impl TurnUi for WorkerTurnUi {
         self.cancel_requested.swap(false, Ordering::SeqCst)
     }
 
-    fn drain_user_supplements(&mut self) -> Vec<String> {
+    fn drain_user_supplements_with_context(&mut self) -> Vec<crate::UserSupplement> {
         if !self.accept_supplements {
             return Vec::new();
         }
@@ -1682,7 +1755,10 @@ impl TurnUi for WorkerTurnUi {
 }
 
 impl WorkerTurnUi {
-    fn accept_queued_supplements(&self, queued: Vec<QueuedSupplement>) -> Vec<String> {
+    fn accept_queued_supplements(
+        &self,
+        queued: Vec<QueuedSupplement>,
+    ) -> Vec<crate::UserSupplement> {
         queued
             .into_iter()
             .map(|queued| {
@@ -1691,12 +1767,12 @@ impl WorkerTurnUi {
                         .event_tx
                         .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
                 }
-                queued.text
+                crate::UserSupplement::new(queued.text, queued.additional_context)
             })
             .collect()
     }
 
-    fn take_or_close_supplements_for_main_context(&mut self) -> Vec<String> {
+    fn take_or_close_supplements_for_main_context(&mut self) -> Vec<crate::UserSupplement> {
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {
@@ -1709,7 +1785,7 @@ impl WorkerTurnUi {
             .unwrap_or_default()
     }
 
-    fn close_supplements_for_main_context(&mut self) -> Vec<String> {
+    fn close_supplements_for_main_context(&mut self) -> Vec<crate::UserSupplement> {
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {

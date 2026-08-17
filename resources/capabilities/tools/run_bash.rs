@@ -22,7 +22,7 @@ use std::os::unix::process::CommandExt;
 
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const BASH_EXECUTABLE: &str = "/bin/bash";
-const MAX_BASH_OUTPUT_CHARS: usize = 8_000;
+const MAX_BASH_OUTPUT_CHARS: usize = 32 * 1024;
 #[cfg(test)]
 static LONG_RUNNING_COMMAND_PROMPT_AFTER_MS: AtomicU64 = AtomicU64::new(60_000);
 #[cfg(test)]

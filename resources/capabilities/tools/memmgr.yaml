@@ -7,9 +7,9 @@ description: |
   Unified local memory manager. Use type=durable for long-lived user facts,
   type=raw_chat for UI-visible chat transcript, type=scratch for temporary notes.
 prompt_synopsis: |
-  memmgr type=durable op=<schema|sql|insert|update|upsert|delete> ...
-  memmgr type=raw_chat op=<search|sql|delete> ...
-  memmgr type=scratch op=<search|write|read|delete> ...
+  {"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories LIMIT 10","limit":10}}
+  {"memmgr":{"type":"raw_chat","op":"search","search_text":"text","limit":10}}
+  {"memmgr":{"type":"scratch","op":"read","id":"scratch_id"}}
 prompt_input: |
   Always include type and op. Choose one synopsis line above and fill only the
   arguments needed for that operation as fields in the args object. Use arrays
@@ -64,19 +64,6 @@ input_schema: |
     "x-required-any-when": [
       {"when": {"type": "raw_chat", "op": "delete"}, "required": ["id", "search_text"]}
     ]
-  }
-output_schema: |
-  {
-    "type": "object",
-    "properties": {
-      "type": {"type": "string", "description": "Echoed memory type."},
-      "op": {"type": "string", "description": "Echoed operation when relevant."},
-      "results": {"type": "string", "description": "Search/sql rows or none."},
-      "id": {"type": "string", "description": "Durable memory id, chat turn id, or scratch id."},
-      "version": {"type": "integer", "description": "Durable memory version after write/update/delete."},
-      "deleted": {"type": "boolean", "description": "Delete result."},
-      "error": {"type": "string", "description": "Validation/storage/conflict message."}
-    }
   }
 example_json: |
   {

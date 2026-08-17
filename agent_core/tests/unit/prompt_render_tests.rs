@@ -75,6 +75,55 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
 }
 
 #[test]
+fn action_result_truncation_is_byte_safe_and_reports_omitted_words() {
+    assert_eq!(MAX_ACTION_RESULT_PROMPT_BYTES, 32 * 1024);
+    let input = format!(
+        "{} alpha beta gamma",
+        "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES - 1)
+    );
+    let truncated = truncate_action_result_for_prompt(&input);
+    assert!(truncated.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
+    assert!(truncated.ends_with("[Too long, 4 words truncated.  Issue new actions  if necessary]"));
+    assert!(!truncated.ends_with('…'));
+
+    let unicode_boundary = format!("{}界 alpha", "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES - 2));
+    let unicode_truncated = truncate_action_result_for_prompt(&unicode_boundary);
+    assert!(unicode_truncated.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
+    assert!(unicode_truncated.is_char_boundary(unicode_truncated.len()));
+    assert!(unicode_truncated
+        .ends_with("[Too long, 2 words truncated.  Issue new actions  if necessary]"));
+}
+
+#[test]
+fn prompt_renderer_defensively_truncates_legacy_action_result_slices() {
+    let oversized = format!(
+        "{} alpha beta",
+        "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES - 1)
+    );
+    let delta = PromptDelta {
+        delta_id: "pd_legacy_action".to_string(),
+        time_ms: 1,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![PromptSlice {
+            delta_id: "pd_legacy_action".to_string(),
+            slice_id: "ps_legacy_action_s001".to_string(),
+            prompt_type: "result_of_llm_action".to_string(),
+            time_ms: 1,
+            text: oversized,
+            slice_index: 1,
+            slice_count: 1,
+        }],
+    };
+    let rendered = render_prompt_with_rendered_static(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        &[delta],
+        "Ai7",
+        "",
+    );
+    assert!(rendered.contains("words truncated.  Issue new actions  if necessary]"));
+}
+
+#[test]
 fn formatted_response_trailer_parser_extracts_heading_free_trailer() {
     let prompt = format!(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\n{}",
@@ -143,6 +192,33 @@ fn prompt_renderer_replaces_current_protocol_language() {
     assert!(!markdown.contains("{{CURRENT_PROTOCOL_LANG}}"));
     assert!(!json.contains("{{CURRENT_PROTOCOL_LANG}}"));
     assert!(!xml.contains("{{CURRENT_PROTOCOL_LANG}}"));
+}
+
+#[test]
+fn prompt_renderer_uses_protocol_native_tool_synopses() {
+    let template =
+        "# Tools\n\n{{TOOL_CATALOG}}\n\n{{SKILL_HEADERS}}\n\n{{RESPONSE_PROTOCOL_SECTION}}";
+    let xml = render_static_prompt(
+        template,
+        &CapabilityRegistry::builtin(),
+        &XmlSuiteV1,
+        "Ai7",
+        "startup",
+    );
+    let json = render_static_prompt(
+        template,
+        &CapabilityRegistry::builtin(),
+        &JsonSuiteV1,
+        "Ai7",
+        "startup",
+    );
+
+    assert!(xml.contains("`<readfile><path>src/main.rs</path>"), "{xml}");
+    assert!(
+        json.contains("`{\"readfile\":{\"path\":\"src/main.rs\""),
+        "{json}"
+    );
+    assert!(!xml.contains("`{\"readfile\":"), "{xml}");
 }
 
 #[test]
