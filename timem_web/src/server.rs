@@ -619,6 +619,8 @@ struct WebChatMessage {
     text: String,
     created_at_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     completion: Option<Value>,
 }
 
@@ -1092,13 +1094,14 @@ pub async fn run_from_env() -> Result<(), String> {
         mem_epoch: Arc::new(RwLock::new(1)),
     };
 
-    let restored_sessions = restore_stored_sessions(&state).map_err(|error| {
-        friendly_memory_space_error(
-            error,
-            &state.template.data_dir,
-            &state.template.initial_space,
-        )
-    })?;
+    let restored_sessions =
+        restore_stored_sessions_after_runtime_restart(&state).map_err(|error| {
+            friendly_memory_space_error(
+                error,
+                &state.template.data_dir,
+                &state.template.initial_space,
+            )
+        })?;
     if restored_sessions == 0 {
         let default_session = create_session(&state, None, None, BTreeMap::new())?;
         let _ = default_session;
@@ -3454,11 +3457,22 @@ fn create_session(
 }
 
 fn restore_stored_sessions(state: &AppState) -> Result<usize, String> {
+    restore_stored_sessions_with_runtime_restart_marker(state, false)
+}
+
+fn restore_stored_sessions_after_runtime_restart(state: &AppState) -> Result<usize, String> {
+    restore_stored_sessions_with_runtime_restart_marker(state, true)
+}
+
+fn restore_stored_sessions_with_runtime_restart_marker(
+    state: &AppState,
+    record_runtime_restart: bool,
+) -> Result<usize, String> {
     let stored_sessions = list_stored_sessions_resilient(&current_session_store(state)?)?;
     let mut restored = 0usize;
     for stored in stored_sessions {
         let session_id = stored.session_id.clone();
-        match restore_stored_session(state, stored) {
+        match restore_stored_session(state, stored, record_runtime_restart) {
             Ok(()) => restored += 1,
             Err(error) => eprintln!(
                 "[timem_web_session_restore_error] session_id={session_id:?} reason={error}"
@@ -3572,10 +3586,17 @@ fn sync_state_parent_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(), String> {
+fn restore_stored_session(
+    state: &AppState,
+    stored: StoredSession,
+    record_runtime_restart: bool,
+) -> Result<(), String> {
     let current_dir = PathBuf::from(&stored.current_dir);
     if !current_dir.is_dir() {
         return Err("stored_session_workspace_not_found".to_string());
+    }
+    if record_runtime_restart {
+        append_runtime_restart_history_marker(state, &stored.session_id)?;
     }
     let cached_env = sanitize_restored_session_env(if stored.env.is_empty() {
         stored.env_overrides.clone().unwrap_or_default()
@@ -3679,6 +3700,25 @@ fn restore_stored_session(state: &AppState, stored: StoredSession) -> Result<(),
     resume_unfinished_core_command_after_restore(state, &stored.session_id)?;
     persist_restored_session_runtime_cache(state, &stored)?;
     Ok(())
+}
+
+const RUNTIME_RESTART_HISTORY_KIND: &str = "runtime_restart";
+const RUNTIME_RESTART_HISTORY_CONTENT: &str = "Timem Web 已重新启动，以下内容来自新的运行实例";
+
+fn append_runtime_restart_history_marker(state: &AppState, session_id: &str) -> Result<(), String> {
+    let created_at_ms = now_ms_i64();
+    current_session_store(state)?.append_history_record(
+        session_id,
+        &ChatHistoryRecord::Message {
+            role: ChatHistoryRole::System,
+            turn_id: format!("runtime_restart_{created_at_ms}"),
+            created_at_ms,
+            kind: Some(RUNTIME_RESTART_HISTORY_KIND.to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: RUNTIME_RESTART_HISTORY_CONTENT.to_string(),
+        },
+    )
 }
 
 fn resume_unfinished_core_command_after_restore(
@@ -3819,6 +3859,9 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 delivery_state,
                 content,
             } => {
+                if role == ChatHistoryRole::System {
+                    continue;
+                }
                 let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
@@ -3955,13 +3998,18 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
             role,
             turn_id,
             created_at_ms,
-            kind: _,
+            kind,
             content,
             ..
         } => {
             let role = match role {
                 ChatHistoryRole::User => "user",
                 ChatHistoryRole::Assistant => "assistant",
+                ChatHistoryRole::System
+                    if kind.as_deref() == Some(RUNTIME_RESTART_HISTORY_KIND) =>
+                {
+                    "system"
+                }
                 ChatHistoryRole::System => return None,
             };
             Some(WebChatMessage {
@@ -3969,6 +4017,7 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
                 role: role.to_string(),
                 text: content,
                 created_at_ms: created_at_ms as u128,
+                kind,
                 completion: None,
             })
         }
@@ -5004,6 +5053,7 @@ fn append_message(
         role: role.to_string(),
         text,
         created_at_ms: now_ms(),
+        kind: None,
         completion: None,
     };
     let mut sessions = state
@@ -5251,6 +5301,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         role: "user".to_string(),
         text: text.to_string(),
         created_at_ms: now_ms(),
+        kind: None,
         completion: None,
     });
     if session.messages.len() > MAX_SESSION_MESSAGES {
