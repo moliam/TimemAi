@@ -26,6 +26,51 @@ export function trimTurns<T>(turns: T[]) {
   return turns.length > MAX_CLIENT_TURNS ? turns.slice(-MAX_CLIENT_TURNS) : turns;
 }
 
+export type TurnTimelinePlacement = {
+  createdAtMs: number;
+  resumedAfterRestart: boolean;
+};
+
+export function turnTimelinePlacement(
+  turn: WebTurn,
+  restartMarkers: ChatMessage[],
+): TurnTimelinePlacement {
+  let resumedAtMs: number | undefined;
+  for (const marker of restartMarkers) {
+    if (marker.created_at_ms <= turn.created_at_ms) continue;
+    const hasActivityAfterRestart = turn.state === "working"
+      || turn.user_entries.some((entry) => entry.created_at_ms >= marker.created_at_ms)
+      || turn.events.some((event) => event.created_at_ms >= marker.created_at_ms);
+    if (hasActivityAfterRestart && (resumedAtMs === undefined || marker.created_at_ms > resumedAtMs)) {
+      resumedAtMs = marker.created_at_ms;
+    }
+  }
+  return resumedAtMs === undefined
+    ? { createdAtMs: turn.created_at_ms, resumedAfterRestart: false }
+    : { createdAtMs: resumedAtMs, resumedAfterRestart: true };
+}
+
+export type TurnTimelineOrderItem = {
+  type: "turn" | "restart";
+  createdAtMs: number;
+  resumedAfterRestart: boolean;
+  id: string;
+};
+
+export function compareTurnTimelineItems(
+  left: TurnTimelineOrderItem,
+  right: TurnTimelineOrderItem,
+): number {
+  const timeOrder = left.createdAtMs - right.createdAtMs;
+  if (timeOrder !== 0) return timeOrder;
+  if (left.type !== right.type) {
+    const turn = left.type === "turn" ? left : right;
+    if (turn.resumedAfterRestart) return left.type === "restart" ? -1 : 1;
+    return left.type === "turn" ? -1 : 1;
+  }
+  return left.id.localeCompare(right.id);
+}
+
 export function visibleRuntimeRestartMarkers(turns: WebTurn[], markers: ChatMessage[]): ChatMessage[] {
   const timeline = [
     ...turns.map((turn) => ({

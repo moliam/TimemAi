@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -718,6 +718,118 @@ describe("web topic view model", () => {
     const completedWork = { ...turn("zz_turn", "finished"), created_at_ms: 30 };
 
     expect(visibleRuntimeRestartMarkers([completedWork], [marker])).toEqual([marker]);
+  });
+
+  it("places a restarted unfinished turn after the runtime restart divider as soon as it resumes", () => {
+    const marker: ChatMessage = {
+      id: "restart_100",
+      role: "system",
+      kind: "runtime_restart",
+      text: "restart",
+      created_at_ms: 100,
+    };
+    const restored = {
+      ...turn("turn_before_restart", "restored"),
+      created_at_ms: 10,
+      events: [{
+        event_id: "historical_thinking",
+        source: "core_topic",
+        payload: {},
+        created_at_ms: 20,
+      }],
+    };
+
+    expect(turnTimelinePlacement(restored, [marker])).toEqual({
+      createdAtMs: 10,
+      resumedAfterRestart: false,
+    });
+    expect(turnTimelinePlacement({ ...restored, state: "working" }, [marker])).toEqual({
+      createdAtMs: 100,
+      resumedAfterRestart: true,
+    });
+  });
+
+  it("sorts the restart divider before a resumed pre-restart turn", () => {
+    const timeline = [
+      {
+        type: "turn" as const,
+        createdAtMs: 100,
+        resumedAfterRestart: true,
+        id: "old_turn",
+      },
+      {
+        type: "restart" as const,
+        createdAtMs: 100,
+        resumedAfterRestart: false,
+        id: "restart_100",
+      },
+    ].sort(compareTurnTimelineItems);
+
+    expect(timeline.map((item) => item.type)).toEqual(["restart", "turn"]);
+  });
+
+  it("keeps ordinary turn work before a same-time restart marker", () => {
+    const timeline = [
+      {
+        type: "restart" as const,
+        createdAtMs: 100,
+        resumedAfterRestart: false,
+        id: "restart_100",
+      },
+      {
+        type: "turn" as const,
+        createdAtMs: 100,
+        resumedAfterRestart: false,
+        id: "new_turn",
+      },
+    ].sort(compareTurnTimelineItems);
+
+    expect(timeline.map((item) => item.type)).toEqual(["turn", "restart"]);
+  });
+
+  it("keeps a resumed turn below the latest restart divider after new activity arrives", () => {
+    const markers: ChatMessage[] = [
+      { id: "restart_100", role: "system", kind: "runtime_restart", text: "restart 1", created_at_ms: 100 },
+      { id: "restart_200", role: "system", kind: "runtime_restart", text: "restart 2", created_at_ms: 200 },
+    ];
+    const resumed = {
+      ...turn("turn_before_restarts", "finished"),
+      created_at_ms: 10,
+      events: [
+        { event_id: "old_event", source: "core_topic", payload: {}, created_at_ms: 20 },
+        { event_id: "new_event", source: "core_topic", payload: {}, created_at_ms: 220 },
+      ],
+    };
+
+    expect(turnTimelinePlacement(resumed, markers)).toEqual({
+      createdAtMs: 200,
+      resumedAfterRestart: true,
+    });
+  });
+
+  it("does not move completed historical turns across a later restart divider", () => {
+    const marker: ChatMessage = {
+      id: "restart_100",
+      role: "system",
+      kind: "runtime_restart",
+      text: "restart",
+      created_at_ms: 100,
+    };
+    const completed = {
+      ...turn("old_completed_turn", "finished"),
+      created_at_ms: 10,
+      events: [{
+        event_id: "old_completion",
+        source: "core_topic",
+        payload: {},
+        created_at_ms: 50,
+      }],
+    };
+
+    expect(turnTimelinePlacement(completed, [marker])).toEqual({
+      createdAtMs: 10,
+      resumedAfterRestart: false,
+    });
   });
 
   it("keeps restart markers separated by actual turn work", () => {
