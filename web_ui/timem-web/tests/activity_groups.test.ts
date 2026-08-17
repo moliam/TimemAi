@@ -22,7 +22,11 @@ describe("tool activity grouping", () => {
       activity("run_bash", "completed"),
       activity("run_bash", "completed"),
     ]);
-    expect(summary?.label).toBe("Bash ×3, Self Tool ×1");
+    expect(summary?.label).toBe("bash 3 | self tool 1");
+    expect(summary?.counts).toEqual([
+      { name: "bash", count: 3 },
+      { name: "self tool", count: 1 },
+    ]);
     expect(summary?.activities).toHaveLength(4);
   });
 
@@ -73,9 +77,9 @@ describe("tool activity grouping", () => {
  label: summary.label,
  activities: summary.activities.length,
  }))).toEqual([
- { startIndex: 1, label: "Bash ×1, Self Tool ×1", activities: 2 },
- { startIndex: 4, label: "Bash ×1", activities: 1 },
- { startIndex: 6, label: "MemMgr ×1, Bash ×1", activities: 2 },
+ { startIndex: 1, label: "bash 1 | self tool 1", activities: 2 },
+ { startIndex: 4, label: "bash 1", activities: 1 },
+ { startIndex: 6, label: "memmgr 1 | bash 1", activities: 2 },
  ]);
  });
  it("does not split adjacent tool activity on invisible events", () => {
@@ -86,7 +90,7 @@ describe("tool activity grouping", () => {
  ]);
  expect(runs).toHaveLength(1);
  expect(runs[0].startIndex).toBe(0);
- expect(runs[0].summary.label).toBe("Bash ×1, Self Tool ×1");
+ expect(runs[0].summary.label).toBe("bash 1 | self tool 1");
  });
  it("ignores non-action activity", () => {
     const thought: Activity = {

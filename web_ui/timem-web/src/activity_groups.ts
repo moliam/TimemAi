@@ -3,8 +3,14 @@ import { toolDisplayName } from "./view_model";
 
 export type ToolActivityGroupStatus = "running" | "failed" | "completed";
 
+export type ToolActivityCount = {
+  name: string;
+  count: number;
+};
+
 export type ToolActivitySummary = {
   label: string;
+  counts: ToolActivityCount[];
   status: ToolActivityGroupStatus;
   activities: Activity[];
 };
@@ -29,8 +35,13 @@ export function summarizeToolActivities(activities: Activity[]): ToolActivitySum
       ? "failed"
       : "completed";
 
+  const countItems = [...counts].map(([name, count]) => ({
+    name: name.toLocaleLowerCase(),
+    count,
+  }));
   return {
-    label: [...counts].map(([name, count]) => `${name} ×${count}`).join(", "),
+    label: countItems.map(({ name, count }) => `${name} ${count}`).join(" | "),
+    counts: countItems,
     status,
     activities: tools,
   };

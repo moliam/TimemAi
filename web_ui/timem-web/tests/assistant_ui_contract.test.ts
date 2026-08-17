@@ -1614,13 +1614,21 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
   });
 
   it("coalesces tool lifecycles and renders tools as compact subordinate rows", () => {
-    expect(source).toContain("coalesceActionLifecycle(turn.events)");
-    expect(source).toContain('<ToolActivityGroup key={`tool-activity-group-${event.event_id}`} summary={summary}/>'); expect(source).toContain("summarizeConsecutiveToolActivities("); expect(source).toContain('className={`tool-activity-group ${summary.status}`}');
-    expect(source).toContain("tool-activity-status");
-    expect(styles).toContain(".tool-activity");
-  });
+  expect(source).toContain("coalesceActionLifecycle(turn.events)");
+  expect(source).toContain('<ToolActivityGroup key={`tool-activity-group-${event.event_id}`} summary={summary}/>');
+  expect(source).toContain("summarizeConsecutiveToolActivities(");
+  expect(source).toContain('className={`tool-activity-group ${summary.status}`}');
+  expect(source).toContain('className="tool-activity-group-counts"');
+  expect(source).toContain("<strong>{count}</strong>");
+  expect(source).toContain("{index > 0 && <i>|</i>}");
+  expect(source).toContain("tool-activity-status");
+  expect(styles).toContain(".tool-activity-group { margin: 3px 0; color: #aaa; font-size: 10px; }");
+  expect(styles).toContain(".tool-activity-group-count > span { overflow: hidden; font-weight: 350; text-overflow: ellipsis; }");
+  expect(styles).toContain(".tool-activity-group-count > strong { color: #c7c7c7; font-weight: 750; }");
+  expect(styles).toContain(".tool-activity");
+});
 
-  it("uses an explicit session-created event and session-scoped inline decisions", () => {
+it("uses an explicit session-created event and session-scoped inline decisions", () => {
     expect(source).toContain('event.type === "session_created"');
     expect(source).toContain("enqueueDecision(current, pendingDecision)");
     expect(source).toContain("decision.event.session_id === activeSession?.session_id");

@@ -2282,7 +2282,7 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
  return <details className={`tool-activity-group ${summary.status}`} open={open} aria-busy={running || undefined} onToggle={(event) => setOpen(event.currentTarget.open)}>
  <summary aria-label={summaryLabel} title={open ? "收起工具活动" : "展开工具活动"}>
  <span className="tool-activity-group-icon tool-command-symbol" aria-hidden="true">&gt;_</span>
- <b>{summary.label}</b>
+ <span className="tool-activity-group-counts" aria-hidden="true">{summary.counts.map(({ name, count }, index) => <span className="tool-activity-group-count" key={name}>{index > 0 && <i>|</i>}<span>{name}</span><strong>{count}</strong></span>)}</span>
  <span className="tool-activity-group-status">· {summary.status}</span>
  <ChevronRight className="tool-activity-chevron" size={14}/>
  </summary>
