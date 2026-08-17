@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -695,6 +695,44 @@ describe("web topic view model", () => {
       kind: "runtime_restart",
       created_at_ms: 30,
     });
+  });
+
+  it("shows only the latest restart marker when repeated restarts contain no work", () => {
+    const markers: ChatMessage[] = [
+      { id: "restart_10", role: "system", kind: "runtime_restart", text: "restart 1", created_at_ms: 10 },
+      { id: "restart_20", role: "system", kind: "runtime_restart", text: "restart 2", created_at_ms: 20 },
+      { id: "restart_30", role: "system", kind: "runtime_restart", text: "restart 3", created_at_ms: 30 },
+    ];
+
+    expect(visibleRuntimeRestartMarkers([], markers).map((marker) => marker.id)).toEqual(["restart_30"]);
+  });
+
+  it("orders turn work before a restart marker at the same timestamp", () => {
+    const marker: ChatMessage = {
+      id: "restart_same_time",
+      role: "system",
+      kind: "runtime_restart",
+      text: "restart",
+      created_at_ms: 30,
+    };
+    const completedWork = { ...turn("zz_turn", "finished"), created_at_ms: 30 };
+
+    expect(visibleRuntimeRestartMarkers([completedWork], [marker])).toEqual([marker]);
+  });
+
+  it("keeps restart markers separated by actual turn work", () => {
+    const markers: ChatMessage[] = [
+      { id: "restart_10", role: "system", kind: "runtime_restart", text: "restart 1", created_at_ms: 10 },
+      { id: "restart_20", role: "system", kind: "runtime_restart", text: "restart 2", created_at_ms: 20 },
+      { id: "restart_40", role: "system", kind: "runtime_restart", text: "restart 3", created_at_ms: 40 },
+      { id: "restart_50", role: "system", kind: "runtime_restart", text: "restart 4", created_at_ms: 50 },
+    ];
+    const completedWork = { ...turn("turn_30", "finished"), created_at_ms: 30 };
+
+    expect(visibleRuntimeRestartMarkers([completedWork], markers).map((marker) => marker.id)).toEqual([
+      "restart_20",
+      "restart_50",
+    ]);
   });
 
   it("keeps one session working when a subworker finishes and hides its final answer", () => {

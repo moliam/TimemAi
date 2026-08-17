@@ -336,7 +336,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('aria-busy={toolGenPending || undefined}');
     expect(source).toContain('disabled={toolGenPending || toolGenBlocked}');
     expect(source).toContain('<span aria-live="polite">{toolGenLabel}</span>');
-    expect(source).toContain('isToolGenTurn ? "Generating tools…" : "working"');
+    expect(source).toContain('isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>');
     expect(source).toContain('isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"');
     expect(styles).toContain(".working-chip.toolgen-working");
     expect(styles).toContain(".completion-toolgen { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 0 3px 0 9px; border: 0; border-left: 1px solid #333;");
@@ -652,6 +652,19 @@ describe("assistant-ui thread integration", () => {
     expect(styles).not.toContain(".working-chip.completed-work-title.toolgen-completed-title { border-color:");
     expect(styles).toContain(".working-chip.work-title-chip { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }");
     expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 0; color: #8fc9f1; font-size: 10px; font-weight: 700; letter-spacing: 0; }");
+    expect(source).toContain('<span className="working-label">working</span>');
+    expect(styles).toContain(".turn-assistant-frame.working .working-label {");
+    expect(styles).toContain("background-size: 260% 100%;");
+    expect(styles).toContain("animation: working-label-sweep 5.6s ease-in-out infinite;");
+    expect(styles).toContain("@keyframes working-label-sweep");
+    expect(styles).toContain("0% { background-position: 100% 50%; }");
+    expect(styles).toContain("70%, 100% { background-position: -100% 50%; }");
+    expect(styles).toContain(':root[data-theme="light"] .turn-assistant-frame.working .working-label {');
+    expect(styles).toContain("@media (prefers-reduced-motion: reduce) {");
+    expect(styles).toContain("color: #8fc9f1;");
+    expect(styles).toContain("background: none;");
+    expect(styles).toContain("animation: none;");
+    expect(styles).toContain(':root[data-theme="light"] .turn-assistant-frame.working .working-label { color: #286a9b; }');
     expect(styles).toContain(".turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 6px; color: #aaa; font-size: 12px;");
     expect(source).toContain('<span className="activity-thinking-dot" aria-hidden="true"/>');
     expect(source).not.toContain('activity.tone === "thinking" ? "💡"');
@@ -1266,7 +1279,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.appearance-font-selects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }');
     expect(styles).toContain('.turn-user-entry { font-family: var(--user-other-font), var(--user-chinese-font), sans-serif; font-weight: var(--user-font-weight); }');
     expect(styles).toContain('.turn-assistant-frame, .turn-final-delivery { font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-weight: var(--agent-font-weight); }');
-    expect(styles).toContain(':root[data-text-size="large"]');
+    expect(styles).toContain("--content-size: 13.5px;");
+    expect(styles).toContain(':root[data-text-size="small"] { --content-size: 12.6px; }');
+    expect(styles).toContain(':root[data-text-size="large"] { --content-size: 14.4px; }');
     expect(html).toContain('<script type="module" src="/src/preload.ts"></script>');
     expect(html).not.toContain("<script>\n");
     expect(preloadSource).toContain("applyAppearance(loadAppearance())");
@@ -1406,15 +1421,17 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".queued-message-list.expanded .queued-message-items { max-height: min(50vh, 420px); overflow-y: auto;");
   });
 
-  it("floats queued worker roles above the message preview instead of clipping them with long text", () => {
-    expect(source).toContain('className={`queued-message-preview ${messageRoleNames.length > 0 ? "has-roles" : ""}`}');
+  it("keeps queued worker roles in normal flow above long message previews", () => {
+    expect(source).toContain('className="queued-message-preview"');
     expect(source).toContain('className="queued-message-roles" title={messageRoleNames.join("、")}');
     expect(source).toContain('className="queued-message-actions"');
-    expect(styles).toContain(".queued-message-preview { position: relative; min-width: 0; }");
-    expect(styles).toContain(".queued-message-preview.has-roles { padding-top: 17px; }");
-    expect(styles).toContain(".queued-message-roles { position: absolute; top: 0; left: 0;");
+    expect(styles).toContain(".queued-message-preview { min-width: 0; display: grid; justify-items: start; gap: 3px; overflow: hidden; }");
+    expect(styles).toContain(".queued-message p { width: 100%; min-width: 0;");
+    expect(styles).toContain(".queued-message-roles { max-width: 100%; display: inline-flex;");
     expect(styles).toContain(".queued-message-roles span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
-    expect(source).not.toContain('{message.text}{messageRoleNames.length > 0 && <small className="queued-message-roles"');
+    expect(styles).not.toContain(".queued-message-preview.has-roles");
+    expect(styles).not.toContain(".queued-message-roles { position: absolute;");
+    expect(source).not.toContain('messageRoleNames.length > 0 ? "has-roles" : ""');
   });
 
   it("claims each queued message before immediate or automatic dispatch", () => {
@@ -1435,8 +1452,16 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("message.id === edit.id ? { ...message, text, deliveryError: undefined } : message");
     expect(source).toContain('selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId)');
     expect(source).toContain(">保存</button>");
+    expect(source).toContain('className="queued-message-edit-cancel"');
     expect(source).toContain(">取消</button>");
-    expect(styles).toContain(".queued-message-editor");
+    expect(styles).toContain(".queued-message.editing { grid-template-columns: 19px minmax(0, 1fr);");
+    expect(styles).toContain(".queued-message.editing .queued-message-drag { display: none; }");
+    expect(styles).toContain(".queued-message.editing .queued-message-preview { grid-column: 2; grid-row: 1; width: 100%;");
+    expect(styles).toContain(".queued-message-editor { box-sizing: border-box; width: 100%;");
+    expect(styles).toContain("min-height: 112px; max-height: min(42vh, 320px);");
+    expect(styles).toContain(".queued-message.editing .queued-message-actions { grid-column: 2; grid-row: 2; justify-self: end;");
+    expect(styles).toContain(".queued-message.editing .queued-message-edit-save");
+    expect(styles).toContain("@media (max-width: 720px) {\n  .queued-message.editing");
   });
 
   it("keeps composer typing away from expensive turn history recomputation", () => {

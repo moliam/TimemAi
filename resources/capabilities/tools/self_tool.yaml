@@ -2,31 +2,44 @@ kind: tool
 id: self_tool
 binding_type: builtin
 binding_name: self_tool
-summary: Locate Timem runtime resources or inspect its effective configuration.
+summary: Locate Timem runtime resources, change cwd, or inspect effective configuration.
 prompt_synopsis: |
   {"self_tool":{"type":"path"}}
+  {"self_tool":{"type":"cwd","new_path":"path/to/workspace"}}
   {"self_tool":{"type":"params"}}
 description: |
-  Use this read-only tool when work requires information about Timem itself.
-  Ask for path when you need to know where something is. Ask for params when
-  you need to know how the current runtime is configured.
+  Use this tool when work requires information about Timem itself or when the
+  current prompt context working directory should change.
+  Ask for path when you need to know where something is. Use cwd with a separate
+  new_path parameter to change the working directory used by later local tools. Ask
+  for params when you need to know how the current runtime is configured.
 prompt_input: |
-  Use type=path for "where" information. Use type=params for effective runtime
-  configuration and limits.
+  Use type=path for "where" information. Use type=cwd with new_path set to an
+  absolute path or a path relative to the current prompt context cwd. Use
+  type=params for effective runtime configuration and limits.
 prompt_result: |
-  path returns relevant runtime file and directory locations. params returns
-  relevant effective, non-sensitive runtime values. Secrets are never returned.
+  path returns relevant runtime file and directory locations. cwd changes the
+  prompt context cwd with `CWD changed to ...`; later run_bash and readfile
+  actions in the same context use the canonical path. params returns relevant effective,
+  non-sensitive runtime values. Secrets are never returned.
 input_schema: |
   {
     "type": "object",
     "properties": {
       "type": {
         "type": "string",
-        "enum": ["path", "params"],
-        "description": "Read-only self-information class."
+        "enum": ["path", "cwd", "params"],
+        "description": "Self-information class or cwd-change operation."
+      },
+      "new_path": {
+        "type": "string",
+        "description": "New prompt context working directory for type=cwd. Relative paths resolve from the current prompt context cwd."
       }
     },
-    "required": ["type"]
+    "required": ["type"],
+    "x-required-when": [
+      {"field": "type", "values": ["cwd"], "required": ["new_path"]}
+    ]
   }
 example_json: |
   {

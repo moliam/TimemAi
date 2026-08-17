@@ -26,6 +26,41 @@ export function trimTurns<T>(turns: T[]) {
   return turns.length > MAX_CLIENT_TURNS ? turns.slice(-MAX_CLIENT_TURNS) : turns;
 }
 
+export function visibleRuntimeRestartMarkers(turns: WebTurn[], markers: ChatMessage[]): ChatMessage[] {
+  const timeline = [
+    ...turns.map((turn) => ({
+      type: "turn" as const,
+      createdAtMs: turn.created_at_ms,
+      id: turn.turn_id,
+    })),
+    ...markers.map((marker) => ({
+      type: "restart" as const,
+      createdAtMs: marker.created_at_ms,
+      id: marker.id,
+      marker,
+    })),
+  ].sort((left, right) => (
+    left.createdAtMs - right.createdAtMs
+    || (left.type === right.type ? left.id.localeCompare(right.id) : left.type === "turn" ? -1 : 1)
+  ));
+
+  const visible: ChatMessage[] = [];
+  let workSinceLastRestart = true;
+  for (const item of timeline) {
+    if (item.type === "turn") {
+      workSinceLastRestart = true;
+      continue;
+    }
+    if (!workSinceLastRestart && visible.length > 0) {
+      visible[visible.length - 1] = item.marker;
+    } else {
+      visible.push(item.marker);
+    }
+    workSinceLastRestart = false;
+  }
+  return visible;
+}
+
 export function tailPath(path: string, maxChars = 28) {
   if (path.length <= maxChars) return path;
   return `…${path.slice(-(Math.max(2, maxChars) - 1))}`;

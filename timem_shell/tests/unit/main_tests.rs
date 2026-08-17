@@ -78,7 +78,7 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(STATIC_PROMPT.contains("# Timem System Prompt"));
     assert!(STATIC_PROMPT.contains("## Role"));
     assert!(STATIC_PROMPT.contains("## Memory"));
-    assert!(STATIC_PROMPT.contains("## Tools And Skills"));
+    assert!(STATIC_PROMPT.contains("## Actions"));
     assert!(STATIC_PROMPT.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     // Response schema is now inside protocol section file
     assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));

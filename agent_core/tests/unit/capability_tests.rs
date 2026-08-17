@@ -79,7 +79,9 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(!rendered.contains("macOS and Linux"));
     assert!(rendered.contains("Ask for path when you need to know where something is"));
     assert!(rendered.contains("Ask for params when"));
-    assert!(rendered.contains("Allowed: `path`, `params`"));
+    assert!(rendered.contains("Allowed: `path`, `cwd`, `params`"));
+    assert!(rendered.contains("`new_path`:"));
+    assert!(rendered.contains("type=cwd"));
     assert!(!rendered.contains("reminder_tips_file"));
     assert!(!rendered.contains("max_llm_input_tokens"));
     assert!(rendered.contains("Conditional:"));
@@ -202,6 +204,22 @@ fn registry_validates_required_input_fields_from_manifest() {
         .validate_action_input("readfile", &json_object([]))
         .unwrap_err()
         .contains("input.path_required"));
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([("type", Value::String("cwd".to_string()))]),
+        )
+        .unwrap_err()
+        .contains("input.new_path_required_when_type=cwd"));
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([
+                ("type", Value::String("cwd".to_string())),
+                ("new_path", Value::String(".".to_string())),
+            ]),
+        )
+        .is_ok());
     assert!(registry
         .validate_action_input(
             "memmgr",

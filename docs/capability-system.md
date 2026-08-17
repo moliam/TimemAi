@@ -223,18 +223,25 @@ the example capability root.
 
 ## `self_tool`
 
-`self_tool` exposes Timem runtime self-information through two read-only classes:
+`self_tool` exposes Timem runtime self-information and prompt-context cwd
+control through three classes:
 
 - `type=path`: use for questions about where Timem runtime resources are. The
   result returns the relevant known file and directory locations; the model may
   then use normal `run_bash` policy if file contents are actually needed.
+- `type=cwd`: set `new_path` to an absolute path or a path relative to the
+  current prompt-context cwd. On success, the result contains
+  `CWD changed to ...`; later `run_bash` and `readfile` actions in that context
+  use the canonical directory. The action finish event also carries
+  `context_state.cwd` so hosts can synchronize their Session display.
 - `type=params`: use for questions about how the current Timem runtime is
   configured. The result returns the relevant effective runtime values.
 
 API keys, tokens, passwords, secrets, credentials, and similarly named env
 values are excluded. `params` is an explicit allowlist and never dumps arbitrary
 Session environment entries; Base URL userinfo, query, and fragment data are
-redacted. The interface has no mutation operation and no additional type family.
+redacted. Only `cwd` mutates prompt-context state; `path` and `params` remain
+read-only.
 
 Successful runtime configuration changes set one Core-side pending notice.
 Regardless of how many fields the user changes before the next interaction,
@@ -244,8 +251,8 @@ retrieve runtime parameters again when needed.
 Do not use `self_tool` for user memory, shell commands, project file edits, or
 model service model calls. Those remain owned by `memmgr`, `run_bash`, and the
 session runtime respectively. Future additions should stay within Timem runtime
-self-state. New information belongs under `path` or `params`; do not add another
-top-level type without a strong boundary reason.
+self-state. New inspection information belongs under `path` or `params`; cwd
+changes remain under `cwd` with `new_path`.
 
 ## Iteration Rule
 

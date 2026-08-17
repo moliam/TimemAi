@@ -1323,17 +1323,19 @@ Current implemented surface:
 
 ### Timem Self Tool
 
-`self_tool` is for questions about Timem itself, not user memory or local project
-work. Its public contract is intentionally only `type=path|params`, with no
-operation argument. `path` answers where runtime resources are and returns all
-relevant known locations. `params` answers how the current runtime is configured
-and returns all relevant effective non-sensitive values.
-It uses an explicit parameter allowlist rather than dumping the Session
-environment; URL userinfo, query, and fragment data are removed before a Base
-URL is shown. Sensitive env values are excluded. The tool has no mutation
-operation and no additional type family.
-Future self information must be added beneath `path` or `params`; file work
-remains `run_bash`, and memory work remains `memmgr`.
+`self_tool` is for Timem self-information and prompt-context cwd control, not
+user memory or arbitrary local project edits. Its public contract is
+`type=path|cwd|params`, with no operation argument. `path` answers where runtime
+resources are and returns all relevant known locations. `cwd` requires
+`new_path`, resolves relative paths from the current prompt-context cwd, and on
+success returns `CWD changed to ...`. The Core action finish event then carries
+`context_state.cwd`, allowing hosts such as Web to synchronize the owning
+Session. `params` answers how the current runtime is configured and returns all
+relevant effective non-sensitive values. It uses an explicit parameter
+allowlist rather than dumping the Session environment; URL userinfo, query, and
+fragment data are removed before a Base URL is shown. Sensitive env values are
+excluded. `path` and `params` remain read-only; file work remains `run_bash`, and
+memory work remains `memmgr`.
 
 Runtime configuration mutation and model notification are separate concerns.
 Hosts update the owning Session worker; Core coalesces any number of successful
