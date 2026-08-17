@@ -6081,6 +6081,7 @@ fn handle_scoped_worker_event(
                 );
                 return;
             }
+            let should_resubmit_unconsumed_supplements = outcome.stop_reason.is_none();
             let completion = json!({
                 "stats": outcome.stats,
                 "latest_usage": outcome.latest_usage,
@@ -6180,7 +6181,9 @@ fn handle_scoped_worker_event(
                     outcome: json!({ "text": outcome.text, "message_id": message_id, "completion": completion }),
                 },
             );
-            resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
+            if should_resubmit_unconsumed_supplements {
+                resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
+            }
         }
         CoreSessionWorkerEvent::WorkerStopped => {
             set_worker_state(state, session_id, worker_id, "stopped");
