@@ -3373,7 +3373,11 @@ impl AgentCore {
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                readfile::execute(&cwd, &action_for_thread.raw_input)
+                readfile::execute_with_timeout(
+                    &cwd,
+                    &action_for_thread.raw_input,
+                    readfile::DEFAULT_TIMEOUT,
+                )
             }))
             .unwrap_or_else(|_| {
                 "Action result: readfile\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.".to_string()

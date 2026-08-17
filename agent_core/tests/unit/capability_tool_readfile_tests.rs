@@ -34,6 +34,41 @@ impl Drop for TempDir {
 }
 
 #[test]
+fn default_execution_timeout_is_ten_seconds() {
+    assert_eq!(DEFAULT_TIMEOUT, std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn blocked_read_returns_timeout_error_after_wait_limit() {
+    let dir = TempDir::new("timeout");
+    fs::write(dir.path().join("slow.txt"), "eventual content").unwrap();
+    let probe = install_test_parallel_read_probe(
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(100),
+    );
+
+    let started = std::time::Instant::now();
+    let result = execute_with_timeout(
+        dir.path(),
+        &json!({"path": "slow.txt"}),
+        std::time::Duration::from_millis(10),
+    );
+    let elapsed = started.elapsed();
+
+    assert!(result.contains("status: error"), "{result}");
+    assert!(result.contains("error: timeout"), "{result}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(80),
+        "readfile timeout returned too late: {elapsed:?}"
+    );
+
+    // The timed-out worker is detached because a blocking filesystem read cannot
+    // be safely cancelled. Let this test probe finish before resetting its globals.
+    thread::sleep(std::time::Duration::from_millis(120));
+    drop(probe);
+}
+
+#[test]
 fn reads_relative_utf8_file_from_session_cwd() {
     let dir = TempDir::new("relative");
     fs::write(dir.path().join("notes.txt"), "alpha\nbeta\n").unwrap();
