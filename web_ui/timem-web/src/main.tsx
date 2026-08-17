@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
+import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
@@ -26,6 +26,18 @@ const MAX_ACTIVITY_ITEMS = 300;
 const STORED_HISTORY_PAGE_SIZE = 200;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
+type ChatMessageDeleteCandidate = {
+  sessionId: string;
+  turnId: string;
+  role: "user" | "assistant";
+  roleIndex: number;
+  preview: string;
+};
+
+function chatMessageDeleteKey(candidate: Pick<ChatMessageDeleteCandidate, "sessionId" | "turnId" | "role" | "roleIndex">) {
+  return `${candidate.sessionId}\u0000${candidate.turnId}\u0000${candidate.role}\u0000${candidate.roleIndex}`;
+}
+
 const FOCUSABLE_DIALOG_SELECTOR = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
 
 function useDialogFocusTrap() {
@@ -102,6 +114,7 @@ function TimemApp() {
   const [showNewSession, setShowNewSession] = useState(false);
   const [showMemSwitch, setShowMemSwitch] = useState(false);
   const [deleteSessionCandidate, setDeleteSessionCandidate] = useState<Session | null>(null);
+  const [deleteMessageCandidate, setDeleteMessageCandidate] = useState<ChatMessageDeleteCandidate | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState("");
   const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(() => new Set());
   const [renameDraft, setRenameDraft] = useState("");
@@ -119,6 +132,7 @@ function TimemApp() {
   const [pendingDecisionKeys, setPendingDecisionKeys] = useState<Set<string>>(() => new Set());
   const [pendingRenameSessionIds, setPendingRenameSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingDeleteSessionIds, setPendingDeleteSessionIds] = useState<Set<string>>(() => new Set());
+  const [pendingDeleteMessageKeys, setPendingDeleteMessageKeys] = useState<Set<string>>(() => new Set());
   const [pendingRuntimeKeys, setPendingRuntimeKeys] = useState<Set<string>>(() => new Set());
   const [pendingSessionCredentialIds, setPendingSessionCredentialIds] = useState<Set<string>>(() => new Set());
   const [pendingMcpKeys, setPendingMcpKeys] = useState<Set<string>>(() => new Set());
@@ -144,6 +158,7 @@ function TimemApp() {
   const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
   const pendingRenameSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingDeleteSessionIdsRef = useRef<Set<string>>(new Set());
+  const pendingDeleteMessageKeysRef = useRef<Set<string>>(new Set());
   const pendingRuntimeKeysRef = useRef<Set<string>>(new Set());
   const pendingSessionCredentialIdsRef = useRef<Set<string>>(new Set());
   const pendingSessionApiKeyValuesRef = useRef<Map<string, string>>(new Map());
@@ -383,6 +398,7 @@ function TimemApp() {
     pendingDecisionKeysRef.current.clear();
     pendingRenameSessionIdsRef.current.clear();
     pendingDeleteSessionIdsRef.current.clear();
+    pendingDeleteMessageKeysRef.current.clear();
     pendingRuntimeKeysRef.current.clear();
     pendingSessionCredentialIdsRef.current.clear();
     pendingSessionApiKeyValuesRef.current.clear();
@@ -396,6 +412,7 @@ function TimemApp() {
     setPendingDecisionKeys(new Set());
     setPendingRenameSessionIds(new Set());
     setPendingDeleteSessionIds(new Set());
+    setPendingDeleteMessageKeys(new Set());
     setPendingRuntimeKeys(new Set());
     setPendingSessionCredentialIds(new Set());
     setPendingMcpKeys(new Set());
@@ -561,6 +578,20 @@ function TimemApp() {
         setActiveSessionId((activeId) => resolveActiveSessionId(activeId, remaining));
         return remaining;
       });
+      return;
+    }
+    if (event.type === "chat_message_deleted") {
+      const key = chatMessageDeleteKey({
+        sessionId: event.session_id,
+        turnId: event.turn_id,
+        role: event.role,
+        roleIndex: event.role_index,
+      });
+      removePendingKey(pendingDeleteMessageKeysRef, setPendingDeleteMessageKeys, key);
+      setDeleteMessageCandidate((current) => current && chatMessageDeleteKey(current) === key ? null : current);
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? applyChatMessageDeleted(session, event.turn_id, event.role, event.role_index)
+        : session));
       return;
     }
     if (event.type === "session_runtime_updated") {
@@ -1127,6 +1158,7 @@ function TimemApp() {
             if (!activeSession || activeSession.state === "working" || runtimeLocked || hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)) return;
             setToolgenDialog({ sessionId: activeSession.session_id, turnId });
           }}
+          onRequestMessageDelete={setDeleteMessageCandidate}
           onCancel={cancelActiveTurn}
           onUpload={uploadFile}
           onRemoveAttachment={(attachmentId) => {
@@ -1220,6 +1252,27 @@ function TimemApp() {
           reportUiError("Delete session failed", "Reconnect to Timem Web before deleting this session.", sessionId);
         }
       }} />}
+      {deleteMessageCandidate && <ChatMessageDeleteDialog
+        candidate={deleteMessageCandidate}
+        pending={pendingDeleteMessageKeys.has(chatMessageDeleteKey(deleteMessageCandidate))}
+        onClose={() => {
+          if (!pendingDeleteMessageKeysRef.current.has(chatMessageDeleteKey(deleteMessageCandidate))) setDeleteMessageCandidate(null);
+        }}
+        onConfirm={() => {
+          const key = chatMessageDeleteKey(deleteMessageCandidate);
+          if (!addPendingKey(pendingDeleteMessageKeysRef, setPendingDeleteMessageKeys, key)) return;
+          if (!sendCommand({
+            type: "chat_message_delete",
+            session_id: deleteMessageCandidate.sessionId,
+            turn_id: deleteMessageCandidate.turnId,
+            role: deleteMessageCandidate.role,
+            role_index: deleteMessageCandidate.roleIndex,
+          })) {
+            removePendingKey(pendingDeleteMessageKeysRef, setPendingDeleteMessageKeys, key);
+            reportUiError("Delete message failed", "Reconnect to Timem Web before deleting this message.", deleteMessageCandidate.sessionId);
+          }
+        }}
+      />}
       {showMemSwitch && <MemSwitchDialog current={server?.mem?.space_dir ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }} onSwitch={(path) => {
         setRenamingSessionId("");
         setRenameDraft("");
@@ -1369,7 +1422,7 @@ function ToolRepoPanel({ panelRef, onClose, session, searchQuery, searchPending,
 const MAX_RENDERED_TURN_EVENTS = 200;
 const EMPTY_DECISIONS: Decision[] = [];
 
-const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen }: {
+const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   sessionId: string;
   turns: WebTurn[];
   decisionsByTurn: ReadonlyMap<string, Decision[]>;
@@ -1379,6 +1432,7 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisi
   toolGenSessionBusy: boolean;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen: (turnId: string) => void;
+  onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 }) {
   return turns.map((turn) => <TurnInteraction
     key={turn.turn_id}
@@ -1391,10 +1445,11 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisi
     toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}
     onDecisionReply={onDecisionReply}
     onRequestToolGen={onRequestToolGen}
+    onRequestMessageDelete={onRequestMessageDelete}
   />);
 });
 
-function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequest, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen }: {
+function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequest, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   activeSession: Session | undefined;
   sessions: Session[];
   completedTurnKey: string;
@@ -1423,6 +1478,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   onRemoveAttachment: (attachmentId: string) => void;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen: (turnId: string) => void;
+  onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
@@ -1709,8 +1765,9 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     };
     const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
  if (sent) {
+ // A normal manual send joins the durable queue without releasing an
+ // abnormal-stop pause and any older queued work behind it.
  updateQueuedMessages(() => nextQueues);
- resumeQueuedMessages();
  }
     // Release the synchronous deduplication lock before publishing the React state
     // snapshot. Calling the mutating helper inside a deferred state updater would
@@ -1814,6 +1871,7 @@ const toggleQueuedMessages = () => {
         toolGenSessionBusy={toolGenSessionBusy}
         onDecisionReply={onDecisionReply}
         onRequestToolGen={onRequestToolGen}
+        onRequestMessageDelete={onRequestMessageDelete}
       />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
@@ -1877,9 +1935,10 @@ type TurnInteractionProps = {
   toolGenBlocked: boolean;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen: (turnId: string) => void;
+  onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 };
 
-const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, onDecisionReply, onRequestToolGen }: TurnInteractionProps) {
+const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: TurnInteractionProps) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
  const workContentRef = useRef<HTMLDivElement | null>(null);
  const followLatest = useRef(true);
@@ -1922,6 +1981,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
     || turn.events.some((event) => (event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen");
   const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);
   const showWorkStream = !canCollapseCompletedWork || showCompletedWork;
+  const canDeleteConversationContent = turn.state !== "working" && !sessionInteractionLocked;
 
   useEffect(() => {
     const wasWorking = previousTurnState.current === "working";
@@ -1966,7 +2026,8 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
 
   return <article className={`turn-interaction ${turn.state === "working" ? "active" : "completed"}`} data-turn-id={turn.turn_id}>
     {!!turn.user_entries.filter((e) => e.kind !== "approval").length && <section className="turn-user-frame">
-      <div className="turn-user-content">{turn.user_entries.filter((e) => e.kind !== "approval").map((entry, index) => <div className={`turn-user-entry ${entry.kind}`} key={`${entry.created_at_ms}-${index}`}>
+      <div className="turn-user-content">{turn.user_entries.map((entry, roleIndex) => ({ entry, roleIndex })).filter(({ entry }) => entry.kind !== "approval").map(({ entry, roleIndex }) => <div className={`turn-user-entry ${entry.kind}`} key={`${entry.created_at_ms}-${roleIndex}`}>
+        <button type="button" className="chat-message-delete user-message-delete" title="Delete this message from the conversation and raw chat log" aria-label="Delete user message" disabled={!canDeleteConversationContent} onClick={() => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "user", roleIndex, preview: entry.text })}><Trash2 size={13}/></button>
         {entry.kind === "supplement" && <span>[补充]</span>}
         <MarkdownContent text={entry.text}/>
         {!!entry.attachments?.length && <div className="turn-entry-attachments">{entry.attachments.map((attachment) => <span key={attachment.id} title={attachment.path}><Paperclip size={13}/><i aria-hidden="true">:</i><b>{attachment.name}</b><small>{formatBytes(attachment.bytes)}</small></span>)}</div>}
@@ -1987,7 +2048,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       </div>}
     </section>}
     {persistentToolGenItems.length > 0 && <div className="turn-persistent-toolgen" aria-label="ToolGen result">{persistentToolGenItems.map(({ event, activity }) => activity ? <ActivityView key={event.event_id} activity={activity}/> : null)}</div>}
-    {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}/>}
+    {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)} onDelete={canDeleteConversationContent ? () => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "assistant", roleIndex: 0, preview: turn.final_answer ?? "" }) : undefined}/>}
     {!turn.final_answer && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
   </article>;
 }, areTurnInteractionPropsEqual);
@@ -2001,6 +2062,7 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
     || previous.toolGenBlocked !== next.toolGenBlocked
     || previous.onDecisionReply !== next.onDecisionReply
     || previous.onRequestToolGen !== next.onRequestToolGen
+    || previous.onRequestMessageDelete !== next.onRequestMessageDelete
     || previous.decisions.length !== next.decisions.length
   ) return false;
   return previous.decisions.every((decision, index) => {
@@ -2010,14 +2072,14 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
   });
 }
 
-function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, onToolGen }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void }) {
+function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, onToolGen, onDelete }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void; onDelete?: () => void }) {
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {
     idle: "Copy answer",
     copied: "Answer copied",
     failed: "Copy answer failed",
   });
   return <section className="turn-final-delivery">
-    <div className="turn-final-toolbar"><button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}<span aria-live="polite">{copyLabel}</span></button></div>
+    <div className="turn-final-toolbar"><button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}<span aria-live="polite">{copyLabel}</span></button>{onDelete && <button type="button" className="chat-message-delete assistant-message-delete" title="Delete this answer from the conversation and raw chat log" aria-label="Delete assistant answer" onClick={onDelete}><Trash2 size={13}/><span>Delete</span></button>}</div>
     <div className="message-content"><MarkdownContent text={text}/></div>
     {completion && <CompletionCard completion={completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/>}
   </section>;
@@ -2097,8 +2159,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const summaryContent = <>
     <span className="tool-activity-icon tool-command-symbol" aria-hidden="true">&gt;_</span>
     <b>{toolName}</b>
-    <span className="tool-activity-status">{humanizeToolStatus(status)}</span>
-    {activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}
+    <span className="tool-activity-meta"><span className="tool-activity-status">{humanizeToolStatus(status)}</span>{activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}</span>
     {invocationPreview && <code className="tool-activity-command" title={invocationPreview}>{invocationPreview}</code>}
   </>;
   if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>
@@ -2582,6 +2643,29 @@ function SessionDeleteDialog({ session, pending, onClose, onConfirm }: {
   const statusId = "delete-session-dialog-status";
   const closeIfIdle = () => { if (!pending) onClose(); };
   return <div className="modal-backdrop" role="presentation" aria-label="Dismiss delete session confirmation" onClick={closeIfIdle}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${session.display_name}`} aria-describedby={pending ? `${descriptionId} ${statusId}` : descriptionId} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">DELETE SESSION</span><h2>Delete “{session.display_name}”?</h2></div><button type="button" className="icon-button" title="Close delete session confirmation" aria-label="Close delete session confirmation" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>This permanently deletes the session, its stored task history, settings, and session tools. {session.state === "working" && "Current work will be stopped."} This cannot be undone.</p>{pending && <p id={statusId} className="session-delete-status" role="status" aria-live="polite">Stopping workers and deleting session…</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`danger ${pending ? "sending" : ""}`} disabled={pending} onClick={onConfirm}>{pending ? <LoaderCircle size={16}/> : <Trash2 size={15}/>} {pending ? "Deleting…" : "Delete session"}</button></div></section></div>;
+}
+
+function ChatMessageDeleteDialog({ candidate, pending, onClose, onConfirm }: {
+  candidate: ChatMessageDeleteCandidate;
+  pending: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const descriptionId = "chat-message-delete-description";
+  const statusId = "chat-message-delete-status";
+  const closeIfIdle = () => { if (!pending) onClose(); };
+  const roleLabel = candidate.role === "user" ? "user message" : "assistant answer";
+  const normalizedPreview = candidate.preview.trim().replace(/\s+/g, " ");
+  const preview = normalizedPreview.slice(0, 180);
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss delete message confirmation" onClick={closeIfIdle}>
+    <section className="decision-modal chat-message-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${roleLabel}`} aria-describedby={pending ? `${descriptionId} ${statusId}` : descriptionId} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}>
+      <div className="modal-titlebar"><div><span className="eyebrow">DELETE MESSAGE</span><h2>Delete this {roleLabel}?</h2></div><button type="button" className="icon-button" title="Close delete message confirmation" aria-label="Close delete message confirmation" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div>
+      <p id={descriptionId}>This permanently removes the content from the conversation and its raw chat log. Runtime activity records for the task are retained. This cannot be undone.</p>
+      {preview && <blockquote className="chat-message-delete-preview">{preview}{normalizedPreview.length > 180 ? "…" : ""}</blockquote>}
+      {pending && <p id={statusId} className="session-delete-status" role="status" aria-live="polite">Deleting message and rewriting raw chat history…</p>}
+      <div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`danger ${pending ? "sending" : ""}`} disabled={pending} onClick={onConfirm}>{pending ? <LoaderCircle size={16}/> : <Trash2 size={15}/>} {pending ? "Deleting…" : "Delete message"}</button></div>
+    </section>
+  </div>;
 }
 
 function ToolGenDialog({ pending, onClose, onSubmit }: { pending: boolean; onClose: () => void; onSubmit: (text: string) => void }) {

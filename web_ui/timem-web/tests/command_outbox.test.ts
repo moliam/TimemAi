@@ -16,6 +16,7 @@ describe("reliable command outbox", () => {
   it("keeps one-shot mutations reliable while allowing read-only requests to be best effort", () => {
     expect(commandNeedsReliableDelivery({ type: "turn_submit", session_id: "s", text: "work" })).toBe(true);
     expect(commandNeedsReliableDelivery({ type: "session_delete", session_id: "s" })).toBe(true);
+    expect(commandNeedsReliableDelivery({ type: "chat_message_delete", session_id: "s", turn_id: "t", role: "user", role_index: 0 })).toBe(true);
     expect(commandNeedsReliableDelivery({ type: "history_page", session_id: "s" })).toBe(false);
   });
 

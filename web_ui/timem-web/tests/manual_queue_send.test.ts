@@ -1,0 +1,47 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+
+function functionBody(startMarker: string, endMarker: string): string {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return source.slice(start, end);
+}
+
+describe("manual sending while the durable queue is paused", () => {
+  it("keeps a normal manual send in the durable queue without implicitly resuming it", () => {
+    const body = functionBody(
+      "const submitDraft = () => {",
+      "const submitDraftAsSupplement = () => {",
+    );
+
+    expect(body).toContain("saveQueuedMessages(");
+    expect(body).toContain("updateQueuedMessages(() => nextQueues)");
+    expect(body).not.toContain("resumeQueuedMessages()");
+    expect(body).not.toContain("onSendForSession(");
+  });
+
+  it("uses Ctrl/Command+Enter as an explicit immediate-send escape hatch", () => {
+    const supplementBody = functionBody(
+      "const submitDraftAsSupplement = () => {",
+      "const toggleQueuedMessages = () => {",
+    );
+    const composerStart = source.indexOf('<form className="composer"');
+    const keyboardStart = source.indexOf("onKeyDown={(event) => {", composerStart);
+    const keyboardEnd = source.indexOf("/>", keyboardStart);
+    expect(composerStart).toBeGreaterThanOrEqual(0);
+    expect(keyboardStart).toBeGreaterThan(composerStart);
+    expect(keyboardEnd).toBeGreaterThan(keyboardStart);
+    const keyboardBody = source.slice(keyboardStart, keyboardEnd);
+
+    expect(supplementBody).toContain("onSendForSession(");
+    expect(supplementBody).toContain('clientId("supplement")');
+    expect(supplementBody).toMatch(/true,\s*\);/);
+    expect(keyboardBody).toContain("event.metaKey || event.ctrlKey");
+    expect(keyboardBody).toContain("submitDraftAsSupplement()");
+    expect(keyboardBody).toContain("submitDraft()");
+  });
+});

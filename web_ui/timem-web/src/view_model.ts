@@ -383,6 +383,47 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
   };
 }
 
+export function applyChatMessageDeleted(
+  session: Session,
+  turnId: string,
+  role: "user" | "assistant",
+  roleIndex: number,
+): Session {
+  const previous = session.turns.find((turn) => turn.turn_id === turnId);
+  if (!previous) return session;
+  const deleted = role === "user"
+    ? previous.user_entries[roleIndex] && {
+        text: previous.user_entries[roleIndex].text,
+        createdAtMs: previous.user_entries[roleIndex].created_at_ms,
+      }
+    : roleIndex === 0 && previous.final_answer
+      ? { text: previous.final_answer, createdAtMs: previous.created_at_ms }
+      : undefined;
+  const updatedTurn = role === "user"
+    ? { ...previous, user_entries: previous.user_entries.filter((_entry, index) => index !== roleIndex) }
+    : { ...previous, final_answer: null };
+  const updated = {
+    ...session,
+    turns: session.turns.map((turn) => turn.turn_id === turnId ? updatedTurn : turn),
+  };
+  if (!deleted) return updated;
+  let candidate = -1;
+  let candidateDistance = Number.POSITIVE_INFINITY;
+  updated.messages.forEach((message, index) => {
+    if (message.role !== role || message.text !== deleted.text) return;
+    const distance = Math.abs(message.created_at_ms - deleted.createdAtMs);
+    if (distance < candidateDistance) {
+      candidate = index;
+      candidateDistance = distance;
+    }
+  });
+  if (candidate < 0) return updated;
+  return {
+    ...updated,
+    messages: updated.messages.filter((_message, index) => index !== candidate),
+  };
+}
+
 export function prependHistoryRecords(session: Session, records: ChatHistoryRecord[]): Session {
   const historicalTurns = turnsFromHistoryRecords(records).map((turn) => ({
     ...turn,
@@ -743,6 +784,41 @@ export function attachTurnCompletion(
   return updated ? { ...session, state, messages } : { ...session, state };
 }
 
+function protocolRepairDisplayReason(payload: Record<string, unknown>): string {
+  const issue = typeof payload.issue === "string" ? payload.issue : "";
+  const knownReasons: Record<string, string> = {
+    xml_recovered_final_answer_requires_retry:
+      "回复根节点外包含了额外内容。系统虽然识别出了最终回答，但无法将它安全地视为完整响应，因此正在重新请求。",
+    invalid_xml:
+      "模型回复不是有效的 XML 协议消息，因此正在重新请求。",
+    invalid_xml_response_root:
+      "回复没有使用唯一且完整的 response 根节点，因此正在重新请求。",
+    xml_response_root_missing:
+      "回复缺少必需的 response 根节点，因此正在重新请求。",
+    missing_response_root:
+      "回复缺少必需的 response 根节点，因此正在重新请求。",
+    xml_response_root_unclosed:
+      "回复的 response 根节点没有完整闭合，因此正在重新请求。",
+    xml_content_before_response:
+      "response 根节点前存在额外内容，因此正在重新请求。",
+    xml_content_after_response:
+      "response 根节点后存在额外内容，因此正在重新请求。",
+    empty_response:
+      "模型没有返回可解析的内容，因此正在重新请求。",
+    truncated_model_output:
+      "模型输出在完整响应生成前被截断，因此正在重新请求。",
+    finish_confirm_required_before_final_answer:
+      "最终回答前缺少协议要求的完成确认，因此正在重新请求。",
+    finish_confirm_prefix_invalid:
+      "最终回答前的完成确认格式不正确，因此正在重新请求。",
+  };
+  const knownReason = knownReasons[issue];
+  if (knownReason) return knownReason;
+
+  const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+  return reason || "模型回复格式不符合当前协议要求，系统正在自动重新请求。";
+}
+
 export function activityFromTopic(event: CoreTopicEvent): Activity | null {
   const payload = event.payload;
   const label = (value: unknown) => typeof value === "string" ? value : "";
@@ -754,7 +830,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       return detail ? { id: clientId(), sessionId: event.session_id, tone: "thinking", title: "", detail, createdAt: Date.now() } : null;
     }
     case "core.model.repair":
-      return { id: clientId(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
+      return { id: clientId(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: protocolRepairDisplayReason(payload), createdAt: Date.now() };
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";

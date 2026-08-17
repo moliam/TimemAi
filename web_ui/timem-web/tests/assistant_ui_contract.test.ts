@@ -680,7 +680,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('bashActivity ? "bash-activity" : ""');
     expect(styles).toContain(".tool-activity.bash-activity .tool-activity-command");
     expect(styles).toContain(".tool-activity.bash-activity .tool-activity-body .code-block code *");
-    expect(styles).toContain(".tool-activity-command { min-width: 0; overflow: hidden; color: #737373;");
+    expect(styles).toContain(".tool-activity-command { min-width: 0; grid-column: 4; justify-self: start; overflow: hidden; color: #737373;");
     expect(styles).toContain("text-overflow: ellipsis; white-space: nowrap;");
     expect(styles).toContain("font-family: var(--ui-font);");
     expect(styles).toContain("font-weight: 400;");
@@ -698,7 +698,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className={`final-copy ${copyClass}`}');
     expect(source).toContain('aria-label={copyLabel}');
     expect(source).toContain('title={copyLabel}');
-    expect(source).toContain('<span aria-live="polite">{copyLabel}</span></button></div>');
+    expect(source).toContain('<span aria-live="polite">{copyLabel}</span></button>{onDelete && <button');
+    expect(source).toContain('className="chat-message-delete assistant-message-delete"');
     expect(source).toContain('<figcaption><span title={language}>{language}</span>');
     expect(source).toContain("navigator.clipboard.writeText(text)");
     expect(source).toContain("async function copyTextToClipboard(text: string)");
@@ -783,7 +784,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession)");
     expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent)");
     expect(source).toContain("const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);");
-    expect(source).toMatch(/if \(sent\) \{[\s\S]*?updateQueuedMessages\(\(\) => nextQueues\);[\s\S]*?resumeQueuedMessages\(\);[\s\S]*?\}/);
+    expect(source).toMatch(/if \(sent\) \{[\s\S]*?updateQueuedMessages\(\(\) => nextQueues\);[\s\S]*?\}/);
+    expect(source).not.toMatch(/if \(sent\) \{[\s\S]*?resumeQueuedMessages\(\);[\s\S]*?\}/);
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
     expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
     expect(source).toContain("pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)");
