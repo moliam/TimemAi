@@ -23,6 +23,13 @@ const BASH_EXECUTABLE: &str = "/bin/bash";
 const MAX_BASH_OUTPUT_CHARS: usize = 32 * 1024;
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 
+fn configure_run_bash_environment(command: &mut Command) {
+    command
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat")
+        .env("TERM", "dumb");
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellJobRecord {
     pub id: String,
@@ -306,6 +313,7 @@ impl FileShellJobStore {
             .open(&output_file)?;
         let stderr = output.try_clone()?;
         let mut command = Command::new(BASH_EXECUTABLE);
+        configure_run_bash_environment(&mut command);
         command
             .arg("-c")
             .arg(clean)
@@ -1418,6 +1426,7 @@ fn execute_one_bash_structured_with_prompt_after(
         return bash_error(command, "invalid_timeout");
     }
     let mut shell = Command::new(BASH_EXECUTABLE);
+    configure_run_bash_environment(&mut shell);
     shell
         .arg("-lc")
         .arg(command)

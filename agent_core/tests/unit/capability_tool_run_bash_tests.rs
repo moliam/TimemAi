@@ -64,6 +64,20 @@ fn tmp_cwd(name: &str) -> PathBuf {
 }
 
 #[test]
+fn normal_bash_sets_noninteractive_pager_environment() {
+    let mut runtime = NeverCancelRuntime;
+    let result = execute_one_bash(
+        "printf 'GIT_PAGER=%s\\nPAGER=%s\\nTERM=%s\\n' \"$GIT_PAGER\" \"$PAGER\" \"$TERM\"",
+        1000,
+        &mut runtime,
+    );
+
+    assert!(result.contains("GIT_PAGER=cat"), "{result}");
+    assert!(result.contains("PAGER=cat"), "{result}");
+    assert!(result.contains("TERM=dumb"), "{result}");
+}
+
+#[test]
 fn normal_bash_reports_status_and_output() {
     let mut runtime = NeverCancelRuntime;
     let result = execute_one_bash("printf shell_ok", 1000, &mut runtime);
@@ -699,6 +713,41 @@ fn tracked_job_runs_real_bash_syntax() {
     assert!(result.contains("Exit code: 0"), "{result}");
     assert!(result.contains("beta"), "{result}");
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn background_bash_sets_noninteractive_pager_environment() {
+    let dir = tmp_memory_dir("background_pager_environment");
+    let store = FileShellJobStore::new(&dir);
+    let started = store.spawn_background(
+        "printf 'GIT_PAGER=%s\\nPAGER=%s\\nTERM=%s\\n' \"$GIT_PAGER\" \"$PAGER\" \"$TERM\"",
+        &dir,
+        "session_env",
+        "turn_env",
+    );
+    assert!(
+        started.contains("now keeps running in background"),
+        "{started}"
+    );
+
+    let started_wait = Instant::now();
+    let update = loop {
+        let (_, updates) = store.refresh_for_session("session_env");
+        if let Some(update) = updates.into_iter().next() {
+            break update;
+        }
+        assert!(
+            started_wait.elapsed() < Duration::from_secs(3),
+            "background environment command did not finish"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    assert_eq!(update.status, "0");
+    assert!(update.output.contains("GIT_PAGER=cat"), "{}", update.output);
+    assert!(update.output.contains("PAGER=cat"), "{}", update.output);
+    assert!(update.output.contains("TERM=dumb"), "{}", update.output);
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
