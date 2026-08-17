@@ -2,11 +2,11 @@ use agent_core::capability::{CapabilityHostProfile, CapabilityRegistry};
 use agent_core::mcp::{McpRuntime, McpServerConfig, McpTool, McpTransportConfig};
 use agent_core::self_tool::SelfToolPaths;
 use agent_core::{
-    read_audit_doc, ActionRuntime, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile,
-    CoreStep, LlmResponse, MemGuard, ModelServiceConfig, OutputExpansionRequest,
-    OutputExpansionResolution, ResponseProtocolKind, RoundLimitDecisionRequest,
-    RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail, TurnStopReason,
-    UsageStats, UserSupplement, UNLIMITED_ROUND_BUDGET,
+    read_audit_doc, worker_role_supporting_context, ActionRuntime, AgentCore, AssistantReplayMode,
+    BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard, ModelServiceConfig,
+    OutputExpansionRequest, OutputExpansionResolution, ResponseProtocolKind,
+    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail,
+    TurnStopReason, UsageStats, UserSupplement, UNLIMITED_ROUND_BUDGET, WORKER_ROLE_CONTEXT_PREFIX,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -1017,6 +1017,268 @@ fn user_supplement_builds_the_next_delta() {
     assert!(prompt.contains("## USER"));
     assert!(!prompt.contains("User supplement during current turn:"));
     assert!(prompt.contains("补充：优先考虑跨平台实现"));
+}
+
+#[test]
+fn repeated_worker_role_references_the_visible_description_instead_of_repeating_it() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("worker_role_context_reference"),
+    );
+    let role = worker_role_supporting_context("Reviewer", "Inspect evidence before changing code.");
+    let full = "User involves the worker role 'Reviewer' for this input. When you work for this task, comply this worker's methodology: Inspect evidence before changing code.";
+    let reference = "User involves the worker role 'Reviewer' for this input (also used in the above). Refer to this role's description above for working methodology.";
+
+    let first = match core.begin_turn("first task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(first.contains(full));
+    assert!(!first.contains(reference));
+    assert!(!first.contains(WORKER_ROLE_CONTEXT_PREFIX));
+
+    let second = match core.begin_turn("second task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(second.matches(full).count(), 1);
+    assert_eq!(second.matches(reference).count(), 1);
+    assert!(!second.contains(WORKER_ROLE_CONTEXT_PREFIX));
+}
+
+#[test]
+fn changed_worker_role_description_is_expanded_again() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("worker_role_description_changed"),
+    );
+    let original = worker_role_supporting_context("Reviewer", "Inspect evidence.");
+    let changed = worker_role_supporting_context("Reviewer", "Inspect evidence and run tests.");
+
+    let _ = core.begin_turn("first task", Some(&original));
+    let prompt = match core.begin_turn("second task", Some(&changed)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert!(prompt.contains("comply this worker's methodology: Inspect evidence."));
+    assert!(prompt.contains("comply this worker's methodology: Inspect evidence and run tests."));
+    assert!(!prompt.contains("worker role 'Reviewer' for this input (also used in the above)"));
+}
+
+#[test]
+fn shorter_worker_role_description_is_not_mistaken_for_a_repeated_prefix() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("worker_role_description_shortened"),
+    );
+    let original = worker_role_supporting_context("Reviewer", "Inspect evidence. Then run tests.");
+    let shortened = worker_role_supporting_context("Reviewer", "Inspect evidence.");
+
+    let _ = core.begin_turn("first task", Some(&original));
+    let prompt = match core.begin_turn("second task", Some(&shortened)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert!(prompt.contains("comply this worker's methodology: Inspect evidence. Then run tests."));
+    assert!(prompt.contains("comply this worker's methodology: Inspect evidence."));
+    assert!(!prompt.contains("(also used in the above)"));
+    assert!(!prompt.contains(WORKER_ROLE_CONTEXT_PREFIX));
+}
+
+#[test]
+fn worker_role_is_expanded_again_after_its_delta_is_discarded() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("worker_role_context_discarded"),
+    );
+    let role = worker_role_supporting_context("Reviewer", "Inspect evidence.");
+    let first = match core.begin_turn("first task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_id = first_field_value(&first, "delta_id");
+    assert!(first.contains("comply this worker's methodology: Inspect evidence."));
+
+    let compacted = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"role description was discarded"}}}}"#,
+            delta_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let compacted_prompt = match compacted {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!compacted_prompt.contains("comply this worker's methodology: Inspect evidence."));
+
+    let prompt = match core.begin_turn("second task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        prompt
+            .matches("comply this worker's methodology: Inspect evidence.")
+            .count(),
+        1
+    );
+    assert!(!prompt.contains("(also used in the above)"));
+    assert!(!prompt.contains(WORKER_ROLE_CONTEXT_PREFIX));
+}
+
+#[test]
+fn worker_role_name_is_escaped_in_full_and_reference_instructions() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("worker_role_name_escaping"),
+    );
+    let role = worker_role_supporting_context(
+        "Reviewer's\\desk\nnight",
+        "Inspect evidence before changing code.",
+    );
+    let escaped_name = r#"Reviewer\'s\\desk\nnight"#;
+
+    let first = match core.begin_turn("first task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(first.contains(&format!("worker role '{escaped_name}' for this input")));
+    assert!(!first.contains("Reviewer's\\desk\nnight"));
+    assert!(!first.contains(WORKER_ROLE_CONTEXT_PREFIX));
+
+    let second = match core.begin_turn("second task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        second
+            .matches(&format!("worker role '{escaped_name}' for this input"))
+            .count(),
+        2
+    );
+    assert_eq!(second.matches("(also used in the above)").count(), 1);
+    assert!(!second.contains(WORKER_ROLE_CONTEXT_PREFIX));
+}
+
+#[test]
+fn worker_role_is_expanded_again_after_dynamic_context_is_cleared() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("worker_role_context_cleared"),
+    );
+    let role = worker_role_supporting_context("Reviewer", "Inspect evidence.");
+    let full = "comply this worker's methodology: Inspect evidence.";
+
+    let _ = core.begin_turn("first task", Some(&role));
+    core.clear_dynamic_context();
+    let prompt = match core.begin_turn("new context task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(prompt.matches(full).count(), 1);
+    assert!(!prompt.contains("(also used in the above)"));
+}
+
+#[test]
+fn duplicate_worker_roles_in_one_context_expand_once_then_reference() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("worker_role_same_context"),
+    );
+    let role = worker_role_supporting_context("Reviewer", "Inspect evidence.");
+    let context = format!("{role}\n\n{role}");
+
+    let prompt = match core.begin_turn("review this", Some(&context)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(
+        prompt
+            .matches("comply this worker's methodology: Inspect evidence.")
+            .count(),
+        1
+    );
+    assert_eq!(prompt.matches("(also used in the above)").count(), 1);
+    assert!(!prompt.contains(WORKER_ROLE_CONTEXT_PREFIX));
+}
+
+#[test]
+fn repeated_worker_role_is_found_across_prompt_slice_boundaries() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("worker_role_cross_slice_reference"),
+    );
+    let description = format!("Inspect this evidence carefully: {}", "x".repeat(13_000));
+    let role = worker_role_supporting_context("Reviewer", &description);
+
+    let first = match core.begin_turn("first task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        first.matches("Inspect this evidence carefully: ").count(),
+        1
+    );
+    assert!(!first.contains("(also used in the above)"));
+
+    let second = match core.begin_turn("second task", Some(&role)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        second.matches("Inspect this evidence carefully: ").count(),
+        1
+    );
+    assert_eq!(second.matches("(also used in the above)").count(), 1);
+    assert!(!second.contains(WORKER_ROLE_CONTEXT_PREFIX));
+}
+
+#[test]
+fn repeated_worker_role_in_supplement_context_uses_a_reference() {
+    let dir = tmp_dir("worker_role_supplement_reference");
+    let audit_file = dir.join("audit/action_audit.json");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let role = worker_role_supporting_context("Reviewer", "Inspect evidence.");
+    let _ = core.begin_turn("initial task", Some(&role));
+
+    let prompt = match core
+        .append_user_supplements_with_context_and_audit(
+            vec![UserSupplement::new("also inspect the logs", Some(role))],
+            &audit_file,
+            "session_1",
+            "turn_1",
+        )
+        .expect("supplement should produce prompt")
+    {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(
+        prompt
+            .matches("comply this worker's methodology: Inspect evidence.")
+            .count(),
+        1
+    );
+    assert_eq!(prompt.matches("(also used in the above)").count(), 1);
+    assert!(!prompt.contains(WORKER_ROLE_CONTEXT_PREFIX));
+    let reference = prompt.find("(also used in the above)").unwrap();
+    let user = prompt.find("also inspect the logs").unwrap();
+    assert!(reference < user);
 }
 
 #[test]

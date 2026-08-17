@@ -370,6 +370,40 @@ pub struct ModelInputOverflowRecovery {
     pub removed_delta_id: String,
     pub removed_action_output_bytes: usize,
 }
+pub const WORKER_ROLE_CONTEXT_PREFIX: &str = "TIMEM_WORKER_ROLE_CONTEXT: ";
+
+pub fn worker_role_supporting_context(name: &str, description: &str) -> String {
+    format!(
+        "{WORKER_ROLE_CONTEXT_PREFIX}{}",
+        serde_json::json!({
+            "name": name,
+            "description": description,
+        })
+    )
+}
+
+fn worker_role_display_name(name: &str) -> String {
+    name.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
+fn worker_role_full_instruction(name: &str, description: &str) -> String {
+    format!(
+        "## SYSTEM\nUser involves the worker role '{}' for this input. When you work for this task, comply this worker's methodology: {}",
+        worker_role_display_name(name),
+        description
+    )
+}
+
+fn worker_role_reference_instruction(name: &str) -> String {
+    format!(
+        "## SYSTEM\nUser involves the worker role '{}' for this input (also used in the above). Refer to this role's description above for working methodology.",
+        worker_role_display_name(name)
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptDelta {
     pub delta_id: String,
@@ -382,6 +416,8 @@ pub struct PromptDelta {
 pub(crate) struct PromptSlice {
     pub(crate) delta_id: String,
     pub(crate) slice_id: String,
+    #[serde(default)]
+    pub(crate) component_id: String,
     pub(crate) prompt_type: String,
     pub(crate) time_ms: i64,
     pub(crate) text: String,
@@ -1579,6 +1615,95 @@ impl AgentCore {
         self.memory.git_commit_count()
     }
 
+    fn text_contains_complete_worker_role_instruction(text: &str, instruction: &str) -> bool {
+        text.match_indices(instruction).any(|(start, _)| {
+            let before = &text[..start];
+            let after = &text[start + instruction.len()..];
+            (before.is_empty() || before.ends_with("\n\n"))
+                && (after.is_empty() || after.starts_with("\n\n") || after.starts_with("\n## "))
+        })
+    }
+
+    fn current_visible_context_contains(&self, instruction: &str) -> bool {
+        if instruction.is_empty() {
+            return true;
+        }
+        if self.pending_prompt_components.iter().any(|component| {
+            Self::text_contains_complete_worker_role_instruction(&component.content, instruction)
+        }) {
+            return true;
+        }
+        self.deltas.iter().any(|delta| {
+            let hidden = delta.hidden_slice_ids.iter().collect::<HashSet<_>>();
+            let mut visible_component = String::new();
+            let mut current_component_id: Option<&str> = None;
+            for slice in &delta.slices {
+                let component_id = if slice.component_id.is_empty() {
+                    slice.slice_id.as_str()
+                } else {
+                    slice.component_id.as_str()
+                };
+                let component_changed = current_component_id
+                    .map(|current| current != component_id)
+                    .unwrap_or(false);
+                if component_changed || hidden.contains(&slice.slice_id) {
+                    if Self::text_contains_complete_worker_role_instruction(
+                        &visible_component,
+                        instruction,
+                    ) {
+                        return true;
+                    }
+                    visible_component.clear();
+                }
+                current_component_id = Some(component_id);
+                if hidden.contains(&slice.slice_id) {
+                    current_component_id = None;
+                } else {
+                    visible_component.push_str(&slice.text);
+                }
+            }
+            Self::text_contains_complete_worker_role_instruction(&visible_component, instruction)
+        })
+    }
+
+    fn filter_repeated_worker_roles(&self, supporting_context: &str) -> String {
+        let mut rendered_in_this_context = HashSet::new();
+        supporting_context
+            .lines()
+            .map(|line| {
+                let Some(payload) = line.strip_prefix(WORKER_ROLE_CONTEXT_PREFIX) else {
+                    return line.to_string();
+                };
+                let Ok(payload) = serde_json::from_str::<Value>(payload) else {
+                    return line.to_string();
+                };
+                let Some(name) = payload.get("name").and_then(Value::as_str) else {
+                    return line.to_string();
+                };
+                let Some(description) = payload.get("description").and_then(Value::as_str) else {
+                    return line.to_string();
+                };
+                let full = worker_role_full_instruction(name, description);
+                if self.current_visible_context_contains(&full)
+                    || rendered_in_this_context.contains(&full)
+                {
+                    worker_role_reference_instruction(name)
+                } else {
+                    rendered_in_this_context.insert(full.clone());
+                    full
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
+    fn filter_supporting_context(&mut self, supporting_context: &str) -> String {
+        let context = self.filter_repeated_work_instructions(supporting_context);
+        self.filter_repeated_worker_roles(&context)
+    }
+
     fn filter_repeated_work_instructions(&mut self, supporting_context: &str) -> String {
         let Some((start, end, block)) = work_instruction_context_block(supporting_context) else {
             return supporting_context.trim().to_string();
@@ -1629,7 +1754,7 @@ impl AgentCore {
                 .map(should_run_memory_precheck)
                 .unwrap_or(false);
         let filtered_supporting_context = supporting_context
-            .map(|ctx| self.filter_repeated_work_instructions(ctx))
+            .map(|ctx| self.filter_supporting_context(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
         let mut system_texts = Vec::new();
         if let Some(ctx) = filtered_supporting_context.as_deref() {
@@ -1747,8 +1872,8 @@ impl AgentCore {
             if let Some(context) = supplement
                 .additional_context
                 .as_deref()
-                .map(str::trim)
-                .filter(|context| !context.is_empty())
+                .map(|context| self.filter_supporting_context(context))
+                .filter(|context| !context.trim().is_empty())
             {
                 self.submit_prompt_component(
                     PromptComponentRole::system(),
@@ -2847,6 +2972,7 @@ impl AgentCore {
                         delta_id.trim_start_matches("pd_"),
                         slice_index
                     ),
+                    component_id: format!("temp_component_{slice_index}"),
                     prompt_type,
                     time_ms,
                     text,
@@ -3139,10 +3265,18 @@ impl AgentCore {
             .into_iter()
             .flat_map(|component| {
                 let prompt_type = component.prompt_type();
+                let component_id = component.id;
                 let slice_time_ms = component.created_at_ms;
                 split_text_for_prompt_slices(&component.content, PROMPT_SLICE_TEXT_LIMIT)
                     .into_iter()
-                    .map(move |chunk| (prompt_type.clone(), slice_time_ms, chunk))
+                    .map(move |chunk| {
+                        (
+                            component_id.clone(),
+                            prompt_type.clone(),
+                            slice_time_ms,
+                            chunk,
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -3150,7 +3284,7 @@ impl AgentCore {
         let slices = chunks
             .into_iter()
             .enumerate()
-            .map(|(idx, (prompt_type, time_ms, text))| {
+            .map(|(idx, (component_id, prompt_type, time_ms, text))| {
                 let slice_index = idx + 1;
                 PromptSlice {
                     delta_id: delta_id.clone(),
@@ -3159,6 +3293,7 @@ impl AgentCore {
                         delta_id.trim_start_matches("pd_"),
                         slice_index
                     ),
+                    component_id,
                     prompt_type,
                     time_ms,
                     text,

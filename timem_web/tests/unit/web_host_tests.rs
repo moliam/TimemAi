@@ -67,7 +67,9 @@ fn worker_roles_are_session_scoped_persisted_and_render_exact_system_context() {
     );
     assert_eq!(
         worker_roles_context(&roles).as_deref(),
-        Some("## SYSTEM\nUser involves the worker role 'Reviewer' for this input. When you work for this task, comply this worker's role description: Inspect evidence before changing code.")
+        Some(
+            r#"TIMEM_WORKER_ROLE_CONTEXT: {"description":"Inspect evidence before changing code.","name":"Reviewer"}"#
+        )
     );
     let role_id = roles[0].id.clone();
     handle_command(
@@ -173,9 +175,15 @@ fn multiple_worker_roles_resolve_in_message_order_and_render_all_contexts() {
     .unwrap();
     assert_eq!(selected, vec![roles[1].clone(), roles[0].clone()]);
     let context = worker_roles_context(&selected).unwrap();
-    assert!(context.contains("worker role 'Tester'"));
-    assert!(context.contains("worker role 'Reviewer'"));
+    assert!(context.contains(r#""name":"Tester""#));
+    assert!(context.contains(r#""name":"Reviewer""#));
     assert!(context.find("Tester").unwrap() < context.find("Reviewer").unwrap());
+    assert_eq!(
+        context
+            .matches(agent_core::WORKER_ROLE_CONTEXT_PREFIX)
+            .count(),
+        2
+    );
     assert_eq!(
         resolve_worker_roles(&state, "session_a", &["missing".to_string()], None).unwrap_err(),
         "worker_role_not_found"
