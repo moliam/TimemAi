@@ -8,14 +8,15 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::mpsc;
 #[cfg(test)]
 use std::sync::Mutex;
-#[cfg(test)]
 use std::time::Duration;
 
 pub const DEFAULT_MAX_BYTES: usize = 32 * 1024;
 pub const MAX_RETURN_BYTES: usize = 32 * 1024;
 pub const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_MATCH_BYTES: usize = 64 * 1024;
 
 #[cfg(test)]
@@ -75,11 +76,12 @@ impl Drop for ActiveTestReadProbe {
 
 #[cfg(test)]
 fn begin_test_parallel_read_probe(path: &Path) -> Option<ActiveTestReadProbe> {
+    let canonical_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let enabled = TEST_PARALLEL_PROBE_ROOT
         .lock()
         .unwrap()
         .as_ref()
-        .is_some_and(|root| path.starts_with(root));
+        .is_some_and(|root| canonical_path.starts_with(root));
     if !enabled {
         return None;
     }
@@ -116,7 +118,34 @@ impl ReadfileError {
 }
 
 pub(crate) fn execute_action(core: &AgentCore, action: &ParsedAction) -> String {
-    execute(core.current_prompt_cwd(), &action.raw_input)
+    execute_with_timeout(
+        core.current_prompt_cwd(),
+        &action.raw_input,
+        DEFAULT_TIMEOUT,
+    )
+}
+
+pub(crate) fn execute_with_timeout(cwd: &Path, input: &Value, timeout: Duration) -> String {
+    let cwd = cwd.to_path_buf();
+    let input = input.clone();
+    let path = input_path(&input).unwrap_or("<unknown>").to_string();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = execute(&cwd, &input);
+        let _ = sender.send(result);
+    });
+
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => format!(
+            "Action result: readfile\nstatus: error\npath: {}\nerror: timeout\nmessage: The readfile operation exceeded its execution timeout.",
+            quote(&path)
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => format!(
+            "Action result: readfile\nstatus: error\npath: {}\nerror: builtin_action_panicked\nmessage: The readfile worker failed internally. Timem isolated the failure and remains available.",
+            quote(&path)
+        ),
+    }
 }
 
 pub fn execute(cwd: &Path, input: &Value) -> String {

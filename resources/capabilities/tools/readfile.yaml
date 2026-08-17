@@ -11,7 +11,7 @@ description: |
   Prefer `readfile` over shell commands for reading normal text files. Relative
   paths resolve from the current session cwd. The tool is read-only, rejects
   directories and special files, decodes text strictly, and always bounds the
-  returned content.
+  returned content. Each read has a default execution timeout of 10 seconds.
 input_schema: |
   {
     "type": "object",
