@@ -169,10 +169,13 @@ pub fn stable_text_fingerprint(text: &str) -> String {
 
 fn prompt_delta_segment_starts(text: &str) -> Vec<usize> {
     let mut starts = Vec::new();
-    if text.starts_with("[BEGIN DELTA]") || text.starts_with("[BEGIN SEGMENT ") {
+    if text.starts_with("[BEGIN DELTA]")
+        || text.starts_with("[BEGIN SEGMENT ")
+        || text.starts_with("<prompt_delta ")
+    {
         starts.push(0);
     }
-    for marker in ["\n[BEGIN DELTA]", "\n[BEGIN SEGMENT "] {
+    for marker in ["\n[BEGIN DELTA]", "\n[BEGIN SEGMENT ", "\n<prompt_delta "] {
         let mut offset = 0;
         while let Some(relative) = text[offset..].find(marker) {
             let start = offset + relative + 1;
@@ -187,6 +190,17 @@ fn prompt_delta_segment_starts(text: &str) -> Vec<usize> {
 }
 
 fn segment_delta_id(segment: &str) -> Option<String> {
+    let first_line = segment.lines().next().unwrap_or_default();
+    if let Some(rest) = first_line.strip_prefix("<prompt_delta ") {
+        if let Some(rest) = rest.split_once("id=\"").map(|(_, rest)| rest) {
+            if let Some((id, _)) = rest.split_once('"') {
+                if !id.is_empty() {
+                    return Some(id.to_string());
+                }
+            }
+        }
+    }
+
     segment.lines().find_map(|line| {
         line.strip_prefix("delta_id:")
             .map(str::trim)

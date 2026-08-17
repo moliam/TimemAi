@@ -306,11 +306,28 @@ fn first_field_value(prompt: &str, field: &str) -> String {
 }
 
 fn field_values(prompt: &str, field: &str) -> Vec<String> {
-    let prefix = format!("{field}: ");
+    let line_prefix = format!("{field}:");
+    let xml_attribute = format!("{field}=\"");
+
     prompt
         .lines()
-        .filter_map(|line| line.strip_prefix(&prefix))
-        .map(ToString::to_string)
+        .filter_map(|line| {
+            if let Some(value) = line.strip_prefix(&line_prefix) {
+                return Some(value.trim().to_string());
+            }
+
+            if line.starts_with("<prompt_delta ") {
+                if let Some(rest) = line.split_once(&xml_attribute).map(|(_, rest)| rest) {
+                    if let Some((value, _)) = rest.split_once('"') {
+                        if !value.is_empty() {
+                            return Some(value.to_string());
+                        }
+                    }
+                }
+            }
+
+            None
+        })
         .collect()
 }
 
@@ -990,9 +1007,13 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     });
     assert!(matches!(step, CoreStep::Final(_)));
     let prompt = core.render_prompt();
-    let delta_ids = field_values(&prompt, "delta_id");
+    let delta_ids = field_values(&prompt, "id");
 
     assert_eq!(delta_ids, vec!["pd_1"]);
+    assert!(prompt.contains("<prompt_delta id=\"pd_1\""));
+    assert!(prompt.contains("</prompt_delta>"));
+    assert!(!prompt.contains("[BEGIN DELTA]"));
+    assert!(!prompt.contains("delta_id: pd_1"));
     assert!(!prompt.contains("先分析"));
     assert!(!prompt.contains("Final Answer:\n结论"));
     assert!(prompt.ends_with(
@@ -1003,9 +1024,11 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let delta_ids = field_values(&prompt, "delta_id");
+    let delta_ids = field_values(&prompt, "id");
 
     assert_eq!(delta_ids, vec!["pd_1", "pd_2"]);
+    assert_eq!(prompt.matches("<prompt_delta ").count(), 2);
+    assert_eq!(prompt.matches("</prompt_delta>").count(), 2);
     assert!(prompt.contains("## TIMEM_ASSISTANT"));
     assert!(prompt.contains("先分析"));
     assert!(prompt.contains("<free_talk>先分析</free_talk><finish_confirm>"));
