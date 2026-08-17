@@ -2051,6 +2051,83 @@ finished
 }
 
 #[test]
+fn session_turn_parallel_group_runs_readfiles_concurrently_and_keeps_declared_order() {
+    let dir = tmp_dir("parallel_readfile_group_session");
+    let audit = dir.join("audit.json");
+    fs::write(dir.join("first.txt"), "first result").unwrap();
+    fs::write(dir.join("second.txt"), "second result").unwrap();
+    let probe =
+        crate::readfile::install_test_parallel_read_probe(dir.clone(), Duration::from_millis(150));
+
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.change_prompt_cwd(dir.to_string_lossy()).unwrap();
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    let mut ui = NoopTurnUi;
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"## Free_talk
+并行读取两个文件。
+
+## Working_Still_Action
+```action
+[
+  [
+    {"readfile":{"path":"first.txt"}},
+    {"readfile":{"path":"second.txt"}}
+  ]
+]
+```"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"## Status
+finished
+
+## Final_Answer
+并行读取完成。"#,
+            1_200,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "并行读取文件",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "并行读取完成。");
+    assert!(
+        probe.max_active() >= 2,
+        "parallel readfile actions did not overlap"
+    );
+    assert_eq!(outcome.stats.tool_calls, 2);
+
+    let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
+    let first = second_parts.new_delta.find("first result").unwrap();
+    let second = second_parts.new_delta.find("second result").unwrap();
+    assert!(
+        first < second,
+        "parallel results must keep the model-declared action order"
+    );
+
+    drop(probe);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently() {
     let dir = tmp_dir("parallel_approval_group_session");
     let audit = dir.join("audit.json");
