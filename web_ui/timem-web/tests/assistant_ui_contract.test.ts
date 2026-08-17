@@ -654,11 +654,13 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 0; color: #8fc9f1; font-size: 10px; font-weight: 700; letter-spacing: 0; }");
     expect(source).toContain('<span className="working-label">working</span>');
     expect(styles).toContain(".turn-assistant-frame.working .working-label {");
-    expect(styles).toContain("background-size: 260% 100%;");
-    expect(styles).toContain("animation: working-label-sweep 5.6s ease-in-out infinite;");
+    expect(styles).toContain("background-size: 320% 100%;");
+    expect(styles).toContain("animation: working-label-sweep 2.8s linear infinite;");
     expect(styles).toContain("@keyframes working-label-sweep");
-    expect(styles).toContain("0% { background-position: 100% 50%; }");
-    expect(styles).toContain("70%, 100% { background-position: -100% 50%; }");
+    expect(styles).toContain("from { background-position: 100% 50%; }");
+    expect(styles).toContain("to { background-position: -100% 50%; }");
+    expect(styles).toContain("will-change: background-position;");
+    expect(styles).not.toContain("70%, 100% { background-position: -100% 50%; }");
     expect(styles).toContain(':root[data-theme="light"] .turn-assistant-frame.working .working-label {');
     expect(styles).toContain("@media (prefers-reduced-motion: reduce) {");
     expect(styles).toContain("color: #8fc9f1;");
