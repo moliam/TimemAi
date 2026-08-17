@@ -663,6 +663,38 @@ describe("web topic view model", () => {
     ]);
   });
 
+  it("restores runtime restart markers as system timeline messages without creating turns", () => {
+    const current = {
+      ...session("session_1"),
+      turns: [turn("turn_2", "finished")],
+      messages: [assistantMessage("current answer")],
+    };
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 10, kind: "task", content: "older task" },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 20, content: "older answer" },
+      { type: "message", role: "system", turn_id: "runtime_restart_30", created_at_ms: 30, kind: "runtime_restart", content: "Timem Web 已重新启动，以下内容来自新的运行实例" },
+      { type: "message", role: "system", turn_id: "other_system_notice", created_at_ms: 31, kind: "other_notice", content: "not a chat divider" },
+    ];
+
+    const updated = prependHistoryRecords(current, records);
+    expect(updated.turns.map((item) => item.turn_id)).toEqual(["turn_1", "turn_2"]);
+    expect(updated.messages.map((message) => `${message.role}:${message.kind ?? ""}:${message.text}`)).toEqual([
+      "user:task:older task",
+      "assistant::older answer",
+      "system:runtime_restart:Timem Web 已重新启动，以下内容来自新的运行实例",
+      "assistant::current answer",
+    ]);
+
+    const markerOnly = prependHistoryRecords(session("session_2"), [records[2]]);
+    expect(markerOnly.turns).toEqual([]);
+    expect(markerOnly.messages).toHaveLength(1);
+    expect(markerOnly.messages[0]).toMatchObject({
+      role: "system",
+      kind: "runtime_restart",
+      created_at_ms: 30,
+    });
+  });
+
   it("keeps one session working when a subworker finishes and hides its final answer", () => {
     let current = session("session_1");
     current.contexts.push({ context_id: "context_sub", current_dir: "/work/sub", worker_ids: ["worker_sub"] });
@@ -804,6 +836,41 @@ describe("web topic view model", () => {
 
     expect(sessionContextUsage(current)?.prompt_tokens).toBe(8_200);
     expect(sessionContextUsage(session("session_2"))).toBeUndefined();
+  });
+
+  it("resets session context usage at the latest runtime restart boundary", () => {
+    const restarted = session("session_restarted");
+    const oldTurn = turn("old", "finished");
+    oldTurn.created_at_ms = 100;
+    oldTurn.events = [
+      { event_id: "old_usage", source: "worker_activity", created_at_ms: 120, payload: { kind: "model_response", usage: { prompt_tokens: 24_000, completion_tokens: 500 } } },
+    ];
+    oldTurn.completion = { latest_usage: { prompt_tokens: 24_000, completion_tokens: 500 } };
+    restarted.turns = [oldTurn];
+    restarted.messages = [{
+      id: "restart",
+      role: "system",
+      kind: "runtime_restart",
+      text: "Timem Web 已重新启动，以下内容来自新的运行实例",
+      created_at_ms: 200,
+    }];
+
+    expect(sessionContextUsage(restarted)).toBeUndefined();
+
+    const resumedTurn = turn("resumed", "working");
+    resumedTurn.created_at_ms = 150;
+    resumedTurn.events = [
+      { event_id: "restored_old_usage", source: "worker_activity", created_at_ms: 180, payload: { kind: "model_response", usage: { prompt_tokens: 30_000 } } },
+      { event_id: "new_runtime_usage", source: "worker_activity", created_at_ms: 220, payload: { kind: "model_response", usage: { prompt_tokens: 4_600, completion_tokens: 30 } } },
+    ];
+    restarted.turns.push(resumedTurn);
+    expect(sessionContextUsage(restarted)).toEqual({ prompt_tokens: 4_600, completion_tokens: 30 });
+
+    const newCompletedTurn = turn("new_completed", "finished");
+    newCompletedTurn.created_at_ms = 240;
+    newCompletedTurn.completion = { latest_usage: { prompt_tokens: 6_200, completion_tokens: 45 } };
+    restarted.turns.push(newCompletedTurn);
+    expect(sessionContextUsage(restarted)).toEqual({ prompt_tokens: 6_200, completion_tokens: 45 });
   });
 
   it("does not treat restored history telemetry as current context usage", () => {

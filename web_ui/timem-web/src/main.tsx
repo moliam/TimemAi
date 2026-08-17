@@ -988,11 +988,13 @@ function TimemApp() {
     }
   }, [addPendingKey, pendingMemSwitch, pushActivity, removePendingKey, sendCommand]);
 
-  const runtimeMessages = useMemo<readonly ThreadMessageLike[]>(() => activeMessages.map((message) => ({
-    id: message.id,
-    role: message.role,
-    content: [{ type: "text" as const, text: message.text }],
-  })), [activeMessages]);
+  const runtimeMessages = useMemo<readonly ThreadMessageLike[]>(() => activeMessages
+    .filter((message): message is ChatMessage & { role: "user" | "assistant" } => message.role !== "system")
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: [{ type: "text" as const, text: message.text }],
+    })), [activeMessages]);
   const [auiMessages, setAuiMessages] = useState<readonly ThreadMessageLike[]>(runtimeMessages);
   useEffect(() => setAuiMessages(runtimeMessages), [runtimeMessages]);
   const cancelActiveTurn = useCallback(async () => {
@@ -1515,9 +1517,10 @@ function ToolRepoPanel({ panelRef, onClose, session, searchQuery, searchPending,
 const MAX_RENDERED_TURN_EVENTS = 200;
 const EMPTY_DECISIONS: Decision[] = [];
 
-const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
+const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restartMarkers, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   sessionId: string;
   turns: WebTurn[];
+  restartMarkers: ChatMessage[];
   decisionsByTurn: ReadonlyMap<string, Decision[]>;
   sessionInteractionLocked: boolean;
   pendingDecisionKeys: Set<string>;
@@ -1527,20 +1530,41 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisi
   onRequestToolGen: (turnId: string) => void;
   onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 }) {
-  return turns.map((turn) => <TurnInteraction
-    key={turn.turn_id}
-    sessionId={sessionId}
-    turn={turn}
-    decisions={decisionsByTurn.get(sessionTurnKey(sessionId, turn.turn_id)) ?? EMPTY_DECISIONS}
-    sessionInteractionLocked={sessionInteractionLocked}
-    pendingDecisionKeys={pendingDecisionKeys}
-    toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}
-    toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}
-    onDecisionReply={onDecisionReply}
-    onRequestToolGen={onRequestToolGen}
-    onRequestMessageDelete={onRequestMessageDelete}
-  />);
+  const timeline = [
+    ...turns.map((turn) => ({ type: "turn" as const, createdAtMs: turn.created_at_ms, id: turn.turn_id, turn })),
+    ...restartMarkers.map((marker) => ({ type: "restart" as const, createdAtMs: marker.created_at_ms, id: marker.id, marker })),
+  ].sort((left, right) => left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id));
+
+  return timeline.map((item) => {
+    if (item.type === "restart") return <RuntimeRestartDivider key={item.id} marker={item.marker}/>;
+    const turn = item.turn;
+    return <TurnInteraction
+      key={turn.turn_id}
+      sessionId={sessionId}
+      turn={turn}
+      decisions={decisionsByTurn.get(sessionTurnKey(sessionId, turn.turn_id)) ?? EMPTY_DECISIONS}
+      sessionInteractionLocked={sessionInteractionLocked}
+      pendingDecisionKeys={pendingDecisionKeys}
+      toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}
+      toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}
+      onDecisionReply={onDecisionReply}
+      onRequestToolGen={onRequestToolGen}
+      onRequestMessageDelete={onRequestMessageDelete}
+    />;
+  });
 });
+
+function RuntimeRestartDivider({ marker }: { marker: ChatMessage }) {
+  const restartedAt = new Date(marker.created_at_ms);
+  const timeLabel = Number.isNaN(restartedAt.getTime())
+    ? ""
+    : restartedAt.toLocaleString([], { dateStyle: "medium", timeStyle: "medium" });
+  return <div className="runtime-restart-divider" role="separator" aria-label={`${marker.text}${timeLabel ? `，${timeLabel}` : ""}`}>
+    <span aria-hidden="true"/>
+    <div><strong>{marker.text}</strong>{timeLabel && <time dateTime={restartedAt.toISOString()}>{timeLabel}</time>}</div>
+    <span aria-hidden="true"/>
+  </div>;
+}
 
 function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequest, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, selectedRoleIds, onRolesConsumed, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   activeSession: Session | undefined;
@@ -1620,6 +1644,10 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
  return true;
  }, [reliableStorageScope]);
   const turns = activeSession?.turns ?? [];
+  const restartMarkers = useMemo(
+    () => (activeSession?.messages ?? []).filter((message) => message.role === "system" && message.kind === "runtime_restart"),
+    [activeSession?.messages],
+  );
   const activeSessionId = activeSession?.session_id;
   const draft = draftForSession(draftsBySession, activeSessionId);
   const queuedMessages = activeSessionId ? queuedMessagesBySession[activeSessionId] ?? [] : [];
@@ -1963,6 +1991,7 @@ const toggleQueuedMessages = () => {
       <VisibleTurnList
         sessionId={activeSession?.session_id ?? ""}
         turns={turns}
+        restartMarkers={restartMarkers}
         decisionsByTurn={decisionsByTurn}
         sessionInteractionLocked={sessionInteractionLocked}
         pendingDecisionKeys={pendingDecisionKeys}
