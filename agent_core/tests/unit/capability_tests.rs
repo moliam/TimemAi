@@ -125,6 +125,8 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
     assert!(json.contains(json_action), "{json}");
     assert!(markdown.contains(json_action), "{markdown}");
     assert!(xml.contains("<readfile><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><line_nr>80</line_nr></ender><max_bytes>32768</max_bytes></readfile>"), "{xml}");
+    assert!(!json.contains("It is supported on macOS and Linux."), "{json}");
+    assert!(!json.contains("`path` is required. `encoding` defaults to UTF-8"), "{json}");
     assert!(
         xml.contains(
             "<run_bash><cmd>git status --short</cmd><timeout_ms>5000</timeout_ms></run_bash>"
