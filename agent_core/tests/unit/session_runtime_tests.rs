@@ -1556,13 +1556,12 @@ fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
 
 #[test]
 fn session_turn_long_running_command_hands_status_to_next_model_round() {
-    let _guard = crate::shell_exec::set_long_running_command_prompt_after_for_tests(
-        Duration::from_millis(50),
-    );
     let dir = tmp_dir("long_command_model_follow_up");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
+    core.shell_jobs
+        .set_long_running_prompt_after_for_tests(Duration::from_millis(50));
     let mut config = test_config();
     let mut ui = NoopTurnUi;
     let command = "sleep 2; printf should_not_finish";
@@ -1626,13 +1625,12 @@ fn session_turn_long_running_command_hands_status_to_next_model_round() {
 
 #[test]
 fn sequential_group_with_long_timeout_command_hands_status_to_model() {
-    let _guard = crate::shell_exec::set_long_running_command_prompt_after_for_tests(
-        Duration::from_millis(50),
-    );
     let dir = tmp_dir("sequential_long_timeout_model_follow_up");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
+    core.shell_jobs
+        .set_long_running_prompt_after_for_tests(Duration::from_millis(50));
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Markdown;
     let mut ui = NoopTurnUi;
