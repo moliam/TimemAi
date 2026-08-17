@@ -1790,6 +1790,87 @@ impl ModelClient for AssistantHeadingModel {
 }
 
 #[test]
+fn explicit_assistant_speaker_name_sets_prompt_identity_and_updates_on_rename() {
+    let dir = tmp_dir("explicit_assistant_speaker_name");
+    let core = AgentCore::new(
+        "YOUR ID is: {{ASSSISTANT_ID}}\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker_config = test_worker_config(&dir, "explicit_assistant_speaker_name", 4)
+        .with_assistant_speaker_name("ASSISTANT_of_Build session");
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        worker_config,
+        ImmediateFinalPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .run_turn("first", None)
+        .expect("worker should accept first turn");
+    let first = wait_for_turn_finished(worker.events(), "explicit identity first");
+    assert_eq!(first.text, "IMMEDIATE_FINAL");
+
+    handle
+        .rename_with_assistant_speaker_name(
+            "Renamed worker",
+            Some("ASSISTANT_of_研发 会话".to_string()),
+        )
+        .expect("worker should accept identity update");
+    let renamed_lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit renamed lifecycle topic");
+    assert_eq!(
+        renamed_lifecycle
+            .as_topics_first_lifecycle()
+            .unwrap()
+            .worker
+            .unwrap()
+            .display_name,
+        "Renamed worker"
+    );
+
+    handle
+        .run_turn("second", None)
+        .expect("worker should accept second turn");
+    let second = wait_for_turn_finished(worker.events(), "explicit identity second");
+    assert_eq!(second.text, "IMMEDIATE_FINAL");
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts[0].contains("YOUR ID is: ASSISTANT_of_Build session"),
+        "initial prompt should use the explicit Session-derived identity:\n{}",
+        prompts[0]
+    );
+    assert!(
+        prompts[1].contains("YOUR ID is: ASSISTANT_of_研发 会话"),
+        "renamed prompt should use the updated Session-derived identity:\n{}",
+        prompts[1]
+    );
+    assert!(
+        prompts[1].contains("## ASSISTANT_of_研发 会话"),
+        "assistant history should use the updated identity heading:\n{}",
+        prompts[1]
+    );
+
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_worker_identity_sets_prompt_assistant_heading() {
     let dir = tmp_dir("worker_assistant_heading");
     let core = AgentCore::new(

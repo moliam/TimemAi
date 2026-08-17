@@ -38,6 +38,7 @@ impl ToolGenRequest {
 pub struct CoreSessionWorkerConfig {
     pub identity: CoreSessionWorkerIdentity,
     pub workspace: CoreSessionWorkerWorkspace,
+    pub assistant_speaker_name: Option<String>,
 }
 
 impl CoreSessionWorkerConfig {
@@ -45,7 +46,13 @@ impl CoreSessionWorkerConfig {
         Self {
             identity,
             workspace,
+            assistant_speaker_name: None,
         }
+    }
+
+    pub fn with_assistant_speaker_name(mut self, name: impl Into<String>) -> Self {
+        self.assistant_speaker_name = Some(name.into());
+        self
     }
 
     pub fn session_id(&self) -> &str {
@@ -267,6 +274,7 @@ enum CoreSessionWorkerCommand {
     },
     Rename {
         display_name: String,
+        assistant_speaker_name: Option<String>,
     },
     UpdateBashApproval {
         mode: crate::BashApprovalMode,
@@ -612,12 +620,21 @@ impl CoreSessionWorkerHandle {
     }
 
     pub fn rename(&self, display_name: impl Into<String>) -> Result<(), String> {
+        self.rename_with_assistant_speaker_name(display_name, None)
+    }
+
+    pub fn rename_with_assistant_speaker_name(
+        &self,
+        display_name: impl Into<String>,
+        assistant_speaker_name: Option<String>,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
         self.command_tx
             .send(CoreSessionWorkerCommand::Rename {
                 display_name: display_name.into(),
+                assistant_speaker_name,
             })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
@@ -829,7 +846,7 @@ impl CoreSessionWorkerManager {
         display_name: Option<String>,
         parent_worker_id: Option<String>,
     ) -> Result<String, String> {
-        self.spawn_worker_in_session_with_model_client(
+        self.spawn_worker_in_session_with_assistant_speaker_name(
             core,
             config,
             workspace,
@@ -837,6 +854,31 @@ impl CoreSessionWorkerManager {
             context_id,
             display_name,
             parent_worker_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_worker_in_session_with_assistant_speaker_name(
+        &mut self,
+        core: AgentCore,
+        config: ModelServiceConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        assistant_speaker_name: Option<String>,
+    ) -> Result<String, String> {
+        self.spawn_worker_in_session_with_model_client_and_assistant_speaker_name(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
+            assistant_speaker_name,
             HttpModelClient,
         )
     }
@@ -885,6 +927,35 @@ impl CoreSessionWorkerManager {
     where
         M: ModelClient + Send + 'static,
     {
+        self.spawn_worker_in_session_with_model_client_and_assistant_speaker_name(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
+            None,
+            model_client,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_worker_in_session_with_model_client_and_assistant_speaker_name<M>(
+        &mut self,
+        core: AgentCore,
+        config: ModelServiceConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        assistant_speaker_name: Option<String>,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
         let session_id = session_id.into();
         let context_id = context_id.into();
         if self.workers.values().any(|worker| {
@@ -918,7 +989,13 @@ impl CoreSessionWorkerManager {
         let worker = CoreSessionWorker::spawn_with_runtime_model_client(
             core,
             config,
-            CoreSessionWorkerConfig::new(identity.clone(), workspace),
+            {
+                let worker_config = CoreSessionWorkerConfig::new(identity.clone(), workspace);
+                match assistant_speaker_name {
+                    Some(name) => worker_config.with_assistant_speaker_name(name),
+                    None => worker_config,
+                }
+            },
             self.runtime.clone(),
             model_client,
         );
@@ -1071,8 +1148,12 @@ impl CoreSessionWorker {
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();
             let workspace = worker_config.workspace.clone();
+            let mut assistant_speaker_name = worker_config
+                .assistant_speaker_name
+                .clone()
+                .unwrap_or_else(|| identity.display_name.clone());
             core.set_response_protocol(config.response_protocol);
-            core.set_assistant_speaker_name(&identity.display_name);
+            core.set_assistant_speaker_name(&assistant_speaker_name);
             core.set_tool_repo_session_id(&identity.session_id);
             let init_event = core_initialized_topic_event_with_worker(
                 &identity.session_id,
@@ -1277,9 +1358,14 @@ impl CoreSessionWorker {
                         drop(working);
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                     }
-                    CoreSessionWorkerCommand::Rename { display_name } => {
+                    CoreSessionWorkerCommand::Rename {
+                        display_name,
+                        assistant_speaker_name: updated_assistant_speaker_name,
+                    } => {
                         identity.rename(display_name);
-                        core.set_assistant_speaker_name(&identity.display_name);
+                        assistant_speaker_name = updated_assistant_speaker_name
+                            .unwrap_or_else(|| identity.display_name.clone());
+                        core.set_assistant_speaker_name(&assistant_speaker_name);
                         let event = core_initialized_topic_event_with_worker(
                             &identity.session_id,
                             core.profile(),
