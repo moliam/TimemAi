@@ -12,10 +12,6 @@ description: |
   paths resolve from the current session cwd. The tool is read-only, rejects
   directories and special files, decodes text strictly, and always bounds the
   returned content.
-prompt_result: |
-  Returns the resolved path, canonical encoding, file size, selected UTF-8
-  byte range, whether the range was limited, and the decoded content. Errors
-  are explicit and never return partial or replacement-decoded text.
 input_schema: |
   {
     "type": "object",

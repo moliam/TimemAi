@@ -39,7 +39,11 @@ fn tmp_dir(name: &str) -> PathBuf {
 #[test]
 fn oversized_readfile_action_result_has_common_prompt_truncation_notice() {
     let cwd = tmp_dir("readfile_prompt_truncation");
-    fs::write(cwd.join("large.txt"), "alpha beta gamma delta ".repeat(2_000)).unwrap();
+    fs::write(
+        cwd.join("large.txt"),
+        "alpha beta gamma delta ".repeat(2_000),
+    )
+    .unwrap();
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),

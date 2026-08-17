@@ -752,19 +752,21 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest, protocol_format: &str)
             .join("; ");
         lines.push(format!("- Conditional one of: {rules}"));
     }
-    lines.push(String::new());
-    lines.push("**Result**".to_string());
-    lines.push(one_line(&manifest.prompt.result));
-    if manifest.binding.binding_type == "mcp" {
-        lines.push(
-            "Runtime validates the XML value shape before dispatch; the MCP server validates advanced schema constraints, and any rejection returns as tool evidence for the next correction."
-                .to_string(),
-        );
-    } else {
-        lines.push(
-            "If args do not match this tool spec, runtime asks you to repair the response before executing the tool."
-                .to_string(),
-        );
+    if !manifest.prompt.result.trim().is_empty() {
+        lines.push(String::new());
+        lines.push("**Result**".to_string());
+        lines.push(one_line(&manifest.prompt.result));
+        if manifest.binding.binding_type == "mcp" {
+            lines.push(
+                "Runtime validates the XML value shape before dispatch; the MCP server validates advanced schema constraints, and any rejection returns as tool evidence for the next correction."
+                    .to_string(),
+            );
+        } else {
+            lines.push(
+                "If args do not match this tool spec, runtime asks you to repair the response before executing the tool."
+                    .to_string(),
+            );
+        }
     }
     lines.join("\n")
 }
@@ -1289,12 +1291,6 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             .to_string()
     } else {
         prompt_input
-    };
-    let prompt_result = if prompt_result.trim().is_empty() {
-        "Runtime returns an action result with either useful output or a short error string."
-            .to_string()
-    } else {
-        prompt_result
     };
     Ok(ToolManifest {
         kind: required_top(&top, "kind")?,
