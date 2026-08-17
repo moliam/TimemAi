@@ -672,10 +672,10 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".activity-thinking-dot { width: 5px; height: 5px; border-radius: 50%; background: #111; }");
     expect(styles).toContain(".turn-work-item.free-talk .turn-work-detail { font-size: 90%; }");
     expect(styles).toContain(".turn-work-item.free-talk .turn-work-detail .message-content { font-size: inherit; }");
-    expect(styles).toContain(".worker-role-editor input::placeholder, .worker-role-editor textarea::placeholder { font-size: 10px; }");
+    expect(styles).toContain(".worker-role-editor input::placeholder, .worker-role-editor textarea::placeholder { font-size: inherit; }");
 expect(source).toContain('className={`worker-role-editor ${editingId ? "editing" : "creating"}`}');
-expect(styles).toContain(".worker-role-editor input { height: 34px; padding: 0 9px; font-size: 11px; line-height: 1.4; }");
-expect(styles).toContain(".worker-role-editor textarea { min-height: 112px; resize: vertical; padding: 9px; font-size: 10px; line-height: 1.5; }");
+expect(styles).toContain(".worker-role-editor input { height: 34px; padding: 0 9px; font-size: var(--content-size); line-height: 1.4; }");
+expect(styles).toContain(".worker-role-editor textarea { min-height: 112px; resize: vertical; padding: 9px; font-size: var(--content-size); line-height: 1.5; }");
 expect(styles).not.toContain("font: 12px/1.45 var(--ui-font);");
 expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(160px, 30dvh, 360px);");
   });
