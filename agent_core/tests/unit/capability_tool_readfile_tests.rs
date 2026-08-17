@@ -87,6 +87,66 @@ fn line_selectors_are_one_based_inclusive_and_keep_line_endings() {
 }
 
 #[test]
+fn end_line_beyond_eof_clamps_to_the_actual_last_line() {
+    let dir = TempDir::new("end_line_beyond_eof");
+    fs::write(dir.path().join("short.txt"), "first\nsecond").unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "short.txt",
+            "starter": {"line_nr": 1},
+            "ender": {"line_nr": 240},
+            "max_bytes": 32768
+        }),
+    );
+
+    assert!(result.contains("status: ok"), "{result}");
+    assert!(!result.contains("end_line_not_found"), "{result}");
+    assert!(result.contains("limited: false"), "{result}");
+    assert!(result.ends_with("content:\nfirst\nsecond"), "{result}");
+}
+
+#[test]
+fn end_line_beyond_eof_still_respects_max_bytes() {
+    let dir = TempDir::new("end_line_beyond_eof_budget");
+    fs::write(dir.path().join("short.txt"), "first\nsecond\nthird").unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "short.txt",
+            "starter": {"line_nr": 1},
+            "ender": {"line_nr": 240},
+            "max_bytes": 8
+        }),
+    );
+
+    assert!(result.contains("status: ok"), "{result}");
+    assert!(result.contains("content_bytes: 8"), "{result}");
+    assert!(result.contains("limited: true"), "{result}");
+    assert!(result.ends_with("content:\nfirst\nse"), "{result}");
+}
+
+#[test]
+fn starter_line_beyond_eof_remains_an_error() {
+    let dir = TempDir::new("start_line_beyond_eof");
+    fs::write(dir.path().join("short.txt"), "first\nsecond").unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "short.txt",
+            "starter": {"line_nr": 240},
+            "ender": {"line_nr": 300}
+        }),
+    );
+
+    assert!(result.contains("status: error"), "{result}");
+    assert!(result.contains("error: start_line_not_found"), "{result}");
+}
+
+#[test]
 fn line_selectors_support_lone_carriage_return_files() {
     let dir = TempDir::new("cr_lines");
     fs::write(dir.path().join("lines.txt"), "one\rtwo\rthree").unwrap();

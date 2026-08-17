@@ -32,7 +32,7 @@ input_schema: |
         "type": "object",
         "description": "Inclusive end selector; exactly one field is allowed.",
         "properties": {
-          "line_nr": {"type": ">0 integer", "description": "1-based inclusive line number."},
+          "line_nr": {"type": ">0 integer", "description": "1-based inclusive line number; values beyond EOF clamp to the actual last line."},
           "byte_nr": {"type": ">=0 integer", "description": "0-based inclusive original-file byte number."},
           "match": {"type": "string", "description": "End after the last complete exact match in the max_bytes window."}
         }
