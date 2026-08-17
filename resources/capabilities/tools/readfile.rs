@@ -7,10 +7,10 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 #[cfg(test)]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const DEFAULT_MAX_BYTES: usize = 32 * 1024;
@@ -20,31 +20,35 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_MATCH_BYTES: usize = 64 * 1024;
 
 #[cfg(test)]
-static TEST_PARALLEL_PROBE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
-#[cfg(test)]
-static TEST_PARALLEL_PROBE_DELAY_MS: AtomicU64 = AtomicU64::new(0);
-#[cfg(test)]
-static TEST_PARALLEL_PROBE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static TEST_PARALLEL_PROBE_MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static TEST_PARALLEL_PROBES: Mutex<Vec<Arc<TestParallelReadProbeState>>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
-pub(crate) struct TestParallelReadProbe;
+struct TestParallelReadProbeState {
+    root: PathBuf,
+    delay: Duration,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+#[cfg(test)]
+pub(crate) struct TestParallelReadProbe {
+    state: Arc<TestParallelReadProbeState>,
+}
 
 #[cfg(test)]
 impl TestParallelReadProbe {
     pub(crate) fn max_active(&self) -> usize {
-        TEST_PARALLEL_PROBE_MAX_ACTIVE.load(AtomicOrdering::SeqCst)
+        self.state.max_active.load(AtomicOrdering::SeqCst)
     }
 }
 
 #[cfg(test)]
 impl Drop for TestParallelReadProbe {
     fn drop(&mut self) {
-        *TEST_PARALLEL_PROBE_ROOT.lock().unwrap() = None;
-        TEST_PARALLEL_PROBE_DELAY_MS.store(0, AtomicOrdering::SeqCst);
-        TEST_PARALLEL_PROBE_ACTIVE.store(0, AtomicOrdering::SeqCst);
-        TEST_PARALLEL_PROBE_MAX_ACTIVE.store(0, AtomicOrdering::SeqCst);
+        TEST_PARALLEL_PROBES
+            .lock()
+            .unwrap()
+            .retain(|state| !Arc::ptr_eq(state, &self.state));
     }
 }
 
@@ -53,46 +57,45 @@ pub(crate) fn install_test_parallel_read_probe(
     root: PathBuf,
     delay: Duration,
 ) -> TestParallelReadProbe {
-    let root = fs::canonicalize(&root).unwrap_or(root);
-    *TEST_PARALLEL_PROBE_ROOT.lock().unwrap() = Some(root);
-    TEST_PARALLEL_PROBE_DELAY_MS.store(
-        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-        AtomicOrdering::SeqCst,
-    );
-    TEST_PARALLEL_PROBE_ACTIVE.store(0, AtomicOrdering::SeqCst);
-    TEST_PARALLEL_PROBE_MAX_ACTIVE.store(0, AtomicOrdering::SeqCst);
-    TestParallelReadProbe
+    let state = Arc::new(TestParallelReadProbeState {
+        root: fs::canonicalize(&root).unwrap_or(root),
+        delay,
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+    });
+    TEST_PARALLEL_PROBES.lock().unwrap().push(state.clone());
+    TestParallelReadProbe { state }
 }
 
 #[cfg(test)]
-struct ActiveTestReadProbe;
+struct ActiveTestReadProbe {
+    state: Arc<TestParallelReadProbeState>,
+}
 
 #[cfg(test)]
 impl Drop for ActiveTestReadProbe {
     fn drop(&mut self) {
-        TEST_PARALLEL_PROBE_ACTIVE.fetch_sub(1, AtomicOrdering::SeqCst);
+        self.state.active.fetch_sub(1, AtomicOrdering::SeqCst);
     }
 }
 
 #[cfg(test)]
 fn begin_test_parallel_read_probe(path: &Path) -> Option<ActiveTestReadProbe> {
     let canonical_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let enabled = TEST_PARALLEL_PROBE_ROOT
+    let state = TEST_PARALLEL_PROBES
         .lock()
         .unwrap()
-        .as_ref()
-        .is_some_and(|root| canonical_path.starts_with(root));
-    if !enabled {
-        return None;
-    }
+        .iter()
+        .rev()
+        .find(|state| canonical_path.starts_with(&state.root))
+        .cloned()?;
 
-    let active = TEST_PARALLEL_PROBE_ACTIVE.fetch_add(1, AtomicOrdering::SeqCst) + 1;
-    TEST_PARALLEL_PROBE_MAX_ACTIVE.fetch_max(active, AtomicOrdering::SeqCst);
-    let delay_ms = TEST_PARALLEL_PROBE_DELAY_MS.load(AtomicOrdering::SeqCst);
-    if delay_ms > 0 {
-        std::thread::sleep(Duration::from_millis(delay_ms));
+    let active = state.active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+    state.max_active.fetch_max(active, AtomicOrdering::SeqCst);
+    if !state.delay.is_zero() {
+        std::thread::sleep(state.delay);
     }
-    Some(ActiveTestReadProbe)
+    Some(ActiveTestReadProbe { state })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
