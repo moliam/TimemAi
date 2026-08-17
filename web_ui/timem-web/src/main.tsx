@@ -1633,6 +1633,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   const [queuedMessagesBySession, setQueuedMessagesBySession] = useState<Record<string, QueuedMessage[]>>({});
   const queuedMessagesBySessionRef = useRef<Record<string, QueuedMessage[]>>(queuedMessagesBySession);
   const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<Set<string>>(() => new Set());
+  const [collapsedQueuePanelSessionIds, setCollapsedQueuePanelSessionIds] = useState<Set<string>>(() => new Set());
   const [draggedQueueMessageId, setDraggedQueueMessageId] = useState<string>();
   const [editingQueuedMessage, setEditingQueuedMessage] = useState<{ sessionId: string; id: string; text: string }>();
   const queuedDispatchSessionIdsRef = useRef<Set<string>>(new Set());
@@ -1687,6 +1688,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     ? unclaimedQueuedMessages(queuedMessages, queuedMessageClaims, activeSessionId)
     : [];
   const queueExpanded = !!activeSessionId && expandedQueueSessionIds.has(activeSessionId);
+  const queuePanelCollapsed = !!activeSessionId && collapsedQueuePanelSessionIds.has(activeSessionId);
   const visibleQueuedMessages = queueExpanded ? displayQueuedMessages : displayQueuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
   const hiddenQueuedMessageCount = Math.max(0, displayQueuedMessages.length - COLLAPSED_QUEUE_LIMIT);
  const reservedAttachmentIds = useMemo(() => reservedQueuedAttachmentIds(queuedMessages), [queuedMessages]);
@@ -1778,6 +1780,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
     updateQueuedMessages((current) => Object.fromEntries(Object.entries(current).filter(([sessionId]) => sessionIds.includes(sessionId))));
     setExpandedQueueSessionIds((current) => new Set(Array.from(current).filter((sessionId) => sessionIds.includes(sessionId))));
+    setCollapsedQueuePanelSessionIds((current) => new Set(Array.from(current).filter((sessionId) => sessionIds.includes(sessionId))));
     setEditingQueuedMessage((current) => current && sessionIds.includes(current.sessionId) ? current : undefined);
     for (const sessionId of Array.from(queuedDispatchSessionIdsRef.current)) {
       if (!sessionIds.includes(sessionId)) queuedDispatchSessionIdsRef.current.delete(sessionId);
@@ -2072,6 +2075,16 @@ const toggleQueuedMessages = () => {
     });
   };
 
+  const toggleQueuedMessagePanel = () => {
+    if (!activeSessionId) return;
+    setCollapsedQueuePanelSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(activeSessionId)) next.delete(activeSessionId);
+      else next.add(activeSessionId);
+      return next;
+    });
+  };
+
   const dropQueuedMessage = (targetId: string) => {
     if (!activeSessionId || !draggedQueueMessageId) return;
     updateQueuedMessages((current) => ({
@@ -2136,7 +2149,7 @@ const toggleQueuedMessages = () => {
       />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
-        {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>{queuedMessagesPause ? "自动续发已暂停，手动发送仍可用" : "上一条完成后自动发送"}</small>{queuedMessagesPause && <button type="button" className="queued-message-resume" onClick={resumeQueuedMessages}>继续发送</button>}{hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}</header><div className="queued-message-items">{visibleQueuedMessages.map((message) => {
+        {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>{queuePanelCollapsed ? `${displayQueuedMessages.length} 条消息` : queuedMessagesPause ? "自动续发已暂停，手动发送仍可用" : "上一条完成后自动发送"}</small><div className="queued-message-header-actions">{!queuePanelCollapsed && queuedMessagesPause && <button type="button" className="queued-message-resume" onClick={resumeQueuedMessages}>继续发送</button>}{!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}<button type="button" className="queued-message-panel-toggle" aria-expanded={!queuePanelCollapsed} aria-controls={`queued-message-items-${activeSession.session_id}`} title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"} onClick={toggleQueuedMessagePanel}>{queuePanelCollapsed ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}<span>{queuePanelCollapsed ? "展开" : "折叠"}</span></button></div></header>{!queuePanelCollapsed && <div id={`queued-message-items-${activeSession.session_id}`} className="queued-message-items">{visibleQueuedMessages.map((message) => {
           const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
           const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
           const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));
@@ -2153,7 +2166,7 @@ const toggleQueuedMessages = () => {
           }
           if (message.deliveryError) updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: undefined } : candidate) }));
         }}>{claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>;
-        })}</div></section>}
+        })}</div>}</section>}
         {!!activeSession && (!!availableAttachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{availableAttachments.map((attachment) => {
           const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);
           const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `${sessionInteractionLockReason} · cannot remove ${attachment.name}` : `Remove ${attachment.name}`;
