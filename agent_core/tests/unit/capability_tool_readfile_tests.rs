@@ -238,7 +238,10 @@ fn end_line_beyond_eof_still_respects_max_bytes() {
     assert!(result.contains("status: ok"), "{result}");
     assert!(result.contains("content_bytes: 8"), "{result}");
     assert!(result.contains("limited: true"), "{result}");
-    assert!(result.ends_with("content:\nfirst\nse"), "{result}");
+    assert!(
+        result.contains("content:\nfirst\nse\n!!!Too long, 2 words truncated after."),
+        "{result}"
+    );
 }
 
 #[test]
@@ -292,7 +295,10 @@ fn match_selectors_use_first_start_and_last_complete_end_in_window() {
     );
 
     assert!(result.contains("limited: true"), "{result}");
-    assert!(result.ends_with("content:\nA1B2B"), "{result}");
+    assert!(
+        result.contains("content:\nA1B2B\n!!!Too long, 0 words truncated after."),
+        "{result}"
+    );
 }
 
 #[test]
@@ -366,7 +372,10 @@ fn max_bytes_never_splits_returned_utf8() {
 
     assert!(result.contains("content_bytes: 2"), "{result}");
     assert!(result.contains("limited: true"), "{result}");
-    assert!(result.ends_with("content:\né"), "{result}");
+    assert!(
+        result.contains("content:\né\n!!!Too long, 1 words truncated after."),
+        "{result}"
+    );
 }
 
 #[test]
@@ -561,4 +570,104 @@ fn empty_regular_file_returns_an_empty_success() {
     assert!(result.contains("status: ok"), "{result}");
     assert!(result.contains("file_bytes: 0"), "{result}");
     assert!(result.ends_with("content:\n"), "{result}");
+}
+
+#[test]
+fn forward_read_retains_beginning_and_places_notice_after_content() {
+    let dir = TempDir::new("forward_tail_option");
+    fs::write(dir.path().join("large.txt"), "BEGIN alpha beta gamma END").unwrap();
+
+    let result = execute(dir.path(), &json!({"path": "large.txt", "max_bytes": 11}));
+
+    assert!(result.contains("tail_out: false"), "{result}");
+    assert!(result.contains("content_bytes: 11"), "{result}");
+    assert!(
+        result.contains("content:\nBEGIN alpha\n!!!Too long,"),
+        "{result}"
+    );
+    assert!(result.contains("truncated after"), "{result}");
+    assert!(!result.contains("gamma END"), "{result}");
+}
+
+#[test]
+fn tail_read_retains_ending_and_places_notice_before_content() {
+    let dir = TempDir::new("tail_option");
+    fs::write(dir.path().join("large.txt"), "BEGIN alpha beta gamma END").unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({"path": "large.txt", "max_bytes": 9, "tail_out": true}),
+    );
+
+    assert!(result.contains("tail_out: true"), "{result}");
+    assert!(result.contains("content_bytes: 9"), "{result}");
+    assert!(result.contains("content:\n!!!Too long,"), "{result}");
+    assert!(result.contains("truncated before"), "{result}");
+    assert!(result.ends_with("gamma END"), "{result}");
+    assert!(!result.ends_with("BEGIN alpha"), "{result}");
+}
+
+#[test]
+fn tail_read_is_utf8_safe_and_never_exceeds_byte_budget() {
+    let dir = TempDir::new("tail_utf8");
+    fs::write(dir.path().join("utf8.txt"), "甲乙丙丁").unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({"path": "utf8.txt", "max_bytes": 7, "tail_out": true}),
+    );
+
+    assert!(result.contains("content_bytes: 6"), "{result}");
+    assert!(result.contains("limited: true"), "{result}");
+    assert!(result.ends_with("丙丁"), "{result}");
+    assert!(!result.contains('�'), "{result}");
+}
+
+#[test]
+fn tail_read_applies_to_the_selected_range_only() {
+    let dir = TempDir::new("tail_selected_range");
+    fs::write(
+        dir.path().join("selected.txt"),
+        "outside START one two three END outside-tail",
+    )
+    .unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "selected.txt",
+            "starter": {"match": "START"},
+            "ender": {"match": "END"},
+            "max_bytes": 13,
+            "tail_out": true
+        }),
+    );
+
+    assert!(result.contains("truncated before"), "{result}");
+    assert!(result.ends_with("two three END"), "{result}");
+    assert!(!result.contains("outside-tail"), "{result}");
+}
+
+#[test]
+fn tail_read_without_truncation_has_no_notice() {
+    let dir = TempDir::new("tail_without_truncation");
+    fs::write(dir.path().join("short.txt"), "short text").unwrap();
+
+    let result = execute(dir.path(), &json!({"path": "short.txt", "tail_out": true}));
+
+    assert!(result.contains("tail_out: true"), "{result}");
+    assert!(result.contains("limited: false"), "{result}");
+    assert!(!result.contains("!!!Too long,"), "{result}");
+    assert!(result.ends_with("short text"), "{result}");
+}
+
+#[test]
+fn tail_out_must_be_boolean() {
+    let dir = TempDir::new("invalid_tail_out");
+    fs::write(dir.path().join("text.txt"), "text").unwrap();
+
+    let result = execute(dir.path(), &json!({"path": "text.txt", "tail_out": "yes"}));
+
+    assert!(result.contains("status: error"), "{result}");
+    assert!(result.contains("error: invalid_tail_out"), "{result}");
 }

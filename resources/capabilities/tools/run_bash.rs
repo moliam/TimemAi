@@ -46,6 +46,8 @@ pub struct ShellJobRecord {
     pub cwd: String,
     pub output_file: String,
     pub status_file: String,
+    #[serde(default)]
+    pub tail_out: bool,
 }
 
 fn default_shell_job_kind() -> String {
@@ -260,7 +262,7 @@ impl FileShellJobStore {
         session_id: &str,
         turn_id: &str,
     ) -> String {
-        self.spawn_background_outcome(command, cwd, session_id, turn_id)
+        self.spawn_background_outcome(command, cwd, session_id, turn_id, false)
             .text
     }
 
@@ -270,6 +272,7 @@ impl FileShellJobStore {
         cwd: &Path,
         session_id: &str,
         turn_id: &str,
+        tail_out: bool,
     ) -> ActionOutcome {
         let clean = command.trim();
         if clean.is_empty() {
@@ -278,15 +281,16 @@ impl FileShellJobStore {
                 "The background command was not started because no shell command was provided.",
             ));
         }
-        let record = match self.spawn_record(clean, cwd, "background", session_id, turn_id) {
-            Ok(record) => record,
-            Err(_) => {
-                return ActionOutcome::failed(bash_action_not_executed(
-                    Some(clean),
-                    "The background command could not be started by the local shell.",
-                ));
-            }
-        };
+        let record =
+            match self.spawn_record(clean, cwd, "background", session_id, turn_id, tail_out) {
+                Ok(record) => record,
+                Err(_) => {
+                    return ActionOutcome::failed(bash_action_not_executed(
+                        Some(clean),
+                        "The background command could not be started by the local shell.",
+                    ));
+                }
+            };
         let _ = self.append(&record);
         ActionOutcome::background_running(format!(
             "Action result: run_bash\npid={}, now keeps running in background\nCommand: {}",
@@ -301,6 +305,7 @@ impl FileShellJobStore {
         kind: &str,
         session_id: &str,
         turn_id: &str,
+        tail_out: bool,
     ) -> std::io::Result<ShellJobRecord> {
         fs::create_dir_all(&self.dir)?;
         let id = unique_shell_id("job");
@@ -339,6 +344,7 @@ impl FileShellJobStore {
             cwd: cwd.to_string_lossy().to_string(),
             output_file: output_file.to_string_lossy().to_string(),
             status_file: status_file.to_string_lossy().to_string(),
+            tail_out,
         })
     }
 
@@ -351,8 +357,10 @@ impl FileShellJobStore {
         turn_id: &str,
         runtime: &mut dyn ActionRuntime,
     ) -> String {
-        self.run_with_timeout_outcome(command, cwd, timeout_ms, session_id, turn_id, runtime)
-            .text
+        self.run_with_timeout_outcome(
+            command, cwd, timeout_ms, session_id, turn_id, false, runtime,
+        )
+        .text
     }
 
     pub(crate) fn run_with_timeout_outcome(
@@ -362,10 +370,13 @@ impl FileShellJobStore {
         timeout_ms: i64,
         session_id: &str,
         turn_id: &str,
+        tail_out: bool,
         runtime: &mut dyn ActionRuntime,
     ) -> ActionOutcome {
-        self.run_with_timeout_structured(command, cwd, timeout_ms, session_id, turn_id, runtime)
-            .to_action_outcome("run_bash")
+        self.run_with_timeout_structured(
+            command, cwd, timeout_ms, session_id, turn_id, tail_out, runtime,
+        )
+        .to_action_outcome("run_bash")
     }
 
     pub fn run_with_timeout_structured(
@@ -375,13 +386,15 @@ impl FileShellJobStore {
         timeout_ms: i64,
         session_id: &str,
         turn_id: &str,
+        tail_out: bool,
         runtime: &mut dyn ActionRuntime,
     ) -> BashCommandOutput {
         let clean = command.trim();
         if timeout_ms <= 0 {
             return bash_error(clean, "invalid_timeout");
         }
-        let Ok(record) = self.spawn_record(clean, cwd, "timeout", session_id, turn_id) else {
+        let Ok(record) = self.spawn_record(clean, cwd, "timeout", session_id, turn_id, tail_out)
+        else {
             return bash_error(clean, "command_failed");
         };
         let started = Instant::now();
@@ -402,6 +415,7 @@ impl FileShellJobStore {
                     signal: status.signal,
                     output: normalized_shell_output(&output),
                     error: None,
+                    tail_out,
                 };
             }
             if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
@@ -419,12 +433,13 @@ impl FileShellJobStore {
                     command: clean.to_string(),
                     status: None,
                     signal: None,
-                    output: compact_text(&partial, 2000),
+                    output: partial,
                     error: Some(format!(
                         "long_running_still_running:{}:{}",
                         record.pid,
                         status.elapsed.as_millis()
                     )),
+                    tail_out,
                 };
             }
             if started.elapsed() >= timeout {
@@ -434,8 +449,9 @@ impl FileShellJobStore {
                     command: clean.to_string(),
                     status: None,
                     signal: None,
-                    output: compact_text(&partial, 2000),
+                    output: partial,
                     error: Some(format!("timeout_still_running:{}", record.pid)),
+                    tail_out,
                 };
             }
             thread::sleep(Duration::from_millis(50));
@@ -610,11 +626,12 @@ impl FileShellJobStore {
                 .unwrap_or_else(|_| "unknown".to_string())
                 .trim()
                 .to_string(),
-            output: compact_text(
+            output: compact_text_with_tail(
                 &normalized_shell_output(
                     &fs::read_to_string(&record.output_file).unwrap_or_default(),
                 ),
                 MAX_BASH_OUTPUT_CHARS,
+                record.tail_out,
             ),
         })
     }
@@ -931,7 +948,8 @@ pub(crate) fn execute_run_bash_action(
     let session_id = core.current_session_id();
     let turn_id = core.current_action_turn_id();
     let cwd = core.current_prompt_cwd().to_path_buf();
-    execute_run_bash(
+    let tail_out = action.input_bool("tail_out");
+    execute_run_bash_with_tail(
         &command_to_run,
         &cwd,
         action.background(),
@@ -943,10 +961,12 @@ pub(crate) fn execute_run_bash_action(
         &session_id,
         &turn_id,
         is_regular_command,
+        tail_out,
         runtime,
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_run_bash(
     command: &str,
@@ -960,6 +980,39 @@ pub(crate) fn execute_run_bash(
     session_id: &str,
     turn_id: &str,
     is_regular_command: bool,
+    runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
+    execute_run_bash_with_tail(
+        command,
+        cwd,
+        background,
+        timeout_ms,
+        interval_ms,
+        once_timeout_ms,
+        approval_mode,
+        shell_jobs,
+        session_id,
+        turn_id,
+        is_regular_command,
+        false,
+        runtime,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_run_bash_with_tail(
+    command: &str,
+    cwd: &Path,
+    background: bool,
+    timeout_ms: i64,
+    interval_ms: Option<u64>,
+    once_timeout_ms: u64,
+    approval_mode: BashApprovalMode,
+    shell_jobs: &FileShellJobStore,
+    session_id: &str,
+    turn_id: &str,
+    is_regular_command: bool,
+    tail_out: bool,
     runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     let command_to_run = command.trim();
@@ -1029,6 +1082,7 @@ pub(crate) fn execute_run_bash(
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
                 cwd: cwd.to_path_buf(),
+                tail_out,
             },
             continuation: None,
         });
@@ -1039,15 +1093,17 @@ pub(crate) fn execute_run_bash(
             cwd,
             session_id,
             turn_id,
+            tail_out,
         ));
     }
     if let Some(interval_ms) = interval_ms {
-        return ActionExecution::Completed(execute_polling_bash_outcome(
+        return ActionExecution::Completed(execute_polling_bash_outcome_with_tail(
             command_to_run,
             cwd,
             interval_ms,
             timeout_ms,
             once_timeout_ms,
+            tail_out,
             runtime,
         ));
     }
@@ -1057,10 +1113,12 @@ pub(crate) fn execute_run_bash(
         timeout_ms,
         session_id,
         turn_id,
+        tail_out,
         runtime,
     ))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_approved_bash(
     command: &str,
@@ -1071,7 +1129,40 @@ pub(crate) fn execute_approved_bash(
     once_timeout_ms: u64,
     session_id: &str,
     turn_id: &str,
+    is_regular_command: bool,
+    request: &ApprovalRequest,
+    shell_jobs: &FileShellJobStore,
+    runtime: &mut dyn ActionRuntime,
+) -> ActionOutcome {
+    execute_approved_bash_with_tail(
+        command,
+        cwd,
+        background,
+        timeout_ms,
+        interval_ms,
+        once_timeout_ms,
+        session_id,
+        turn_id,
+        is_regular_command,
+        false,
+        request,
+        shell_jobs,
+        runtime,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_approved_bash_with_tail(
+    command: &str,
+    cwd: &Path,
+    background: bool,
+    timeout_ms: i64,
+    interval_ms: Option<u64>,
+    once_timeout_ms: u64,
+    session_id: &str,
+    turn_id: &str,
     _is_regular_command: bool,
+    tail_out: bool,
     request: &ApprovalRequest,
     shell_jobs: &FileShellJobStore,
     runtime: &mut dyn ActionRuntime,
@@ -1089,18 +1180,21 @@ pub(crate) fn execute_approved_bash(
         return outcome;
     }
     let mut outcome = if background {
-        shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id)
+        shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id, tail_out)
     } else if let Some(interval_ms) = interval_ms {
-        execute_polling_bash_outcome(
+        execute_polling_bash_outcome_with_tail(
             clean,
             cwd,
             interval_ms,
             timeout_ms,
             once_timeout_ms,
+            tail_out,
             runtime,
         )
     } else {
-        shell_jobs.run_with_timeout_outcome(clean, cwd, timeout_ms, session_id, turn_id, runtime)
+        shell_jobs.run_with_timeout_outcome(
+            clean, cwd, timeout_ms, session_id, turn_id, tail_out, runtime,
+        )
     };
     outcome.text.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
@@ -1114,12 +1208,33 @@ pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn Action
     execute_one_bash_structured(command, &cwd, timeout_ms, runtime).to_action_result("run_bash")
 }
 
+#[cfg(test)]
 pub(crate) fn execute_polling_bash_outcome(
     command: &str,
     cwd: &Path,
     interval_ms: u64,
     timeout_ms: i64,
     once_timeout_ms: u64,
+    runtime: &mut dyn ActionRuntime,
+) -> ActionOutcome {
+    execute_polling_bash_outcome_with_tail(
+        command,
+        cwd,
+        interval_ms,
+        timeout_ms,
+        once_timeout_ms,
+        false,
+        runtime,
+    )
+}
+
+pub(crate) fn execute_polling_bash_outcome_with_tail(
+    command: &str,
+    cwd: &Path,
+    interval_ms: u64,
+    timeout_ms: i64,
+    once_timeout_ms: u64,
+    tail_out: bool,
     runtime: &mut dyn ActionRuntime,
 ) -> ActionOutcome {
     if timeout_ms <= 0 {
@@ -1130,6 +1245,7 @@ pub(crate) fn execute_polling_bash_outcome(
             Duration::ZERO,
             None,
             "",
+            tail_out,
             Some("loop_timeout_ms must be a positive integer."),
         );
     }
@@ -1141,6 +1257,7 @@ pub(crate) fn execute_polling_bash_outcome(
             Duration::ZERO,
             None,
             "",
+            tail_out,
             Some("interval_ms must be a positive integer."),
         );
     }
@@ -1152,6 +1269,7 @@ pub(crate) fn execute_polling_bash_outcome(
             Duration::ZERO,
             None,
             "",
+            tail_out,
             Some("once_timeout_ms must be a positive integer."),
         );
     }
@@ -1172,6 +1290,7 @@ pub(crate) fn execute_polling_bash_outcome(
                 started.elapsed(),
                 last_status,
                 &last_output,
+                tail_out,
                 last_error.as_deref(),
             );
         }
@@ -1191,6 +1310,7 @@ pub(crate) fn execute_polling_bash_outcome(
                     started.elapsed(),
                     last_status,
                     &last_output,
+                    tail_out,
                     None,
                 );
             }
@@ -1204,6 +1324,7 @@ pub(crate) fn execute_polling_bash_outcome(
                 started.elapsed(),
                 last_status,
                 &last_output,
+                tail_out,
                 last_error.as_deref(),
             );
         }
@@ -1220,6 +1341,7 @@ fn polling_result(
     elapsed: Duration,
     last_status: Option<i32>,
     output: &str,
+    tail_out: bool,
     error: Option<&str>,
 ) -> ActionOutcome {
     let state_sentence = match state {
@@ -1243,7 +1365,11 @@ fn polling_result(
     }
     if !output.trim().is_empty() {
         out.push_str("\nLast output:\n");
-        out.push_str(&compact_text(output, MAX_BASH_OUTPUT_CHARS));
+        out.push_str(&compact_text_with_tail(
+            output,
+            MAX_BASH_OUTPUT_CHARS,
+            tail_out,
+        ));
     }
     let status = match state {
         "finished" => ActionStatus::Completed,
@@ -1320,6 +1446,7 @@ pub struct BashCommandOutput {
     pub signal: Option<i32>,
     pub output: String,
     pub error: Option<String>,
+    pub tail_out: bool,
 }
 
 impl BashCommandOutput {
@@ -1359,7 +1486,7 @@ impl BashCommandOutput {
                 );
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial output:\n");
-                    out.push_str(&compact_text(&self.output, 2000));
+                    out.push_str(&compact_text_with_tail(&self.output, 2000, self.tail_out));
                 }
                 return out;
             }
@@ -1370,7 +1497,7 @@ impl BashCommandOutput {
                 );
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial output:\n");
-                    out.push_str(&compact_text(&self.output, 2000));
+                    out.push_str(&compact_text_with_tail(&self.output, 2000, self.tail_out));
                 }
                 return out;
             }
@@ -1387,7 +1514,7 @@ impl BashCommandOutput {
                 action_name,
                 self.command,
                 signal,
-                compact_text(&self.output, MAX_BASH_OUTPUT_CHARS)
+                compact_text_with_tail(&self.output, MAX_BASH_OUTPUT_CHARS, self.tail_out)
             );
         }
         format!(
@@ -1395,7 +1522,7 @@ impl BashCommandOutput {
             action_name,
             self.command,
             self.status.unwrap_or(-1),
-            compact_text(&self.output, MAX_BASH_OUTPUT_CHARS)
+            compact_text_with_tail(&self.output, MAX_BASH_OUTPUT_CHARS, self.tail_out)
         )
     }
 }
@@ -1498,6 +1625,7 @@ fn execute_one_bash_structured_with_prompt_after(
                 signal: exit_signal(&output.status),
                 output: combined,
                 error: None,
+                tail_out: false,
             }
         }
         Err(_) => bash_error(command, "command_failed"),
@@ -1511,6 +1639,7 @@ fn bash_error(command: &str, error: &str) -> BashCommandOutput {
         signal: None,
         output: String::new(),
         error: Some(error.to_string()),
+        tail_out: false,
     }
 }
 
@@ -1725,16 +1854,37 @@ fn process_group_running(group_leader_pid: u32) -> bool {
 }
 
 pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
-    let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if out.chars().count() > max_chars {
-        let truncated = out.chars().skip(max_chars).collect::<String>();
-        let truncated_words = truncated.split_whitespace().count();
-        out = out.chars().take(max_chars).collect::<String>();
-        out.push_str(&format!(
-            "!!!Too long, {truncated_words} words truncated. Generate more actions if necessary !!!"
-        ));
+    compact_text_with_tail(text, max_chars, false)
+}
+
+pub(crate) fn compact_text_with_tail(text: &str, max_chars: usize, tail_out: bool) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let char_count = normalized.chars().count();
+    if char_count <= max_chars {
+        return normalized;
     }
-    out
+
+    if tail_out {
+        let truncated = normalized
+            .chars()
+            .take(char_count.saturating_sub(max_chars))
+            .collect::<String>();
+        let truncated_words = truncated.split_whitespace().count();
+        let retained = normalized
+            .chars()
+            .skip(char_count.saturating_sub(max_chars))
+            .collect::<String>();
+        format!(
+            "!!!Too long, {truncated_words} words truncated before. Generate more actions if necessary !!!\n{retained}"
+        )
+    } else {
+        let retained = normalized.chars().take(max_chars).collect::<String>();
+        let truncated = normalized.chars().skip(max_chars).collect::<String>();
+        let truncated_words = truncated.split_whitespace().count();
+        format!(
+            "{retained}\n!!!Too long, {truncated_words} words truncated after. Generate more actions if necessary !!!"
+        )
+    }
 }
 
 fn now_ms() -> i64 {

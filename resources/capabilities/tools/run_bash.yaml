@@ -6,6 +6,7 @@ requires_host: local_command_execution
 summary: Run local shell commands.
 prompt_synopsis: |
   {"run_bash":{"cmd":"git status --short","timeout_ms":5000}}
+  {"run_bash":{"cmd":"cargo test","timeout_ms":120000,"tail_out":true}}
   {"run_bash":{"loop_cmd":"test -f build/done","interval_ms":1000,"loop_timeout_ms":120000,"once_timeout_ms":5000}}
 description: |
   `run_bash` runs a shell command on the local machine and collects bounded
@@ -13,7 +14,9 @@ description: |
   polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
   `timeout_ms` is only how long Timem waits for a normal command. It is not a
   kill deadline. If the wait budget is reached, Timem returns the pid and stops
-  waiting while the process may still be running.
+  waiting while the process may still be running. Set `tail_out=true` to
+  retain the end of oversized command output, which is useful for compiler and
+  test summaries.
   Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner.
   Prefer to transform long sleep into loop_cmd or `while` loops with short sleep that can return as soon as cmd is done.
   The loop command is re-run
@@ -22,7 +25,8 @@ description: |
   background=true. Background and timeout jobs return a pid; manage them with
   normal shell commands if the user asks you to inspect or stop them.
 prompt_input: |
-  Use cmd for a shell command. Optional: timeout_ms and background=true. Use
+  Use cmd for a shell command. Optional: timeout_ms, background=true, and
+  tail_out=true. Use
   loop_cmd with interval_ms for polling/waiting. loop_cmd
   is run repeatedly until it exits with code 0 or loop_timeout_ms total wait budget
   is reached. once_timeout_ms is the per-check command timeout.
@@ -43,7 +47,8 @@ input_schema: |
       "loop_timeout_ms": {"type": ">0 integer", "description": "Total polling wait budget in milliseconds when loop_cmd is present."},
       "once_timeout_ms": {"type": ">0 integer", "description": "Per-check timeout in polling mode."},
       "interval_ms": {"type": ">0 integer", "description": "Polling interval. Requires loop_cmd."},
-      "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."}
+      "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."},
+      "tail_out": {"type": "boolean", "description": "When true, oversized output retains its ending and places the truncation notice before the retained content. Default: false."}
     },
     "x-required-any": [["cmd", "loop_cmd"]]
   }
