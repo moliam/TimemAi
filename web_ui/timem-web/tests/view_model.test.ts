@@ -95,6 +95,7 @@ describe("web topic view model", () => {
     const action = activityFromTopic(topic("core.action", { action: "run_bash", status: "completed", input: { cmd: "pwd" } }));
     const repair = activityFromTopic(topic("core.model.repair", { attempt: 1, max_attempts: 5, issue: "invalid_xml" }));
 
+    expect(freeTalk).toMatchObject({ tone: "thinking", kind: "free_talk", detail: "Simple reasoning." });
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 0)).toBe(true);
     expect(hasOnlyFreeTalkActivity([], 0)).toBe(false);
     expect(hasOnlyFreeTalkActivity([freeTalk, action].filter((activity): activity is NonNullable<typeof activity> => activity !== null), 0)).toBe(false);
@@ -111,6 +112,7 @@ describe("web topic view model", () => {
     expect(failed).toMatchObject({ tone: "warning", kind: "toolgen", title: "ToolGen: 生成失败", detail: "self-test failed" });
     expect(activityFromTopic(topic("core.model.response", { runtime_phase: "toolgen", free_talk: "Building a reusable parser.", final_answer: "internal completion" }))).toMatchObject({
       tone: "thinking",
+      kind: "free_talk",
       detail: "Building a reusable parser.",
     });
     expect(activityFromTopic(topic("core.action", { runtime_phase: "toolgen", action: "run_bash", status: "running", input: { cmd: "bash tool.sh --self-test" } }))).toMatchObject({

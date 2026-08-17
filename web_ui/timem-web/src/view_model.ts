@@ -857,7 +857,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const freeTalk = label(payload.free_talk);
       const progress = label(payload.progress);
       const detail = [freeTalk, progress].filter((text) => text.trim()).join("\n\n");
-      return detail ? { id: clientId(), sessionId: event.session_id, tone: "thinking", title: "", detail, createdAt: Date.now() } : null;
+      return detail ? { id: clientId(), sessionId: event.session_id, tone: "thinking", kind: "free_talk", title: "", detail, createdAt: Date.now() } : null;
     }
     case "core.model.repair":
       return { id: clientId(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: protocolRepairDisplayReason(payload), createdAt: Date.now() };

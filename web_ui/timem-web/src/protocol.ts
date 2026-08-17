@@ -174,7 +174,7 @@ export type Activity = {
   tool_name?: string;
   tool_status?: string;
   elapsed_ms?: number;
-  kind?: "context_compact" | "toolgen";
+  kind?: "context_compact" | "toolgen" | "free_talk";
   toolgen_phase?: string;
   before_tokens?: number;
   after_tokens?: number;
