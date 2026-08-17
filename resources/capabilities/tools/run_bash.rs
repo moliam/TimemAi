@@ -1704,7 +1704,7 @@ pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
         let truncated_words = truncated.split_whitespace().count();
         out = out.chars().take(max_chars).collect::<String>();
         out.push_str(&format!(
-            "[Too long, {truncated_words} words truncated.  Issue new actions  if necessary]"
+            "!!!Too long, {truncated_words} words truncated. Generate more actions if necessary !!!"
         ));
     }
     out

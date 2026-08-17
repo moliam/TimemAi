@@ -131,7 +131,7 @@ fn common_prompt_component_ingress_marks_every_truncated_action_result() {
     );
     let prompt = core.build_next_prompt();
     assert!(prompt.contains("Action result: readfile"));
-    assert!(prompt.contains("words truncated.  Issue new actions  if necessary]"));
+    assert!(prompt.contains("words truncated. Generate more actions if necessary !!!"));
     assert!(!prompt.ends_with('…'));
 }
 

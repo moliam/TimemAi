@@ -19,7 +19,7 @@ pub(crate) fn truncate_action_result_for_prompt(text: &str) -> String {
         }
         let truncated_words = text[retained_end..].split_whitespace().count();
         let notice = format!(
-            "[Too long, {truncated_words} words truncated.  Issue new actions  if necessary]"
+            "!!!Too long, {truncated_words} words truncated. Generate more actions if necessary !!!"
         );
         let next_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(notice.len() + 1);
         if next_budget == retained_budget {

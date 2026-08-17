@@ -86,7 +86,8 @@ fn action_result_truncation_is_byte_safe_and_reports_omitted_words() {
     );
     let truncated = truncate_action_result_for_prompt(&input);
     assert!(truncated.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
-    assert!(truncated.ends_with("[Too long, 4 words truncated.  Issue new actions  if necessary]"));
+    assert!(truncated
+        .ends_with("!!!Too long, 4 words truncated. Generate more actions if necessary !!!"));
     assert!(!truncated.ends_with('…'));
 
     let unicode_boundary = format!("{}界 alpha", "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES - 2));
@@ -94,7 +95,7 @@ fn action_result_truncation_is_byte_safe_and_reports_omitted_words() {
     assert!(unicode_truncated.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
     assert!(unicode_truncated.is_char_boundary(unicode_truncated.len()));
     assert!(unicode_truncated
-        .ends_with("[Too long, 2 words truncated.  Issue new actions  if necessary]"));
+        .ends_with("!!!Too long, 2 words truncated. Generate more actions if necessary !!!"));
 }
 
 #[test]
@@ -124,7 +125,7 @@ fn prompt_renderer_defensively_truncates_legacy_action_result_slices() {
         "Ai7",
         "",
     );
-    assert!(rendered.contains("words truncated.  Issue new actions  if necessary]"));
+    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
 }
 
 #[test]
