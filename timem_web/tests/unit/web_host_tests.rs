@@ -43,6 +43,181 @@ fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
 }
 
 #[test]
+fn worker_roles_are_session_scoped_persisted_and_render_exact_system_context() {
+    let state = routing_test_state();
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleCreate {
+            session_id: "session_a".to_string(),
+            name: "Reviewer".to_string(),
+            description: "Inspect evidence before changing code.".to_string(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::WorkerRolesUpdated { roles, .. } = event else {
+        panic!("role creation should publish the authoritative role list")
+    };
+    assert_eq!(roles.len(), 1);
+    assert!(state.sessions.lock().unwrap()["session_b"].roles.is_empty());
+    assert_eq!(
+        load_roles(&worker_roles_path(&state, "session_a").unwrap()).unwrap(),
+        roles
+    );
+    assert_eq!(
+        worker_roles_context(&roles).as_deref(),
+        Some("## SYSTEM\nUser involves the worker role 'Reviewer' for this input. When you work for this task, comply this worker's role description: Inspect evidence before changing code.")
+    );
+    let role_id = roles[0].id.clone();
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleUpdate {
+            session_id: "session_a".to_string(),
+            role_id: role_id.clone(),
+            name: "Evidence reviewer".to_string(),
+            description: "Review logs before changing code.".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"].roles[0].name,
+        "Evidence reviewer"
+    );
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleDelete {
+            session_id: "session_a".to_string(),
+            role_id,
+        },
+    )
+    .unwrap();
+    assert!(state.sessions.lock().unwrap()["session_a"].roles.is_empty());
+    assert!(load_roles(&worker_roles_path(&state, "session_a").unwrap())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn worker_role_snapshots_survive_raw_history_reconstruction() {
+    let state = routing_test_state();
+    let role = WorkerRole {
+        id: "role_reviewer".to_string(),
+        name: "Reviewer".to_string(),
+        description: "Review carefully.".to_string(),
+    };
+    let second_role = WorkerRole {
+        id: "role_tester".to_string(),
+        name: "Tester".to_string(),
+        description: "Test thoroughly.".to_string(),
+    };
+    let selected_roles = vec![role.clone(), second_role];
+    let turn = start_web_turn_with_selected_attachments_and_roles(
+        &state,
+        "session_a",
+        "inspect this",
+        None,
+        Some("role_history_command"),
+        selected_roles.clone(),
+    )
+    .unwrap();
+    let records = read_all_history_records(
+        &current_session_store(&state)
+            .unwrap()
+            .history_path_for_session("session_a"),
+    )
+    .unwrap();
+    let restored = restored_turns_from_history_records(&records);
+    let restored_entry = restored
+        .iter()
+        .find(|candidate| candidate.turn_id == turn.turn_id)
+        .and_then(|candidate| candidate.user_entries.first())
+        .unwrap();
+    assert_eq!(restored_entry.worker_roles, selected_roles);
+}
+
+#[test]
+fn multiple_worker_roles_resolve_in_message_order_and_render_all_contexts() {
+    let state = routing_test_state();
+    let roles = vec![
+        WorkerRole {
+            id: "role_reviewer".to_string(),
+            name: "Reviewer".to_string(),
+            description: "Review evidence.".to_string(),
+        },
+        WorkerRole {
+            id: "role_tester".to_string(),
+            name: "Tester".to_string(),
+            description: "Run regression tests.".to_string(),
+        },
+    ];
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .roles = roles.clone();
+    let selected = resolve_worker_roles(
+        &state,
+        "session_a",
+        &[
+            "role_tester".to_string(),
+            "role_reviewer".to_string(),
+            "role_tester".to_string(),
+        ],
+        None,
+    )
+    .unwrap();
+    assert_eq!(selected, vec![roles[1].clone(), roles[0].clone()]);
+    let context = worker_roles_context(&selected).unwrap();
+    assert!(context.contains("worker role 'Tester'"));
+    assert!(context.contains("worker role 'Reviewer'"));
+    assert!(context.find("Tester").unwrap() < context.find("Reviewer").unwrap());
+    assert_eq!(
+        resolve_worker_roles(&state, "session_a", &["missing".to_string()], None).unwrap_err(),
+        "worker_role_not_found"
+    );
+}
+
+#[test]
+fn turn_submit_wire_accepts_multiple_worker_role_ids_and_legacy_single_id() {
+    let multi: ClientCommand = serde_json::from_value(json!({
+        "type": "turn_submit",
+        "session_id": "session_a",
+        "text": "review and test",
+        "role_ids": ["role_reviewer", "role_tester"]
+    }))
+    .unwrap();
+    let ClientCommand::TurnSubmit {
+        role_ids, role_id, ..
+    } = multi
+    else {
+        panic!("expected turn_submit")
+    };
+    assert_eq!(role_ids, vec!["role_reviewer", "role_tester"]);
+    assert_eq!(role_id, None);
+
+    let legacy: ClientCommand = serde_json::from_value(json!({
+        "type": "turn_submit",
+        "session_id": "session_a",
+        "text": "review",
+        "role_id": "role_reviewer"
+    }))
+    .unwrap();
+    let ClientCommand::TurnSubmit {
+        role_ids, role_id, ..
+    } = legacy
+    else {
+        panic!("expected legacy turn_submit")
+    };
+    assert!(role_ids.is_empty());
+    assert_eq!(role_id.as_deref(), Some("role_reviewer"));
+}
+
+#[test]
 fn chat_message_delete_removes_user_and_assistant_content_from_ui_state_and_raw_log() {
     let state = routing_test_state();
     let turn = start_web_turn(&state, "session_a", "original task").unwrap();
@@ -755,6 +930,8 @@ fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
             input_kind: None,
             source_turn_id: None,
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -797,6 +974,7 @@ fn restore_does_not_revive_an_old_unfinished_turn_after_a_newer_turn_completed()
                 created_at_ms: old_turn.created_at_ms.saturating_add(1),
                 command_id: Some("newer_committed_command".to_string()),
                 delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+                worker_roles: Vec::new(),
             }],
             events: Vec::new(),
             // A turn can finish without an assistant message, for example after
@@ -4524,6 +4702,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         active_context_id: context_id,
         primary_worker_id: worker_id,
         attachments: Vec::new(),
+        roles: Vec::new(),
         consumed_attachment_ids: BTreeSet::new(),
         messages: Vec::new(),
         turns: Vec::new(),
@@ -5051,6 +5230,159 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     let session = sessions.get(session_id).unwrap();
     assert_eq!(session.pending_unconsumed_supplements, supplements);
     assert_eq!(session.turns.len(), turns_before);
+}
+
+#[test]
+fn stopped_primary_turn_removes_its_stale_reported_working_count() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Running,
+            json!({
+                "status": "working",
+                "continue_work": true,
+                "global": {
+                    "working_worker_count": 1,
+                    "session_working_worker_count": 1
+                }
+            }),
+        )
+        .with_worker_scope(primary_context_id.clone(), primary_worker_id.clone())]),
+    );
+
+    let mut outcome = agent_core::TurnOutcome::final_response(
+        "",
+        agent_core::UsageStats::zero(),
+        None,
+        None,
+        Duration::from_millis(1),
+    );
+    outcome.stop_reason = Some(agent_core::TurnStopReason::CancelledByUser);
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "ready");
+    assert_eq!(session.reported_session_working_worker_count, None);
+    assert!(session
+        .workers
+        .iter()
+        .all(|worker| worker.state != "working"));
+    assert_eq!(session.turns.last().unwrap().state, "finished");
+}
+
+#[test]
+fn stopped_primary_turn_preserves_a_reported_active_subworker() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+    let sub_worker_id = "worker_session_a_active_after_cancel".to_string();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.workers.push(WebWorker {
+            worker_id: sub_worker_id.clone(),
+            context_id: "context_session_a_active_after_cancel".to_string(),
+            display_name: "Active subtask".to_string(),
+            ordinal: 99,
+            state: "working".to_string(),
+            parent_worker_id: Some(primary_worker_id.clone()),
+        });
+    }
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Running,
+            json!({
+                "status": "working",
+                "continue_work": true,
+                "global": {
+                    "working_worker_count": 2,
+                    "session_working_worker_count": 2
+                }
+            }),
+        )
+        .with_worker_scope(primary_context_id.clone(), primary_worker_id.clone())]),
+    );
+
+    let mut outcome = agent_core::TurnOutcome::final_response(
+        "",
+        agent_core::UsageStats::zero(),
+        None,
+        None,
+        Duration::from_millis(1),
+    );
+    outcome.stop_reason = Some(agent_core::TurnStopReason::CancelledByUser);
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "working");
+    assert_eq!(session.reported_session_working_worker_count, None);
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == primary_worker_id)
+            .unwrap()
+            .state,
+        "ready"
+    );
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == sub_worker_id)
+            .unwrap()
+            .state,
+        "working"
+    );
 }
 
 #[test]
@@ -5609,6 +5941,8 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
             input_kind: None,
             source_turn_id: None,
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap();
@@ -6390,6 +6724,8 @@ fn stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task() {
             session_id: session_id.clone(),
             text: "new task with file".to_string(),
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -6522,6 +6858,8 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
             input_kind: None,
             source_turn_id: None,
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -6562,6 +6900,8 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
             session_id: session_id.clone(),
             text: "run this after the final answer".to_string(),
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -6852,6 +7192,8 @@ fn stale_supplement_after_cancel_completion_starts_a_new_turn() {
             session_id: session_id.clone(),
             text: "new instruction after stop".to_string(),
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -7475,6 +7817,8 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id.clone()),
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -7532,6 +7876,8 @@ fn manual_toolgen_adds_optional_guidance_as_user_component() {
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id),
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -7574,6 +7920,8 @@ fn manual_toolgen_publishes_tool_and_retains_the_complete_web_event_chain() {
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id.clone()),
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap();
@@ -7644,6 +7992,8 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some("missing_turn".to_string()),
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap_err();
@@ -7665,6 +8015,8 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(unfinished.turn_id),
             attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap_err();
@@ -7677,6 +8029,8 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
         input_kind: Some("toolgen".to_string()),
         source_turn_id: Some(source_turn_id.clone()),
         attachment_ids: None,
+        role_id: None,
+        role_ids: Vec::new(),
     };
     assert!(handle_command(&state, TEST_PORT, request())
         .unwrap()

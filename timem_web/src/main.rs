@@ -1,5 +1,6 @@
 mod event_journal;
 mod server;
+mod worker_roles;
 
 #[tokio::main]
 async fn main() {
