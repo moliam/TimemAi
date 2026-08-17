@@ -619,6 +619,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".working-chip.work-title-chip { min-height: 24px; padding: 0 9px 0 7px; border: 1px solid #4b4b4b; border-radius: 999px; background: #303030; }");
     expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 76px; color: #8fc9f1; font-size: 10px; font-weight: 700; letter-spacing: 0; }");
     expect(styles).toContain(".turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 6px; color: #aaa; font-size: 12px;");
+    expect(source).toContain('<span className="activity-thinking-dot" aria-hidden="true"/>');
+    expect(source).not.toContain('activity.tone === "thinking" ? "💡"');
+    expect(styles).toContain(".activity-thinking-dot { width: 5px; height: 5px; border-radius: 50%; background: #111; }");
   });
 
   it("renders Thought Action as an independent trigger attached to a softly tinted process panel", () => {

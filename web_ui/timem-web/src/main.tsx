@@ -2113,7 +2113,7 @@ function ActivityView({ activity }: { activity: Activity }) {
  if (activity.kind === "toolgen") return <ToolGenNotice activity={activity}/>;
  if (activity.tone === "action") return <ToolActivity activity={activity}/>;
  return <div className={`turn-work-item ${activity.tone}`}>
- <span className="activity-mark">{activity.tone === "thinking" ? "💡" : activity.tone === "warning" ? "⚠️" : activity.tone === "error" ? "×" : "i"}</span>
+ <span className="activity-mark">{activity.tone === "thinking" ? <span className="activity-thinking-dot" aria-hidden="true"/> : activity.tone === "warning" ? "⚠️" : activity.tone === "error" ? "×" : "i"}</span>
  <div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}</div>
  </div>;
 }
