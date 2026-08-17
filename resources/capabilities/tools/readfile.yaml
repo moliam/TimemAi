@@ -6,12 +6,15 @@ summary: Read a bounded range from a normal text file.
 prompt_synopsis: |
   {"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80},"max_bytes":32768}}
   {"readfile":{"path":"logs/app.log","starter":{"byte_nr":0},"ender":{"byte_nr":4095},"max_bytes":4096}}
+  {"readfile":{"path":"logs/app.log","max_bytes":4096,"tail_out":true}}
   {"readfile":{"path":"src/main.rs","starter":{"match":"fn main"},"ender":{"match":"}"},"max_bytes":32768}}
 description: |
   Prefer `readfile` over shell commands for reading normal text files. Relative
   paths resolve from the current session cwd. The tool is read-only, rejects
   directories and special files, decodes text strictly, and always bounds the
-  returned content. Each read has a default execution timeout of 10 seconds.
+  returned content. Set `tail_out=true` to retain the end of an oversized
+  selected range instead of its beginning. Each read has a default execution
+  timeout of 10 seconds.
 input_schema: |
   {
     "type": "object",
@@ -37,7 +40,8 @@ input_schema: |
           "match": {"type": "string", "description": "End after the last complete exact match in the max_bytes window."}
         }
       },
-      "max_bytes": {"type": ">0 integer", "description": "Maximum returned UTF-8 content bytes. Default and maximum 32768."}
+      "max_bytes": {"type": ">0 integer", "description": "Maximum returned UTF-8 content bytes. Default and maximum 32768."},
+      "tail_out": {"type": "boolean", "description": "When true, an oversized selected range retains its ending and places a truncation notice before the content. Default: false."}
     }
   }
 example_json: |

@@ -488,6 +488,7 @@ pub(crate) enum PendingApprovedAction {
         session_id: String,
         turn_id: String,
         cwd: PathBuf,
+        tail_out: bool,
     },
     ToolgenPublish {
         repo: SessionToolRepo,
@@ -516,6 +517,7 @@ impl PendingApprovedAction {
                 session_id,
                 turn_id,
                 cwd,
+                tail_out,
             } => json!({
                 "command": command,
                 "background": background,
@@ -526,6 +528,7 @@ impl PendingApprovedAction {
                 "session_id": session_id,
                 "turn_id": turn_id,
                 "cwd": cwd,
+                "tail_out": tail_out,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -2531,7 +2534,8 @@ impl AgentCore {
                     session_id,
                     turn_id,
                     cwd,
-                } => shell_exec::execute_approved_bash(
+                    tail_out,
+                } => shell_exec::execute_approved_bash_with_tail(
                     command,
                     cwd,
                     *background,
@@ -2541,6 +2545,7 @@ impl AgentCore {
                     session_id,
                     turn_id,
                     interval_ms.is_none(),
+                    *tail_out,
                     &pending.request,
                     &self.shell_jobs,
                     runtime,
@@ -3634,10 +3639,11 @@ impl AgentCore {
                     session_id,
                     turn_id,
                     cwd,
+                    tail_out,
                 } => {
                     let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
-                    shell_exec::execute_approved_bash(
+                    shell_exec::execute_approved_bash_with_tail(
                         command,
                         cwd,
                         *background,
@@ -3647,6 +3653,7 @@ impl AgentCore {
                         session_id,
                         turn_id,
                         interval_ms.is_none(),
+                        *tail_out,
                         &pending_for_thread.request,
                         &shell_jobs,
                         &mut runtime,
@@ -3692,7 +3699,7 @@ impl AgentCore {
             } else {
                 let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
-                shell_exec::execute_run_bash(
+                shell_exec::execute_run_bash_with_tail(
                     &command,
                     &cwd,
                     action.background(),
@@ -3708,6 +3715,7 @@ impl AgentCore {
                     &session_id,
                     &turn_id,
                     is_regular_command,
+                    action.input_bool("tail_out"),
                     &mut runtime,
                 )
             };

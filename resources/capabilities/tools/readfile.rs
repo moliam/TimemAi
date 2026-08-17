@@ -173,7 +173,7 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
     if let Some(field) = object.keys().find(|field| {
         !matches!(
             field.as_str(),
-            "path" | "encoding" | "starter" | "ender" | "max_bytes"
+            "path" | "encoding" | "starter" | "ender" | "max_bytes" | "tail_out"
         )
     }) {
         return Err(ReadfileError::new(
@@ -193,6 +193,7 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
     }
 
     let max_bytes = parse_max_bytes(object.get("max_bytes"))?;
+    let tail_out = parse_tail_out(object.get("tail_out"))?;
     let starter = parse_selector(object.get("starter"), "starter")?;
     let ender = parse_selector(object.get("ender"), "ender")?;
     let requested_encoding = parse_encoding_label(object.get("encoding"))?;
@@ -245,31 +246,69 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
         ));
     }
 
-    let start = resolve_start(starter.as_ref(), text, &raw, encoding, bom_len)?;
-    let window_end = floor_char_boundary(text, start.saturating_add(max_bytes).min(text.len()));
+    let requested_start = resolve_start(starter.as_ref(), text, &raw, encoding, bom_len)?;
+    let selector_window_end = if tail_out {
+        text.len()
+    } else {
+        floor_char_boundary(
+            text,
+            requested_start.saturating_add(max_bytes).min(text.len()),
+        )
+    };
     let (requested_end, match_window_limited) = resolve_end(
         ender.as_ref(),
         text,
         &raw,
         encoding,
         bom_len,
-        start,
-        window_end,
+        requested_start,
+        selector_window_end,
     )?;
-    if requested_end < start || (requested_end == start && ender.is_some() && !text.is_empty()) {
+    if requested_end < requested_start
+        || (requested_end == requested_start && ender.is_some() && !text.is_empty())
+    {
         return Err(ReadfileError::new(
             "range_before_start",
             "The inclusive end selector resolves before the start selector.",
         ));
     }
-    let end = floor_char_boundary(text, requested_end.min(window_end));
-    let limited =
-        end < requested_end || match_window_limited || (ender.is_none() && end < text.len());
+
+    let (start, end) = if tail_out {
+        let earliest = requested_end.saturating_sub(max_bytes).max(requested_start);
+        (
+            ceil_char_boundary(text, earliest),
+            floor_char_boundary(text, requested_end),
+        )
+    } else {
+        (
+            requested_start,
+            floor_char_boundary(text, requested_end.min(selector_window_end)),
+        )
+    };
+    let limited = start > requested_start
+        || end < requested_end
+        || match_window_limited
+        || (ender.is_none() && !tail_out && end < text.len());
     let content = &text[start..end];
+    let rendered_content = if limited {
+        if tail_out {
+            let truncated_words = text[requested_start..start].split_whitespace().count();
+            format!(
+                "!!!Too long, {truncated_words} words truncated before. Generate more actions if necessary !!!\n{content}"
+            )
+        } else {
+            let truncated_words = text[end..requested_end].split_whitespace().count();
+            format!(
+                "{content}\n!!!Too long, {truncated_words} words truncated after. Generate more actions if necessary !!!"
+            )
+        }
+    } else {
+        content.to_string()
+    };
     let canonical = fs::canonicalize(&candidate).unwrap_or(candidate);
 
     Ok(format!(
-        "Action result: readfile\nstatus: ok\npath: {}\nencoding: {}\nfile_bytes: {}\nstart_utf8_byte: {}\nend_utf8_byte_exclusive: {}\ncontent_bytes: {}\nlimited: {}\ncontent:\n{}",
+        "Action result: readfile\nstatus: ok\npath: {}\nencoding: {}\nfile_bytes: {}\nstart_utf8_byte: {}\nend_utf8_byte_exclusive: {}\ncontent_bytes: {}\nlimited: {}\ntail_out: {}\ncontent:\n{}",
         quote(&canonical.to_string_lossy()),
         encoding.name(),
         raw.len(),
@@ -277,8 +316,18 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
         end,
         content.len(),
         limited,
-        content
+        tail_out,
+        rendered_content
     ))
+}
+
+fn parse_tail_out(value: Option<&Value>) -> Result<bool, ReadfileError> {
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    value
+        .as_bool()
+        .ok_or_else(|| ReadfileError::new("invalid_tail_out", "`tail_out` must be a boolean."))
 }
 
 fn parse_max_bytes(value: Option<&Value>) -> Result<usize, ReadfileError> {
@@ -609,6 +658,13 @@ fn next_line_end(text: &str, start: usize) -> Option<(usize, bool)> {
         }
     }
     Some((text.len(), false))
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn floor_char_boundary(text: &str, mut index: usize) -> usize {

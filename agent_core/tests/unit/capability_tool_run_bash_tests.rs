@@ -100,6 +100,7 @@ fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_trunca
         signal: None,
         output,
         error: None,
+        tail_out: false,
     }
     .to_action_result("run_bash");
 
@@ -107,7 +108,7 @@ fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_trunca
     assert_eq!(
         rendered_output,
         format!(
-            "{} !!!Too long, 3 words truncated. Generate more actions if necessary !!!",
+            "{} \n!!!Too long, 3 words truncated after. Generate more actions if necessary !!!",
             "x".repeat(MAX_BASH_OUTPUT_CHARS - 1)
         )
     );
@@ -1037,5 +1038,166 @@ fn run_bash_allows_safe_tmp_delete() {
             assert!(!target.exists(), "safe temp dir should be removable");
         }
         other => panic!("expected safe command to run, got {other:?}"),
+    }
+}
+
+#[test]
+fn compact_text_can_retain_the_tail_with_unicode_safely() {
+    let forward = compact_text_with_tail("BEGIN α β γ END", 8, false);
+    assert!(forward.starts_with("BEGIN α "), "{forward}");
+    assert!(forward.contains("\n!!!Too long,"));
+    assert!(forward.contains("truncated after"));
+    assert!(!forward.ends_with("γ END"));
+
+    let tail = compact_text_with_tail("BEGIN α β γ END", 7, true);
+    assert!(tail.starts_with("!!!Too long,"), "{tail}");
+    assert!(tail.contains("truncated before"));
+    assert!(tail.ends_with("β γ END"), "{tail}");
+    assert!(!tail.contains('�'));
+}
+
+#[test]
+fn foreground_run_bash_tail_out_retains_final_summary() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("foreground_tail_out"));
+    let cwd = tmp_cwd("foreground_tail_out");
+    let command =
+        "printf BEGIN_MARKER; i=0; while [ $i -lt 33000 ]; do printf x; i=$((i+1)); done; printf END_MARKER"
+            .to_string();
+
+    let result = execute_run_bash_with_tail(
+        &command,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_tail",
+        "turn_tail",
+        true,
+        true,
+        &mut NeverCancelRuntime,
+    );
+    let ActionExecution::Completed(outcome) = result else {
+        panic!("approve mode should execute directly");
+    };
+
+    assert_eq!(outcome.status, ActionStatus::Completed);
+    let rendered_output = outcome
+        .text
+        .split_once("Output:\n")
+        .expect("finished result should contain an output section")
+        .1;
+    assert!(
+        rendered_output.contains("truncated before"),
+        "{rendered_output}"
+    );
+    assert!(rendered_output.contains("END_MARKER"), "{rendered_output}");
+    assert!(
+        !rendered_output.contains("BEGIN_MARKER"),
+        "{rendered_output}"
+    );
+}
+
+#[test]
+fn polling_tail_out_retains_last_output_summary() {
+    let cwd = tmp_cwd("polling_tail_out");
+    let command =
+        "printf BEGIN_MARKER; i=0; while [ $i -lt 33000 ]; do printf x; i=$((i+1)); done; printf END_MARKER; exit 0"
+            .to_string();
+    let outcome = execute_polling_bash_outcome_with_tail(
+        &command,
+        &cwd,
+        10,
+        5000,
+        5000,
+        true,
+        &mut NeverCancelRuntime,
+    );
+
+    assert_eq!(outcome.status, ActionStatus::Completed);
+    let last_output = outcome
+        .text
+        .split_once("Last output:\n")
+        .expect("polling result should contain a last-output section")
+        .1;
+    assert!(last_output.contains("truncated before"), "{last_output}");
+    assert!(last_output.contains("END_MARKER"), "{last_output}");
+    assert!(!last_output.contains("BEGIN_MARKER"), "{last_output}");
+}
+
+#[test]
+fn background_tail_out_is_persisted_until_exit_refresh() {
+    let dir = tmp_memory_dir("background_tail_out");
+    let store = FileShellJobStore::new(&dir);
+    let command =
+        "printf BEGIN_MARKER; i=0; while [ $i -lt 33000 ]; do printf x; i=$((i+1)); done; printf END_MARKER"
+            .to_string();
+    let started = store.spawn_background_outcome(
+        &command,
+        &dir,
+        "session_tail_background",
+        "turn_tail_background",
+        true,
+    );
+    assert_eq!(started.status, ActionStatus::BackgroundRunning);
+
+    let record = store
+        .guard
+        .with_read(|| store.records_unlocked().into_iter().next())
+        .unwrap()
+        .expect("persisted background record");
+    assert!(record.tail_out);
+
+    let wait_started = Instant::now();
+    let update = loop {
+        let (_, updates) = store.refresh_for_session("session_tail_background");
+        if let Some(update) = updates.into_iter().next() {
+            break update;
+        }
+        assert!(
+            wait_started.elapsed() < Duration::from_secs(5),
+            "tail background command did not finish"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    assert!(
+        update.output.contains("truncated before"),
+        "{}",
+        update.output
+    );
+    assert!(update.output.contains("END_MARKER"), "{}", update.output);
+    assert!(!update.output.contains("BEGIN_MARKER"), "{}", update.output);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn approval_pending_action_preserves_tail_out() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("approval_tail_out"));
+    let cwd = tmp_cwd("approval_tail_out");
+    let result = execute_run_bash_with_tail(
+        "printf approved",
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Ask,
+        &store,
+        "session_approval_tail",
+        "turn_approval_tail",
+        true,
+        true,
+        &mut NeverCancelRuntime,
+    );
+
+    let ActionExecution::NeedsApproval(pending) = result else {
+        panic!("ask mode should return an approval request");
+    };
+    match pending.approved_action {
+        PendingApprovedAction::RunBash { tail_out, .. } => assert!(tail_out),
+        other => panic!("unexpected pending action: {other:?}"),
     }
 }
