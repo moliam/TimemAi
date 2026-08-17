@@ -1,5 +1,5 @@
 use crate::response_protocol::ParsedAction;
-use crate::AgentCore;
+use crate::{ActionOutcome, AgentCore};
 use encoding_rs::{Encoding, UTF_8};
 use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
@@ -117,41 +117,49 @@ impl ReadfileError {
     }
 }
 
-pub(crate) fn execute_action(core: &AgentCore, action: &ParsedAction) -> String {
-    execute_with_timeout(
+pub(crate) fn execute_action_outcome(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
+    execute_with_timeout_outcome(
         core.current_prompt_cwd(),
         &action.raw_input,
         DEFAULT_TIMEOUT,
     )
 }
 
-pub(crate) fn execute_with_timeout(cwd: &Path, input: &Value, timeout: Duration) -> String {
+pub(crate) fn execute_with_timeout_outcome(
+    cwd: &Path,
+    input: &Value,
+    timeout: Duration,
+) -> ActionOutcome {
     let cwd = cwd.to_path_buf();
     let input = input.clone();
     let path = input_path(&input).unwrap_or("<unknown>").to_string();
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result = execute(&cwd, &input);
-        let _ = sender.send(result);
+        let outcome = execute_outcome(&cwd, &input);
+        let _ = sender.send(outcome);
     });
 
     match receiver.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => format!(
+        Ok(outcome) => outcome,
+        Err(mpsc::RecvTimeoutError::Timeout) => ActionOutcome::timeout(format!(
             "Action result: readfile\nstatus: error\npath: {}\nerror: timeout\nmessage: The readfile operation exceeded its execution timeout.",
             quote(&path)
-        ),
-        Err(mpsc::RecvTimeoutError::Disconnected) => format!(
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => ActionOutcome::failed(format!(
             "Action result: readfile\nstatus: error\npath: {}\nerror: builtin_action_panicked\nmessage: The readfile worker failed internally. Timem isolated the failure and remains available.",
             quote(&path)
-        ),
+        )),
     }
 }
 
 pub fn execute(cwd: &Path, input: &Value) -> String {
+    execute_outcome(cwd, input).text
+}
+
+pub(crate) fn execute_outcome(cwd: &Path, input: &Value) -> ActionOutcome {
     match execute_inner(cwd, input) {
-        Ok(result) => result,
-        Err(error) => error_result(input_path(input), &error),
+        Ok(result) => ActionOutcome::completed(result),
+        Err(error) => ActionOutcome::failed(error_result(input_path(input), &error)),
     }
 }
 

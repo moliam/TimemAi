@@ -62,7 +62,7 @@ fn execute_capmgr(
     action: &ParsedAction,
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    ActionExecution::Completed(capmgr::execute_action(core, action))
+    ActionExecution::Completed(capmgr::execute_action_outcome(core, action))
 }
 
 fn execute_memmgr(
@@ -70,7 +70,7 @@ fn execute_memmgr(
     action: &ParsedAction,
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    ActionExecution::Completed(memmgr::execute(core, action))
+    ActionExecution::Completed(memmgr::execute_outcome(core, action))
 }
 
 fn execute_self_tool(
@@ -78,7 +78,7 @@ fn execute_self_tool(
     action: &ParsedAction,
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    ActionExecution::Completed(self_tool::execute_action(core, action))
+    ActionExecution::Completed(self_tool::execute_action_outcome(core, action))
 }
 
 fn execute_readfile(
@@ -86,7 +86,7 @@ fn execute_readfile(
     action: &ParsedAction,
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    ActionExecution::Completed(readfile::execute_action(core, action))
+    ActionExecution::Completed(readfile::execute_action_outcome(core, action))
 }
 
 fn execute_run_bash(

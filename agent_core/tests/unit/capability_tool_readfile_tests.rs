@@ -39,6 +39,50 @@ fn default_execution_timeout_is_ten_seconds() {
 }
 
 #[test]
+fn successful_read_status_is_independent_of_payload_words() {
+    let dir = TempDir::new("structured_status_payload");
+    let payload = "timeout_secs=30\nerror: documentation example\ncancelled is a word\n";
+    fs::write(dir.path().join("status-words.txt"), payload).unwrap();
+
+    let outcome = execute_outcome(dir.path(), &json!({"path": "status-words.txt"}));
+
+    assert_eq!(outcome.status, crate::ActionStatus::Completed);
+    assert!(outcome.text.contains("timeout_secs=30"), "{}", outcome.text);
+    assert!(
+        outcome.text.contains("error: documentation example"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("cancelled is a word"),
+        "{}",
+        outcome.text
+    );
+}
+
+#[test]
+fn blocked_read_has_structured_timeout_status() {
+    let dir = TempDir::new("structured_timeout");
+    fs::write(dir.path().join("slow.txt"), "eventual content").unwrap();
+    let probe = install_test_parallel_read_probe(
+        dir.path().to_path_buf(),
+        std::time::Duration::from_millis(100),
+    );
+
+    let outcome = execute_with_timeout_outcome(
+        dir.path(),
+        &json!({"path": "slow.txt"}),
+        std::time::Duration::from_millis(10),
+    );
+
+    assert_eq!(outcome.status, crate::ActionStatus::Timeout);
+    assert!(outcome.text.contains("error: timeout"), "{}", outcome.text);
+
+    thread::sleep(std::time::Duration::from_millis(120));
+    drop(probe);
+}
+
+#[test]
 fn blocked_read_returns_timeout_error_after_wait_limit() {
     let dir = TempDir::new("timeout");
     fs::write(dir.path().join("slow.txt"), "eventual content").unwrap();
@@ -48,15 +92,16 @@ fn blocked_read_returns_timeout_error_after_wait_limit() {
     );
 
     let started = std::time::Instant::now();
-    let result = execute_with_timeout(
+    let outcome = execute_with_timeout_outcome(
         dir.path(),
         &json!({"path": "slow.txt"}),
         std::time::Duration::from_millis(10),
     );
     let elapsed = started.elapsed();
 
-    assert!(result.contains("status: error"), "{result}");
-    assert!(result.contains("error: timeout"), "{result}");
+    assert_eq!(outcome.status, crate::ActionStatus::Timeout);
+    assert!(outcome.text.contains("status: error"), "{}", outcome.text);
+    assert!(outcome.text.contains("error: timeout"), "{}", outcome.text);
     assert!(
         elapsed < std::time::Duration::from_millis(80),
         "readfile timeout returned too late: {elapsed:?}"

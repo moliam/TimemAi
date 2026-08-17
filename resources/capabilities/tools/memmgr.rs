@@ -1,7 +1,7 @@
 use crate::response_protocol::ParsedAction;
 use crate::{
     compact_text, format_scratch_read_result, format_scratch_write_result,
-    scratch_label_for_display, AgentCore,
+    scratch_label_for_display, ActionOutcome, AgentCore,
 };
 
 pub fn normalize_scratch_kind(scratch_type: &str) -> String {
@@ -11,7 +11,7 @@ pub fn normalize_scratch_kind(scratch_type: &str) -> String {
     }
 }
 
-pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
+pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> ActionOutcome {
     let mem_type = action.input_lower("type");
     let op = action.input_lower("op");
     let search_text = action.input_str("search_text");
@@ -25,10 +25,11 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
     let after_ms = action.input_i64("after_ms");
     let before_ms = action.input_i64("before_ms");
     let expected_version = action.input_u64("expected_version");
+
     match (mem_type.as_str(), op.as_str()) {
         ("durable", "schema") => {
             core.current_stats.mem_reads += 1;
-            core.memory.schema_text(&core.chat_history)
+            ActionOutcome::completed(core.memory.schema_text(&core.chat_history))
         }
         ("durable", "sql") | ("raw_chat", "sql") => {
             core.current_stats.mem_reads += 1;
@@ -37,7 +38,7 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 .sql_read(&core.chat_history, &sql, &params, limit)
             {
                 Ok(rows) if rows.is_empty() => {
-                    if mem_type == "durable" {
+                    let text = if mem_type == "durable" {
                         let total_rows = core.memory.count().unwrap_or_default();
                         format!(
                             "Action result: memmgr\ntype: durable\nop: sql\nsql: {}\nresults: none\ndurable_memory_total_rows: {}",
@@ -48,7 +49,8 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                             "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults: none",
                             mem_type, sql
                         )
-                    }
+                    };
+                    ActionOutcome::completed(text)
                 }
                 Ok(rows) => {
                     let lines = rows
@@ -63,42 +65,48 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    format!(
+                    ActionOutcome::completed(format!(
                         "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nresults:\n{}",
                         mem_type, sql, lines
-                    )
+                    ))
                 }
-                Err(err) => format!(
+                Err(err) => ActionOutcome::failed(format!(
                     "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nerror: {}",
                     mem_type, sql, err
-                ),
+                )),
             }
         }
         ("durable", "insert" | "update" | "upsert" | "delete") => {
             match core.memory.update(&op, &id, &content, expected_version) {
                 Ok(result) => {
                     core.current_stats.mem_writes += 1;
-                    result
+                    ActionOutcome::completed(result)
                 }
-                Err(err) => {
-                    format!(
-                        "Action result: memmgr\ntype: durable\nop: {}\nerror: {}",
-                        op, err
-                    )
-                }
+                Err(err) => ActionOutcome::failed(format!(
+                    "Action result: memmgr\ntype: durable\nop: {}\nerror: {}",
+                    op, err
+                )),
             }
         }
         ("raw_chat", "search") => {
-            let rows = core
+            let rows = match core
                 .chat_history
                 .query(&search_text, limit, after_ms, before_ms)
-                .unwrap_or_default();
+            {
+                Ok(rows) => rows,
+                Err(err) => {
+                    return ActionOutcome::failed(format!(
+                        "Action result: memmgr\ntype: raw_chat\nop: search\nerror: {}",
+                        err
+                    ));
+                }
+            };
             let delta_rows = core.query_prompt_slices(&search_text, limit, after_ms, before_ms);
             if rows.is_empty() && delta_rows.is_empty() {
-                format!(
+                ActionOutcome::completed(format!(
                     "Action result: memmgr\ntype: raw_chat\nop: search\nsearch_text: {}\nresults: none",
                     search_text
-                )
+                ))
             } else {
                 let mut sections = Vec::new();
                 if !rows.is_empty() {
@@ -137,11 +145,11 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                         .join("\n");
                     sections.push(format!("current_prompt_deltas:\n{}", lines));
                 }
-                format!(
+                ActionOutcome::completed(format!(
                     "Action result: memmgr\ntype: raw_chat\nop: search\nsearch_text: {}\nresults:\n{}",
                     search_text,
                     sections.join("\n")
-                )
+                ))
             }
         }
         ("raw_chat", "delete") => {
@@ -149,44 +157,45 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                 .chat_history
                 .delete(&id, &search_text, limit, after_ms, before_ms)
             {
-                Ok(deleted) => format!(
+                Ok(deleted) => ActionOutcome::completed(format!(
                     "Action result: memmgr\ntype: raw_chat\nop: delete\nid: {}\nsearch_text: {}\ndeleted_count: {}",
                     id, search_text, deleted
-                ),
-                Err(err) => {
-                    format!("Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}", err)
-                }
+                )),
+                Err(err) => ActionOutcome::failed(format!(
+                    "Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}",
+                    err
+                )),
             }
         }
         ("scratch", "write") => {
             let scratch_type = normalize_scratch_kind(&scratch_type);
-            let write_result = core
+            match core
                 .scratch
-                .write_record(&scratch_type, &label, &content, &[], &[]);
-            match write_result {
-                Ok(record) => format_scratch_write_result(&record),
-                Err(err) => format!(
+                .write_record(&scratch_type, &label, &content, &[], &[])
+            {
+                Ok(record) => ActionOutcome::completed(format_scratch_write_result(&record)),
+                Err(err) => ActionOutcome::failed(format!(
                     "Action result: memmgr\ntype: scratch\nop: write\nerror: {}",
                     err
-                ),
+                )),
             }
         }
         ("scratch", "read") => match core.scratch.read(&id) {
-            Ok(Some(record)) => format_scratch_read_result(&record),
-            Ok(None) => format!(
+            Ok(Some(record)) => ActionOutcome::completed(format_scratch_read_result(&record)),
+            Ok(None) => ActionOutcome::completed(format!(
                 "Action result: memmgr\ntype: scratch\nop: read\nid: {}\nfound: false",
                 id
-            ),
-            Err(err) => format!(
+            )),
+            Err(err) => ActionOutcome::failed(format!(
                 "Action result: memmgr\ntype: scratch\nop: read\nerror: {}",
                 err
-            ),
+            )),
         },
         ("scratch", "search") => match core.scratch.query(&search_text, limit) {
-            Ok(rows) if rows.is_empty() => format!(
+            Ok(rows) if rows.is_empty() => ActionOutcome::completed(format!(
                 "Action result: memmgr\ntype: scratch\nop: search\nsearch_text: {}\nresults: none",
                 search_text
-            ),
+            )),
             Ok(rows) => {
                 let lines = rows
                     .into_iter()
@@ -202,34 +211,34 @@ pub(crate) fn execute(core: &mut AgentCore, action: &ParsedAction) -> String {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                format!(
-                    "Action result: memmgr\ntype: scratch\nop: search\nsearch_text: {}\nresults:\n{}",
-                    search_text, lines
-                )
+                ActionOutcome::completed(format!(
+                        "Action result: memmgr\ntype: scratch\nop: search\nsearch_text: {}\nresults:\n{}",
+                        search_text, lines
+                    ))
             }
-            Err(err) => format!(
+            Err(err) => ActionOutcome::failed(format!(
                 "Action result: memmgr\ntype: scratch\nop: search\nerror: {}",
                 err
-            ),
+            )),
         },
         ("scratch", "delete") => match core.scratch.delete(&id) {
-            Ok(true) => format!(
+            Ok(true) => ActionOutcome::completed(format!(
                 "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: true",
                 id
-            ),
-            Ok(false) => format!(
+            )),
+            Ok(false) => ActionOutcome::completed(format!(
                 "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: false",
                 id
-            ),
-            Err(err) => format!(
+            )),
+            Err(err) => ActionOutcome::failed(format!(
                 "Action result: memmgr\ntype: scratch\nop: delete\nerror: {}",
                 err
-            ),
+            )),
         },
-        _ => format!(
+        _ => ActionOutcome::failed(format!(
             "Action result: memmgr\ntype: {}\nop: {}\nerror: unsupported_type_or_op",
             mem_type, op
-        ),
+        )),
     }
 }
 

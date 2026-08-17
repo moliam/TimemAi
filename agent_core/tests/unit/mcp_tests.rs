@@ -50,6 +50,44 @@ fn stdio_client_initializes_discovers_and_calls_tool() {
 }
 
 #[test]
+fn mcp_tool_error_has_structured_failed_status() {
+    let script = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *\"method\":\"initialize\"*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}}'
+      ;;
+    *\"method\":\"tools/list\"*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fails","description":"Fails structurally","inputSchema":{"type":"object"}}]}}'
+      ;;
+    *\"method\":\"tools/call\"*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ordinary payload text"}],"isError":true}}'
+      ;;
+  esac
+done
+"#;
+    let runtime = McpRuntime::default();
+    let config = stdio_config(script);
+    runtime.connect(&config).unwrap();
+
+    let outcome = runtime
+        .call_tool_outcome(&config, "fails", &json!({}))
+        .unwrap();
+
+    assert_eq!(outcome.status, crate::ActionStatus::Failed);
+    assert!(
+        outcome.text.contains("status: tool_error"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("ordinary payload text"),
+        "{}",
+        outcome.text
+    );
+}
+
+#[test]
 fn legacy_sse_client_discovers_and_calls_tool() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

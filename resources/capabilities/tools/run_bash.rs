@@ -1,8 +1,8 @@
 use crate::response_protocol::ParsedAction;
 use crate::MemGuard;
 use crate::{
-    ActionExecution, ActionRuntime, AgentCore, ApprovalRequest, BashApprovalMode,
-    LongRunningCommandStatus, PendingApproval, PendingApprovedAction,
+    ActionExecution, ActionOutcome, ActionRuntime, ActionStatus, AgentCore, ApprovalRequest,
+    BashApprovalMode, LongRunningCommandStatus, PendingApproval, PendingApprovedAction,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -251,27 +251,38 @@ impl FileShellJobStore {
         session_id: &str,
         turn_id: &str,
     ) -> String {
+        self.spawn_background_outcome(command, cwd, session_id, turn_id)
+            .text
+    }
+
+    pub(crate) fn spawn_background_outcome(
+        &self,
+        command: &str,
+        cwd: &Path,
+        session_id: &str,
+        turn_id: &str,
+    ) -> ActionOutcome {
         let clean = command.trim();
         if clean.is_empty() {
-            return bash_action_not_executed(
+            return ActionOutcome::failed(bash_action_not_executed(
                 None,
                 "The background command was not started because no shell command was provided.",
-            );
+            ));
         }
         let record = match self.spawn_record(clean, cwd, "background", session_id, turn_id) {
             Ok(record) => record,
             Err(_) => {
-                return bash_action_not_executed(
+                return ActionOutcome::failed(bash_action_not_executed(
                     Some(clean),
                     "The background command could not be started by the local shell.",
-                )
+                ));
             }
         };
         let _ = self.append(&record);
-        format!(
+        ActionOutcome::background_running(format!(
             "Action result: run_bash\npid={}, now keeps running in background\nCommand: {}",
             record.pid, clean
-        )
+        ))
     }
 
     fn spawn_record(
@@ -330,9 +341,21 @@ impl FileShellJobStore {
         turn_id: &str,
         runtime: &mut dyn ActionRuntime,
     ) -> String {
-        let result = self
-            .run_with_timeout_structured(command, cwd, timeout_ms, session_id, turn_id, runtime);
-        result.to_action_result("run_bash")
+        self.run_with_timeout_outcome(command, cwd, timeout_ms, session_id, turn_id, runtime)
+            .text
+    }
+
+    pub(crate) fn run_with_timeout_outcome(
+        &self,
+        command: &str,
+        cwd: &Path,
+        timeout_ms: i64,
+        session_id: &str,
+        turn_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> ActionOutcome {
+        self.run_with_timeout_structured(command, cwd, timeout_ms, session_id, turn_id, runtime)
+            .to_action_outcome("run_bash")
     }
 
     pub fn run_with_timeout_structured(
@@ -877,10 +900,10 @@ pub(crate) fn execute_run_bash_action(
 ) -> ActionExecution {
     let loop_command = action.input_str("loop_cmd");
     if !loop_command.is_empty() && !action.input_str("cmd").is_empty() {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             None,
             "The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
-        ));
+        )));
     }
     let is_regular_command = loop_command.is_empty();
     let command_to_run = if is_regular_command {
@@ -930,52 +953,52 @@ pub(crate) fn execute_run_bash(
 ) -> ActionExecution {
     let command_to_run = command.trim();
     if command_to_run.is_empty() {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             None,
             "The command was not executed because no shell command was provided.",
-        ));
+        )));
     }
     if let Err(reason) = validate_bash_request(command_to_run) {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             Some(command_to_run),
             bash_validation_message(&reason),
-        ));
+        )));
     }
     if !background && is_regular_command && timeout_ms <= 0 {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             Some(command_to_run),
             "timeout_ms must be a positive integer. Choose a wait budget that matches the command.",
-        ));
+        )));
     }
     if !background && !is_regular_command && timeout_ms <= 0 {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             Some(command_to_run),
             "loop_timeout_ms must be a positive integer. Choose a total polling wait budget that matches the external state you are waiting for.",
-        ));
+        )));
     }
     if !background && is_regular_command && contains_long_normal_sleep(command_to_run) {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             Some(command_to_run),
             "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.",
-        ));
+        )));
     }
     if background && interval_ms.is_some() {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             Some(command_to_run),
             "Polling mode and background mode cannot be combined. Use loop_cmd with interval_ms for polling, or background=true for a persistent background command.",
-        ));
+        )));
     }
     if interval_ms.is_some() && is_regular_command {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             Some(command_to_run),
             "interval_ms is only valid with loop_cmd. Move the check command to loop_cmd, or remove interval_ms for a normal command.",
-        ));
+        )));
     }
     if interval_ms.is_none() && !is_regular_command {
-        return ActionExecution::Completed(bash_action_not_executed(
+        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
             Some(command_to_run),
             "loop_cmd needs interval_ms so the runtime knows how often to check the condition.",
-        ));
+        )));
     }
     if approval_mode == BashApprovalMode::Ask {
         return ActionExecution::NeedsApproval(PendingApproval {
@@ -1000,7 +1023,7 @@ pub(crate) fn execute_run_bash(
         });
     }
     if background {
-        return ActionExecution::Completed(shell_jobs.spawn_background(
+        return ActionExecution::Completed(shell_jobs.spawn_background_outcome(
             command_to_run,
             cwd,
             session_id,
@@ -1008,7 +1031,7 @@ pub(crate) fn execute_run_bash(
         ));
     }
     if let Some(interval_ms) = interval_ms {
-        return ActionExecution::Completed(execute_polling_bash(
+        return ActionExecution::Completed(execute_polling_bash_outcome(
             command_to_run,
             cwd,
             interval_ms,
@@ -1017,7 +1040,7 @@ pub(crate) fn execute_run_bash(
             runtime,
         ));
     }
-    ActionExecution::Completed(shell_jobs.run_with_timeout(
+    ActionExecution::Completed(shell_jobs.run_with_timeout_outcome(
         command_to_run,
         cwd,
         timeout_ms,
@@ -1041,20 +1064,23 @@ pub(crate) fn execute_approved_bash(
     request: &ApprovalRequest,
     shell_jobs: &FileShellJobStore,
     runtime: &mut dyn ActionRuntime,
-) -> String {
+) -> ActionOutcome {
     let clean = command.trim();
     if let Err(reason) = validate_bash_request(clean) {
-        let mut result = bash_action_not_executed(Some(clean), bash_validation_message(&reason));
-        result.push_str(&format!(
+        let mut outcome = ActionOutcome::failed(bash_action_not_executed(
+            Some(clean),
+            bash_validation_message(&reason),
+        ));
+        outcome.text.push_str(&format!(
             "\napproval_id: {}\napproval_status: approved_by_user",
             request.approval_id
         ));
-        return result;
+        return outcome;
     }
-    let mut result = if background {
-        shell_jobs.spawn_background(clean, cwd, session_id, turn_id)
+    let mut outcome = if background {
+        shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id)
     } else if let Some(interval_ms) = interval_ms {
-        execute_polling_bash(
+        execute_polling_bash_outcome(
             clean,
             cwd,
             interval_ms,
@@ -1063,13 +1089,13 @@ pub(crate) fn execute_approved_bash(
             runtime,
         )
     } else {
-        shell_jobs.run_with_timeout(clean, cwd, timeout_ms, session_id, turn_id, runtime)
+        shell_jobs.run_with_timeout_outcome(clean, cwd, timeout_ms, session_id, turn_id, runtime)
     };
-    result.push_str(&format!(
+    outcome.text.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
         request.approval_id
     ));
-    result
+    outcome
 }
 
 pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn ActionRuntime) -> String {
@@ -1077,14 +1103,14 @@ pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn Action
     execute_one_bash_structured(command, &cwd, timeout_ms, runtime).to_action_result("run_bash")
 }
 
-pub(crate) fn execute_polling_bash(
+pub(crate) fn execute_polling_bash_outcome(
     command: &str,
     cwd: &Path,
     interval_ms: u64,
     timeout_ms: i64,
     once_timeout_ms: u64,
     runtime: &mut dyn ActionRuntime,
-) -> String {
+) -> ActionOutcome {
     if timeout_ms <= 0 {
         return polling_result(
             command,
@@ -1184,7 +1210,7 @@ fn polling_result(
     last_status: Option<i32>,
     output: &str,
     error: Option<&str>,
-) -> String {
+) -> ActionOutcome {
     let state_sentence = match state {
         "finished" => "The polling command finished because the check command exited with code 0.",
         "timeout" => "The polling command stopped because the total wait budget was reached before the check command exited with code 0.",
@@ -1208,7 +1234,13 @@ fn polling_result(
         out.push_str("\nLast output:\n");
         out.push_str(&compact_text(output, MAX_BASH_OUTPUT_CHARS));
     }
-    out
+    let status = match state {
+        "finished" => ActionStatus::Completed,
+        "timeout" => ActionStatus::Timeout,
+        "cancelled" => ActionStatus::Cancelled,
+        _ => ActionStatus::Failed,
+    };
+    ActionOutcome::new(status, out)
 }
 
 fn sleep_cancelable(duration: Duration, cancelled: &mut impl FnMut() -> bool) {
@@ -1281,6 +1313,32 @@ pub struct BashCommandOutput {
 
 impl BashCommandOutput {
     pub fn to_action_result(&self, action_name: &str) -> String {
+        self.to_action_outcome(action_name).text
+    }
+
+    pub(crate) fn to_action_outcome(&self, action_name: &str) -> ActionOutcome {
+        let text = self.render_action_result(action_name);
+        let status = if let Some(error) = self.error.as_deref() {
+            match error {
+                "timeout" => ActionStatus::Timeout,
+                "cancelled" | "cancelled_by_user" => ActionStatus::Cancelled,
+                _ if error.starts_with("timeout_still_running:") => ActionStatus::Timeout,
+                _ if error.starts_with("long_running_still_running:") => {
+                    ActionStatus::BackgroundRunning
+                }
+                _ => ActionStatus::Failed,
+            }
+        } else if self.signal.is_some() {
+            ActionStatus::Failed
+        } else if self.status == Some(0) {
+            ActionStatus::Completed
+        } else {
+            ActionStatus::Failed
+        };
+        ActionOutcome::new(status, text)
+    }
+
+    fn render_action_result(&self, action_name: &str) -> String {
         if let Some(error) = &self.error {
             if let Some(details) = error.strip_prefix("long_running_still_running:") {
                 let (pid, elapsed_ms) = details.split_once(':').unwrap_or((details, "unknown"));
