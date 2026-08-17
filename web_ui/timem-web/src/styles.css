@@ -773,6 +773,7 @@ button:disabled { cursor: not-allowed; }
 .turn-work-item.warning .activity-mark,
 .turn-work-item.error .activity-mark,
 .turn-work-item.notice .activity-mark { width: 16px; height: 20px; padding: 0; background: transparent; color: #8d8d8d; font-size: 11px; }
+.activity-thinking-dot { width: 5px; height: 5px; border-radius: 50%; background: #111; }
 .turn-work-detail { color: #999; }
 .turn-work-item.thinking { font-size: 13.5px; line-height: 1.62; }
 .turn-work-item.thinking .turn-work-detail { color: #b8c2cc; }
@@ -905,6 +906,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .turn-work-item.warning .activity-mark,
 :root[data-theme="light"] .turn-work-item.error .activity-mark,
 :root[data-theme="light"] .turn-work-item.notice .activity-mark { background: transparent; color: #777; }
+:root[data-theme="light"] .activity-thinking-dot { background: #242424; }
 :root[data-theme="light"] .turn-work-detail { color: #666; }
 :root[data-theme="light"] .tool-activity summary:hover,
 :root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }
