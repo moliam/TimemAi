@@ -79,6 +79,32 @@ fn a_second_host_cannot_open_the_same_journal_until_the_owner_exits() {
 }
 
 #[test]
+fn instance_lock_publishes_recovery_metadata_for_a_second_launch() {
+    let path = journal_path("instance_info");
+    let mut journal = EventJournal::open(&path).unwrap();
+    let info = JournalInstanceInfo {
+        pid: 42,
+        port: Some(18080),
+        token: Some("private-token".to_string()),
+        browser_url: Some("http://127.0.0.1:18080/?token=private-token".to_string()),
+        public_access: false,
+        started_at_ms: 123,
+    };
+
+    journal.publish_instance_info(&info).unwrap();
+
+    assert_eq!(EventJournal::read_instance_info(&path), Some(info));
+    assert_eq!(
+        EventJournal::open(&path).unwrap_err(),
+        "event_journal_in_use"
+    );
+
+    drop(journal);
+    let _ = std::fs::remove_file(journal_lock_path(&path));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn snapshot_cursor_plus_replay_covers_an_event_during_snapshot_without_a_gap() {
     let path = journal_path("snapshot_gap");
     let mut journal = EventJournal::open(&path).unwrap();

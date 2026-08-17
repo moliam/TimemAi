@@ -22,7 +22,7 @@ pub(crate) struct JournalEvent {
 /// acknowledged only after the line and its metadata reach stable storage.
 #[derive(Debug)]
 pub(crate) struct EventJournal {
-    _instance_lock: JournalInstanceLock,
+    instance_lock: JournalInstanceLock,
     path: PathBuf,
     next_seq: u64,
     first_seq: Option<u64>,
@@ -66,7 +66,7 @@ impl EventJournal {
             .checked_add(1)
             .ok_or_else(|| "event_journal_sequence_exhausted".to_string())?;
         let mut journal = Self {
-            _instance_lock: instance_lock,
+            instance_lock,
             bytes: std::fs::metadata(&path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
@@ -83,6 +83,15 @@ impl EventJournal {
 
     pub fn cursor(&self) -> u64 {
         self.next_seq.saturating_sub(1)
+    }
+
+    pub fn publish_instance_info(&mut self, info: &JournalInstanceInfo) -> Result<(), String> {
+        self.instance_lock.write_info(info)
+    }
+
+    pub fn read_instance_info(path: impl AsRef<Path>) -> Option<JournalInstanceInfo> {
+        let raw = std::fs::read(journal_lock_path(path.as_ref())).ok()?;
+        serde_json::from_slice(&raw).ok()
     }
 
     /// The oldest cursor for which every later event is still replayable.
@@ -185,9 +194,35 @@ impl EventJournal {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct JournalInstanceInfo {
+    pub pid: u32,
+    pub port: Option<u16>,
+    pub token: Option<String>,
+    pub browser_url: Option<String>,
+    pub public_access: bool,
+    pub started_at_ms: u128,
+}
+
+impl JournalInstanceInfo {
+    pub fn starting() -> Self {
+        Self {
+            pid: std::process::id(),
+            port: None,
+            token: None,
+            browser_url: None,
+            public_access: false,
+            started_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct JournalInstanceLock {
-    _file: File,
+    file: File,
 }
 
 impl JournalInstanceLock {
@@ -215,6 +250,13 @@ impl JournalInstanceLock {
 
         #[cfg(unix)]
         {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("event_journal_lock_permissions_failed:{error}"))?;
+        }
+
+        #[cfg(unix)]
+        {
             use std::os::fd::AsRawFd;
             let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if result != 0 {
@@ -227,7 +269,20 @@ impl JournalInstanceLock {
             }
         }
 
-        Ok(Self { _file: file })
+        let mut instance_lock = Self { file };
+        instance_lock.write_info(&JournalInstanceInfo::starting())?;
+        Ok(instance_lock)
+    }
+
+    fn write_info(&mut self, info: &JournalInstanceInfo) -> Result<(), String> {
+        let encoded = serde_json::to_vec(info)
+            .map_err(|error| format!("event_journal_instance_serialize_failed:{error}"))?;
+        self.file
+            .set_len(0)
+            .and_then(|_| self.file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|_| self.file.write_all(&encoded))
+            .and_then(|_| self.file.sync_data())
+            .map_err(|error| format!("event_journal_instance_write_failed:{error}"))
     }
 }
 
