@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed unused capability `output_schema` declarations and parser state.
+  Tool manifests now describe fresh model submissions with `input_schema` and
+  describe executor-owned evidence with `prompt_result`.
+
 ## [1.1.3] - 2026-08-15
 
 ### Added

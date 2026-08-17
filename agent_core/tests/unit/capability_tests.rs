@@ -7,6 +7,7 @@ fn builtin_registry_loads_manifest_tools() {
 
     assert!(registry.contains_tool("memmgr"));
     assert!(registry.contains_tool("capmgr"));
+    assert!(registry.contains_tool("readfile"));
     assert!(registry.contains_tool("run_bash"));
     assert!(!registry.contains_tool("shell_job_status"));
     assert!(registry.contains_tool("self_tool"));
@@ -22,6 +23,7 @@ fn host_profile_filters_local_command_capabilities() {
 
     assert!(registry.contains_tool("memmgr"));
     assert!(registry.contains_tool("capmgr"));
+    assert!(registry.contains_tool("readfile"));
     assert!(registry.contains_tool("self_tool"));
     assert!(!registry.contains_tool("run_bash"));
     assert!(!registry.contains_tool("shell_job_status"));
@@ -47,6 +49,7 @@ fn host_profile_can_enable_local_command_capabilities_without_shell_ui() {
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
 
     assert!(registry.contains_tool("run_bash"));
+    assert!(registry.contains_tool("readfile"));
     assert!(!registry.contains_tool("shell_job_status"));
     assert!(!registry.contains_tool("tool_job_status"));
     assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
@@ -59,6 +62,7 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
 
     assert!(rendered.contains("#### `memmgr`"));
     assert!(!rendered.contains("#### `capmgr`"));
+    assert!(rendered.contains("#### `readfile`"));
     assert!(rendered.contains("#### `run_bash`"));
     assert!(!rendered.contains("#### `shell_job_status`"));
     assert!(!rendered.contains("#### `tool_job_status`"));
@@ -70,6 +74,10 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("**Synopsis**"));
     assert!(rendered.contains("**Options**"));
     assert!(rendered.contains("Unified local memory manager"));
+    assert!(rendered.contains("Read a bounded range from a normal text file"));
+    assert!(rendered.contains("Byte numbers address the original"));
+    assert!(rendered.contains("file bytes"));
+    assert!(rendered.contains("macOS and Linux"));
     assert!(rendered.contains("Ask for path when you need to know where something is"));
     assert!(rendered.contains("Ask for params when"));
     assert!(rendered.contains("Allowed: `path`, `params`"));
@@ -106,11 +114,55 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
 }
 
 #[test]
+fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
+    let registry = CapabilityRegistry::builtin();
+
+    let json = registry.render_tool_catalog_markdown_for_protocol("JSON");
+    let markdown = registry.render_tool_catalog_markdown_for_protocol("Markdown");
+    let xml = registry.render_tool_catalog_markdown_for_protocol("XML");
+
+    let json_action = r#"{"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80},"max_bytes":32768}}"#;
+    assert!(json.contains(json_action), "{json}");
+    assert!(markdown.contains(json_action), "{markdown}");
+    assert!(xml.contains("<readfile><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><line_nr>80</line_nr></ender><max_bytes>32768</max_bytes></readfile>"), "{xml}");
+    assert!(
+        xml.contains(
+            "<run_bash><cmd>git status --short</cmd><timeout_ms>5000</timeout_ms></run_bash>"
+        ),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<self_tool><type>path</type></self_tool>"),
+        "{xml}"
+    );
+    assert!(!xml.contains(json_action), "{xml}");
+    assert!(!xml.contains("run_bash cmd=<shell_command>"), "{xml}");
+}
+
+#[test]
+fn tool_catalog_is_injected_but_skill_headers_are_suppressed() {
+    let registry = CapabilityRegistry::builtin();
+
+    let tools_only = registry.enrich_static_prompt_for_protocol("{{TOOL_CATALOG}}", "XML");
+    let skills_only = registry.enrich_static_prompt("{{SKILL_HEADERS}}");
+
+    assert!(tools_only.contains("#### `readfile`"), "{tools_only}");
+    assert!(
+        tools_only.contains("`<readfile><path>src/main.rs</path>"),
+        "{tools_only}"
+    );
+    assert!(!tools_only.contains("{{TOOL_CATALOG}}"));
+    assert!(skills_only.trim().is_empty(), "{skills_only}");
+    assert!(!skills_only.contains("{{SKILL_HEADERS}}"));
+}
+
+#[test]
 fn registry_exposes_executor_binding_names() {
     let registry = CapabilityRegistry::builtin();
 
     assert_eq!(registry.binding_name("memmgr"), Some("memmgr"));
     assert_eq!(registry.binding_name("capmgr"), Some("capmgr"));
+    assert_eq!(registry.binding_name("readfile"), Some("readfile"));
     assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
     assert_eq!(registry.binding_name("shell_job_status"), None);
     assert_eq!(registry.binding_name("tool_job_status"), None);
@@ -126,6 +178,10 @@ fn registry_validates_required_input_fields_from_manifest() {
         .validate_action_input("capmgr", &json_object([]))
         .unwrap_err()
         .contains("input.op_required"));
+    assert!(registry
+        .validate_action_input("readfile", &json_object([]))
+        .unwrap_err()
+        .contains("input.path_required"));
     assert!(registry
         .validate_action_input(
             "memmgr",
@@ -424,7 +480,7 @@ fn registry_enriches_static_prompt_tool_catalog() {
     assert!(enriched.contains("#### `memmgr`"));
     assert!(!enriched.contains("\"release_quality_gate\""));
     assert!(enriched.contains("#### `run_bash`"));
-    assert!(enriched.contains("No optional skills are currently loaded."));
+    assert!(!enriched.contains("No optional skills are currently loaded."));
     assert!(!enriched.contains("{{TOOL_CATALOG}}"));
     assert!(!enriched.contains("{{SKILL_HEADERS}}"));
 }
@@ -469,8 +525,8 @@ fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
     }));
 
     let prompt = registry.render_tool_catalog_markdown();
-    assert!(prompt.contains("run_bash cmd=<shell_command>"));
-    assert!(prompt.contains("run_bash loop_cmd=<check_command>"));
+    assert!(prompt.contains(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":5000}}"#));
+    assert!(prompt.contains(r#"{"run_bash":{"loop_cmd":"test -f build/done""#));
     assert!(prompt.contains("loop_timeout_ms"));
     assert!(prompt.contains("once_timeout_ms"));
     assert!(!prompt.contains("check_timeout_ms"));
@@ -498,7 +554,7 @@ fn capmgr_can_list_and_load_skill_content() {
     assert!(loaded_tool.contains("manual:"));
     assert!(loaded_tool.contains("#### `run_bash`"));
     assert!(loaded_tool.contains("**Options**"));
-    assert!(loaded_tool.contains("run_bash cmd=<shell_command>"));
+    assert!(loaded_tool.contains(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":5000}}"#));
     assert!(!loaded_tool.contains("read_back_command"));
     assert!(!loaded_tool.contains("large_readback"));
     assert!(!loaded_tool.contains("expect_timeout_ms"));

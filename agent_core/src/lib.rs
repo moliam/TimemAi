@@ -39,6 +39,8 @@ pub mod prompt_cache;
 pub mod prompt_components;
 pub mod prompt_render;
 pub mod prompt_spec;
+#[path = "../../resources/capabilities/tools/readfile.rs"]
+pub mod readfile;
 pub mod redaction;
 pub mod reminder_config;
 pub mod response_protocol;
@@ -91,7 +93,8 @@ pub use data_layout::{
 };
 pub use host::{
     context_compact_topic_event, core_initialized_topic_event,
-    core_initialized_topic_event_with_worker, normalize_user_supplements, resolve_topic_reply,
+    core_initialized_topic_event_with_worker, normalize_user_supplements,
+    normalize_user_supplements_with_context, resolve_topic_reply,
     session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
     work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
     CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
@@ -101,7 +104,7 @@ pub use host::{
     HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
     NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
     RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
-    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, CORE_TOPIC_ACTION,
+    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
     CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
     CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
     CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
@@ -200,8 +203,6 @@ pub use workspace::{
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT: u32 = 95;
 const PROMPT_DELTA_RENDER_OVERHEAD_TOKENS: u32 = 64;
-const MAX_MCP_COMPACT_NOTE_CHARS: usize = 8_000;
-const MAX_MCP_COMPACT_ACTIONS: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreProfile {
@@ -1112,10 +1113,6 @@ impl AgentCore {
         }
     }
 
-    fn cwd_note_slice(&self) -> (String, String) {
-        ("runtime_note".to_string(), self.cwd_prompt_note())
-    }
-
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
         self.bash_approval_mode = mode;
     }
@@ -1423,45 +1420,6 @@ impl AgentCore {
         Ok(true)
     }
 
-    fn active_mcp_compact_note(&self) -> Option<String> {
-        if self.mcp_tools.is_empty() {
-            return None;
-        }
-
-        let total = self.mcp_tools.len();
-        let mut note =
-            format!("Active MCP capabilities after context compaction ({total} actions):");
-        let mut shown = 0usize;
-        for tool in self.mcp_tools.values().take(MAX_MCP_COMPACT_ACTIONS) {
-            let server_name = tool
-                .server_name
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let line = format!("\n- {} ({server_name})", tool.action_name);
-            if note
-                .chars()
-                .count()
-                .saturating_add(line.chars().count())
-                .saturating_add(256)
-                > MAX_MCP_COMPACT_NOTE_CHARS
-            {
-                break;
-            }
-            note.push_str(&line);
-            shown += 1;
-        }
-        if shown < total {
-            note.push_str(&format!(
-                "\n- {} additional active MCP actions are omitted from this compact reminder.",
-                total - shown
-            ));
-        }
-        note.push_str(
-            "\nThese actions remain available. Refer to the current capability catalog for complete argument definitions.",
-        );
-        Some(note)
-    }
     pub(crate) fn enable_toolgen_capability(&mut self) -> Result<(), String> {
         self.capabilities.enable_toolgen()?;
         self.refresh_rendered_static_prompt();
@@ -1769,6 +1727,50 @@ impl AgentCore {
         })
     }
 
+    pub fn append_user_supplements_with_context_and_audit(
+        &mut self,
+        supplements: impl IntoIterator<Item = UserSupplement>,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+    ) -> Option<CoreStep> {
+        let mut added = false;
+        for supplement in supplements {
+            let text = supplement.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let _ = append_audit_event(
+                audit_file,
+                &user_supplement_audit_event(session, turn_id, text),
+            );
+            if let Some(context) = supplement
+                .additional_context
+                .as_deref()
+                .map(str::trim)
+                .filter(|context| !context.is_empty())
+            {
+                self.submit_prompt_component(
+                    PromptComponentRole::system(),
+                    "user_supplement_context",
+                    context,
+                    "host_context",
+                );
+            }
+            self.submit_prompt_component(
+                PromptComponentRole::user(),
+                "user_supplement",
+                text,
+                "user_input",
+            );
+            added = true;
+        }
+        added.then(|| CoreStep::NeedModel {
+            prompt: self.build_next_prompt(),
+            rounds_remaining: self.remaining_rounds(),
+        })
+    }
+
     pub fn apply_model_response(&mut self, response: LlmResponse) -> CoreStep {
         self.apply_model_response_with_cancel(response, &mut || false)
     }
@@ -1896,7 +1898,7 @@ impl AgentCore {
             &self.current_session_id(),
             &compact_delta_ids,
         );
-        let mut active_mcp_compact_note = self.active_mcp_compact_note();
+        let mut compacted_successfully = false;
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
@@ -1936,25 +1938,15 @@ impl AgentCore {
                         }
                     }
                 };
-                let mut shrink_result = self.apply_prompt_shrink(
+                let _ = self.apply_prompt_shrink(
                     "Action result: context_compact",
                     &compact.delta_ids,
                     &compact.slice_ids,
                 );
-                if let Some(record) = offload_record.as_ref() {
-                    shrink_result.push_str("\nscratch_id: ");
-                    shrink_result.push_str(&record.id);
-                }
                 let estimated_after_tokens = self
                     .dynamic_context_summary()
                     .estimated_tokens
-                    .saturating_add(estimate_prompt_tokens(&compact.summary))
-                    .saturating_add(
-                        active_mcp_compact_note
-                            .as_deref()
-                            .map(estimate_prompt_tokens)
-                            .unwrap_or_default(),
-                    );
+                    .saturating_add(estimate_prompt_tokens(&compact.summary));
                 runtime.on_core_topic_events(&[host::context_compact_topic_event(
                     self.current_session_id(),
                     estimated_before_tokens,
@@ -1963,15 +1955,7 @@ impl AgentCore {
                     &compact.offload_delta_ids,
                     offload_record.as_ref().map(|record| record.id.as_str()),
                 )]);
-                slices.push((
-                    "context_compacted".to_string(),
-                    "context compacted successfully.".to_string(),
-                ));
-                slices.push(("result_of_llm_action".to_string(), shrink_result));
-                slices.push(self.cwd_note_slice());
-                if let Some(note) = active_mcp_compact_note.take() {
-                    slices.push(("context_compacted".to_string(), note));
-                }
+                compacted_successfully = true;
             } else {
                 slices.push((
                     "result_of_llm_action".to_string(),
@@ -1981,6 +1965,15 @@ impl AgentCore {
                     ),
                 ));
             }
+        }
+        if compacted_successfully {
+            slices.push((
+                "context_compacted".to_string(),
+                format!(
+                    "context compacted successfully.\nCWD: {}",
+                    self.current_prompt_cwd.display()
+                ),
+            ));
         }
         if !parsed.continue_work {
             for candidate in &parsed.memory_candidates {
@@ -2923,7 +2916,11 @@ impl AgentCore {
         source: impl Into<String>,
         logical_time_ms: i64,
     ) -> Option<String> {
-        let content = content.into();
+        let kind = kind.into();
+        let mut content = content.into();
+        if role.prompt_type_hint(&kind) == "result_of_llm_action" {
+            content = prompt_render::truncate_action_result_for_prompt(&content);
+        }
         if content.trim().is_empty() {
             return None;
         }
@@ -2934,7 +2931,7 @@ impl AgentCore {
         self.pending_prompt_components.push(PromptComponent {
             id: id.clone(),
             role,
-            kind: kind.into(),
+            kind,
             content,
             source: source.into(),
             created_at_ms: logical_time_ms,
@@ -2971,6 +2968,11 @@ impl AgentCore {
         &mut self,
         mut slice_texts: Vec<(String, String)>,
     ) -> bool {
+        for (prompt_type, text) in &mut slice_texts {
+            if prompt_type == "result_of_llm_action" {
+                *text = prompt_render::truncate_action_result_for_prompt(text);
+            }
+        }
         let action_output_bytes = slice_texts
             .iter()
             .filter(|(prompt_type, _)| prompt_type == "result_of_llm_action")

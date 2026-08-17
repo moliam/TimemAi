@@ -1,13 +1,13 @@
 use crate::{
     append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
-    model_retry_audit_event, model_retry_decision, normalize_user_supplements,
+    model_retry_audit_event, model_retry_decision, normalize_user_supplements_with_context,
     turn_supporting_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
     HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandDecision,
     LongRunningCommandStatus, ModelCallOutcome, ModelServiceConfig, ModelSystemRetryPolicy,
     OutputExpansionRequest, OutputExpansionResolution, PromptComponentRole,
     RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn,
     SupportingContextInput, TurnInput, TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi,
-    UsageStats,
+    UsageStats, UserSupplement,
 };
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -245,9 +245,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     };
                     continue;
                 }
-                let supplements = normalize_user_supplements(ui.drain_user_supplements());
+                let supplements = normalize_user_supplements_with_context(
+                    ui.drain_user_supplements_with_context(),
+                );
                 if !supplements.is_empty() {
-                    if let Some(next_step) = core.append_user_supplements_with_audit(
+                    if let Some(next_step) = core.append_user_supplements_with_context_and_audit(
                         supplements,
                         request.audit_file,
                         request.session,
@@ -334,10 +336,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             ) {
                                 OutputExpansionResolution::RetryWithExpandedLimit { .. } => {
                                     core.record_unapplied_model_response_usage(&truncated_usage);
-                                    let supplements =
-                                        normalize_user_supplements(ui.drain_user_supplements());
+                                    let supplements = normalize_user_supplements_with_context(
+                                        ui.drain_user_supplements_with_context(),
+                                    );
                                     if let Some(next_step) = core
-                                        .append_user_supplements_with_audit(
+                                        .append_user_supplements_with_context_and_audit(
                                             supplements,
                                             request.audit_file,
                                             request.session,
@@ -371,16 +374,23 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         user_wait_this_turn =
                             user_wait_this_turn.saturating_add(action_runtime.user_wait());
                         if !is_terminal_stop(&step) {
-                            let mut all_supplements = action_runtime.take_pending_supplements();
-                            all_supplements
-                                .extend(normalize_user_supplements(ui.drain_user_supplements()));
+                            let mut all_supplements = action_runtime
+                                .take_pending_supplements()
+                                .into_iter()
+                                .map(UserSupplement::from)
+                                .collect::<Vec<_>>();
+                            all_supplements.extend(normalize_user_supplements_with_context(
+                                ui.drain_user_supplements_with_context(),
+                            ));
                             if !all_supplements.is_empty() {
-                                if let Some(next_step) = core.append_user_supplements_with_audit(
-                                    all_supplements,
-                                    request.audit_file,
-                                    request.session,
-                                    &turn_id,
-                                ) {
+                                if let Some(next_step) = core
+                                    .append_user_supplements_with_context_and_audit(
+                                        all_supplements,
+                                        request.audit_file,
+                                        request.session,
+                                        &turn_id,
+                                    )
+                                {
                                     step = next_step;
                                 }
                             }
@@ -451,15 +461,23 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 user_wait_this_turn =
                     user_wait_this_turn.saturating_add(action_runtime.user_wait());
                 if !is_terminal_stop(&step) {
-                    let mut all_supplements = action_runtime.take_pending_supplements();
-                    all_supplements.extend(normalize_user_supplements(ui.drain_user_supplements()));
+                    let mut all_supplements = action_runtime
+                        .take_pending_supplements()
+                        .into_iter()
+                        .map(UserSupplement::from)
+                        .collect::<Vec<_>>();
+                    all_supplements.extend(normalize_user_supplements_with_context(
+                        ui.drain_user_supplements_with_context(),
+                    ));
                     if !all_supplements.is_empty() {
-                        if let Some(next_step) = core.append_user_supplements_with_audit(
-                            all_supplements,
-                            request.audit_file,
-                            request.session,
-                            &turn_id,
-                        ) {
+                        if let Some(next_step) = core
+                            .append_user_supplements_with_context_and_audit(
+                                all_supplements,
+                                request.audit_file,
+                                request.session,
+                                &turn_id,
+                            )
+                        {
                             step = next_step;
                         }
                     }
@@ -496,9 +514,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 if let Some(stop) = turn.stop_summary {
                     break turn_stop_parts(stop);
                 }
-                let supplements = normalize_user_supplements(ui.drain_user_supplements());
+                let supplements = normalize_user_supplements_with_context(
+                    ui.drain_user_supplements_with_context(),
+                );
                 if !supplements.is_empty() {
-                    if let Some(next_step) = core.append_user_supplements_with_audit(
+                    if let Some(next_step) = core.append_user_supplements_with_context_and_audit(
                         supplements,
                         request.audit_file,
                         request.session,

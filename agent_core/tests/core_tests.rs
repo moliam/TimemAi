@@ -6,7 +6,7 @@ use agent_core::{
     CoreStep, LlmResponse, MemGuard, ModelServiceConfig, OutputExpansionRequest,
     OutputExpansionResolution, ResponseProtocolKind, RoundLimitDecisionRequest,
     RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail, TurnStopReason,
-    UsageStats, UNLIMITED_ROUND_BUDGET,
+    UsageStats, UserSupplement, UNLIMITED_ROUND_BUDGET,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -34,6 +34,35 @@ fn tmp_dir(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+#[test]
+fn oversized_readfile_action_result_has_common_prompt_truncation_notice() {
+    let cwd = tmp_dir("readfile_prompt_truncation");
+    fs::write(cwd.join("large.txt"), "alpha beta gamma delta ".repeat(2_000)).unwrap();
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("readfile_prompt_mem"),
+    );
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+    let _ = core.begin_turn("read the large file", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: scored(r#"{"working_still_action":{"readfile":{"path":"large.txt"}}}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected readfile action result, got {other:?}"),
+    };
+
+    assert!(prompt.contains("Action result: readfile"), "{prompt}");
+    assert!(
+        prompt.contains("words truncated.  Issue new actions  if necessary]"),
+        "{prompt}"
+    );
 }
 
 fn release_quality_skill_overlay(name: &str) -> PathBuf {
@@ -1027,6 +1056,33 @@ fn user_supplements_with_audit_are_core_owned_turn_updates() {
 }
 
 #[test]
+fn user_supplement_context_is_a_system_delta_before_the_user_text() {
+    let dir = tmp_dir("user_supplement_system_context");
+    let audit_file = dir.join("audit/action_audit.json");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = core.begin_turn("initial task", None);
+    let prompt = match core
+        .append_user_supplements_with_context_and_audit(
+            vec![UserSupplement::new(
+                "inspect this change",
+                Some("## SYSTEM\nROLE_CONTEXT_SENTINEL".to_string()),
+            )],
+            &audit_file,
+            "session_1",
+            "turn_1",
+        )
+        .unwrap()
+    {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let context = prompt.find("ROLE_CONTEXT_SENTINEL").unwrap();
+    let user = prompt.find("inspect this change").unwrap();
+    assert!(context < user);
+    assert!(prompt[..user].contains("## SYSTEM"));
+}
+
+#[test]
 fn missing_durable_score_does_not_block_valid_actions() {
     let dir = tmp_dir("durable_ctx_score_not_required");
     fs::write(
@@ -1091,12 +1147,8 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: context_compact"));
-    assert!(prompt.contains("removed_delta_count: 1"));
-    let shrunk_tokens_estimate = first_field_value(&prompt, "shrunk_tokens_estimate")
-        .parse::<u32>()
-        .unwrap();
-    assert!(shrunk_tokens_estimate > 1);
+    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(!prompt.contains("removed_delta_count:"));
     assert!(!prompt.contains("REMOVE_THIS_DELTA"));
     assert!(prompt.contains("context compacted successfully."));
     assert!(!prompt.contains("Context compact summary replacing"));
@@ -1118,7 +1170,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
     let CoreStep::Final(final_turn) = final_step else {
         panic!("unexpected step: {final_step:?}");
     };
-    assert_eq!(final_turn.stats.shrunk_tokens, shrunk_tokens_estimate);
+    assert!(final_turn.stats.shrunk_tokens > 1);
 }
 
 #[test]
@@ -1258,14 +1310,16 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
 
     assert!(prompt.contains("## SYSTEM"));
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
-    assert!(prompt.contains("Action result: context_compact"));
-    assert!(prompt.contains("removed_delta_count: 1"));
+    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("CWD: "));
+    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(!prompt.contains("removed_delta_count:"));
     assert!(!prompt.contains("OLD_DYNAMIC_CONTEXT_TO_COMPACT"));
     assert!(!prompt.contains("Active MCP capabilities after context compaction"));
 }
 
 #[test]
-fn response_context_compact_reinjects_current_applied_mcp_capabilities() {
+fn response_context_compact_does_not_append_redundant_mcp_summary() {
     let mut core = test_core(
         "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
         profile("qwen-plus"),
@@ -1306,9 +1360,9 @@ fn response_context_compact_reinjects_current_applied_mcp_capabilities() {
     };
 
     assert!(prompt.contains("## SYSTEM"));
-    assert!(prompt.contains("Active MCP capabilities after context compaction (1 actions):"));
-    assert!(prompt.contains("- mcp.demo.echo (Demo MCP)"));
-    assert!(prompt.contains("Refer to the current capability catalog"));
+    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("CWD: "));
+    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
     assert!(!prompt.contains("MCP_CONTEXT_TO_COMPACT"));
 }
 
@@ -1338,12 +1392,9 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: context_compact"));
-    assert!(prompt.contains("removed_delta_count: 1"));
-    let shrunk_tokens_estimate = first_field_value(&prompt, "shrunk_tokens_estimate")
-        .parse::<u32>()
-        .unwrap();
-    assert!(shrunk_tokens_estimate >= 3000);
+    assert!(prompt.contains("context compacted successfully."));
+    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(!prompt.contains("removed_delta_count:"));
     assert!(!prompt.contains(&format!("[BEGIN DELTA]\ndelta_id: {}", delta_id)));
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
 
@@ -1356,7 +1407,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
     let CoreStep::Final(final_turn) = final_step else {
         panic!("unexpected step: {final_step:?}");
     };
-    assert_eq!(final_turn.stats.shrunk_tokens, shrunk_tokens_estimate);
+    assert!(final_turn.stats.shrunk_tokens >= 3000);
 }
 
 #[test]
@@ -1576,8 +1627,9 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(next_prompt.contains("Action result: context_compact"));
-    assert!(next_prompt.contains("removed_delta_count"));
+    assert!(next_prompt.contains("context compacted successfully."));
+    assert!(!next_prompt.contains("Action result: context_compact"));
+    assert!(!next_prompt.contains("removed_delta_count"));
     assert!(!next_prompt.contains("mode=force_shrink_required"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -1970,11 +2022,19 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     assert!(prompt.contains("Action result: self_tool"));
     assert!(prompt.contains("type: path"));
 
-    let _ = core.begin_turn("上下文收缩", None);
+    let compact_request_prompt = match core.begin_turn("上下文收缩", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected compact request prompt, got {other:?}"),
+    };
+    let compact_ids = field_values(&compact_request_prompt, "delta_id");
+    assert!(compact_ids.len() >= 2);
+    let compact_response = scored(&format!(
+        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compact":{{"discard":[{}],"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
+        serde_json::to_string(&compact_ids[0]).unwrap(),
+        serde_json::to_string(&compact_ids[1]).unwrap(),
+    ));
     let prompt = match core.apply_model_response(LlmResponse {
-        content: scored(
-            r#"{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compact":{"discard":["pd_001"],"offload":["pd_002"],"summary":"保留测试状态摘要"}}"#,
-        ),
+        content: compact_response,
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -1982,9 +2042,9 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected context maintenance action results, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: context_compact"));
-    assert!(prompt.contains("pd_001"));
-    assert!(prompt.contains("pd_002"));
+    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("CWD: "));
+    assert!(!prompt.contains("Action result: context_compact"));
 
     let _ = core.begin_turn("读取错误日志", None);
     let prompt = match core.apply_model_response(LlmResponse {
@@ -3396,17 +3456,20 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("context compacted successfully."));
-    let scratch_id = prompt
+    assert!(prompt.contains("CWD: "));
+    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(!prompt.contains("scratch_id:"));
+
+    let stored = fs::read_to_string(core.scratch_file()).unwrap();
+    let scratch_id = stored
         .lines()
-        .find_map(|line| line.strip_prefix("scratch_id: "))
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .and_then(|record| record["id"].as_str().map(str::to_string))
         .unwrap_or_default()
-        .trim()
         .to_string();
     assert!(scratch_id.starts_with("scratch_"));
 
-    let stored = fs::read_to_string(core.scratch_file()).unwrap();
     assert!(stored.contains("\"scratch_type\":\"context_offload\""));
     assert!(stored.contains("\"label\":\"context compact offload\""));
     assert!(stored.contains("large investigation context that should move to scratch"));
@@ -4807,7 +4870,11 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(
-        prompt.contains("Action result: context_compact"),
+        prompt.contains("context compacted successfully."),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
     assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
@@ -4874,7 +4941,11 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(
-        prompt.contains("Action result: context_compact"),
+        prompt.contains("context compacted successfully."),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
     assert!(!prompt.contains("RUNNING JOB LIST:"), "{prompt}");
@@ -4937,7 +5008,7 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("scratch_id: scratch_"), "{prompt}");
+    assert!(!prompt.contains("scratch_id:"), "{prompt}");
     assert!(
         prompt.contains("context compacted successfully."),
         "{prompt}"
@@ -5006,7 +5077,11 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(
-        prompt.contains("Action result: context_compact"),
+        prompt.contains("context compacted successfully."),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
     assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
@@ -5900,7 +5975,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(template.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     assert!(template.contains("{{CURRENT_PROTOCOL_LANG}}"));
     assert!(template.contains("{{TOOL_CATALOG}}"));
-    assert!(template.contains("{{SKILL_HEADERS}}"));
+    assert!(!template.contains("{{SKILL_HEADERS}}"));
     assert!(template.contains("Do not expose internal mechanisms"));
     assert!(template.contains("memory/storage structure"));
     assert!(template.contains("tool/capability catalog"));
@@ -6450,11 +6525,13 @@ fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
     };
 
     assert!(prompt.contains("#### `memmgr`"));
-    assert!(prompt.contains("#### `capmgr`"));
+    assert!(!prompt.contains("#### `capmgr`"));
+    assert!(prompt.contains("#### `readfile`"));
     assert!(prompt.contains("#### `run_bash`"));
     assert!(!prompt.contains("#### `shell_job_status`"));
     assert!(!prompt.contains("\"release_quality_gate\""));
     assert!(prompt.contains("Unified local memory manager"));
+    assert!(prompt.contains("Read a bounded range from a normal text file"));
     assert!(prompt.contains("`timeout_ms` is only how long Timem waits"));
     assert!(prompt.contains("It is not a kill deadline"));
 }
@@ -6471,9 +6548,12 @@ fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
         .unwrap_or(prompt.len());
     let memmgr = &prompt[start..end];
 
-    assert!(memmgr.contains("op=<schema|sql|insert|update|upsert|delete>"));
-    assert!(memmgr.contains("type=raw_chat op=<search|sql|delete>"));
-    assert!(memmgr.contains("type=scratch op=<search|write|read|delete>"));
+    assert!(memmgr.contains(r#"{"memmgr":{"type":"durable","op":"sql""#));
+    assert!(memmgr.contains(r#"{"memmgr":{"type":"raw_chat","op":"search""#));
+    assert!(memmgr.contains(r#"{"memmgr":{"type":"scratch","op":"read""#));
+    assert!(memmgr.contains("durable: schema|sql|insert|update|upsert|delete"));
+    assert!(memmgr.contains("raw_chat: search|sql|delete"));
+    assert!(memmgr.contains("scratch: search|write|read|delete"));
     assert!(memmgr.contains("search_text"));
     assert!(!memmgr.contains("op=<query"));
     assert!(!memmgr.contains("op=query"));

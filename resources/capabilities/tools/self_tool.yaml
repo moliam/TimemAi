@@ -3,6 +3,9 @@ id: self_tool
 binding_type: builtin
 binding_name: self_tool
 summary: Locate Timem runtime resources or inspect its effective configuration.
+prompt_synopsis: |
+  {"self_tool":{"type":"path"}}
+  {"self_tool":{"type":"params"}}
 description: |
   Use this read-only tool when work requires information about Timem itself.
   Ask for path when you need to know where something is. Ask for params when
@@ -24,57 +27,6 @@ input_schema: |
       }
     },
     "required": ["type"]
-  }
-output_schema: |
-  {
-    "type": "object",
-    "properties": {
-      "type": {
-        "type": "string",
-        "enum": ["path", "params"],
-        "description": "Echoed self-information class."
-      },
-      "cwd": {"type": "string", "description": "Current prompt context working directory for type=path."},
-      "process_cwd": {"type": "string", "description": "Process working directory for type=path."},
-      "executable": {"type": "string", "description": "Current executable path for type=path."},
-      "config_root": {"type": "string", "description": "Global Timem configuration directory for type=path."},
-      "reminder_tips_file": {"type": "string", "description": "Global reminder tips configuration file for type=path."},
-      "capabilities_dir": {"type": "string", "description": "Configured capability overlay directory for type=path, when present."},
-      "data_root": {"type": "string", "description": "Timem data root for type=path."},
-      "workspace_config_file": {"type": "string", "description": "Workspace configuration file for type=path."},
-      "space_dir": {"type": "string", "description": "Current Timem space directory for type=path."},
-      "memory_dir": {"type": "string", "description": "Memory directory for type=path."},
-      "memory_file": {"type": "string", "description": "Durable memory file for type=path."},
-      "scratch_file": {"type": "string", "description": "Scratch memory file for type=path."},
-      "sessions_dir": {"type": "string", "description": "Stored Session directory for type=path."},
-      "session_index_file": {"type": "string", "description": "Stored Session index for type=path."},
-      "tool_repo_dir": {"type": "string", "description": "Current Session tool repository for type=path."},
-      "audit_dir": {"type": "string", "description": "Audit directory for type=path."},
-      "api_audit_file": {"type": "string", "description": "API audit file for type=path."},
-      "action_audit_file": {"type": "string", "description": "Action audit file for type=path."},
-      "name": {"type": "string", "description": "Timem runtime name for type=params."},
-      "version": {"type": "string", "description": "Timem version for type=params."},
-      "pid": {"type": "integer", "description": "Current process id for type=params."},
-      "model": {"type": "string", "description": "Effective model for type=params."},
-      "assistant_name": {"type": "string", "description": "Current assistant speaker name for type=params."},
-      "api_protocol": {"type": "string", "description": "Effective model API protocol for type=params."},
-      "response_protocol": {"type": "string", "description": "Effective response protocol for type=params."},
-      "base_url": {"type": "string", "description": "Redacted model service Base URL for type=params."},
-      "api_key_configured": {"type": "boolean", "description": "Whether the current Session has a non-empty API key, without revealing it."},
-      "timeout_secs": {"type": "string", "description": "Effective model timeout for type=params."},
-      "max_llm_input_tokens": {"type": "integer", "description": "Effective model input-token limit for type=params."},
-      "max_llm_output_tokens": {"type": "string", "description": "Effective model output-token limit for type=params."},
-      "max_steps": {"type": "string", "description": "Effective turn step limit for type=params."},
-      "bash_approval": {"type": "string", "description": "Effective Bash approval policy for type=params."},
-      "work_instructions": {"type": "string", "description": "Effective work-instruction setting for type=params."},
-      "enable_thinking": {"type": "string", "description": "Effective thinking switch for type=params."},
-      "reasoning_effort": {"type": "string", "description": "Effective reasoning effort for type=params."},
-      "stream": {"type": "string", "description": "Effective streaming setting for type=params."},
-      "capability_tools": {"type": "integer", "description": "Number of available capability tools for type=params."},
-      "capability_skills": {"type": "integer", "description": "Number of available capability skills for type=params."},
-      "note": {"type": "string", "description": "Safety and scope note."},
-      "error": {"type": "string", "description": "Structured error for unsupported input."}
-    }
   }
 example_json: |
   {

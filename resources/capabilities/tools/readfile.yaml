@@ -1,0 +1,67 @@
+kind: tool
+id: readfile
+binding_type: builtin
+binding_name: readfile
+summary: Read a bounded range from a normal text file.
+prompt_synopsis: |
+  {"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80},"max_bytes":32768}}
+  {"readfile":{"path":"logs/app.log","starter":{"byte_nr":0},"ender":{"byte_nr":4095},"max_bytes":4096}}
+  {"readfile":{"path":"src/main.rs","starter":{"match":"fn main"},"ender":{"match":"}"},"max_bytes":32768}}
+description: |
+  Prefer `readfile` over shell commands for reading normal text files. Relative
+  paths resolve from the current session cwd. The tool is read-only, rejects
+  directories and special files, decodes text strictly, and always bounds the
+  returned content. It is supported on macOS and Linux.
+prompt_input: |
+  `path` is required. `encoding` defaults to UTF-8; when it is omitted, a
+  UTF-8/UTF-16 BOM is honored. `starter` and `ender` are optional objects and
+  each must contain exactly one selector: `line_nr`, `byte_nr`, or `match`.
+  Line numbers are 1-based and inclusive. Byte numbers address the original
+  file bytes, are 0-based, and are inclusive. A starter match begins at the
+  first occurrence. An ender match ends after the last complete occurrence in
+  the `max_bytes` window. For example, starter match A and ender match B over
+  ABABABAB return from the first A through the last complete B in the window.
+  `max_bytes` limits returned UTF-8 content bytes; default and maximum 32768.
+  To keep memory and latency bounded, the current implementation
+  accepts normal text files no larger than 67108864 bytes.
+prompt_result: |
+  Returns the resolved path, canonical encoding, file size, selected UTF-8
+  byte range, whether the range was limited, and the decoded content. Errors
+  are explicit and never return partial or replacement-decoded text.
+input_schema: |
+  {
+    "type": "object",
+    "required": ["path"],
+    "properties": {
+      "path": {"type": "string", "description": "Absolute path or path relative to the current session cwd."},
+      "encoding": {"type": "string", "description": "WHATWG encoding label such as utf-8, utf-16le, utf-16be, gbk, big5, shift_jis, or windows-1252. Default: utf-8 with BOM detection."},
+      "starter": {
+        "type": "object",
+        "description": "Inclusive start selector; exactly one field is allowed.",
+        "properties": {
+          "line_nr": {"type": ">0 integer", "description": "1-based inclusive line number."},
+          "byte_nr": {"type": ">=0 integer", "description": "0-based inclusive original-file byte number."},
+          "match": {"type": "string", "description": "Start at the first exact string match."}
+        }
+      },
+      "ender": {
+        "type": "object",
+        "description": "Inclusive end selector; exactly one field is allowed.",
+        "properties": {
+          "line_nr": {"type": ">0 integer", "description": "1-based inclusive line number."},
+          "byte_nr": {"type": ">=0 integer", "description": "0-based inclusive original-file byte number."},
+          "match": {"type": "string", "description": "End after the last complete exact match in the max_bytes window."}
+        }
+      },
+      "max_bytes": {"type": ">0 integer", "description": "Maximum returned UTF-8 content bytes. Default and maximum 32768."}
+    }
+  }
+example_json: |
+  {
+    "readfile": {
+      "path": "src/main.rs",
+      "starter": {"line_nr": 20},
+      "ender": {"line_nr": 80},
+      "max_bytes": 32768
+    }
+  }

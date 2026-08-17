@@ -124,6 +124,15 @@ fn json_markdown_xml_protocols_treat_protocol_language_inside_text_as_text() {
 }
 
 #[test]
+fn json_markdown_xml_protocols_parse_readfile_selector_objects() {
+    assert_protocols_equivalent(
+        r#"{"free_talk":"reading","working_still_action":{"readfile":{"path":"src/main.rs","encoding":"utf-8","starter":{"line_nr":20},"ender":{"match":"fn main"},"max_bytes":8192}}}"#,
+        "## Free_talk\nreading\n\n## Working_Still_Action\n```action\n{\"readfile\":{\"path\":\"src/main.rs\",\"encoding\":\"utf-8\",\"starter\":{\"line_nr\":20},\"ender\":{\"match\":\"fn main\"},\"max_bytes\":8192}}\n```",
+        "<response><free_talk>reading</free_talk><actions><readfile encoding=\"utf-8\" max_bytes=\"8192\"><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><match>fn main</match></ender></readfile></actions></response>",
+    );
+}
+
+#[test]
 fn json_markdown_xml_protocols_parse_same_working_actions() {
     assert_protocols_equivalent(
             r#"{"free_talk":"state","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,

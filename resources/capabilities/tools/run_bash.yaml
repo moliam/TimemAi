@@ -5,8 +5,8 @@ binding_name: run_bash
 requires_host: local_command_execution
 summary: Run local shell commands.
 prompt_synopsis: |
-  run_bash cmd=<shell_command> timeout_ms=<n> [background=true]
-  run_bash loop_cmd=<check_command> interval_ms=<n> loop_timeout_ms=<total_wait_ms> [once_timeout_ms=<n>]
+  {"run_bash":{"cmd":"git status --short","timeout_ms":5000}}
+  {"run_bash":{"loop_cmd":"test -f build/done","interval_ms":1000,"loop_timeout_ms":120000,"once_timeout_ms":5000}}
 description: |
   `run_bash` runs a shell command on the local machine and collects bounded
   evidence from the command result. It supports normal, background, and
@@ -46,25 +46,6 @@ input_schema: |
       "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."}
     },
     "x-required-any": [["cmd", "loop_cmd"]]
-  }
-output_schema: |
-  {
-    "type": "object",
-    "properties": {
-      "command": {"type": "string", "description": "Command actually executed."},
-      "mode": {"type": "string", "description": "poll when interval_ms was used."},
-      "state": {"type": "string", "description": "Polling state: finished|timeout|cancelled."},
-      "attempts": {"type": "integer", "description": "Polling attempts."},
-      "elapsed_ms": {"type": "integer", "description": "Polling elapsed time."},
-      "last_status": {"type": "integer", "description": "Last observed polling exit code."},
-      "status": {"type": "integer", "description": "Process exit code for normal command success."},
-      "output": {"type": "string", "description": "Bounded stdout/stderr text for normal command execution."},
-      "pid": {"type": "integer", "description": "Process id for background jobs and timed-out commands that are still running."},
-      "output_file": {"type": "string", "description": "Path where background output is stored."},
-      "status_file": {"type": "string", "description": "Path where background exit status is stored."},
-      "approval_status": {"type": "string", "enum": ["approved_by_user", "denied_by_user"], "description": "Approval result."},
-      "reason": {"type": "string", "description": "Natural-language reason when a command is not executed, times out, or is cancelled."}
-    }
   }
 example_json: |
   {

@@ -73,7 +73,8 @@ fn normal_bash_reports_status_and_output() {
 }
 
 #[test]
-fn normal_bash_keeps_eight_thousand_characters_and_reports_truncated_word_count() {
+fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_truncated_word_count() {
+    assert_eq!(MAX_BASH_OUTPUT_CHARS, 32 * 1024);
     let boundary = compact_text(&"x".repeat(MAX_BASH_OUTPUT_CHARS), MAX_BASH_OUTPUT_CHARS);
     assert_eq!(boundary.chars().count(), MAX_BASH_OUTPUT_CHARS);
     assert!(!boundary.contains("[Too long,"));

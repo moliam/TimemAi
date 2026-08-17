@@ -8,6 +8,7 @@ use crate::prompt_spec::replace_markdown_placeholder_with_text;
 
 const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
 const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
+const READFILE_MANIFEST: &str = include_str!("../../resources/capabilities/tools/readfile.yaml");
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
 const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
 const TOOLGEN_MANIFEST: &str = include_str!("../../resources/capabilities/tools/toolgen.yaml");
@@ -39,12 +40,6 @@ pub struct CapabilityInputSchema {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapabilityOutputSchema {
-    pub schema_type: String,
-    pub properties: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityRequiredWhen {
     pub field: String,
     pub values: Vec<String>,
@@ -61,7 +56,6 @@ pub struct ToolManifest {
     pub summary: String,
     pub prompt: CapabilityPrompt,
     pub input_schema: CapabilityInputSchema,
-    pub output_schema: CapabilityOutputSchema,
     pub example: Value,
 }
 
@@ -191,6 +185,7 @@ impl CapabilityRegistry {
             &[
                 MEMMGR_MANIFEST,
                 CAPMGR_MANIFEST,
+                READFILE_MANIFEST,
                 RUN_BASH_MANIFEST,
                 SELF_TOOL_MANIFEST,
                 TOOLGEN_MANIFEST,
@@ -263,7 +258,10 @@ impl CapabilityRegistry {
                     summary: tool.description.clone(),
                     prompt: CapabilityPrompt {
                         description: tool.description.clone(),
-                        synopsis: format!("{} <arguments matching the options below>", tool.action_name),
+                        synopsis: format!(
+                            "{} <arguments matching the options below>",
+                            tool.action_name
+                        ),
                         input: "Provide arguments matching this MCP tool's input options."
                             .to_string(),
                         result: format!("Returns the result from MCP server {}.", tool.server_name),
@@ -276,13 +274,6 @@ impl CapabilityRegistry {
                         required_any_when: Vec::new(),
                         enum_fields: BTreeMap::new(),
                         properties,
-                    },
-                    output_schema: CapabilityOutputSchema {
-                        schema_type: "object".to_string(),
-                        properties: BTreeMap::from([(
-                            "content".to_string(),
-                            serde_json::json!({ "description": "Content returned by the MCP server." }),
-                        )]),
                     },
                     example: Value::Object(Map::new()),
                 },
@@ -561,7 +552,7 @@ impl CapabilityRegistry {
                     tool.id,
                     tool.binding.binding_type,
                     tool.binding.name,
-                    render_tool_manifest_markdown(tool)
+                    render_tool_manifest_markdown(tool, "JSON")
                 ),
                 None => format!("Action result: capmgr\nop: load\nkind: tool\nid: {id}\nerror: not_found"),
             },
@@ -665,36 +656,41 @@ impl CapabilityRegistry {
     }
 
     pub fn render_tool_catalog_markdown(&self) -> String {
+        self.render_tool_catalog_markdown_for_protocol("JSON")
+    }
+
+    pub fn render_tool_catalog_markdown_for_protocol(&self, protocol_format: &str) -> String {
         self.tools
             .values()
             // Keep capmgr registered and executable, but do not advertise it
             // to the model as part of the prompt tool catalog.
             .filter(|manifest| manifest.id != "capmgr")
-            .map(render_tool_manifest_markdown)
+            .map(|manifest| render_tool_manifest_markdown(manifest, protocol_format))
             .collect::<Vec<_>>()
             .join("\n\n")
     }
 
     pub fn enrich_static_prompt(&self, static_prompt: &str) -> String {
-        if let Some(with_catalog) = replace_markdown_placeholder_with_text(
+        self.enrich_static_prompt_for_protocol(static_prompt, "JSON")
+    }
+
+    pub fn enrich_static_prompt_for_protocol(
+        &self,
+        static_prompt: &str,
+        protocol_format: &str,
+    ) -> String {
+        let with_catalog = replace_markdown_placeholder_with_text(
             static_prompt,
             "{{TOOL_CATALOG}}",
-            &self.render_tool_catalog_markdown(),
-        ) {
-            if let Some(with_skills) = replace_markdown_placeholder_with_text(
-                &with_catalog,
-                "{{SKILL_HEADERS}}",
-                &self.render_skill_headers_markdown(),
-            ) {
-                return with_skills;
-            }
-        }
-
-        static_prompt.to_string()
+            &self.render_tool_catalog_markdown_for_protocol(protocol_format),
+        )
+        .unwrap_or_else(|| static_prompt.to_string());
+        replace_markdown_placeholder_with_text(&with_catalog, "{{SKILL_HEADERS}}", "")
+            .unwrap_or(with_catalog)
     }
 }
 
-fn render_tool_manifest_markdown(manifest: &ToolManifest) -> String {
+fn render_tool_manifest_markdown(manifest: &ToolManifest, protocol_format: &str) -> String {
     let mut lines = Vec::new();
     lines.push(format!("#### `{}`", manifest.id));
     lines.push(String::new());
@@ -706,7 +702,7 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest) -> String {
     ));
     lines.push(String::new());
     lines.push("**Synopsis**".to_string());
-    lines.extend(render_synopsis(manifest));
+    lines.extend(render_synopsis(manifest, protocol_format));
     lines.push(String::new());
     lines.push("**Description**".to_string());
     lines.push(one_line(&manifest.prompt.description));
@@ -773,7 +769,7 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest) -> String {
     lines.join("\n")
 }
 
-fn render_synopsis(manifest: &ToolManifest) -> Vec<String> {
+fn render_synopsis(manifest: &ToolManifest, protocol_format: &str) -> Vec<String> {
     if manifest.prompt.synopsis.trim().is_empty() {
         return vec![format!("`{}`", synopsis_from_schema(manifest))];
     }
@@ -783,8 +779,74 @@ fn render_synopsis(manifest: &ToolManifest) -> Vec<String> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(|line| format!("`{line}`"))
+        .map(|line| {
+            let rendered = serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|action| render_protocol_action_synopsis(&action, line, protocol_format))
+                .unwrap_or_else(|| line.to_string());
+            format!("`{rendered}`")
+        })
         .collect()
+}
+
+fn render_protocol_action_synopsis(
+    action: &Value,
+    source: &str,
+    protocol_format: &str,
+) -> Option<String> {
+    let object = action.as_object()?;
+    if object.len() != 1 || !object.values().next()?.is_object() {
+        return None;
+    }
+    if protocol_format.eq_ignore_ascii_case("xml") {
+        let (name, input) = object.iter().next()?;
+        let mut output = String::new();
+        render_xml_synopsis_element(name, input, source, &mut output)?;
+        Some(output)
+    } else {
+        Some(source.to_string())
+    }
+}
+
+fn render_xml_synopsis_element(
+    name: &str,
+    value: &Value,
+    source: &str,
+    output: &mut String,
+) -> Option<()> {
+    output.push('<');
+    output.push_str(name);
+    output.push('>');
+    match value {
+        Value::Object(fields) => {
+            let mut fields = fields.iter().collect::<Vec<_>>();
+            fields.sort_by_key(|(field, _)| {
+                source.find(&format!("\"{field}\"")).unwrap_or(usize::MAX)
+            });
+            for (field, value) in fields {
+                render_xml_synopsis_element(field, value, source, output)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                render_xml_synopsis_element("item", item, source, output)?;
+            }
+        }
+        Value::String(text) => output.push_str(&escape_xml_synopsis_text(text)),
+        Value::Number(number) => output.push_str(&number.to_string()),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Null => {}
+    }
+    output.push_str("</");
+    output.push_str(name);
+    output.push('>');
+    Some(())
+}
+
+fn escape_xml_synopsis_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn synopsis_from_schema(manifest: &ToolManifest) -> String {
@@ -1004,7 +1066,6 @@ fn inline_code_list(items: &[String]) -> String {
 fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let mut top = BTreeMap::<String, String>::new();
     let mut input_properties = BTreeMap::<String, Value>::new();
-    let mut output_properties = BTreeMap::<String, Value>::new();
     let mut required = Vec::<String>::new();
     let mut required_any = Vec::<Vec<String>>::new();
     let mut required_when = Vec::<CapabilityRequiredWhen>::new();
@@ -1015,7 +1076,6 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let mut prompt_input = String::new();
     let mut prompt_result = String::new();
     let mut input_schema_json = String::new();
-    let mut output_schema_json = String::new();
     let mut example_json = String::new();
     let mut section: Option<&str> = None;
 
@@ -1043,16 +1103,8 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             section = Some("input_properties");
             continue;
         }
-        if line == "output_properties:" {
-            section = Some("output_properties");
-            continue;
-        }
         if line == "input_schema: |" {
             section = Some("input_schema");
-            continue;
-        }
-        if line == "output_schema: |" {
-            section = Some("output_schema");
             continue;
         }
         if line == "example_json: |" {
@@ -1112,28 +1164,12 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
                 input_schema_json.push_str(line.strip_prefix("  ").unwrap_or(line));
                 input_schema_json.push('\n');
             }
-            Some("output_schema") if line.starts_with("  ") => {
-                output_schema_json.push_str(line.strip_prefix("  ").unwrap_or(line));
-                output_schema_json.push('\n');
-            }
             Some("input_properties") if line.starts_with("  ") => {
                 let trimmed = line.trim();
                 let Some((key, value)) = trimmed.split_once(':') else {
                     return Err(format!("input_property_must_use_key_colon_value:{trimmed}"));
                 };
                 input_properties.insert(
-                    key.trim().to_string(),
-                    Value::String(value.trim().to_string()),
-                );
-            }
-            Some("output_properties") if line.starts_with("  ") => {
-                let trimmed = line.trim();
-                let Some((key, value)) = trimmed.split_once(':') else {
-                    return Err(format!(
-                        "output_property_must_use_key_colon_value:{trimmed}"
-                    ));
-                };
-                output_properties.insert(
                     key.trim().to_string(),
                     Value::String(value.trim().to_string()),
                 );
@@ -1248,14 +1284,6 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     } else {
         parse_input_schema_json(&id, input_schema_json.trim())?
     };
-    let output_schema = if output_schema_json.trim().is_empty() {
-        CapabilityOutputSchema {
-            schema_type: "object".to_string(),
-            properties: output_properties,
-        }
-    } else {
-        parse_output_schema_json(&id, output_schema_json.trim())?
-    };
     let prompt_input = if prompt_input.trim().is_empty() {
         "Use the fields shown in the example; load this tool with capmgr if full details are needed."
             .to_string()
@@ -1285,7 +1313,6 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             result: prompt_result,
         },
         input_schema,
-        output_schema,
         example,
     })
 }
@@ -1326,30 +1353,6 @@ fn parse_input_schema_json(tool_id: &str, raw: &str) -> Result<CapabilityInputSc
         required_when,
         required_any_when,
         enum_fields,
-        properties,
-    })
-}
-
-fn parse_output_schema_json(tool_id: &str, raw: &str) -> Result<CapabilityOutputSchema, String> {
-    let value: Value = serde_json::from_str(raw)
-        .map_err(|err| format!("{tool_id}:output_schema_json_invalid:{err}"))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| format!("{tool_id}:output_schema_must_be_object"))?;
-    let schema_type = object
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("object")
-        .to_string();
-    let properties = object
-        .get("properties")
-        .and_then(Value::as_object)
-        .ok_or_else(|| format!("{tool_id}:output_schema_properties_required"))?
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    Ok(CapabilityOutputSchema {
-        schema_type,
         properties,
     })
 }
@@ -1828,12 +1831,6 @@ fn validate_manifest(manifest: &ToolManifest) -> Result<(), String> {
     if manifest.input_schema.schema_type != "object" {
         return Err(format!("{}:input_schema_must_be_object", manifest.id));
     }
-    if manifest.output_schema.schema_type != "object" {
-        return Err(format!("{}:output_schema_must_be_object", manifest.id));
-    }
-    if manifest.output_schema.properties.is_empty() {
-        return Err(format!("{}:output_properties_required", manifest.id));
-    }
     for key in manifest.input_schema.enum_fields.keys() {
         if !input_property_declared(&manifest.input_schema.properties, key) {
             return Err(format!("{}:enum_field_without_property:{key}", manifest.id));
@@ -1882,9 +1879,6 @@ fn validate_overlay_manifest(
     }
     if manifest.input_schema.schema_type != "object" {
         return Err(format!("{}:input_schema_must_be_object", manifest.id));
-    }
-    if manifest.output_schema.schema_type != "object" {
-        return Err(format!("{}:output_schema_must_be_object", manifest.id));
     }
     for key in manifest.input_schema.enum_fields.keys() {
         if !input_property_declared(&manifest.input_schema.properties, key) {

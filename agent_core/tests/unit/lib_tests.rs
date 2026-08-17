@@ -117,6 +117,25 @@ fn build_next_prompt_orders_pending_components_without_role_merging() {
 }
 
 #[test]
+fn common_prompt_component_ingress_marks_every_truncated_action_result() {
+    let mut core = test_core("action_result_truncation");
+    let oversized = format!(
+        "Action result: readfile\ncontent:\n{} alpha beta gamma",
+        "x".repeat(prompt_render::MAX_ACTION_RESULT_PROMPT_BYTES)
+    );
+    core.submit_prompt_component(
+        PromptComponentRole::system(),
+        "action_result",
+        oversized,
+        "readfile",
+    );
+    let prompt = core.build_next_prompt();
+    assert!(prompt.contains("Action result: readfile"));
+    assert!(prompt.contains("words truncated.  Issue new actions  if necessary]"));
+    assert!(!prompt.ends_with('…'));
+}
+
+#[test]
 fn previous_model_response_components_share_earliest_logical_time() {
     let mut core = test_core("previous_batch");
     let batch_time = 100;
@@ -271,9 +290,9 @@ fn action_output_at_or_below_safety_limit_is_preserved() {
 #[test]
 fn action_output_budget_accepts_exact_95_percent_and_rejects_the_next_token() {
     let mut at_limit = test_core("action_output_exact_95");
-    at_limit.set_max_llm_input_tokens(10_000);
+    at_limit.set_max_llm_input_tokens(4_000);
     let current_tokens = estimate_prompt_tokens(&at_limit.render_prompt());
-    let available_tokens = 9_500u32
+    let available_tokens = 3_800u32
         .saturating_sub(current_tokens)
         .saturating_sub(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS);
     assert!(available_tokens > 10);
@@ -284,9 +303,9 @@ fn action_output_budget_accepts_exact_95_percent_and_rejects_the_next_token() {
     )]));
 
     let mut over_limit = test_core("action_output_over_95");
-    over_limit.set_max_llm_input_tokens(10_000);
+    over_limit.set_max_llm_input_tokens(4_000);
     let current_tokens = estimate_prompt_tokens(&over_limit.render_prompt());
-    let available_tokens = 9_500u32
+    let available_tokens = 3_800u32
         .saturating_sub(current_tokens)
         .saturating_sub(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS);
     let one_token_over = "x".repeat(available_tokens as usize * 4 + 1);
@@ -434,34 +453,7 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
 }
 
 #[test]
-fn active_mcp_compact_note_is_deterministic_and_bounded() {
-    let mut core = test_core("bounded_mcp_compact_note");
-    let tools = (0..300)
-        .map(|index| {
-            test_mcp_tool(
-                &format!("mcp.large.action_{index:03}_{}", "x".repeat(80)),
-                "Large generated test action",
-            )
-        })
-        .collect::<Vec<_>>();
-    core.configure_mcp(
-        CapabilityRegistry::builtin(),
-        mcp::McpRuntime::default(),
-        Vec::new(),
-        tools,
-    )
-    .unwrap();
-
-    let first = core.active_mcp_compact_note().unwrap();
-    let second = core.active_mcp_compact_note().unwrap();
-    assert_eq!(first, second);
-    assert!(first.chars().count() <= MAX_MCP_COMPACT_NOTE_CHARS);
-    assert!(first.contains("additional active MCP actions are omitted"));
-    assert!(first.contains("current capability catalog"));
-}
-
-#[test]
-fn multiple_successful_compacts_reinject_active_mcp_only_once() {
+fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
     let mut core = test_core("multiple_compacts_mcp_note");
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.configure_mcp(
@@ -492,10 +484,10 @@ fn multiple_successful_compacts_reinject_active_mcp_only_once() {
     let CoreStep::NeedModel { prompt, .. } = step else {
         panic!("context compact should continue with a model request")
     };
-    assert_eq!(
-        prompt
-            .matches("Active MCP capabilities after context compaction")
-            .count(),
-        1
-    );
+    assert_eq!(prompt.matches("context compacted successfully.").count(), 1);
+    assert_eq!(prompt.matches("CWD: ").count(), 1);
+    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
+    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(!prompt.contains("removed_delta_count:"));
+    assert!(!prompt.contains("scratch_id:"));
 }
