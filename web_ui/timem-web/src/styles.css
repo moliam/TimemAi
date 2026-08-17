@@ -1531,3 +1531,15 @@ body {
 :root[data-theme="light"] .worker-role-item.selected, :root[data-theme="light"] .composer-role { border-color: #7eaa9d; background: #eaf4f0; color: #416d60; }
 @media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 200px minmax(0, 1fr); }.mobile-role-button { display: grid; }.worker-role-panel .worker-role-close { display: grid; }.role-panel-backdrop { display: block; position: fixed; z-index: 13; inset: 0; width: 100%; border: 0; background: #02060999; }.worker-role-panel { visibility: hidden; position: fixed; z-index: 14; top: 0; right: 0; bottom: 0; width: min(320px, 90vw); transform: translateX(105%); transition: transform .2s ease, visibility 0s linear .2s; box-shadow: -18px 0 42px #0008; }.worker-role-panel.mobile-open { visibility: visible; transform: translateX(0); transition-delay: 0s; } }
 @media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; } }
+
+.runtime-restart-divider { width: 100%; max-width: 760px; margin: 4px auto 30px; display: grid; grid-template-columns: minmax(28px, 1fr) auto minmax(28px, 1fr); align-items: center; gap: 14px; color: #83949d; text-align: center; }
+.runtime-restart-divider > span { height: 1px; background: linear-gradient(90deg, transparent, #3a4a52); }
+.runtime-restart-divider > span:last-child { background: linear-gradient(90deg, #3a4a52, transparent); }
+.runtime-restart-divider > div { display: grid; gap: 3px; max-width: min(520px, 72vw); }
+.runtime-restart-divider strong { color: #aab8be; font-size: 12px; font-weight: 650; line-height: 1.45; }
+.runtime-restart-divider time { color: #71838c; font-size: 10px; line-height: 1.35; }
+:root[data-theme="light"] .runtime-restart-divider { color: #718087; }
+:root[data-theme="light"] .runtime-restart-divider > span { background: linear-gradient(90deg, transparent, #c5d0d4); }
+:root[data-theme="light"] .runtime-restart-divider > span:last-child { background: linear-gradient(90deg, #c5d0d4, transparent); }
+:root[data-theme="light"] .runtime-restart-divider strong { color: #52636a; }
+:root[data-theme="light"] .runtime-restart-divider time { color: #7a898f; }

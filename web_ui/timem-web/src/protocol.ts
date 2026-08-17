@@ -1,8 +1,9 @@
 export type ChatMessage = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   text: string;
   created_at_ms: number;
+  kind?: string;
   completion?: TurnCompletion;
 };
 

@@ -429,24 +429,26 @@ export function prependHistoryRecords(session: Session, records: ChatHistoryReco
     ...turn,
     events: trimRestoredTurnEvents(turn.events),
   }));
-  if (historicalTurns.length === 0) return session;
-  const existing = new Set(session.turns.map((turn) => turn.turn_id));
-  const earlier = historicalTurns.filter((turn) => !existing.has(turn.turn_id));
-  if (earlier.length === 0) return session;
+  const existingTurnIds = new Set(session.turns.map((turn) => turn.turn_id));
+  const earlier = historicalTurns.filter((turn) => !existingTurnIds.has(turn.turn_id));
   const earlierTurnIds = new Set(earlier.map((turn) => turn.turn_id));
+  const existingMessageIds = new Set(session.messages.map((message) => message.id));
+  const earlierMessages = messagesFromHistoryRecords(records.filter((record) => (
+    earlierTurnIds.has(record.turn_id)
+    || (record.type === "message" && record.role === "system" && record.kind === "runtime_restart")
+  ))).filter((message) => !existingMessageIds.has(message.id));
+  if (earlier.length === 0 && earlierMessages.length === 0) return session;
   return {
     ...session,
     turns: trimTurns([...earlier, ...session.turns]),
-    messages: trimMessages([
-      ...messagesFromHistoryRecords(records.filter((record) => earlierTurnIds.has(record.turn_id))),
-      ...session.messages,
-    ]),
+    messages: trimMessages([...earlierMessages, ...session.messages]),
   };
 }
 
 export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[] {
   const turns = new Map<string, WebTurn>();
   for (const record of records) {
+    if (record.type === "message" && record.role === "system") continue;
     const turn = turns.get(record.turn_id) ?? {
       turn_id: record.turn_id,
       state: "restored",
@@ -487,10 +489,13 @@ export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[]
     .sort((left, right) => left.created_at_ms - right.created_at_ms);
 }
 
-type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }> & { role: "user" | "assistant" };
+type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }>;
 
 function isChatMessageHistoryRecord(record: ChatHistoryRecord): record is ChatMessageHistoryRecord {
-  return record.type === "message" && (record.role === "user" || record.role === "assistant");
+  return record.type === "message"
+    && (record.role === "user"
+      || record.role === "assistant"
+      || (record.role === "system" && record.kind === "runtime_restart"));
 }
 
 function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[] {
@@ -502,6 +507,7 @@ function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[]
       role: record.role,
       text: record.content,
       created_at_ms: record.created_at_ms,
+      kind: record.kind,
     }));
 }
 
@@ -594,10 +600,14 @@ function aggregateSessionState(workers: Session["workers"], fallback: string) {
   return "ready";
 }
 
-export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").UsageStats; latest: import("./protocol").UsageStats } | undefined {
+function turnLiveUsageSince(
+  turn: WebTurn,
+  createdAtOrAfterMs?: number,
+): { total: import("./protocol").UsageStats; latest: import("./protocol").UsageStats } | undefined {
   let latest: import("./protocol").UsageStats | undefined;
   const total: import("./protocol").UsageStats = {};
   for (const event of turn.events) {
+    if (createdAtOrAfterMs !== undefined && event.created_at_ms < createdAtOrAfterMs) continue;
     if (event.source !== "worker_activity" || event.payload.kind !== "model_response") continue;
     const usage = event.payload.usage;
     if (!usage || typeof usage !== "object") continue;
@@ -611,12 +621,32 @@ export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").Usag
   return latest ? { total, latest } : undefined;
 }
 
+export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").UsageStats; latest: import("./protocol").UsageStats } | undefined {
+  return turnLiveUsageSince(turn);
+}
+
 export function sessionContextUsage(session: Session): import("./protocol").UsageStats | undefined {
+  const runtimeRestartAtMs = session.messages.reduce<number | undefined>((latest, message) => (
+    message.role === "system"
+      && message.kind === "runtime_restart"
+      && (latest === undefined || message.created_at_ms > latest)
+      ? message.created_at_ms
+      : latest
+  ), undefined);
+
   for (let index = session.turns.length - 1; index >= 0; index -= 1) {
     const turn = session.turns[index];
     if (turn.state === "restored") continue;
-    const live = turnLiveUsage(turn);
+
+    // A restarted host restores historical turns for display, but Core starts
+    // with a fresh context. Only model responses emitted by the new runtime
+    // instance may refill the context meter.
+    const live = turnLiveUsageSince(turn, runtimeRestartAtMs);
     if (live) return live.latest;
+
+    // Completion telemetry has no independent timestamp. It is safe only when
+    // the whole turn began after the latest runtime restart boundary.
+    if (runtimeRestartAtMs !== undefined && turn.created_at_ms < runtimeRestartAtMs) continue;
     const latest = turn.completion?.latest_usage;
     if (latest) return latest;
   }

@@ -96,6 +96,16 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("[activeSessionId, latestTurn?.turn_id]");
   });
 
+  it("renders durable runtime restarts as accessible chat timeline dividers", () => {
+    expect(protocolSource).toContain('role: "user" | "assistant" | "system"');
+    expect(source).toContain('message.kind === "runtime_restart"');
+    expect(source).toContain("function RuntimeRestartDivider");
+    expect(source).toContain('className="runtime-restart-divider" role="separator"');
+    expect(source).toContain('.filter((message): message is ChatMessage & { role: "user" | "assistant" } => message.role !== "system")');
+    expect(styles).toContain(".runtime-restart-divider {");
+    expect(styles).toContain(':root[data-theme="light"] .runtime-restart-divider');
+  });
+
   it("keeps the composer usable on narrow screens while stop and tool buttons are visible", () => {
     expect(styles).toContain("@media (max-width: 520px)");
     expect(styles).toContain(".composer-actions { align-items: flex-start; gap: 8px; justify-content: space-between; }");
@@ -928,6 +938,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("!turn.final_answer && turn.completion");
     expect(viewModelSource).toContain("turnLiveUsage");
     expect(viewModelSource).toContain("sessionContextUsage");
+    expect(viewModelSource).toContain('message.kind === "runtime_restart"');
+    expect(viewModelSource).toContain("turnLiveUsageSince(turn, runtimeRestartAtMs)");
     expect(styles).toContain(".header-context-meter");
     expect(styles).toContain(".header-context.warning .header-context-meter > span");
     expect(styles).toContain(".header-context.critical .header-context-meter > span");
