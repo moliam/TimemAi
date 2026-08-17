@@ -1218,7 +1218,10 @@ button:disabled { cursor: not-allowed; }
 .queued-message p { width: 100%; min-width: 0; margin: 0; overflow: hidden; color: #ddd; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .queued-message-error { display: block; overflow: hidden; color: #f0a19a; font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .queued-message-roles { max-width: 100%; display: inline-flex; align-items: center; gap: 3px; overflow: hidden; border: 1px solid #41685c; border-radius: 999px; padding: 1px 6px; background: #263b35; color: #a9d6c7; font-size: 9px; font-weight: 700; line-height: 13px; box-shadow: 0 1px 3px #0004; }
-.queued-message-roles span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queued-message-role-names { min-width: 0; display: inline-flex; align-items: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queued-message-role { display: inline-flex; align-items: center; min-width: 0; }
+.queued-message-role > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queued-message-role-separator { flex: 0 0 auto; margin: 0 4px; color: #6f9187; font-style: normal; font-weight: 500; }
 .queued-message-roles svg { flex: 0 0 auto; }
 .queued-message-attachments { display: inline-flex; align-items: center; gap: 3px; margin-top: 2px; color: #9fc9bb; font-size: 10px; font-weight: 600; }
 .queued-message.delivery-error { border-color: color-mix(in srgb, #d85c52 48%, #404040); }
@@ -1251,6 +1254,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .queued-message p { color: #27343a; }
 :root[data-theme="light"] .queued-message-error { color: #a53d35; }
 :root[data-theme="light"] .queued-message-roles { border-color: #9bc1b5; background: #e4f1ed; color: #416d60; box-shadow: 0 1px 3px #48685c20; }
+:root[data-theme="light"] .queued-message-role-separator { color: #91aaa2; }
 :root[data-theme="light"] .queued-message-editor { border-color: #c7d1d6; background: #f8fafb; color: #27343a; }
 :root[data-theme="light"] .queued-message-editor:focus { border-color: #5e899c; }
 :root[data-theme="light"] .queued-message.editing .queued-message-actions button { border-color: #cbd5d9; }
