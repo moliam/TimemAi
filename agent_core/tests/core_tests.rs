@@ -334,6 +334,36 @@ fn prompt_is_append_only_and_segmented() {
 }
 
 #[test]
+fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes() {
+    let mut core = AgentCore::new(
+        include_str!("../../resources/system_prompt/system_prompt.md"),
+        profile("qwen-plus"),
+        tmp_dir("startup_stamp"),
+    );
+    let first = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let timestamp_section =
+        "## TIMESTAMP\nThis is the time stamp when this whole agent interaction starts:\n";
+    let stamp = first
+        .rsplit_once(timestamp_section)
+        .and_then(|(_, rest)| rest.lines().next())
+        .expect("startup stamp should be rendered")
+        .to_string();
+    assert!(
+        stamp.contains("local_time") || stamp == "local_time_unavailable",
+        "unexpected rendered startup stamp: {stamp:?}"
+    );
+    assert!(!first.contains("{{STARTUP_STAMP}}"));
+
+    core.set_assistant_speaker_name("Ai2");
+    let refreshed = core.build_next_prompt();
+    assert!(refreshed.contains(&format!("{timestamp_section}{stamp}")));
+    assert!(!refreshed.contains("{{STARTUP_STAMP}}"));
+}
+
+#[test]
 fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape() {
     let mut core = test_core(
         "STATIC",
@@ -1068,6 +1098,16 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         .unwrap();
     assert!(shrunk_tokens_estimate > 1);
     assert!(!prompt.contains("REMOVE_THIS_DELTA"));
+    assert!(prompt.contains("context compacted successfully."));
+    assert!(!prompt.contains("Context compact summary replacing"));
+    assert_eq!(prompt.matches("remove stale test delta").count(), 1);
+    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let compact_request = prompt.find("remove stale test delta").unwrap();
+    let compact_result = prompt.find("context compacted successfully.").unwrap();
+    let system = prompt[..compact_result].rfind("## SYSTEM").unwrap();
+    assert!(assistant < compact_request);
+    assert!(compact_request < system);
+    assert!(system < compact_result);
 
     let final_step = core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
@@ -1079,6 +1119,44 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         panic!("unexpected step: {final_step:?}");
     };
     assert_eq!(final_turn.stats.shrunk_tokens, shrunk_tokens_estimate);
+}
+
+#[test]
+fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("shrink_extracted_replay_order"),
+    );
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
+    let prompt = match core.begin_turn("REMOVE_EXTRACTED_DELTA", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let delta_id = first_field_value(&prompt, "delta_id");
+
+    let step = core.apply_model_response(LlmResponse {
+        content: scored(format!(
+            r#"{{"context_compact":{{"discard":["{}"],"summary":"retain extracted compact state"}}}}"#,
+            delta_id
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(prompt.matches("retain extracted compact state").count(), 1);
+    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let summary = prompt.find("retain extracted compact state").unwrap();
+    let compact_result = prompt.find("context compacted successfully.").unwrap();
+    let system = prompt[..compact_result].rfind("## SYSTEM").unwrap();
+    assert!(assistant < summary);
+    assert!(summary < system);
+    assert!(system < compact_result);
 }
 
 #[test]
@@ -3319,10 +3397,10 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: context_compact"));
-    assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
+    assert!(prompt.contains("context compacted successfully."));
     let scratch_id = prompt
         .lines()
-        .find_map(|line| line.strip_prefix("The scratch id for offloaded deltas is: "))
+        .find_map(|line| line.strip_prefix("scratch_id: "))
         .unwrap_or_default()
         .trim()
         .to_string();
@@ -4859,8 +4937,9 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
+    assert!(prompt.contains("scratch_id: scratch_"), "{prompt}");
     assert!(
-        prompt.contains("The scratch id for offloaded deltas is: scratch_"),
+        prompt.contains("context compacted successfully."),
         "{prompt}"
     );
     assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");

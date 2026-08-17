@@ -657,7 +657,13 @@ fn core_notifications_can_be_published_as_topic_events() {
 
 #[test]
 fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
-    let event = model_repair_topic_event("session_a", "invalid_xml", 2, 5);
+    let event = model_repair_topic_event(
+        "session_a",
+        "invalid_xml",
+        "模型回复不是有效的 XML 协议消息。",
+        2,
+        5,
+    );
 
     assert_eq!(event.session_id, "session_a");
     assert_eq!(event.topic.name, CORE_TOPIC_MODEL_REPAIR);
@@ -669,6 +675,7 @@ fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
         event.as_model_repair(),
         Some(CoreModelRepairTopic {
             issue: "invalid_xml".to_string(),
+            reason: "模型回复不是有效的 XML 协议消息。".to_string(),
             attempt: 2,
             max_attempts: 5,
         })
@@ -688,6 +695,7 @@ fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
             },
             "payload": {
                 "issue": "invalid_xml",
+                "reason": "模型回复不是有效的 XML 协议消息。",
                 "attempt": 2,
                 "max_attempts": 5,
             },

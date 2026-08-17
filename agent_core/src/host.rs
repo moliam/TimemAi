@@ -377,6 +377,7 @@ pub struct CoreModelResponseTopic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreModelRepairTopic {
     pub issue: String,
+    pub reason: String,
     pub attempt: u32,
     pub max_attempts: u32,
 }
@@ -692,6 +693,12 @@ impl CoreTopicEvent {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            reason: self
+                .payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             attempt: self
                 .payload
                 .get("attempt")
@@ -823,10 +830,12 @@ impl CoreTopicEvent {
 pub fn model_repair_topic_event(
     session_id: impl Into<String>,
     issue: impl Into<String>,
+    reason: impl Into<String>,
     attempt: u32,
     max_attempts: u32,
 ) -> CoreTopicEvent {
     let issue = issue.into();
+    let reason = reason.into();
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
@@ -838,6 +847,7 @@ pub fn model_repair_topic_event(
         CoreSessionState::WaitingModel,
         json!({
             "issue": issue,
+            "reason": reason,
             "attempt": attempt,
             "max_attempts": max_attempts,
         }),

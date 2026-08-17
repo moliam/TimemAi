@@ -60,6 +60,7 @@ pub(crate) fn render_static_prompt(
     capabilities: &CapabilityRegistry,
     protocol_suite: &dyn ResponseProtocolSuite,
     assistant_heading: &str,
+    startup_stamp: &str,
 ) -> String {
     // 1. Fill {{RESPONSE_PROTOCOL_SECTION}} from protocol suite
     let with_protocol = static_prompt.replace(
@@ -71,6 +72,7 @@ pub(crate) fn render_static_prompt(
     let assistant_heading = assistant_heading.trim();
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
     let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
+    let with_protocol = with_protocol.replace("{{STARTUP_STAMP}}", startup_stamp);
     // 2. Fill {{TOOL_CATALOG}} and {{SKILL_HEADERS}} from capabilities
     let with_caps = capabilities.enrich_static_prompt(&with_protocol);
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
