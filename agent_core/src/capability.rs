@@ -363,6 +363,10 @@ impl CapabilityRegistry {
         self.tools.contains_key(action)
     }
 
+    pub fn contains_skill(&self, id: &str) -> bool {
+        self.skills.contains_key(id)
+    }
+
     pub(crate) fn tool_input_property_schema(
         &self,
         action: &str,

@@ -192,13 +192,30 @@ impl McpRuntime {
         tool_name: &str,
         args: &Value,
     ) -> Result<String, String> {
+        self.call_tool_outcome(config, tool_name, args)
+            .map(|outcome| outcome.text)
+    }
+
+    pub(crate) fn call_tool_outcome(
+        &self,
+        config: &McpServerConfig,
+        tool_name: &str,
+        args: &Value,
+    ) -> Result<crate::ActionOutcome, String> {
         let connection = self.connection(config)?;
         let result = connection
             .lock()
             .map_err(|_| "mcp_connection_poisoned".to_string())?
             .call_tool(tool_name, args);
         match result {
-            Ok(result) => Ok(render_call_result(&config.name, tool_name, &result)),
+            Ok(result) => {
+                let text = render_call_result(&config.name, tool_name, &result);
+                if result.get("isError").and_then(Value::as_bool) == Some(true) {
+                    Ok(crate::ActionOutcome::failed(text))
+                } else {
+                    Ok(crate::ActionOutcome::completed(text))
+                }
+            }
             Err(error) => {
                 // A failed transport may still deliver a late response for this
                 // request, so it must not be reused by a later tool call.

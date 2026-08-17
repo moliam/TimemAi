@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::response_protocol::ParsedAction;
+use crate::ActionOutcome;
 use crate::AgentCore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,26 +60,22 @@ impl SelfToolState {
     }
 }
 
-pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> String {
+pub(crate) fn execute_action_outcome(core: &mut AgentCore, action: &ParsedAction) -> ActionOutcome {
     match action.input_lower("type").as_str() {
-        "path" => execute_path_action(core),
-        "cwd" => execute_cwd_action(core, &action.input_raw_str("new_path")),
-        "params" => execute_params_action(core),
-        self_type => {
-            format!("Action result: self_tool\ntype: {self_type}\nerror: unsupported_type")
-        }
-    }
-}
-
-fn execute_cwd_action(core: &mut AgentCore, new_path: &str) -> String {
-    match core.change_prompt_cwd(new_path) {
-        Ok(path) => format!(
-            "Action result: self_tool\ntype: cwd\nCWD changed to {}",
-            path.display()
-        ),
-        Err(error) => {
-            format!("Action result: self_tool\ntype: cwd\nerror: {error}")
-        }
+        "path" => ActionOutcome::completed(execute_path_action(core)),
+        "cwd" => match core.change_prompt_cwd(action.input_raw_str("new_path")) {
+            Ok(path) => ActionOutcome::completed(format!(
+                "Action result: self_tool\ntype: cwd\nCWD changed to {}",
+                path.display()
+            )),
+            Err(error) => ActionOutcome::failed(format!(
+                "Action result: self_tool\ntype: cwd\nerror: {error}"
+            )),
+        },
+        "params" => ActionOutcome::completed(execute_params_action(core)),
+        self_type => ActionOutcome::failed(format!(
+            "Action result: self_tool\ntype: {self_type}\nerror: unsupported_type"
+        )),
     }
 }
 

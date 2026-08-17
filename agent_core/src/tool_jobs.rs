@@ -1,4 +1,4 @@
-use crate::MemGuard;
+use crate::{ActionOutcome, MemGuard};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
@@ -45,16 +45,25 @@ impl FileToolJobStore {
     }
 
     pub fn spawn(&self, action: &str, path: &Path, payload: &Value) -> String {
+        self.spawn_outcome(action, path, payload).text
+    }
+
+    pub(crate) fn spawn_outcome(
+        &self,
+        action: &str,
+        path: &Path,
+        payload: &Value,
+    ) -> ActionOutcome {
         let _ = fs::create_dir_all(&self.dir);
         let id = unique_job_id("tool_job");
         let payload_file = self.dir.join(format!("{id}.payload.json"));
         let output_file = self.dir.join(format!("{id}.out"));
         let status_file = self.dir.join(format!("{id}.status"));
         if let Err(err) = fs::write(&payload_file, payload.to_string()) {
-            return format!(
+            return ActionOutcome::failed(format!(
                 "Action result: {action}\nerror: background_payload_write_failed\nreason: {}",
                 compact_text(&err.to_string(), 1000)
-            );
+            ));
         }
 
         let script = format!(
@@ -79,10 +88,10 @@ impl FileToolJobStore {
         let child = match spawn {
             Ok(child) => child,
             Err(err) => {
-                return format!(
+                return ActionOutcome::failed(format!(
                     "Action result: {action}\nerror: background_spawn_failed\nreason: {}",
                     compact_text(&err.to_string(), 1000)
-                )
+                ))
             }
         };
         let record = ToolJobRecord {
@@ -96,22 +105,28 @@ impl FileToolJobStore {
             status_file: status_file.to_string_lossy().to_string(),
         };
         let _ = self.append(&record);
-        format!(
+        ActionOutcome::background_running(format!(
             "Action result: {action}\nstatus: background_started\njob_id: {}\npid: {}\noutput_file: {}\nstatus_file: {}\nnext_action: capmgr op=job_status",
             record.id, record.pid, record.output_file, record.status_file
-        )
+        ))
     }
 
     pub fn status(&self, job_id: &str, wait_ms: u64) -> String {
+        self.status_outcome(job_id, wait_ms).text
+    }
+
+    pub(crate) fn status_outcome(&self, job_id: &str, wait_ms: u64) -> ActionOutcome {
         let clean_id = job_id.trim();
         if clean_id.is_empty() {
-            return "Action result: capmgr\nop: job_status\nerror: job_id_required".to_string();
+            return ActionOutcome::failed(
+                "Action result: capmgr\nop: job_status\nerror: job_id_required",
+            );
         }
         let Some(record) = self.find(clean_id) else {
-            return format!(
+            return ActionOutcome::failed(format!(
                 "Action result: capmgr\nop: job_status\njob_id: {}\nerror: job_not_found",
                 clean_id
-            );
+            ));
         };
         let wait = Duration::from_millis(wait_ms.min(15000));
         let started = Instant::now();
@@ -123,16 +138,16 @@ impl FileToolJobStore {
             {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
                 if code == "cancelled" {
-                    return format!(
+                    return ActionOutcome::cancelled(format!(
                         "Action result: capmgr\nop: job_status\njob_id: {}\naction: {}\nstate: cancelled\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
                         record.id,
                         record.action,
                         started.elapsed().as_millis(),
                         record.output_file,
                         compact_text(&output, 2000)
-                    );
+                    ));
                 }
-                return format!(
+                return ActionOutcome::background_finished(format!(
                     "Action result: capmgr\nop: job_status\njob_id: {}\naction: {}\nstate: finished\nexit_code: {}\nwaited_ms: {}\noutput_file: {}\noutput:\n{}",
                     record.id,
                     record.action,
@@ -140,11 +155,11 @@ impl FileToolJobStore {
                     started.elapsed().as_millis(),
                     record.output_file,
                     compact_text(&output, 4000)
-                );
+                ));
             }
             if started.elapsed() >= wait {
                 let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-                return format!(
+                return ActionOutcome::background_running(format!(
                     "Action result: capmgr\nop: job_status\njob_id: {}\naction: {}\nstate: running\npid: {}\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
                     record.id,
                     record.action,
@@ -152,50 +167,57 @@ impl FileToolJobStore {
                     started.elapsed().as_millis(),
                     record.output_file,
                     compact_text(&output, 2000)
-                );
+                ));
             }
             thread::sleep(Duration::from_millis(200));
         }
     }
 
     pub fn cancel(&self, job_id: &str) -> String {
+        self.cancel_outcome(job_id).text
+    }
+
+    pub(crate) fn cancel_outcome(&self, job_id: &str) -> ActionOutcome {
         let clean_id = job_id.trim();
         if clean_id.is_empty() {
-            return "Action result: capmgr\nop: job_cancel\nerror: job_id_required".to_string();
+            return ActionOutcome::failed(
+                "Action result: capmgr\nop: job_cancel\nerror: job_id_required",
+            );
         }
         let Some(record) = self.find(clean_id) else {
-            return format!(
+            return ActionOutcome::failed(format!(
                 "Action result: capmgr\nop: job_cancel\njob_id: {}\nerror: job_not_found",
                 clean_id
-            );
+            ));
         };
         if let Some(code) = fs::read_to_string(&record.status_file)
             .ok()
             .map(|text| text.trim().to_string())
             .filter(|text| !text.is_empty())
         {
-            let state = if code == "cancelled" {
-                "cancelled"
-            } else {
-                "finished"
-            };
-            return format!(
-                "Action result: capmgr\nop: job_cancel\njob_id: {}\naction: {}\nstate: {}\nstatus: already_completed",
-                record.id, record.action, state
-            );
+            if code == "cancelled" {
+                return ActionOutcome::cancelled(format!(
+                    "Action result: capmgr\nop: job_cancel\njob_id: {}\naction: {}\nstate: cancelled\nstatus: already_completed",
+                    record.id, record.action
+                ));
+            }
+            return ActionOutcome::background_finished(format!(
+                "Action result: capmgr\nop: job_cancel\njob_id: {}\naction: {}\nstate: finished\nstatus: already_completed",
+                record.id, record.action
+            ));
         }
 
         terminate_process(record.pid);
         let _ = fs::write(&record.status_file, "cancelled");
         let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-        format!(
+        ActionOutcome::cancelled(format!(
             "Action result: capmgr\nop: job_cancel\njob_id: {}\naction: {}\nstate: cancelled\npid: {}\noutput_file: {}\npartial_output:\n{}",
             record.id,
             record.action,
             record.pid,
             record.output_file,
             compact_text(&output, 2000)
-        )
+        ))
     }
 
     fn append(&self, record: &ToolJobRecord) -> std::io::Result<()> {

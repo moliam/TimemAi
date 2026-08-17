@@ -1,4 +1,5 @@
 use crate::capability::CapabilityRegistry;
+use crate::ActionOutcome;
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -60,6 +61,15 @@ pub fn execute_command_action(
     payload: &Value,
     timeout_ms: u64,
 ) -> String {
+    execute_command_action_outcome(action, path, payload, timeout_ms).text
+}
+
+pub(crate) fn execute_command_action_outcome(
+    action: &str,
+    path: &Path,
+    payload: &Value,
+    timeout_ms: u64,
+) -> ActionOutcome {
     let mut child = match Command::new("/bin/sh")
         .arg(path)
         .stdin(Stdio::piped())
@@ -69,10 +79,10 @@ pub fn execute_command_action(
     {
         Ok(child) => child,
         Err(err) => {
-            return format!(
+            return ActionOutcome::failed(format!(
                 "Action result: {action}\nerror: command_spawn_failed\nreason: {}",
                 compact_text(&err.to_string(), 1000)
-            )
+            ))
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
@@ -87,14 +97,14 @@ pub fn execute_command_action(
             Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return format!("Action result: {action}\nerror: timeout");
+                return ActionOutcome::timeout(format!("Action result: {action}\nerror: timeout"));
             }
             Ok(None) => thread::sleep(Duration::from_millis(50)),
             Err(err) => {
-                return format!(
+                return ActionOutcome::failed(format!(
                     "Action result: {action}\nerror: command_wait_failed\nreason: {}",
                     compact_text(&err.to_string(), 1000)
-                )
+                ))
             }
         }
     }
@@ -117,22 +127,27 @@ pub fn execute_command_action(
                 combined = "<no output>".to_string();
             }
             if let Some(signal) = exit_signal(&output.status) {
-                format!(
+                ActionOutcome::failed(format!(
                     "Action result: {action}\nerror: terminated_by_signal\nsignal: {signal}\noutput:\n{}",
                     compact_text(&combined, 4000)
-                )
+                ))
             } else {
-                format!(
-                    "Action result: {action}\nstatus: {}\noutput:\n{}",
-                    output.status.code().unwrap_or(-1),
+                let code = output.status.code().unwrap_or(-1);
+                let text = format!(
+                    "Action result: {action}\nstatus: {code}\noutput:\n{}",
                     compact_text(&combined, 4000)
-                )
+                );
+                if code == 0 {
+                    ActionOutcome::completed(text)
+                } else {
+                    ActionOutcome::failed(text)
+                }
             }
         }
-        Err(err) => format!(
+        Err(err) => ActionOutcome::failed(format!(
             "Action result: {action}\nerror: command_output_failed\nreason: {}",
             compact_text(&err.to_string(), 1000)
-        ),
+        )),
     }
 }
 

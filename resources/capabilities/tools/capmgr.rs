@@ -1,6 +1,6 @@
 use crate::capability::CapabilityRegistry;
 use crate::response_protocol::ParsedAction;
-use crate::AgentCore;
+use crate::{ActionOutcome, AgentCore};
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapmgrActionInput<'a> {
@@ -34,24 +34,46 @@ pub fn execute(registry: &CapabilityRegistry, input: CapmgrActionInput<'_>) -> S
     }
 }
 
-pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> String {
+pub(crate) fn execute_action_outcome(core: &mut AgentCore, action: &ParsedAction) -> ActionOutcome {
     let op = action.input_lower("op");
     if op == "job_status" {
         return core
             .tool_jobs
-            .status(&action.input_str("job_id"), action.status_timeout_ms());
+            .status_outcome(&action.input_str("job_id"), action.status_timeout_ms());
     }
     if op == "job_cancel" {
-        return core.tool_jobs.cancel(&action.input_str("job_id"));
+        return core.tool_jobs.cancel_outcome(&action.input_str("job_id"));
     }
-    execute(
+
+    let kind = action.input_str("kind");
+    let id = action.input_str("id");
+    let text = execute(
         &core.capabilities,
         CapmgrActionInput {
             op: &op,
-            kind: &action.input_str("kind"),
-            id: &action.input_str("id"),
+            kind: &kind,
+            id: &id,
         },
-    )
+    );
+
+    let succeeded = match op.as_str() {
+        "list" => matches!(kind.trim(), "" | "all" | "tool" | "skill"),
+        "load" => {
+            !kind.trim().is_empty()
+                && !id.trim().is_empty()
+                && match kind.trim() {
+                    "tool" => core.capabilities.contains_tool(id.trim()),
+                    "skill" => core.capabilities.contains_skill(id.trim()),
+                    _ => false,
+                }
+        }
+        _ => false,
+    };
+    if succeeded {
+        ActionOutcome::completed(text)
+    } else {
+        ActionOutcome::failed(text)
+    }
 }
 
 #[cfg(test)]

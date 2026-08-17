@@ -703,10 +703,72 @@ impl Drop for MemGuardLock {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActionStatus {
+    Completed,
+    Failed,
+    Timeout,
+    Cancelled,
+    BackgroundRunning,
+    BackgroundFinished,
+}
+
+impl ActionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::BackgroundRunning => "background_running",
+            Self::BackgroundFinished => "background_finished",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActionOutcome {
+    pub status: ActionStatus,
+    pub text: String,
+}
+
+impl ActionOutcome {
+    pub(crate) fn new(status: ActionStatus, text: impl Into<String>) -> Self {
+        Self {
+            status,
+            text: text.into(),
+        }
+    }
+
+    pub(crate) fn completed(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Completed, text)
+    }
+
+    pub(crate) fn failed(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Failed, text)
+    }
+
+    pub(crate) fn timeout(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Timeout, text)
+    }
+
+    pub(crate) fn cancelled(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Cancelled, text)
+    }
+
+    pub(crate) fn background_running(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::BackgroundRunning, text)
+    }
+
+    pub(crate) fn background_finished(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::BackgroundFinished, text)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ActionExecution {
-    Completed(String),
+    Completed(ActionOutcome),
     NeedsApproval(PendingApproval),
 }
 
@@ -2458,7 +2520,7 @@ impl AgentCore {
                 runtime,
             );
         }
-        let result = if approved {
+        let outcome = if approved {
             match &pending.approved_action {
                 PendingApprovedAction::RunBash {
                     command,
@@ -2484,22 +2546,34 @@ impl AgentCore {
                     runtime,
                 ),
                 PendingApprovedAction::ToolgenPublish { repo, draft_path } => {
-                    toolgen::execute_approved_publish(repo, draft_path, &pending.request)
+                    toolgen::execute_approved_publish_outcome(repo, draft_path, &pending.request)
                 }
             }
         } else {
-            format!(
+            ActionOutcome::failed(format!(
                 "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
                 pending.request.action,
                 pending.approved_action.command(),
                 pending.request.approval_id,
                 pending.request.reason
-            )
+            ))
         };
-        self.record_pending_approval_audit(&pending, approved, &result);
+        self.record_pending_approval_audit(&pending, approved, &outcome.text);
+        self.emit_action_finish_topic(
+            &ParsedAction {
+                action: pending.request.action.clone(),
+                raw_input: pending.approved_action.audit_input(
+                    &pending.request.approval_id,
+                    &pending.request.risk,
+                    &pending.request.reason,
+                ),
+            },
+            &outcome,
+            runtime,
+        );
         self.append_delta_with_action_output_budget(vec![(
             "result_of_llm_action".to_string(),
-            result,
+            outcome.text,
         )]);
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
@@ -2559,9 +2633,9 @@ impl AgentCore {
                 continue;
             }
             match self.execute_action(action, runtime) {
-                ActionExecution::Completed(result) => {
+                ActionExecution::Completed(outcome) => {
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(result);
+                        *slot = Some(outcome.text);
                     }
                 }
                 ActionExecution::NeedsApproval(pending) => {
@@ -2632,8 +2706,8 @@ impl AgentCore {
                 continue;
             }
             match self.execute_action(action, runtime) {
-                ActionExecution::Completed(result) => {
-                    completed_results.push((next_index, result));
+                ActionExecution::Completed(outcome) => {
+                    completed_results.push((next_index, outcome.text));
                 }
                 ActionExecution::NeedsApproval(next_pending) => {
                     let pending = Self::pending_approval_with_parallel_continuation(
@@ -3477,7 +3551,7 @@ impl AgentCore {
             }
             for action in group.actions {
                 match self.execute_action(action, runtime) {
-                    ActionExecution::Completed(result) => result_lines.push(result),
+                    ActionExecution::Completed(outcome) => result_lines.push(outcome.text),
                     ActionExecution::NeedsApproval(pending) => {
                         return Err((result_lines, pending));
                     }
@@ -3511,22 +3585,24 @@ impl AgentCore {
         &mut self,
         idx: usize,
         action: ParsedAction,
-    ) -> thread::JoinHandle<(usize, ParsedAction, String)> {
+    ) -> thread::JoinHandle<(usize, ParsedAction, ActionOutcome)> {
         let action_for_thread = action.clone();
         let cwd = self.current_prompt_cwd().to_path_buf();
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                readfile::execute_with_timeout(
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                readfile::execute_with_timeout_outcome(
                     &cwd,
                     &action_for_thread.raw_input,
                     readfile::DEFAULT_TIMEOUT,
                 )
             }))
             .unwrap_or_else(|_| {
-                "Action result: readfile\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.".to_string()
+                ActionOutcome::failed(
+                    "Action result: readfile\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.",
+                )
             });
-            (idx, action, result)
+            (idx, action, outcome)
         })
     }
 
@@ -3535,7 +3611,7 @@ impl AgentCore {
         idx: usize,
         pending: PendingApproval,
         cancel_requested: Arc<AtomicBool>,
-    ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)> {
+    ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, ActionOutcome)> {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             raw_input: pending.approved_action.audit_input(
@@ -3577,7 +3653,11 @@ impl AgentCore {
                     )
                 }
                 PendingApprovedAction::ToolgenPublish { repo, draft_path } => {
-                    toolgen::execute_approved_publish(repo, draft_path, &pending_for_thread.request)
+                    toolgen::execute_approved_publish_outcome(
+                        repo,
+                        draft_path,
+                        &pending_for_thread.request,
+                    )
                 }
             };
             (idx, action, pending_for_thread, result)
@@ -3589,7 +3669,7 @@ impl AgentCore {
         idx: usize,
         action: ParsedAction,
         cancel_requested: Arc<AtomicBool>,
-    ) -> thread::JoinHandle<(usize, ParsedAction, String)> {
+    ) -> thread::JoinHandle<(usize, ParsedAction, ActionOutcome)> {
         let action_for_audit = action.clone();
         let shell_jobs = self.shell_jobs.clone();
         let session_id = self.current_session_id();
@@ -3606,9 +3686,9 @@ impl AgentCore {
                 loop_command.clone()
             };
             let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
-                ActionExecution::Completed(
-                    "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.".to_string(),
-                )
+                ActionExecution::Completed(ActionOutcome::failed(
+                    "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
+                ))
             } else {
                 let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
@@ -3631,20 +3711,20 @@ impl AgentCore {
                     &mut runtime,
                 )
             };
-            let result = match result {
-                ActionExecution::Completed(result) => result,
-                ActionExecution::NeedsApproval(_) => format!(
+            let outcome = match result {
+                ActionExecution::Completed(outcome) => outcome,
+                ActionExecution::NeedsApproval(_) => ActionOutcome::failed(format!(
                     "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
                     command,
-                ),
+                )),
             };
-            (idx, action_for_audit, result)
+            (idx, action_for_audit, outcome)
         })
     }
 
     fn collect_parallel_action_handles(
         &self,
-        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
+        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, ActionOutcome)>>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
         cancel_requested: &Arc<AtomicBool>,
@@ -3659,11 +3739,11 @@ impl AgentCore {
             };
             let handle = handles.swap_remove(position);
             match handle.join() {
-                Ok((idx, action, result)) => {
-                    self.record_action_audit(&action, "completed", Some(&result));
-                    self.emit_action_finish_topic(&action, &result, runtime);
+                Ok((idx, action, outcome)) => {
+                    self.record_action_audit(&action, outcome.status.as_str(), Some(&outcome.text));
+                    self.emit_action_finish_topic(&action, &outcome, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(result);
+                        *slot = Some(outcome.text);
                     }
                 }
                 Err(_) => {
@@ -3679,7 +3759,7 @@ impl AgentCore {
 
     fn collect_approved_parallel_bash_handles(
         &self,
-        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)>>,
+        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, ActionOutcome)>>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
         cancel_requested: &Arc<AtomicBool>,
@@ -3694,11 +3774,11 @@ impl AgentCore {
             };
             let handle = handles.swap_remove(position);
             match handle.join() {
-                Ok((idx, action, pending, result)) => {
-                    self.record_pending_approval_audit(&pending, true, &result);
-                    self.emit_action_finish_topic(&action, &result, runtime);
+                Ok((idx, action, pending, outcome)) => {
+                    self.record_pending_approval_audit(&pending, true, &outcome.text);
+                    self.emit_action_finish_topic(&action, &outcome, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(result);
+                        *slot = Some(outcome.text);
                     }
                 }
                 Err(_) => {
@@ -3758,8 +3838,8 @@ impl AgentCore {
                 continue;
             }
             match self.execute_action(action, runtime) {
-                ActionExecution::Completed(result) => {
-                    results[idx] = Some(result);
+                ActionExecution::Completed(outcome) => {
+                    results[idx] = Some(outcome.text);
                 }
                 ActionExecution::NeedsApproval(pending) => {
                     self.collect_parallel_action_handles(
@@ -3797,54 +3877,77 @@ impl AgentCore {
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
             Err(err) => {
-                let result = format!("Action result: {}\nerror: {}", action.action, err);
-                self.record_action_audit(&action_for_audit, "completed", Some(&result));
-                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-                return ActionExecution::Completed(result);
+                let outcome = ActionOutcome::failed(format!(
+                    "Action result: {}\nerror: {}",
+                    action.action, err
+                ));
+                self.record_action_audit(
+                    &action_for_audit,
+                    outcome.status.as_str(),
+                    Some(&outcome.text),
+                );
+                self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+                return ActionExecution::Completed(outcome);
             }
         };
+
         if let Err(issue) = self
             .capabilities
             .validate_action_input(&action.action, &action.raw_input)
         {
-            let result = format!(
+            let outcome = ActionOutcome::failed(format!(
                 "Action result: {}\nerror: invalid_input\nmessage: {}",
                 action.action, issue
-            );
-            self.record_action_audit(&action_for_audit, "invalid_input", Some(&result));
-            self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-            return ActionExecution::Completed(result);
+            ));
+            self.record_action_audit(&action_for_audit, "invalid_input", Some(&outcome.text));
+            self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+            return ActionExecution::Completed(outcome);
         }
+
         if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
-            let result = self.execute_command_capability(&action, path);
-            self.record_action_audit(&action_for_audit, "completed", Some(&result));
-            return ActionExecution::Completed(result);
+            let outcome = self.execute_command_capability(&action, path);
+            self.record_action_audit(
+                &action_for_audit,
+                outcome.status.as_str(),
+                Some(&outcome.text),
+            );
+            self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+            return ActionExecution::Completed(outcome);
         }
+
         if let executor::ExecutorTarget::Mcp {
             server_id,
             tool_name,
         } = &executor_target
         {
             self.current_stats.tool_calls += 1;
-            let result = match self.mcp_servers.get(server_id) {
-                Some(config) => self
-                    .mcp_runtime
-                    .call_tool(config, tool_name, &action.raw_input)
-                    .unwrap_or_else(|error| {
-                        format!(
+            let outcome = match self.mcp_servers.get(server_id) {
+                Some(config) => {
+                    match self
+                        .mcp_runtime
+                        .call_tool_outcome(config, tool_name, &action.raw_input)
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => ActionOutcome::failed(format!(
                             "Action result: {}\nstatus: failed\nerror: {}",
                             action.action, error
-                        )
-                    }),
-                None => format!(
+                        )),
+                    }
+                }
+                None => ActionOutcome::failed(format!(
                     "Action result: {}\nstatus: failed\nerror: mcp_server_not_enabled",
                     action.action
-                ),
+                )),
             };
-            self.record_action_audit(&action_for_audit, "completed", Some(&result));
-            self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-            return ActionExecution::Completed(result);
+            self.record_action_audit(
+                &action_for_audit,
+                outcome.status.as_str(),
+                Some(&outcome.text),
+            );
+            self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+            return ActionExecution::Completed(outcome);
         }
+
         let dispatch_name = match &executor_target {
             executor::ExecutorTarget::Builtin { binding_name } => binding_name.as_str(),
             executor::ExecutorTarget::Command { .. } => {
@@ -3854,6 +3957,7 @@ impl AgentCore {
                 unreachable!("MCP target returned early")
             }
         };
+
         self.current_stats.tool_calls += 1;
         let execution = match tool_registry::execute_builtin_tool(
             self,
@@ -3862,25 +3966,30 @@ impl AgentCore {
             runtime,
         ) {
             Ok(Some(execution)) => execution,
-            Ok(None) => ActionExecution::Completed(format!(
+            Ok(None) => ActionExecution::Completed(ActionOutcome::failed(format!(
                 "Action result: {}\nunsupported native action",
                 dispatch_name
-            )),
+            ))),
             Err(_) => {
-                let result = format!(
+                let outcome = ActionOutcome::failed(format!(
                     "Action result: {}\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.",
                     dispatch_name
-                );
-                self.record_action_audit(&action_for_audit, "internal_error", Some(&result));
-                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-                return ActionExecution::Completed(result);
+                ));
+                self.record_action_audit(&action_for_audit, "internal_error", Some(&outcome.text));
+                self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+                return ActionExecution::Completed(outcome);
             }
         };
+
         match execution {
-            ActionExecution::Completed(result) => {
-                self.record_action_audit(&action_for_audit, "completed", Some(&result));
-                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-                ActionExecution::Completed(result)
+            ActionExecution::Completed(outcome) => {
+                self.record_action_audit(
+                    &action_for_audit,
+                    outcome.status.as_str(),
+                    Some(&outcome.text),
+                );
+                self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+                ActionExecution::Completed(outcome)
             }
             ActionExecution::NeedsApproval(pending) => {
                 let result = format!(
@@ -3900,7 +4009,7 @@ impl AgentCore {
     fn emit_action_finish_topic(
         &self,
         action: &ParsedAction,
-        result: &str,
+        outcome: &ActionOutcome,
         runtime: &mut dyn ActionRuntime,
     ) {
         let notification = notification::notification_from_action(action);
@@ -3909,10 +4018,11 @@ impl AgentCore {
         event.topic.attributes["active"] = json!(false);
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
-        event.payload["status"] = json!(Self::action_finish_status(action, result));
+        event.payload["status"] = json!(outcome.status.as_str());
         if action.action == "self_tool"
             && action.input_lower("type") == "cwd"
-            && result
+            && outcome
+                .text
                 .lines()
                 .nth(2)
                 .is_some_and(|line| line.starts_with("CWD changed to "))
@@ -3921,63 +4031,27 @@ impl AgentCore {
                 "cwd": self.current_prompt_cwd().display().to_string(),
             });
         }
-        if let Some(pid) = action_result_pid(result) {
+        if let Some(pid) = action_result_pid(&outcome.text) {
             event.payload["pid"] = json!(pid);
         }
         runtime.on_core_topic_events(&[event]);
     }
 
-    fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> String {
+    fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> ActionOutcome {
         self.current_stats.tool_calls += 1;
         let payload = json!({
             "action": action.action,
             "args": action.raw_input,
         });
         if action.background() {
-            return self.tool_jobs.spawn(&action.action, path, &payload);
+            return self.tool_jobs.spawn_outcome(&action.action, path, &payload);
         }
-        executor::execute_command_action(&action.action, path, &payload, action.shell_timeout_ms())
-    }
-
-    fn action_finish_status(action: &ParsedAction, result: &str) -> &'static str {
-        let lower = result.to_lowercase();
-        if action.action == "run_bash" && action.background() {
-            return "background_running";
-        }
-        if action.action == "capmgr" && action.input_lower("op") == "job_status" {
-            if lower.contains("state: finished") || lower.contains("has finished") {
-                return "background_finished";
-            }
-            if lower.contains("state: cancelled") || lower.contains("was cancelled") {
-                return "cancelled";
-            }
-            if lower.contains("state: running") || lower.contains("still running") {
-                return "background_running";
-            }
-        }
-        if lower.contains("polling state: finished")
-            || lower.contains("exit code: 0")
-            || lower.contains("status: 0")
-            || lower.contains("the command finished")
-        {
-            return "completed";
-        }
-        if lower.contains("polling state: timeout")
-            || lower.contains("timed out")
-            || lower.contains("timeout")
-        {
-            return "timeout";
-        }
-        if lower.contains("cancelled") {
-            return "cancelled";
-        }
-        if lower.contains("not executed")
-            || lower.contains("invalid_input")
-            || lower.contains("error:")
-        {
-            return "failed";
-        }
-        "completed"
+        executor::execute_command_action_outcome(
+            &action.action,
+            path,
+            &payload,
+            action.shell_timeout_ms(),
+        )
     }
 
     fn record_action_audit(&self, action: &ParsedAction, status: &str, result: Option<&str>) {

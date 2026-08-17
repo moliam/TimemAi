@@ -190,6 +190,38 @@ fn normal_bash_cancel_terminates_the_entire_process_group() {
 }
 
 #[test]
+fn successful_run_bash_status_is_independent_of_output_words() {
+    let store = FileShellJobStore::new(&tmp_memory_dir("status_words"));
+    let cwd = tmp_cwd("status_words");
+    let result = execute_run_bash(
+        "printf 'timeout documentation\\nerror: example\\ncancelled text\\n'",
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+
+    let ActionExecution::Completed(outcome) = result else {
+        panic!("approve mode should execute directly");
+    };
+    assert_eq!(outcome.status, ActionStatus::Completed);
+    assert!(
+        outcome.text.contains("timeout documentation"),
+        "{}",
+        outcome.text
+    );
+    assert!(outcome.text.contains("error: example"), "{}", outcome.text);
+    assert!(outcome.text.contains("cancelled text"), "{}", outcome.text);
+}
+
+#[test]
 fn normal_run_bash_rejects_long_sleep_commands() {
     let store = FileShellJobStore::new(&tmp_memory_dir("long_sleep_guard"));
     let cwd = tmp_cwd("long_sleep_guard");
@@ -208,9 +240,14 @@ fn normal_run_bash_rejects_long_sleep_commands() {
         &mut NeverCancelRuntime,
     );
     match result {
-        ActionExecution::Completed(text) => {
-            assert!(text.contains("long sleep in normal mode"), "{text}");
-            assert!(text.contains("interval_ms"));
+        ActionExecution::Completed(outcome) => {
+            assert_eq!(outcome.status, ActionStatus::Failed);
+            assert!(
+                outcome.text.contains("long sleep in normal mode"),
+                "{}",
+                outcome.text
+            );
+            assert!(outcome.text.contains("interval_ms"));
         }
         ActionExecution::NeedsApproval(_) => {
             panic!("long sleep should be rejected before approval")
@@ -237,9 +274,10 @@ fn normal_run_bash_allows_short_sleep_commands() {
         &mut NeverCancelRuntime,
     );
     match result {
-        ActionExecution::Completed(text) => {
-            assert!(text.contains("Exit code: 0"));
-            assert!(text.contains("done"));
+        ActionExecution::Completed(outcome) => {
+            assert_eq!(outcome.status, ActionStatus::Completed);
+            assert!(outcome.text.contains("Exit code: 0"));
+            assert!(outcome.text.contains("done"));
         }
         ActionExecution::NeedsApproval(_) => panic!("approve mode should not request approval"),
     }
@@ -255,10 +293,19 @@ fn run_bash_poll_mode_finishes_when_command_exits_zero() {
         shell_quote_path(&marker)
     );
     let mut runtime = NeverCancelRuntime;
-    let result = execute_polling_bash(&command, &dir, 1000, 5000, 1000, &mut runtime);
-    assert!(result.contains("Action result: run_bash"), "{result}");
-    assert!(result.contains("Polling state: finished"), "{result}");
-    assert!(result.contains("Attempts: 2"), "{result}");
+    let outcome = execute_polling_bash_outcome(&command, &dir, 1000, 5000, 1000, &mut runtime);
+    assert_eq!(outcome.status, ActionStatus::Completed);
+    assert!(
+        outcome.text.contains("Action result: run_bash"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("Polling state: finished"),
+        "{}",
+        outcome.text
+    );
+    assert!(outcome.text.contains("Attempts: 2"), "{}", outcome.text);
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -266,7 +313,7 @@ fn run_bash_poll_mode_finishes_when_command_exits_zero() {
 fn run_bash_poll_mode_times_out_when_command_stays_nonzero() {
     let mut runtime = NeverCancelRuntime;
     let cwd = tmp_cwd("poll_timeout");
-    let result = execute_polling_bash(
+    let outcome = execute_polling_bash_outcome(
         "printf waiting; exit 7",
         &cwd,
         1000,
@@ -274,9 +321,18 @@ fn run_bash_poll_mode_times_out_when_command_stays_nonzero() {
         1000,
         &mut runtime,
     );
-    assert!(result.contains("Polling state: timeout"), "{result}");
-    assert!(result.contains("Last observed exit code: 7"), "{result}");
-    assert!(result.contains("waiting"), "{result}");
+    assert_eq!(outcome.status, ActionStatus::Timeout);
+    assert!(
+        outcome.text.contains("Polling state: timeout"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("Last observed exit code: 7"),
+        "{}",
+        outcome.text
+    );
+    assert!(outcome.text.contains("waiting"), "{}", outcome.text);
 }
 
 #[test]
@@ -286,8 +342,13 @@ fn run_bash_poll_mode_can_be_cancelled_during_wait() {
         cancelled: &cancelled,
     };
     let cwd = tmp_cwd("poll_cancel");
-    let result = execute_polling_bash("exit 1", &cwd, 1000, 10_000, 1000, &mut runtime);
-    assert!(result.contains("Polling state: cancelled"), "{result}");
+    let outcome = execute_polling_bash_outcome("exit 1", &cwd, 1000, 10_000, 1000, &mut runtime);
+    assert_eq!(outcome.status, ActionStatus::Cancelled);
+    assert!(
+        outcome.text.contains("Polling state: cancelled"),
+        "{}",
+        outcome.text
+    );
 }
 
 #[test]
@@ -336,10 +397,14 @@ fn run_bash_polling_requires_loop_cmd_and_interval_pair() {
         &mut NeverCancelRuntime,
     );
     match cmd_with_interval {
-        ActionExecution::Completed(text) => {
+        ActionExecution::Completed(outcome) => {
+            assert_eq!(outcome.status, ActionStatus::Failed);
             assert!(
-                text.contains("interval_ms is only valid with loop_cmd"),
-                "{text}"
+                outcome
+                    .text
+                    .contains("interval_ms is only valid with loop_cmd"),
+                "{}",
+                outcome.text
             );
         }
         other => panic!("expected pairing error, got {other:?}"),
@@ -360,8 +425,13 @@ fn run_bash_polling_requires_loop_cmd_and_interval_pair() {
         &mut NeverCancelRuntime,
     );
     match loop_without_interval {
-        ActionExecution::Completed(text) => {
-            assert!(text.contains("loop_cmd needs interval_ms"), "{text}");
+        ActionExecution::Completed(outcome) => {
+            assert_eq!(outcome.status, ActionStatus::Failed);
+            assert!(
+                outcome.text.contains("loop_cmd needs interval_ms"),
+                "{}",
+                outcome.text
+            );
         }
         other => panic!("expected pairing error, got {other:?}"),
     }
@@ -384,7 +454,7 @@ fn polling_bash_waits_until_async_file_appears() {
         .expect("spawn delayed flag creator");
 
     let started = Instant::now();
-    let result = execute_polling_bash(
+    let outcome = execute_polling_bash_outcome(
         &format!("test -f {flag_path}"),
         &dir,
         100,
@@ -394,18 +464,26 @@ fn polling_bash_waits_until_async_file_appears() {
     );
     let elapsed = started.elapsed();
 
-    assert!(result.contains("Polling state: finished"), "{result}");
+    assert_eq!(outcome.status, ActionStatus::Completed);
     assert!(
-        result.contains("Success condition: exit code 0"),
-        "{result}"
+        outcome.text.contains("Polling state: finished"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("Success condition: exit code 0"),
+        "{}",
+        outcome.text
     );
     assert!(
         elapsed >= Duration::from_millis(200),
-        "poll should wait for asynchronous file creation, elapsed={elapsed:?}\n{result}"
+        "poll should wait for asynchronous file creation, elapsed={elapsed:?}\n{}",
+        outcome.text
     );
     assert!(
         elapsed < Duration::from_millis(1500),
-        "poll should return soon after condition succeeds, elapsed={elapsed:?}\n{result}"
+        "poll should return soon after condition succeeds, elapsed={elapsed:?}\n{}",
+        outcome.text
     );
     let _ = child.wait();
 }
@@ -783,8 +861,13 @@ fn run_bash_blocks_dangerous_delete_before_spawning_or_approval() {
         &mut NeverCancelRuntime,
     );
     match result {
-        ActionExecution::Completed(text) => {
-            assert!(text.contains("blocked by Timem safety policy"), "{text}");
+        ActionExecution::Completed(outcome) => {
+            assert_eq!(outcome.status, ActionStatus::Failed);
+            assert!(
+                outcome.text.contains("blocked by Timem safety policy"),
+                "{}",
+                outcome.text
+            );
             assert!(
                 !marker.exists(),
                 "blocked command must not execute follow-up"
@@ -815,8 +898,13 @@ fn run_bash_blocks_dangerous_polling_loop_command() {
         &mut NeverCancelRuntime,
     );
     match result {
-        ActionExecution::Completed(text) => {
-            assert!(text.contains("blocked by Timem safety policy"), "{text}");
+        ActionExecution::Completed(outcome) => {
+            assert_eq!(outcome.status, ActionStatus::Failed);
+            assert!(
+                outcome.text.contains("blocked by Timem safety policy"),
+                "{}",
+                outcome.text
+            );
         }
         other => panic!("expected safety block, got {other:?}"),
     }
@@ -849,13 +937,16 @@ fn approved_bash_rechecks_safety_before_execution() {
         &store,
         &mut NeverCancelRuntime,
     );
+    assert_eq!(result.status, ActionStatus::Failed);
     assert!(
-        result.contains("blocked by Timem safety policy"),
-        "{result}"
+        result.text.contains("blocked by Timem safety policy"),
+        "{}",
+        result.text
     );
     assert!(
-        result.contains("approval_status: approved_by_user"),
-        "{result}"
+        result.text.contains("approval_status: approved_by_user"),
+        "{}",
+        result.text
     );
     assert!(
         !marker.exists(),
@@ -885,8 +976,9 @@ fn run_bash_allows_safe_tmp_delete() {
         &mut NeverCancelRuntime,
     );
     match result {
-        ActionExecution::Completed(text) => {
-            assert!(text.contains("Exit code: 0"), "{text}");
+        ActionExecution::Completed(outcome) => {
+            assert_eq!(outcome.status, ActionStatus::Completed);
+            assert!(outcome.text.contains("Exit code: 0"), "{}", outcome.text);
             assert!(!target.exists(), "safe temp dir should be removable");
         }
         other => panic!("expected safe command to run, got {other:?}"),
