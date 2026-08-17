@@ -55,6 +55,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         &[delta],
         "TIMEM_ASSISTANT",
         "one Markdown response with one state branch",
+        "Markdown",
     );
     assert!(rendered.contains("Response Protocol"));
     assert!(rendered.contains("memmgr"));
@@ -72,6 +73,37 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         "Please continue the work and respond as protocol requires in user's language:"
     ));
     assert!(!rendered.contains("one Markdown response with one state branch"));
+}
+
+#[test]
+fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
+    let delta = PromptDelta {
+        delta_id: "pd_xml_14".to_string(),
+        time_ms: 123,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![PromptSlice {
+            delta_id: "pd_xml_14".to_string(),
+            slice_id: "ps_xml_14_s001".to_string(),
+            component_id: String::new(),
+            prompt_type: "user_question".to_string(),
+            time_ms: 123,
+            text: "hello".to_string(),
+            slice_index: 1,
+            slice_count: 1,
+        }],
+    };
+    let rendered = render_prompt_with_rendered_static(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        &[delta],
+        "TIMEM_ASSISTANT",
+        "one-root label <response>...</response>",
+        "XML",
+    );
+
+    assert!(rendered.contains("<prompt_delta id=\"pd_xml_14\" time_ms=\"123\">"));
+    assert!(rendered.contains("</prompt_delta>"));
+    assert!(!rendered.contains("[BEGIN DELTA]"));
+    assert!(!rendered.contains("delta_id: pd_xml_14"));
 }
 
 #[test]
@@ -121,6 +153,7 @@ fn prompt_renderer_defensively_truncates_legacy_action_result_slices() {
         &[delta],
         "Ai7",
         "",
+        "Markdown",
     );
     assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
 }

@@ -116,6 +116,7 @@ pub(crate) fn render_prompt_with_rendered_static(
     deltas: &[PromptDelta],
     assistant_heading: &str,
     response_shape_hint: &str,
+    protocol_lang: &str,
 ) -> String {
     let mut out = rendered_static_prompt.to_string();
 
@@ -125,11 +126,19 @@ pub(crate) fn render_prompt_with_rendered_static(
             continue;
         }
         out.push('\n');
-        out.push_str("[BEGIN DELTA]\n");
-        out.push_str(&format!(
-            "delta_id: {}\ntime: {}\n",
-            delta.delta_id, delta.time_ms
-        ));
+        let xml_delta = protocol_lang.eq_ignore_ascii_case("XML");
+        if xml_delta {
+            out.push_str(&format!(
+                "<prompt_delta id=\"{}\" time_ms=\"{}\">\n",
+                delta.delta_id, delta.time_ms
+            ));
+        } else {
+            out.push_str("[BEGIN DELTA]\n");
+            out.push_str(&format!(
+                "delta_id: {}\ntime: {}\n",
+                delta.delta_id, delta.time_ms
+            ));
+        }
         let mut last_role = None;
         let mut last_was_action_result = false;
         for slice in slices {
@@ -154,7 +163,11 @@ pub(crate) fn render_prompt_with_rendered_static(
             out.push('\n');
             last_was_action_result = is_action_result;
         }
-        out.push_str("\n[END DELTA]");
+        if xml_delta {
+            out.push_str("\n</prompt_delta>");
+        } else {
+            out.push_str("\n[END DELTA]");
+        }
     }
 
     out.push_str("\n\n");

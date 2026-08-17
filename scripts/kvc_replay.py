@@ -98,9 +98,13 @@ def extract_prompt(body: Any) -> tuple[str, str] | None:
 
 def prompt_segment_starts(text: str) -> list[int]:
     starts: list[int] = []
-    if text.startswith("[BEGIN DELTA]") or text.startswith("[BEGIN SEGMENT "):
+    if (
+        text.startswith("[BEGIN DELTA]")
+        or text.startswith("[BEGIN SEGMENT ")
+        or text.startswith("<prompt_delta ")
+    ):
         starts.append(0)
-    for marker in ("\n[BEGIN DELTA]", "\n[BEGIN SEGMENT "):
+    for marker in ("\n[BEGIN DELTA]", "\n[BEGIN SEGMENT ", "\n<prompt_delta "):
         offset = 0
         while True:
             idx = text.find(marker, offset)
@@ -327,7 +331,11 @@ def simulate(
         if not prompt:
             continue
         static_prompt, dynamic_prompt = prompt
-        if "[BEGIN DELTA]" not in dynamic_prompt and "[BEGIN SEGMENT " not in dynamic_prompt:
+        if (
+            "[BEGIN DELTA]" not in dynamic_prompt
+            and "[BEGIN SEGMENT " not in dynamic_prompt
+            and "<prompt_delta " not in dynamic_prompt
+        ):
             continue
 
         if strategy == "static":

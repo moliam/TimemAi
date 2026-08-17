@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn cache_planner_supports_xml_style_prompt_delta_boundaries() {
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n<prompt_delta id=\"pd_1\" time_ms=\"1\">\n\n## USER\ndelta1\n</prompt_delta>\n<prompt_delta id=\"pd_2\" time_ms=\"2\">\n\n## USER\ndelta2\n</prompt_delta>";
+
+    let parts = prompt_parts_from_rendered_prompt(prompt);
+    assert!(parts.old_deltas.contains("pd_1"));
+    assert!(parts.new_delta.contains("pd_2"));
+
+    let blocks = plan_prompt_cache(prompt);
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks[1].text.contains("pd_1"));
+    assert!(blocks[2].text.contains("pd_2"));
+}
+
+#[test]
 fn cache_planner_splits_static_and_dynamic_prompt() {
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]";
 

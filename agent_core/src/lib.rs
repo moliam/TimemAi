@@ -2904,6 +2904,7 @@ impl AgentCore {
             &self.deltas,
             &self.assistant_speaker_name,
             self.response_protocol.suite().response_shape_hint(),
+            self.response_protocol.lang_format(),
         )
     }
 
@@ -3085,6 +3086,7 @@ impl AgentCore {
             &deltas,
             &self.assistant_speaker_name,
             self.response_protocol.suite().response_shape_hint(),
+            self.response_protocol.lang_format(),
         )
     }
 

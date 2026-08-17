@@ -51,9 +51,17 @@ discard or offload some dynamic contexts.
 
 <---- Prompt delta example ----->
 
-[BEGIN DELTA]   --> a delta(that is, a new chat-turn) begins with BEGIN DELTA
-delta_id: pd_1    --> the system generated identity for this delta. It is a simple globally increasing sequence: pd_1, pd_2, ...
-time: 123        --> time of creation
+When the active response protocol is XML, a delta uses an XML-style boundary:
+
+<prompt_delta id="pd_1" time_ms="123">
+
+When the active response protocol is Markdown or JSON, it uses:
+
+[BEGIN DELTA]
+delta_id: pd_1
+time: 123
+
+`pd_1` is the runtime-generated identity. It is a simple globally increasing sequence: pd_1, pd_2, ...
 
 ## USER
 new user input, or user supplement entered while the current turn was already in
@@ -66,7 +74,15 @@ your response in this round
 Timem Runtime's feedback, tips, etc.
 SYSTEM's 'TIPS' will occasionally show up. They are the philosophy you should really seriously respect.
 
-[END DELTA] --> a delta ends with BEGIN DELTA
+For XML protocol, the delta ends with:
+
+</prompt_delta>
+
+For Markdown or JSON protocol, it ends with:
+
+[END DELTA]
+
+These are model-facing prompt boundaries. Because slice content can contain arbitrary user text, the complete provider prompt is not guaranteed to be one parser-valid XML document.
 
 <-------------------------------->
 
