@@ -13,6 +13,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
             PromptSlice {
                 delta_id: "pd_test_1".to_string(),
                 slice_id: "ps_test_1_s001".to_string(),
+                component_id: String::new(),
                 prompt_type: "user_question".to_string(),
                 time_ms: 2,
                 text: "hello".to_string(),
@@ -22,6 +23,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
             PromptSlice {
                 delta_id: "pd_test_1".to_string(),
                 slice_id: "ps_test_1_s002".to_string(),
+                component_id: String::new(),
                 prompt_type: "llm_response".to_string(),
                 time_ms: 3,
                 text: "HIDDEN".to_string(),
@@ -31,6 +33,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
             PromptSlice {
                 delta_id: "pd_test_1".to_string(),
                 slice_id: "ps_test_1_s003".to_string(),
+                component_id: String::new(),
                 prompt_type: "result_of_llm_action".to_string(),
                 time_ms: 4,
                 text: "Action result: run_bash\nok".to_string(),
@@ -107,6 +110,7 @@ fn prompt_renderer_defensively_truncates_legacy_action_result_slices() {
         slices: vec![PromptSlice {
             delta_id: "pd_legacy_action".to_string(),
             slice_id: "ps_legacy_action_s001".to_string(),
+            component_id: String::new(),
             prompt_type: "result_of_llm_action".to_string(),
             time_ms: 1,
             text: oversized,

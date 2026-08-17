@@ -1528,10 +1528,7 @@ fn worker_roles_context(roles: &[WorkerRole]) -> Option<String> {
     (!roles.is_empty()).then(|| {
         roles
             .iter()
-            .map(|role| format!(
-            "## SYSTEM\nUser involves the worker role '{}' for this input. When you work for this task, comply this worker's role description: {}",
-            role.name, role.description
-            ))
+            .map(|role| agent_core::worker_role_supporting_context(&role.name, &role.description))
             .collect::<Vec<_>>()
             .join("\n\n")
     })
