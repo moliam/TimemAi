@@ -4895,6 +4895,35 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
 }
 
 #[test]
+fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let supplements = vec!["follow-up one".to_string(), "follow-up two".to_string()];
+
+    let turns_before = {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.pending_unconsumed_supplements = supplements.clone();
+        session.turns.len()
+    };
+
+    let mut outcome =
+        TurnOutcome::final_response("cancelled", UsageStats::zero(), None, None, Duration::ZERO);
+    outcome.stop_reason = Some(agent_core::TurnStopReason::CancelledByUser);
+
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.pending_unconsumed_supplements, supplements);
+    assert_eq!(session.turns.len(), turns_before);
+}
+
+#[test]
 fn primary_turn_finish_preserves_explicitly_reported_active_subworker() {
     let state = routing_test_state();
     let session_id = "session_a";
