@@ -75,9 +75,8 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("**Options**"));
     assert!(rendered.contains("Unified local memory manager"));
     assert!(rendered.contains("Read a bounded range from a normal text file"));
-    assert!(rendered.contains("Byte numbers address the original"));
-    assert!(rendered.contains("file bytes"));
-    assert!(rendered.contains("macOS and Linux"));
+    assert!(!rendered.contains("Byte numbers address the original"));
+    assert!(!rendered.contains("macOS and Linux"));
     assert!(rendered.contains("Ask for path when you need to know where something is"));
     assert!(rendered.contains("Ask for params when"));
     assert!(rendered.contains("Allowed: `path`, `params`"));
@@ -125,8 +124,27 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
     assert!(json.contains(json_action), "{json}");
     assert!(markdown.contains(json_action), "{markdown}");
     assert!(xml.contains("<readfile><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><line_nr>80</line_nr></ender><max_bytes>32768</max_bytes></readfile>"), "{xml}");
-    assert!(!json.contains("It is supported on macOS and Linux."), "{json}");
-    assert!(!json.contains("`path` is required. `encoding` defaults to UTF-8"), "{json}");
+    assert!(
+        !json.contains("It is supported on macOS and Linux."),
+        "{json}"
+    );
+    assert!(
+        !json.contains("`path` is required. `encoding` defaults to UTF-8"),
+        "{json}"
+    );
+    let readfile_catalog = json
+        .split("#### `readfile`")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#### `").next())
+        .expect("readfile catalog section");
+    assert!(
+        !readfile_catalog.contains("**Result**"),
+        "{readfile_catalog}"
+    );
+    assert!(
+        !readfile_catalog.contains("If args do not match this tool spec"),
+        "{readfile_catalog}"
+    );
     assert!(
         xml.contains(
             "<run_bash><cmd>git status --short</cmd><timeout_ms>5000</timeout_ms></run_bash>"
