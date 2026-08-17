@@ -2389,6 +2389,14 @@ fn handle_command(
     handle_command_with_id(state, port, None, command)
 }
 
+fn assistant_speaker_name_for_session(display_name: &str) -> String {
+    let normalized = display_name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("ASSISTANT_of_{normalized}")
+}
+
 fn handle_command_with_id(
     state: &AppState,
     port: u16,
@@ -2420,9 +2428,37 @@ fn handle_command_with_id(
             session_id,
             display_name,
         } => {
-            let handle = primary_worker_handle(state, &session_id)?;
             let display_name = nonempty_text(display_name, "session display name")?;
-            handle.rename(display_name.clone())?;
+            let (primary_worker_id, workers) = {
+                let sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned")?;
+                let session = sessions
+                    .get(&session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                (
+                    session.primary_worker_id.clone(),
+                    session
+                        .workers
+                        .iter()
+                        .map(|worker| (worker.worker_id.clone(), worker.display_name.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let assistant_speaker_name = assistant_speaker_name_for_session(&display_name);
+            for (worker_id, worker_display_name) in workers {
+                let handle = session_worker_handle(state, &session_id, Some(&worker_id))?;
+                let updated_display_name = if worker_id == primary_worker_id {
+                    display_name.clone()
+                } else {
+                    worker_display_name
+                };
+                handle.rename_with_assistant_speaker_name(
+                    updated_display_name,
+                    Some(assistant_speaker_name.clone()),
+                )?;
+            }
             state
                 .sessions
                 .lock()
@@ -4467,7 +4503,7 @@ fn attach_worker_to_session_context(
     parent_worker_id: Option<String>,
     primary: bool,
 ) -> Result<String, String> {
-    let (runtime, current_dir, mcp_server_ids) = {
+    let (runtime, current_dir, mcp_server_ids, session_display_name) = {
         let sessions = state
             .sessions
             .lock()
@@ -4496,6 +4532,7 @@ fn attach_worker_to_session_context(
             session.runtime.clone(),
             PathBuf::from(&context.current_dir),
             session.mcp_server_ids.clone(),
+            session.display_name.clone(),
         )
     };
 
@@ -4536,7 +4573,7 @@ fn attach_worker_to_session_context(
         .manager
         .lock()
         .map_err(|_| "worker_manager_poisoned".to_string())?
-        .spawn_worker_in_session(
+        .spawn_worker_in_session_with_assistant_speaker_name(
             core,
             runtime.settings.config,
             workspace,
@@ -4544,6 +4581,7 @@ fn attach_worker_to_session_context(
             context_id.to_string(),
             display_name,
             parent_worker_id,
+            Some(assistant_speaker_name_for_session(&session_display_name)),
         )?;
     let identity = state
         .manager

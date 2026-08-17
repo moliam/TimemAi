@@ -3174,6 +3174,22 @@ fn session_delete_stops_workers_and_removes_persisted_session() {
 }
 
 #[test]
+fn assistant_speaker_name_uses_normalized_session_display_name() {
+    assert_eq!(
+        assistant_speaker_name_for_session("Build session"),
+        "ASSISTANT_of_Build session"
+    );
+    assert_eq!(
+        assistant_speaker_name_for_session("  研发\n  会话  "),
+        "ASSISTANT_of_研发 会话"
+    );
+    assert_eq!(
+        assistant_speaker_name_for_session("Session0"),
+        "ASSISTANT_of_Session0"
+    );
+}
+
+#[test]
 fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_default_session_name_{}", now_ms()));
@@ -3215,10 +3231,13 @@ fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
             display_name: ref name,
         }) if renamed_id == &session_id && name == "Build session"
     ));
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions[&session_id].display_name, "Build session");
     assert_eq!(
-        state.sessions.lock().unwrap()[&session_id].display_name,
-        "Build session"
+        sessions[&session_id].workers[0].display_name, "ID0",
+        "Session rename must not rewrite the Web worker display name"
     );
+    drop(sessions);
 }
 
 #[test]
