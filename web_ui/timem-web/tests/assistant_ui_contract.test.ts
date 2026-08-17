@@ -345,16 +345,15 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".completion-toolgen.sending svg");
   });
 
-  it("labels completed normal and ToolGen work frames distinctly with a visible title treatment", () => {
+  it("labels completed normal and ToolGen work frames with minimal text-only titles", () => {
     expect(source).toContain('isToolGenTurn ? "ToolGen" : "Thought/Action"');
-    expect(source).toContain('<span className="work-title-dot" aria-hidden="true"/>');
+    expect(source).not.toContain('<span className="work-title-dot" aria-hidden="true"/>');
     expect(source).toContain("completed-work-title");
     expect(source).toContain("toolgen-completed-title");
-    expect(styles).toContain(".working-chip.completed-work-title");
-    expect(styles).toContain(".work-title-dot { width: 5px; height: 5px; flex: none; border-radius: 50%; background: #111; }");
-    expect(styles).toContain("border-radius: 999px");
-    expect(styles).toContain(":root[data-theme=\"light\"] .working-chip.completed-work-title");
-    expect(styles).toContain(':root[data-theme="light"] .work-title-dot { background: #242424; }');
+    expect(styles).toContain(".working-chip.completed-work-title { color: #d4d4d4; }");
+    expect(styles).toContain(".working-chip.work-title-chip { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }");
+    expect(styles).not.toContain(".work-title-dot");
+    expect(styles).toContain(':root[data-theme="light"] .working-chip.completed-work-title { color: #465a63; }');
   });
 
   it("identifies restored ToolGen work by topic rather than event source", () => {
@@ -645,8 +644,14 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; }");
     expect(source).toContain("working-chip work-title-chip active-work-title");
     expect(source).toContain("working-chip work-title-chip completed-work-title work-collapse-toggle");
-    expect(styles).toContain(".working-chip.work-title-chip { min-height: 24px; padding: 0 9px 0 7px; border: 1px solid #4b4b4b; border-radius: 999px; background: #303030; }");
-    expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 76px; color: #8fc9f1; font-size: 10px; font-weight: 700; letter-spacing: 0; }");
+    expect(source).not.toContain('<span className="work-title-dot" aria-hidden="true"/>');
+    expect(source).not.toContain('isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>');
+    expect(styles).toContain(".work-collapse-toggle:hover { color: #f0f0f0; }");
+    expect(styles).not.toContain(".work-collapse-toggle:hover { border-color:");
+    expect(styles).not.toContain(".working-chip.interrupted-work-title { border-color:");
+    expect(styles).not.toContain(".working-chip.completed-work-title.toolgen-completed-title { border-color:");
+    expect(styles).toContain(".working-chip.work-title-chip { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }");
+    expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 0; color: #8fc9f1; font-size: 10px; font-weight: 700; letter-spacing: 0; }");
     expect(styles).toContain(".turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 6px; color: #aaa; font-size: 12px;");
     expect(source).toContain('<span className="activity-thinking-dot" aria-hidden="true"/>');
     expect(source).not.toContain('activity.tone === "thinking" ? "💡"');
