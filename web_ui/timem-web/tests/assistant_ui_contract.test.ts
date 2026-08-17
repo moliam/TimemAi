@@ -655,7 +655,11 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 6px; color: #aaa; font-size: 12px;");
     expect(source).toContain('<span className="activity-thinking-dot" aria-hidden="true"/>');
     expect(source).not.toContain('activity.tone === "thinking" ? "💡"');
+    expect(source).toContain('activity.kind === "free_talk" ? " free-talk" : ""');
     expect(styles).toContain(".activity-thinking-dot { width: 5px; height: 5px; border-radius: 50%; background: #111; }");
+    expect(styles).toContain(".turn-work-item.free-talk .turn-work-detail { font-size: 90%; }");
+    expect(styles).toContain(".turn-work-item.free-talk .turn-work-detail .message-content { font-size: inherit; }");
+    expect(styles).toContain(".worker-role-editor input::placeholder, .worker-role-editor textarea::placeholder { font-size: 10px; }");
   });
 
   it("shows a live elapsed duration only while the turn is working", () => {

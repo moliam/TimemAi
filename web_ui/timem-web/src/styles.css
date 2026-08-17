@@ -1149,6 +1149,8 @@ button:disabled { cursor: not-allowed; }
 .chat-scroll { overflow-x: hidden; }
 .turn-work-scroll { overflow-x: hidden; }
 .turn-work-item, .turn-work-item > div, .turn-work-detail, .tool-activity, .tool-activity summary { min-width: 0; }
+.turn-work-item.free-talk .turn-work-detail { font-size: 90%; }
+.turn-work-item.free-talk .turn-work-detail .message-content { font-size: inherit; }
 .turn-work-item.thinking, .turn-work-item.thinking .message-content { font-size: max(14px, var(--content-size)); }
 .tool-activity b, .tool-activity-status, .tool-activity-duration { line-height: 1.35; }
 .tool-activity-status, .tool-activity-duration { font-size: 11px; }
@@ -1519,6 +1521,7 @@ body {
 .worker-role-editor { margin-top: auto; display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid #2b2b2b; }
 .worker-role-editor > strong { color: #bdbdbd; font-size: 11px; }
 .worker-role-editor input, .worker-role-editor textarea { width: 100%; border: 1px solid #343434; border-radius: 7px; background: #202020; color: #e8e8e8; font: inherit; outline: none; }
+.worker-role-editor input::placeholder, .worker-role-editor textarea::placeholder { font-size: 10px; }
 .worker-role-editor input { height: 34px; padding: 0 9px; }
 .worker-role-editor textarea { min-height: 112px; resize: vertical; padding: 9px; line-height: 1.45; }
 .worker-role-editor input:focus, .worker-role-editor textarea:focus { border-color: #577d72; box-shadow: 0 0 0 2px #577d7226; }
