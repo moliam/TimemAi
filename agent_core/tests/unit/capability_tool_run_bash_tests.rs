@@ -77,7 +77,7 @@ fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_trunca
     assert_eq!(MAX_BASH_OUTPUT_CHARS, 32 * 1024);
     let boundary = compact_text(&"x".repeat(MAX_BASH_OUTPUT_CHARS), MAX_BASH_OUTPUT_CHARS);
     assert_eq!(boundary.chars().count(), MAX_BASH_OUTPUT_CHARS);
-    assert!(!boundary.contains("[Too long,"));
+    assert!(!boundary.contains("!!!Too long,"));
 
     let output = format!("{} alpha beta gamma", "x".repeat(MAX_BASH_OUTPUT_CHARS - 1));
     let result = BashCommandOutput {
@@ -93,7 +93,7 @@ fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_trunca
     assert_eq!(
         rendered_output,
         format!(
-            "{} [Too long, 3 words truncated.  Issue new actions  if necessary]",
+            "{} !!!Too long, 3 words truncated. Generate more actions if necessary !!!",
             "x".repeat(MAX_BASH_OUTPUT_CHARS - 1)
         )
     );

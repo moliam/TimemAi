@@ -64,7 +64,7 @@ fn oversized_readfile_action_result_has_common_prompt_truncation_notice() {
 
     assert!(prompt.contains("Action result: readfile"), "{prompt}");
     assert!(
-        prompt.contains("words truncated.  Issue new actions  if necessary]"),
+        prompt.contains("words truncated. Generate more actions if necessary !!!"),
         "{prompt}"
     );
 }
