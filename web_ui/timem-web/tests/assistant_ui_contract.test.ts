@@ -1430,12 +1430,16 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
 
   it("keeps queued worker roles in normal flow above long message previews", () => {
     expect(source).toContain('className="queued-message-preview"');
-    expect(source).toContain('className="queued-message-roles" title={messageRoleNames.join("、")}');
+    expect(source).toContain('className="queued-message-roles" title={messageRoleNames.join(" | ")}');
     expect(source).toContain('className="queued-message-actions"');
     expect(styles).toContain(".queued-message-preview { min-width: 0; display: grid; justify-items: start; gap: 3px; overflow: hidden; }");
     expect(styles).toContain(".queued-message p { width: 100%; min-width: 0;");
     expect(styles).toContain(".queued-message-roles { max-width: 100%; display: inline-flex;");
-    expect(styles).toContain(".queued-message-roles span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
+    expect(source).toContain('className="queued-message-role-separator" aria-hidden="true">|</i>');
+    expect(source).not.toContain('messageRoleNames.join("、")');
+    expect(styles).toContain(".queued-message-role-names { min-width: 0; display: inline-flex;");
+    expect(styles).toContain(".queued-message-role-separator { flex: 0 0 auto; margin: 0 4px; color: #6f9187;");
+    expect(styles).toContain(':root[data-theme="light"] .queued-message-role-separator { color: #91aaa2; }');
     expect(styles).not.toContain(".queued-message-preview.has-roles");
     expect(styles).not.toContain(".queued-message-roles { position: absolute;");
     expect(source).not.toContain('messageRoleNames.length > 0 ? "has-roles" : ""');
