@@ -28,7 +28,7 @@ describe("per-message worker role selection", () => {
   it("supports multiple selected roles and clears them only after a successful send", () => {
     expect(source).toContain("useState<Record<string, string[]>>({})");
     expect(source).toContain("role_ids: [...new Set(roleIds)]");
-    expect(source).toContain("if (selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId)");
+    expect(source).toContain("if (sent && selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId)");
     expect(source).toContain("selectedRoleIds.includes(role.id)");
   });
 
@@ -852,9 +852,14 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(source).toContain("creatingSessionRef.current");
     expect(source).toContain("const [draftsBySession, setDraftsBySession]");
     expect(source).toContain("const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());");
+    expect(source).toContain("const directSubmissionsRef = useRef<Map<string, {");
     expect(source).toContain("reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession)");
     expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent)");
-    expect(source).toContain("const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);");
+    expect(source).toContain("directSubmissionsRef.current.set(reserved.sessionId, {");
+    expect(source).toContain('event.command_id.startsWith("submit-") && event.status === "rejected"');
+    expect(source).toContain("rejectedDirectDrafts.set(sessionId, submission.text)");
+    expect(source).toContain("onRolesConsumed(session.session_id, submission.roleIds)");
+    expect(source).toContain("sent = !!reliableStorageScope\n        && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);");
     expect(source).toMatch(/if \(sent\) \{[\s\S]*?updateQueuedMessages\(\(\) => nextQueues\);[\s\S]*?\}/);
     expect(source).not.toMatch(/if \(sent\) \{[\s\S]*?resumeQueuedMessages\(\);[\s\S]*?\}/);
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
@@ -1418,11 +1423,11 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
   });
 
   it("bounds, expands, collapses, and reorders the queued message list", () => {
-    expect(source).toContain("queuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT)");
+    expect(source).toContain("displayQueuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT)");
     expect(source).toContain('queueExpanded ? "expanded" : "collapsed"');
     expect(source).toContain('aria-expanded={queueExpanded}');
     expect(source).toContain('queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`');
-    expect(source).toContain('className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1}');
+    expect(source).toContain('className="queued-message-drag" draggable={!editing && !claimed && displayQueuedMessages.length > 1}');
     expect(source).toContain("reorderQueuedMessages(current[activeSessionId] ?? [], draggedQueueMessageId, targetId, queuedMessageClaimsRef.current, activeSessionId)");
     expect(styles).toContain(".queued-message-list.collapsed .queued-message-items { max-height: 224px; overflow: hidden; }");
     expect(styles).toContain(".queued-message-list.expanded .queued-message-items { max-height: min(50vh, 420px); overflow-y: auto;");
@@ -1450,6 +1455,8 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(source).toContain("claimQueuedMessage(queuedMessageClaimsRef.current");
     expect(source).toContain("releaseQueuedMessageClaim(queuedMessageClaimsRef.current");
     expect(source).toContain("queuedMessagesBySessionRef.current");
+    expect(source).toContain("unclaimedQueuedMessages(queuedMessages, queuedMessageClaims, activeSessionId)");
+    expect(source).toContain("displayQueuedMessages.length > 0");
     expect(source).toContain("removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current");
     expect(source).toContain('disabled={claimed || (!message.deliveryError && activeSession.state !== "working")');
     expect(source).toContain('aria-busy={claimed || undefined}');

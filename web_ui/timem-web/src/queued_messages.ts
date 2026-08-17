@@ -174,6 +174,14 @@ export function reservedQueuedAttachmentIds(messages: readonly QueuedMessage[]) 
  return new Set(messages.flatMap((message) => message.attachmentIds));
 }
 
+export function shouldDirectManualMessage(
+ sessionState: string,
+ queuedMessageCount: number,
+ paused: boolean,
+) {
+ return sessionState === "ready" && queuedMessageCount === 0 && !paused;
+}
+
 export type QueuedMessageClaims = Set<string>;
 
 export function queuedMessageKey(sessionId: string, messageId: string) {
@@ -195,6 +203,14 @@ export function claimQueuedMessage(
 
 export function releaseQueuedMessageClaim(claims: QueuedMessageClaims, sessionId: string, messageId: string) {
   return claims.delete(queuedMessageKey(sessionId, messageId));
+}
+
+export function unclaimedQueuedMessages(
+ messages: readonly QueuedMessage[],
+ claims: ReadonlySet<string>,
+ sessionId: string,
+) {
+ return messages.filter((message) => !claims.has(queuedMessageKey(sessionId, message.id)));
 }
 
 export function releaseSessionQueuedMessageClaims(
