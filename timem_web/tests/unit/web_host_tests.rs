@@ -8574,6 +8574,48 @@ fn friendly_journal_error_replaces_in_use_with_actionable_message() {
 }
 
 #[test]
+fn existing_instance_recovery_reports_pid_url_and_stop_command() {
+    let path = std::env::temp_dir().join(unique_web_id("existing_instance_recovery"));
+    let mut journal = EventJournal::open(&path).unwrap();
+    journal
+        .publish_instance_info(&JournalInstanceInfo {
+            pid: 4242,
+            port: Some(18080),
+            token: Some("existing-token".to_string()),
+            browser_url: Some("http://127.0.0.1:18080/?token=existing-token".to_string()),
+            public_access: false,
+            started_at_ms: 123,
+        })
+        .unwrap();
+
+    let options = WebLaunchOptions {
+        open_browser: false,
+        ..WebLaunchOptions::default()
+    };
+    assert!(resume_existing_web_instance(&options, &path).is_ok());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let lock_path = path.with_file_name(format!(
+            "{}.lock",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        assert_eq!(
+            std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    drop(journal);
+    let _ = std::fs::remove_file(path.with_file_name(format!(
+        "{}.lock",
+        path.file_name().unwrap().to_string_lossy()
+    )));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn startup_resource_errors_are_actionable_instead_of_internal_codes() {
     let data_dir = std::path::PathBuf::from("/tmp/timem_test_data");
     let locked =

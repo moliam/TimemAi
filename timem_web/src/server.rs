@@ -1,4 +1,4 @@
-use crate::event_journal::EventJournal;
+use crate::event_journal::{EventJournal, JournalInstanceInfo};
 use crate::worker_roles::{
     load_roles, normalize_role_fields, roles_path_for_history, save_roles, WorkerRole,
     MAX_WORKER_ROLES,
@@ -1075,9 +1075,20 @@ pub async fn run_from_env() -> Result<(), String> {
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
     let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
-    let event_journal = EventJournal::open(event_journal_path(&initial_mem)).map_err(|error| {
-        friendly_journal_error(error, &template.data_dir, &template.initial_space)
-    })?;
+    let journal_path = event_journal_path(&initial_mem);
+    let event_journal = match EventJournal::open(&journal_path) {
+        Ok(journal) => journal,
+        Err(error) if error == "event_journal_in_use" => {
+            return resume_existing_web_instance(&launch, &journal_path);
+        }
+        Err(error) => {
+            return Err(friendly_journal_error(
+                error,
+                &template.data_dir,
+                &template.initial_space,
+            ));
+        }
+    };
     let mem = Arc::new(Mutex::new(initial_mem));
     let state = AppState {
         token: token.clone(),
@@ -1117,8 +1128,14 @@ pub async fn run_from_env() -> Result<(), String> {
         .port();
     let app = build_router(state.clone(), port);
     let local_url = format!("http://127.0.0.1:{port}/?token={token}");
+    let public_url = launch
+        .public_access
+        .then(|| public_access_url(launch.public_host.as_deref(), port, &token))
+        .flatten();
+    let browser_url = public_url.as_deref().unwrap_or(&local_url).to_string();
+    publish_running_instance_info(&state, port, &token, &browser_url, launch.public_access)?;
     if launch.public_access {
-        if let Some(public_url) = public_access_url(launch.public_host.as_deref(), port, &token) {
+        if let Some(public_url) = public_url.as_deref() {
             println!("Timem Web is ready at {public_url}");
         } else {
             println!("Timem Web is ready at {local_url}");
@@ -1540,6 +1557,82 @@ fn current_session_store(state: &AppState) -> Result<SessionStore, String> {
 
 fn command_dedup_path(mem: &WebMemState) -> PathBuf {
     mem.layout.memory_dir().join("web_command_dedup.json")
+}
+
+fn publish_running_instance_info(
+    state: &AppState,
+    port: u16,
+    token: &str,
+    browser_url: &str,
+    public_access: bool,
+) -> Result<(), String> {
+    let mut journal = state
+        .event_journal
+        .lock()
+        .map_err(|_| "event_journal_poisoned".to_string())?;
+    journal.publish_instance_info(&JournalInstanceInfo {
+        pid: std::process::id(),
+        port: Some(port),
+        token: Some(token.to_string()),
+        browser_url: Some(browser_url.to_string()),
+        public_access,
+        started_at_ms: now_ms(),
+    })
+}
+
+fn resume_existing_web_instance(
+    launch: &WebLaunchOptions,
+    journal_path: &Path,
+) -> Result<(), String> {
+    let Some(info) = EventJournal::read_instance_info(journal_path) else {
+        return Err(
+            "Timem Web is already running for this workspace, but the older instance did not publish recovery information. Stop the existing timem-web process and retry."
+                .to_string(),
+        );
+    };
+
+    println!("A Timem Web instance is already running for this workspace.");
+    println!("  PID:  {}", info.pid);
+    if let Some(port) = info.port {
+        println!("  Port: {port}");
+    }
+    if let Some(url) = info.browser_url.as_deref() {
+        println!("  URL:  {url}");
+    }
+    println!();
+    println!("To stop the existing instance:");
+    #[cfg(unix)]
+    println!("  kill -TERM {}", info.pid);
+    #[cfg(windows)]
+    println!("  taskkill /PID {} /T", info.pid);
+
+    if launch.open_browser {
+        if let Some(url) = info.browser_url.as_deref() {
+            if should_auto_open_browser() {
+                match open_browser(url) {
+                    Ok(()) => {
+                        println!();
+                        println!("Reopened the existing authenticated Timem Web page.");
+                    }
+                    Err(error) => {
+                        eprintln!();
+                        eprintln!("Could not reopen the browser automatically: {error}");
+                        eprintln!("Open the URL above manually.");
+                    }
+                }
+            } else {
+                println!();
+                println!("Open the URL above to continue using the existing instance.");
+            }
+        } else {
+            println!();
+            println!(
+                "The existing instance is still starting or predates recovery metadata. Use the stop command above if it remains inaccessible."
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
