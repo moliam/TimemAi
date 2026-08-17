@@ -11,8 +11,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(test)]
-use std::sync::MutexGuard;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,10 +21,7 @@ use std::os::unix::process::CommandExt;
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const BASH_EXECUTABLE: &str = "/bin/bash";
 const MAX_BASH_OUTPUT_CHARS: usize = 32 * 1024;
-#[cfg(test)]
-static LONG_RUNNING_COMMAND_PROMPT_AFTER_MS: AtomicU64 = AtomicU64::new(60_000);
-#[cfg(test)]
-static LONG_RUNNING_COMMAND_PROMPT_AFTER_LOCK: Mutex<()> = Mutex::new(());
+const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellJobRecord {
@@ -103,6 +98,7 @@ pub struct FileShellJobStore {
     index_file: PathBuf,
     guard: MemGuard,
     watcher: ShellJobWatcher,
+    long_running_prompt_after: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -241,7 +237,13 @@ impl FileShellJobStore {
             dir,
             guard: MemGuard::for_memory_dir(memory_dir),
             watcher: ShellJobWatcher::new(),
+            long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_long_running_prompt_after_for_tests(&mut self, duration: Duration) {
+        self.long_running_prompt_after = duration.max(Duration::from_millis(1));
     }
 
     pub fn spawn_background(
@@ -376,12 +378,23 @@ impl FileShellJobStore {
         };
         let started = Instant::now();
         let timeout = Duration::from_millis(timeout_ms as u64);
-        let next_long_running_check = long_running_command_prompt_after();
+        let next_long_running_check = self.long_running_prompt_after;
         loop {
             if runtime.should_cancel() {
                 terminate_process(record.pid);
                 write_status_if_empty(Path::new(&record.status_file), "cancelled");
                 return bash_error(clean, "cancelled");
+            }
+            self.watcher.refresh_pid(record.pid);
+            if let Some(status) = read_process_status(&record.status_file) {
+                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                return BashCommandOutput {
+                    command: clean.to_string(),
+                    status: status.code,
+                    signal: status.signal,
+                    output: normalized_shell_output(&output),
+                    error: None,
+                };
             }
             if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
                 let status = LongRunningCommandStatus {
@@ -404,16 +417,6 @@ impl FileShellJobStore {
                         record.pid,
                         status.elapsed.as_millis()
                     )),
-                };
-            }
-            if let Some(status) = read_process_status(&record.status_file) {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
-                return BashCommandOutput {
-                    command: clean.to_string(),
-                    status: status.code,
-                    signal: status.signal,
-                    output: normalized_shell_output(&output),
-                    error: None,
                 };
             }
             if started.elapsed() >= timeout {
@@ -1400,7 +1403,7 @@ pub fn execute_one_bash_structured(
         cwd,
         timeout_ms,
         runtime,
-        long_running_command_prompt_after(),
+        LONG_RUNNING_COMMAND_PROMPT_AFTER,
     )
 }
 
@@ -1489,49 +1492,6 @@ fn execute_one_bash_structured_with_prompt_after(
             }
         }
         Err(_) => bash_error(command, "command_failed"),
-    }
-}
-
-fn long_running_command_prompt_after() -> Duration {
-    #[cfg(test)]
-    {
-        Duration::from_millis(
-            LONG_RUNNING_COMMAND_PROMPT_AFTER_MS
-                .load(Ordering::Relaxed)
-                .max(1),
-        )
-    }
-    #[cfg(not(test))]
-    {
-        Duration::from_secs(60)
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct LongRunningPromptAfterGuard {
-    previous_ms: u64,
-    _lock: MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl Drop for LongRunningPromptAfterGuard {
-    fn drop(&mut self) {
-        LONG_RUNNING_COMMAND_PROMPT_AFTER_MS.store(self.previous_ms, Ordering::Relaxed);
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn set_long_running_command_prompt_after_for_tests(
-    duration: Duration,
-) -> LongRunningPromptAfterGuard {
-    let lock = LONG_RUNNING_COMMAND_PROMPT_AFTER_LOCK
-        .lock()
-        .expect("long running prompt threshold test lock should not be poisoned");
-    let previous_ms = LONG_RUNNING_COMMAND_PROMPT_AFTER_MS
-        .swap(duration.as_millis().max(1) as u64, Ordering::Relaxed);
-    LongRunningPromptAfterGuard {
-        previous_ms,
-        _lock: lock,
     }
 }
 

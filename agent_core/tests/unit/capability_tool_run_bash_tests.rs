@@ -143,9 +143,15 @@ fn normal_bash_rejects_non_positive_timeout() {
 
 #[test]
 fn normal_bash_positive_timeout_reports_long_running_status_to_runtime() {
-    let _guard = set_long_running_command_prompt_after_for_tests(Duration::from_millis(50));
     let mut runtime = CaptureLongRunningStatusRuntime::default();
-    let result = execute_one_bash("sleep 1; printf finished", 5000, &mut runtime);
+    let result = execute_one_bash_structured_with_prompt_after(
+        "sleep 1; printf finished",
+        Path::new("."),
+        5000,
+        &mut runtime,
+        Duration::from_millis(50),
+    )
+    .to_action_result("run_bash");
 
     assert!(result.contains("Exit code: 0"), "{result}");
     assert!(result.contains("finished"), "{result}");
