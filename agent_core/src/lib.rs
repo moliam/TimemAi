@@ -889,6 +889,7 @@ pub struct AgentCore {
     memory_dir: PathBuf,
     static_prompt: String,
     rendered_static_prompt: String,
+    startup_stamp: String,
     profile: CoreProfile,
     pub(crate) capabilities: CapabilityRegistry,
     mcp_runtime: mcp::McpRuntime,
@@ -948,17 +949,20 @@ impl AgentCore {
         let response_protocol = ResponseProtocolKind::default();
         let configured_round_budget = configured_round_budget_from_env();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
+        let startup_stamp = runtime_time_context();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let rendered_static_prompt = prompt_render::render_static_prompt(
             &static_prompt,
             &capabilities,
             response_protocol.suite(),
             &assistant_speaker_name,
+            &startup_stamp,
         );
         Self {
             memory_dir: memory_dir.to_path_buf(),
             static_prompt,
             rendered_static_prompt,
+            startup_stamp,
             profile,
             capabilities,
             mcp_runtime: mcp::McpRuntime::default(),
@@ -1333,6 +1337,7 @@ impl AgentCore {
             &self.capabilities,
             self.response_protocol.suite(),
             &self.assistant_speaker_name,
+            &self.startup_stamp,
         );
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
@@ -1875,6 +1880,13 @@ impl AgentCore {
             );
             runtime.on_core_topic_events(&events);
         }
+        if parsed.continue_work {
+            // Preserve the actual turn chronology in the replayed prompt: the
+            // assistant requested the compact before the runtime reported its
+            // result. Prompt components with the same logical timestamp retain
+            // this insertion order through their sequence number.
+            slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
+        }
         let compact_delta_ids = parsed
             .context_compacts
             .iter()
@@ -1924,11 +1936,15 @@ impl AgentCore {
                         }
                     }
                 };
-                let shrink_result = self.apply_prompt_shrink(
+                let mut shrink_result = self.apply_prompt_shrink(
                     "Action result: context_compact",
                     &compact.delta_ids,
                     &compact.slice_ids,
                 );
+                if let Some(record) = offload_record.as_ref() {
+                    shrink_result.push_str("\nscratch_id: ");
+                    shrink_result.push_str(&record.id);
+                }
                 let estimated_after_tokens = self
                     .dynamic_context_summary()
                     .estimated_tokens
@@ -1947,21 +1963,9 @@ impl AgentCore {
                     &compact.offload_delta_ids,
                     offload_record.as_ref().map(|record| record.id.as_str()),
                 )]);
-                let scratch_line = offload_record
-                    .as_ref()
-                    .map(|record| {
-                        format!("\nThe scratch id for offloaded deltas is: {}", record.id)
-                    })
-                    .unwrap_or_default();
                 slices.push((
                     "context_compacted".to_string(),
-                    format!(
-                        "Context compact summary replacing discarded_delta_ids=[{}], offloaded_delta_ids=[{}]:\n{}{}",
-                        compact.discard_delta_ids.join(","),
-                        compact.offload_delta_ids.join(","),
-                        compact.summary,
-                        scratch_line
-                    ),
+                    "context compacted successfully.".to_string(),
                 ));
                 slices.push(("result_of_llm_action".to_string(), shrink_result));
                 slices.push(self.cwd_note_slice());
@@ -2009,7 +2013,6 @@ impl AgentCore {
         }
 
         // Omitted status is an intentional shorthand for status:working.
-        slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         if let Some(note) = parsed.runtime_note.as_deref() {
             slices.push(("runtime_note".to_string(), note.to_string()));
         }
@@ -2779,9 +2782,15 @@ impl AgentCore {
         self.repair_attempts = self.repair_attempts.saturating_add(1);
         self.last_repair_issue = Some(issue.to_string());
         self.current_stats.repair_calls = self.current_stats.repair_calls.saturating_add(1);
+        let repair_reason = self
+            .response_protocol
+            .suite()
+            .repair_reason(issue)
+            .to_string();
         runtime.on_core_topic_events(&[host::model_repair_topic_event(
             self.current_session_id(),
             issue,
+            repair_reason,
             self.repair_attempts,
             MAX_PROTOCOL_REPAIR_ATTEMPTS,
         )]);
@@ -2883,6 +2892,14 @@ impl AgentCore {
                 if let Some(parsed) = parsed {
                     if !parsed.thought.is_empty() {
                         slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
+                    }
+                    for compact in &parsed.context_compacts {
+                        if !compact.summary.trim().is_empty() {
+                            slices.push((
+                                "llm_response".to_string(),
+                                compact.summary.trim().to_string(),
+                            ));
+                        }
                     }
                 }
                 if let Some(final_text) = final_text {

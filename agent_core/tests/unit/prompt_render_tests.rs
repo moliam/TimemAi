@@ -46,6 +46,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         &CapabilityRegistry::builtin(),
         &MarkdownSuiteV1,
         "TIMEM_ASSISTANT",
+        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let rendered = render_prompt_with_rendered_static(
         &rendered_static,
@@ -119,14 +120,22 @@ fn prompt_renderer_replaces_current_protocol_language() {
         &CapabilityRegistry::builtin(),
         &MarkdownSuiteV1,
         "Ai7",
+        "startup",
     );
     let json = render_static_prompt(
         template,
         &CapabilityRegistry::builtin(),
         &JsonSuiteV1,
         "Ai7",
+        "startup",
     );
-    let xml = render_static_prompt(template, &CapabilityRegistry::builtin(), &XmlSuiteV1, "Ai7");
+    let xml = render_static_prompt(
+        template,
+        &CapabilityRegistry::builtin(),
+        &XmlSuiteV1,
+        "Ai7",
+        "startup",
+    );
 
     assert!(markdown.contains("Return Markdown"));
     assert!(json.contains("Return JSON"));
@@ -143,9 +152,24 @@ fn prompt_renderer_replaces_assistant_id() {
         &CapabilityRegistry::builtin(),
         &MarkdownSuiteV1,
         "Ai7",
+        "startup",
     );
     assert!(rendered.contains("YOUR ID is: Ai7"));
     assert!(rendered.contains("## Ai7"));
     assert!(!rendered.contains("{{ASSSISTANT_ID}}"));
     assert!(!rendered.contains("ASSSISTANT_ID"));
+}
+
+#[test]
+fn prompt_renderer_replaces_startup_stamp() {
+    let rendered = render_static_prompt(
+        "## TIMESTAMP\n{{STARTUP_STAMP}}",
+        &CapabilityRegistry::builtin(),
+        &MarkdownSuiteV1,
+        "Ai7",
+        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
+    );
+
+    assert!(rendered.contains("## TIMESTAMP\n2026-08-17 12:34:56 local_time, weekday=周一/Monday"));
+    assert!(!rendered.contains("{{STARTUP_STAMP}}"));
 }

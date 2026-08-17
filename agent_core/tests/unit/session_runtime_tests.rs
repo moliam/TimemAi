@@ -2883,7 +2883,13 @@ impl ModelClient for ShrinkReplayModel {
         }
         assert_eq!(self.prompts.len(), 2);
         assert!(prompt.contains("Action result: context_compact"));
-        assert!(prompt.contains("Context compact summary"));
+        assert!(prompt.contains("context compacted successfully."));
+        assert_eq!(
+            prompt
+                .matches("discard stale context and keep current task state")
+                .count(),
+            1
+        );
         assert!(!prompt.contains("mode=force_shrink_required"));
         assert!(!prompt.contains(
             "TIPS: You can update your job list plan, steer and optimize your work based on the above work."
@@ -3921,7 +3927,8 @@ impl ModelClient for ScratchOffloadReplayModel {
         }
         assert_eq!(self.prompts.len(), 2);
         assert!(prompt.contains("Action result: context_compact"));
-        assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
+        assert!(prompt.contains("scratch_id: scratch_"));
+        assert!(prompt.contains("context compacted successfully."));
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"scratch 已记录，可以继续。"}"#,
             4_100,
@@ -4231,8 +4238,9 @@ impl ModelClient for StoryReplayModel {
             }
             9 => {
                 assert!(prompt.contains("Action result: context_compact"));
-                assert!(prompt.contains("The scratch id for offloaded deltas is: scratch_"));
-                assert!(prompt.contains("Context compact summary"));
+                assert!(prompt.contains("scratch_id: scratch_"));
+                assert!(prompt.contains("context compacted successfully."));
+                assert!(!prompt.contains("Context compact summary"));
                 assert!(!prompt.contains("mode=force_shrink_required"));
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
