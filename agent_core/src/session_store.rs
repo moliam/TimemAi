@@ -132,7 +132,7 @@ pub struct SessionResumeNotice {
 impl SessionResumeNotice {
     pub fn render(&self) -> String {
         format!(
-            "## SYSTEM\n\nThis session was restored and may not include the full previous context.\n\n{}\n\nDo not assume the whole previous context is loaded. Read this file only when needed for the current task.\nTry to use efficient tools such as tail, rg, jq, or short scripts instead of a huge cat.\n\nCurrent cwd: {}",
+            "## SYSTEM\n\nRuntime just restarted. Previous audit chat history's runtime info are valid.\n\nThis session was restored and may not include the full previous context.\n\n{}\n\nDo not assume the whole previous context is loaded. Read this file only when needed for the current task.\nTry to use efficient tools such as tail, rg, jq, or short scripts instead of a huge cat.\n\nCurrent cwd: {}",
             chat_history_prompt_format_hint(&self.history_path),
             self.current_dir.display()
         )
@@ -143,6 +143,7 @@ impl SessionResumeNotice {
 pub struct SessionStore {
     root: PathBuf,
     history_indexes: Arc<Mutex<BTreeMap<PathBuf, HistoryIndex>>>,
+    history_write_lock: Arc<Mutex<()>>,
     index_lock: Arc<Mutex<()>>,
     guard: MemGuard,
 }
@@ -168,6 +169,7 @@ impl SessionStore {
             guard: MemGuard::for_memory_dir(&root),
             root,
             history_indexes: Arc::new(Mutex::new(BTreeMap::new())),
+            history_write_lock: Arc::new(Mutex::new(())),
             index_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -314,13 +316,22 @@ impl SessionStore {
         session_id: &str,
         record: &ChatHistoryRecord,
     ) -> Result<(), String> {
+        let _history_write_lock = self
+            .history_write_lock
+            .lock()
+            .map_err(|_| "chat_history_write_lock_poisoned".to_string())?;
         let path = self.history_path_for_session(session_id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|_| "chat_history_dir_create_failed")?;
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&path)
             .map_err(|_| "chat_history_open_failed")?;
         let line =
@@ -331,6 +342,97 @@ impl SessionStore {
             .map_err(|_| "chat_history_index_poisoned")?
             .remove(&path);
         Ok(())
+    }
+
+    pub fn delete_history_message(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        role: ChatHistoryRole,
+        role_index: usize,
+    ) -> Result<ChatHistoryRecord, String> {
+        let turn_id = turn_id.trim();
+        if turn_id.is_empty() {
+            return Err("turn_id_required".to_string());
+        }
+        let _history_write_lock = self
+            .history_write_lock
+            .lock()
+            .map_err(|_| "chat_history_write_lock_poisoned".to_string())?;
+        self.guard.with_write(|| {
+            self.delete_history_message_unlocked(session_id, turn_id, role, role_index)
+        })?
+    }
+
+    fn delete_history_message_unlocked(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        role: ChatHistoryRole,
+        role_index: usize,
+    ) -> Result<ChatHistoryRecord, String> {
+        let path = self.history_path_for_session(session_id);
+        if !path.exists() {
+            return Err("chat_message_not_found".to_string());
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| "chat_history_path_invalid".to_string())?;
+        let temporary = parent.join("raw_chat_history.jsonl.tmp");
+        let source = fs::File::open(&path).map_err(|_| "chat_history_open_failed")?;
+        let mut options = OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut target = options
+            .open(&temporary)
+            .map_err(|_| "chat_history_open_failed")?;
+        let mut matching_index = 0usize;
+        let mut deleted = None;
+        for line in BufReader::new(source).lines() {
+            let line = line.map_err(|_| "chat_history_read_failed")?;
+            let parsed = parse_chat_history_record_line(&line);
+            let matches_target = parsed.as_ref().is_some_and(|record| {
+                matches!(
+                    record,
+                    ChatHistoryRecord::Message {
+                        role: record_role,
+                        turn_id: record_turn_id,
+                        ..
+                    } if *record_role == role && record_turn_id == turn_id
+                )
+            });
+            if matches_target {
+                if matching_index == role_index && deleted.is_none() {
+                    deleted = parsed;
+                    matching_index = matching_index.saturating_add(1);
+                    continue;
+                }
+                matching_index = matching_index.saturating_add(1);
+            }
+            writeln!(target, "{line}").map_err(|_| "chat_history_write_failed".to_string())?;
+        }
+        let Some(deleted) = deleted else {
+            let _ = fs::remove_file(&temporary);
+            return Err("chat_message_not_found".to_string());
+        };
+        target
+            .sync_all()
+            .map_err(|_| "chat_history_sync_failed".to_string())?;
+        fs::rename(&temporary, &path).map_err(|_| "chat_history_replace_failed".to_string())?;
+        restrict_session_path_permissions(&path, false)?;
+        #[cfg(unix)]
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| "chat_history_dir_sync_failed".to_string())?;
+        self.history_indexes
+            .lock()
+            .map_err(|_| "chat_history_index_poisoned")?
+            .remove(&path);
+        Ok(deleted)
     }
 
     pub fn read_history_page(

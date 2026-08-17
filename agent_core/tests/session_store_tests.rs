@@ -563,6 +563,71 @@ fn deleting_a_session_removes_its_index_entry_and_persisted_data() {
     );
 }
 
+#[test]
+fn deleting_one_history_message_rewrites_raw_chat_and_preserves_other_records() {
+    let root = tmp_dir("delete_history_message");
+    let store = SessionStore::new(&root);
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 1,
+            kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "keep first user entry".to_string(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 2,
+            kind: Some("supplement".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "delete second user entry".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 3,
+            kind: ChatHistoryEventKind::Progress,
+            content: "keep event".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::Assistant,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 4,
+            kind: None,
+            command_id: None,
+            delivery_state: None,
+            content: "keep assistant".to_string(),
+        },
+    ];
+    for record in &records {
+        store.append_history_record("session_a", record).unwrap();
+    }
+
+    let deleted = store
+        .delete_history_message("session_a", "turn_1", ChatHistoryRole::User, 1)
+        .unwrap();
+    assert!(matches!(
+        deleted,
+        ChatHistoryRecord::Message { content, .. } if content == "delete second user entry"
+    ));
+    let remaining = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert_eq!(
+        remaining,
+        vec![records[0].clone(), records[2].clone(), records[3].clone()]
+    );
+    assert_eq!(
+        store
+            .delete_history_message("session_a", "turn_1", ChatHistoryRole::User, 1)
+            .unwrap_err(),
+        "chat_message_not_found"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn session_index_permissions_protect_cached_environment() {
@@ -615,6 +680,8 @@ fn resume_notice_references_history_format_without_web_specific_language() {
     };
     let rendered = notice.render();
     assert!(rendered.starts_with("## SYSTEM"));
+    assert!(rendered
+        .contains("Runtime just restarted. Previous audit chat history's runtime info are valid."));
     assert!(rendered
         .contains("This session was restored and may not include the full previous context."));
     assert!(rendered.contains("path: /tmp/session/raw_chat_history.jsonl"));

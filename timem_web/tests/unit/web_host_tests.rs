@@ -43,6 +43,133 @@ fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
 }
 
 #[test]
+fn chat_message_delete_removes_user_and_assistant_content_from_ui_state_and_raw_log() {
+    let state = routing_test_state();
+    let turn = start_web_turn(&state, "session_a", "original task").unwrap();
+    append_turn_user_entry(
+        &state,
+        "session_a",
+        "supplement",
+        "delete this supplement".to_string(),
+    )
+    .unwrap();
+    append_message(
+        &state,
+        "session_a",
+        "assistant",
+        "delete this answer".to_string(),
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.state = "ready".to_string();
+        let stored_turn = session
+            .turns
+            .iter_mut()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap();
+        stored_turn.state = "finished".to_string();
+        stored_turn.final_answer = Some("delete this answer".to_string());
+    }
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ChatMessageDelete {
+            session_id: "session_a".to_string(),
+            turn_id: turn.turn_id.clone(),
+            role: "user".to_string(),
+            role_index: 1,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        event,
+        WireEvent::ChatMessageDeleted { role, role_index: 1, .. } if role == "user"
+    ));
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ChatMessageDelete {
+            session_id: "session_a".to_string(),
+            turn_id: turn.turn_id.clone(),
+            role: "assistant".to_string(),
+            role_index: 0,
+        },
+    )
+    .unwrap();
+
+    let session = state
+        .sessions
+        .lock()
+        .unwrap()
+        .get("session_a")
+        .unwrap()
+        .clone();
+    let stored_turn = session
+        .turns
+        .iter()
+        .find(|candidate| candidate.turn_id == turn.turn_id)
+        .unwrap();
+    assert_eq!(
+        stored_turn
+            .user_entries
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["original task"]
+    );
+    assert!(stored_turn.final_answer.is_none());
+    assert!(!session
+        .messages
+        .iter()
+        .any(|message| message.text == "delete this supplement"
+            || message.text == "delete this answer"));
+
+    let history = read_all_history_records(
+        &current_session_store(&state)
+            .unwrap()
+            .history_path_for_session("session_a"),
+    )
+    .unwrap();
+    let serialized = serde_json::to_string(&history).unwrap();
+    assert!(serialized.contains("original task"));
+    assert!(!serialized.contains("delete this supplement"));
+    assert!(!serialized.contains("delete this answer"));
+}
+
+#[test]
+fn chat_message_delete_rejects_an_active_turn_without_touching_raw_log() {
+    let state = routing_test_state();
+    let turn = start_web_turn(&state, "session_a", "still executing").unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ChatMessageDelete {
+            session_id: "session_a".to_string(),
+            turn_id: turn.turn_id,
+            role: "user".to_string(),
+            role_index: 0,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "active_turn_message_delete_not_allowed");
+    let raw = std::fs::read_to_string(
+        current_session_store(&state)
+            .unwrap()
+            .history_path_for_session("session_a"),
+    )
+    .unwrap();
+    assert!(raw.contains("still executing"));
+}
+
+#[test]
 fn production_semantic_envelope_has_one_sequence_and_one_nested_event() {
     let envelope = semantic_event_envelope(
         42,
@@ -3398,12 +3525,15 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let context = session_context(&restarted, &session_id, &[])
         .unwrap()
         .expect("restored session should inject resume context");
+    assert!(context
+        .contains("Runtime just restarted. Previous audit chat history's runtime info are valid."));
     assert!(context.contains("This session was restored"));
     assert!(context.contains("raw_chat_history.jsonl"));
     assert!(context.contains("format: JSONL, one record per line."));
     let context_after_first_use = session_context(&restarted, &session_id, &[])
         .unwrap()
         .unwrap_or_default();
+    assert!(!context_after_first_use.contains("Runtime just restarted."));
     assert!(!context_after_first_use.contains("This session was restored"));
 }
 

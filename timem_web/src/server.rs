@@ -636,6 +636,12 @@ enum WireEvent {
     SessionDeleted {
         session_id: String,
     },
+    ChatMessageDeleted {
+        session_id: String,
+        turn_id: String,
+        role: String,
+        role_index: usize,
+    },
     SessionRuntimeUpdated {
         session_id: String,
         runtime_profile: WebSessionRuntimeProfile,
@@ -858,6 +864,12 @@ enum ClientCommand {
     SessionDelete {
         session_id: String,
     },
+    ChatMessageDelete {
+        session_id: String,
+        turn_id: String,
+        role: String,
+        role_index: usize,
+    },
     TurnSubmit {
         session_id: String,
         #[serde(default)]
@@ -963,6 +975,7 @@ impl ClientCommand {
             | Self::SessionApiKeyUpdate { session_id, .. }
             | Self::SessionStop { session_id }
             | Self::SessionDelete { session_id }
+            | Self::ChatMessageDelete { session_id, .. }
             | Self::TurnSubmit { session_id, .. }
             | Self::TurnSupplement { session_id, .. }
             | Self::TurnCancel { session_id }
@@ -2261,6 +2274,22 @@ fn handle_command_with_id(
                 .remove(&session_id)
                 .ok_or_else(|| "session_not_found".to_string())?;
             let event = WireEvent::SessionDeleted { session_id };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::ChatMessageDelete {
+            session_id,
+            turn_id,
+            role,
+            role_index,
+        } => {
+            delete_chat_message(state, &session_id, &turn_id, &role, role_index)?;
+            let event = WireEvent::ChatMessageDeleted {
+                session_id,
+                turn_id,
+                role,
+                role_index,
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -4729,6 +4758,103 @@ fn append_message(
         )?;
     }
     Ok(message_id)
+}
+
+fn delete_chat_message(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+    role: &str,
+    role_index: usize,
+) -> Result<(), String> {
+    let history_role = match role {
+        "user" => ChatHistoryRole::User,
+        "assistant" if role_index == 0 => ChatHistoryRole::Assistant,
+        "assistant" => return Err("assistant_message_index_invalid".to_string()),
+        _ => return Err("chat_message_role_invalid".to_string()),
+    };
+    let (content, created_at_ms) = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        if session.active_turn_id.as_deref() == Some(turn_id) {
+            return Err("active_turn_message_delete_not_allowed".to_string());
+        }
+        let turn = session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == turn_id)
+            .ok_or_else(|| "turn_not_found".to_string())?;
+        match history_role {
+            ChatHistoryRole::User => turn
+                .user_entries
+                .get(role_index)
+                .map(|entry| (entry.text.clone(), entry.created_at_ms))
+                .ok_or_else(|| "chat_message_not_found".to_string())?,
+            ChatHistoryRole::Assistant => turn
+                .final_answer
+                .as_ref()
+                .map(|answer| (answer.clone(), turn.created_at_ms))
+                .ok_or_else(|| "chat_message_not_found".to_string())?,
+            ChatHistoryRole::System => return Err("chat_message_role_invalid".to_string()),
+        }
+    };
+
+    current_session_store(state)?.delete_history_message(
+        session_id,
+        turn_id,
+        history_role,
+        role_index,
+    )?;
+
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let turn = session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == turn_id)
+            .ok_or_else(|| "turn_not_found".to_string())?;
+        match history_role {
+            ChatHistoryRole::User => {
+                if role_index >= turn.user_entries.len() {
+                    return Err("chat_message_not_found".to_string());
+                }
+                turn.user_entries.remove(role_index);
+            }
+            ChatHistoryRole::Assistant => turn.final_answer = None,
+            ChatHistoryRole::System => return Err("chat_message_role_invalid".to_string()),
+        }
+        remove_closest_chat_message(&mut session.messages, role, &content, created_at_ms);
+    }
+    persist_web_session(state, session_id)?;
+    Ok(())
+}
+
+fn remove_closest_chat_message(
+    messages: &mut Vec<WebChatMessage>,
+    role: &str,
+    content: &str,
+    created_at_ms: u128,
+) {
+    let candidate = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == role && message.text == content)
+        .min_by_key(|(_, message)| message.created_at_ms.abs_diff(created_at_ms))
+        .map(|(index, _)| index);
+    if let Some(index) = candidate {
+        messages.remove(index);
+    }
 }
 
 #[cfg(test)]
