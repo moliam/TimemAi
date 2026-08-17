@@ -686,7 +686,10 @@ fn resume_notice_references_history_format_without_web_specific_language() {
         .contains("This session was restored and may not include the full previous context."));
     assert!(rendered.contains("path: /tmp/session/raw_chat_history.jsonl"));
     assert!(rendered.contains("format: JSONL, one record per line."));
-    assert!(rendered.contains("Try to use efficient tools such as tail, rg, jq"));
+    assert!(!rendered.contains("Do not assume the whole previous context is loaded."));
+    assert!(!rendered.contains("Read this file only when needed for the current task."));
+    assert!(!rendered.contains("Try to use efficient tools such as tail, rg, jq"));
+    assert!(!rendered.contains("instead of a huge cat"));
     assert!(rendered.contains("Current cwd: /work/project"));
     assert!(!rendered.to_lowercase().contains("web"));
 }
