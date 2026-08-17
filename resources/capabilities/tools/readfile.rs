@@ -382,14 +382,10 @@ fn resolve_end(
     match selector {
         None => Ok((text.len(), false)),
         Some(Selector::Line(line)) => {
-            line_end(text, *line)
-                .map(|end| (end, false))
-                .ok_or_else(|| {
-                    ReadfileError::new(
-                        "end_line_not_found",
-                        format!("Ender line {line} does not exist."),
-                    )
-                })
+            // An inclusive end line beyond EOF means "through the actual last
+            // line". This keeps bounded range requests useful when callers do
+            // not know the file's exact line count.
+            Ok((line_end(text, *line).unwrap_or(text.len()), false))
         }
         Some(Selector::Byte(byte)) => {
             let byte = usize::try_from(*byte).map_err(|_| {
