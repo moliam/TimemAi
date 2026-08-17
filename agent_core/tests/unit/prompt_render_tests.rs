@@ -64,9 +64,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     assert!(rendered.contains("## USER"));
     assert!(rendered.contains("## SYSTEM"));
     assert!(!rendered.contains("## ACTIONS"));
-    assert!(
-        rendered.contains("The following are results of TIMEM_ASSISTANT newly initiated actions:")
-    );
+    assert!(rendered.contains("The following are results of the actions generated in response:"));
     assert!(rendered.contains("Action result: run_bash"));
     assert!(!rendered.contains("slice_id:"));
     assert!(!rendered.contains("prompt_type:"));

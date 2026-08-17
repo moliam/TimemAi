@@ -433,6 +433,41 @@ fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape
 }
 
 #[test]
+fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("assistant_replay_extracted_xml"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Xml);
+    core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
+    core.set_assistant_speaker_name("Session Assistant");
+
+    let _ = core.begin_turn("inspect runtime", None);
+    let response = r#"<response>
+  <free_talk>Inspecting the runtime.</free_talk>
+  <actions><self_tool type="params"/></actions>
+</response>"#;
+    let step = core.apply_model_response(LlmResponse {
+        content: response.to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert!(prompt.contains("## Session Assistant"));
+    assert!(prompt.contains(response));
+    assert_eq!(prompt.matches("<response>").count(), 1);
+    assert!(prompt.contains("The following are results of the actions generated in response:"));
+    assert!(!prompt.contains("newly initiated actions"));
+}
+
+#[test]
 fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
     let mut core = test_core(
         "STATIC",
@@ -457,7 +492,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
     let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
     let raw = prompt.find(raw_response).unwrap();
     let system_result = prompt
-        .find("The following are results of TIMEM_ASSISTANT newly initiated actions:")
+        .find("The following are results of the actions generated in response:")
         .unwrap();
     assert!(assistant < raw);
     assert!(raw < system_result);
@@ -558,7 +593,7 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("The following are results of Ai4 newly initiated actions:"));
+    assert!(prompt.contains("The following are results of the actions generated in response:"));
     assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
     assert!(!prompt.contains("{{CURRENT_ASSISTANT_NAME}}"));
 }
