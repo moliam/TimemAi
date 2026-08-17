@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseStorageKey, saveQueuedMessagesPause } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -230,4 +230,48 @@ describe("queued messages", () => {
     expect(dispatching).toEqual(new Set(["session_b"]));
     expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([]);
   });
+
+ it("persists and clears a mem-scoped global pause without changing queued messages", () => {
+ const values = new Map<string, string>();
+ const storage = {
+ get length() { return values.size; },
+ key: (index: number) => Array.from(values.keys())[index] ?? null,
+ getItem: (key: string) => values.get(key) ?? null,
+ setItem: (key: string, value: string) => { values.set(key, value); },
+ removeItem: (key: string) => { values.delete(key); },
+ };
+ expect(saveQueuedMessages(storage, "scope-a", { session_a: messages.slice(0, 2) })).toBe(true);
+ expect(saveQueuedMessagesPause(storage, "scope-a", {
+ paused: true,
+ reason: "CancelledByUser",
+ stoppedAtMs: 123,
+ })).toBe(true);
+ expect(loadQueuedMessagesPause(storage, "scope-a")).toEqual({
+ paused: true,
+ reason: "CancelledByUser",
+ stoppedAtMs: 123,
+ });
+ expect(loadQueuedMessagesPause(storage, "scope-b")).toBeNull();
+ expect(loadQueuedMessages(storage, "scope-a").session_a.map(({ id }) => id)).toEqual(["a", "b"]);
+ expect(clearQueuedMessagesPause(storage, "scope-a")).toBe(true);
+ expect(loadQueuedMessagesPause(storage, "scope-a")).toBeNull();
+ expect(loadQueuedMessages(storage, "scope-a").session_a.map(({ id }) => id)).toEqual(["a", "b"]);
+ });
+
+ it("ignores malformed queue pause records", () => {
+ const values = new Map<string, string>();
+ const storage = { getItem: (key: string) => values.get(key) ?? null };
+ const key = queuedMessagesPauseStorageKey("scope-a");
+ for (const malformed of [
+ "not-json",
+ "{}",
+ JSON.stringify({ paused: false, stoppedAtMs: 1 }),
+ JSON.stringify({ paused: true, stoppedAtMs: "now" }),
+ JSON.stringify({ paused: true, stoppedAtMs: -1 }),
+ JSON.stringify({ paused: true, stoppedAtMs: 1, reason: 42 }),
+ ]) {
+ values.set(key, malformed);
+ expect(loadQueuedMessagesPause(storage, "scope-a")).toBeNull();
+ }
+ });
 });

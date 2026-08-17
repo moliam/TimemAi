@@ -1167,7 +1167,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .composer-cwd-inline span { color: #627780; }
 .queued-message-list { width: 100%; display: grid; gap: 5px; margin-bottom: 7px; padding: 8px 9px; border: 1px solid #404040; border-radius: 11px; background: #292929; }
 .queued-message-list > header { display: flex; align-items: center; gap: 7px; padding: 0 2px 2px; color: #c5c5c5; font-size: 11px; font-weight: 700; }
-.queued-message-list > header small { color: #858585; font-size: 10px; font-weight: 500; }
+.queued-message-list > header small { color: #858585; font-size: 10px; font-weight: 500; } .queued-message-list.paused { border-color: color-mix(in srgb, #d59b45 55%, #404040); } .queued-message-list.paused > header small { color: #d6aa68; } .queued-message-resume { min-height: 24px; margin-left: auto; border: 1px solid #655031; border-radius: 6px; padding: 0 8px; background: #3a3124; color: #f1c984; font-size: 10px; font-weight: 700; } .queued-message-resume:hover { border-color: #9b7540; background: #493b29; color: #ffe0a8; }
 .queued-message-toggle { min-height: 24px; display: inline-flex; align-items: center; gap: 3px; margin-left: auto; border: 0; border-radius: 6px; padding: 0 6px; background: transparent; color: #929292; font-size: 10px; font-weight: 500; }
 .queued-message-toggle:hover { background: #3a3a3a; color: #d7efff; }
 .queued-message-items { min-height: 0; display: grid; gap: 5px; }

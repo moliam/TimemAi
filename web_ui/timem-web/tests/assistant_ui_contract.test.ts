@@ -747,9 +747,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('cancellingSessionIds.current.delete(event.session_id);');
     expect(source).toContain('{isCancelling ? "Stopping…" : "Stop"}');
     expect(source).toContain("const cancelActiveSessionTurn = async () =>");
-    expect(source).toContain("clearSessionQueuedMessages(previous, activeSessionId)");
-    expect(source).toContain("releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, activeSessionId)");
-    expect(source).toContain("queuedDispatchSessionIdsRef.current.delete(activeSessionId)");
+    expect(source).toContain('pauseQueuedMessages("CancelledByUser")');
+    expect(source).not.toContain("clearSessionQueuedMessages(previous, activeSessionId)");
+    expect(source).toContain("releaseAllQueuedDispatches()");
     expect(source).toContain("onClick={() => void cancelActiveSessionTurn()}");
   });
 
@@ -783,7 +783,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession)");
     expect(source).toContain("finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent)");
     expect(source).toContain("const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);");
-    expect(source).toContain("if (sent) updateQueuedMessages(() => nextQueues);");
+    expect(source).toMatch(/if \(sent\) \{[\s\S]*?updateQueuedMessages\(\(\) => nextQueues\);[\s\S]*?resumeQueuedMessages\(\);[\s\S]*?\}/);
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
     expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
     expect(source).toContain("pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)");
@@ -1331,7 +1331,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('"Ask Timem to investigate, write, or work with you."');
     expect(source).not.toContain("Ask Timem anything about this workspace");
     expect(source).toContain('activeSession?.state === "working" ? "Queue message" : "Send message"');
-    expect(source).toContain('className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"}`}');
+    expect(source).toContain('className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuedMessagesPause ? "paused" : ""}`}');
+    expect(source).toContain('"自动续发已暂停，手动发送仍可用"');
+    expect(source).toContain('onClick={resumeQueuedMessages}>继续发送</button>');
     expect(source).toContain('className="queued-message-supplement"');
     expect(source).toContain('claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"');
     expect(source).toContain('title={effectiveSendLabel} aria-label={effectiveSendLabel}');
@@ -1382,7 +1384,8 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("releases a stuck send affordance only from the authoritative turn completion", () => {
-    expect(source).toContain('setCompletedTurnKey(`${event.session_id}:${event.turn_id ?? ""}`);');
+    expect(source).toContain('const completedKey = `${event.session_id}:${event.turn_id ?? ""}`;');
+    expect(source).toContain("setCompletedTurnKey(completedKey);");
     expect(source).not.toContain('if (event.turn.state !== "working") setCompletedTurnKey');
     expect(source).toContain('completedTurnKey.startsWith(`${activeSessionId}:`)');
     expect(source).toContain('releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)');
