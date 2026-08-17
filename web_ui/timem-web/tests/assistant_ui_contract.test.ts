@@ -673,6 +673,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".turn-work-item.free-talk .turn-work-detail { font-size: 90%; }");
     expect(styles).toContain(".turn-work-item.free-talk .turn-work-detail .message-content { font-size: inherit; }");
     expect(styles).toContain(".worker-role-editor input::placeholder, .worker-role-editor textarea::placeholder { font-size: 10px; }");
+expect(source).toContain('className={`worker-role-editor ${editingId ? "editing" : "creating"}`}');
+expect(styles).toContain("font: 12px/1.45 var(--ui-font);");
+expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(160px, 30dvh, 360px);");
   });
 
   it("shows a live elapsed duration only while the turn is working", () => {
