@@ -1398,8 +1398,19 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`');
     expect(source).toContain('className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1}');
     expect(source).toContain("reorderQueuedMessages(current[activeSessionId] ?? [], draggedQueueMessageId, targetId, queuedMessageClaimsRef.current, activeSessionId)");
-    expect(styles).toContain(".queued-message-list.collapsed .queued-message-items { max-height: 156px; overflow: hidden; }");
+    expect(styles).toContain(".queued-message-list.collapsed .queued-message-items { max-height: 224px; overflow: hidden; }");
     expect(styles).toContain(".queued-message-list.expanded .queued-message-items { max-height: min(50vh, 420px); overflow-y: auto;");
+  });
+
+  it("floats queued worker roles above the message preview instead of clipping them with long text", () => {
+    expect(source).toContain('className={`queued-message-preview ${messageRoleNames.length > 0 ? "has-roles" : ""}`}');
+    expect(source).toContain('className="queued-message-roles" title={messageRoleNames.join("、")}');
+    expect(source).toContain('className="queued-message-actions"');
+    expect(styles).toContain(".queued-message-preview { position: relative; min-width: 0; }");
+    expect(styles).toContain(".queued-message-preview.has-roles { padding-top: 17px; }");
+    expect(styles).toContain(".queued-message-roles { position: absolute; top: 0; left: 0;");
+    expect(styles).toContain(".queued-message-roles span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
+    expect(source).not.toContain('{message.text}{messageRoleNames.length > 0 && <small className="queued-message-roles"');
   });
 
   it("claims each queued message before immediate or automatic dispatch", () => {
