@@ -198,9 +198,9 @@ button:disabled { cursor: not-allowed; }
 .completion-card b { color: #d2e2e7; font-weight: 650; }
 .completion-card .warning { color: #e4bd76; } .mcp-session-name { color: #7ec8b8; font-weight: 700; }
 .turn-completion-only { width: 100%; max-width: 760px; margin: -12px auto 28px; }
-.live-turn-usage { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 9px 0 0; padding: 8px 10px 2px 28px; border-top: 1px solid #253640; color: #8198a5; font-size: 11px; line-height: 1.45; animation: live-turn-usage-breathe 2.8s ease-in-out infinite; }
+.live-turn-usage { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 9px 0 0; padding: 8px 10px 2px 28px; border-top: 1px solid #253640; color: #8fc9f1; font-size: 11px; line-height: 1.45; animation: live-turn-usage-breathe 2.8s ease-in-out infinite; }
 .live-turn-usage span { white-space: nowrap; }
-.live-turn-usage b { color: #b9cbd3; font-weight: 650; }
+.live-turn-usage b { color: inherit; font-weight: 650; }
 .activity .message-content, .activity p { margin: 7px 0 0; }
 .activity .message-content pre { overflow: auto; border: 1px solid #26333e; border-radius: 5px; background: #111820; padding: 9px; }
 .tool-invocation { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; margin-top: 6px; color: #cbd9e2; }
@@ -558,7 +558,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .completion-card { border-color: #bfd2d7; border-left-color: #278c7e; background: #edf5f4; color: #526872; }
 :root[data-theme="light"] .completion-card span { border-color: #c7d7db; }
 :root[data-theme="light"] .completion-card b { color: #263b43; }
-:root[data-theme="light"] .live-turn-usage b { color: #344c56; }
+:root[data-theme="light"] .live-turn-usage b { color: inherit; }
 :root[data-theme="light"] .header-context { color: #718791; }
 :root[data-theme="light"] .header-model:hover,
 :root[data-theme="light"] .header-model.selected { background: #edf2f3; color: #354b54; }
@@ -637,7 +637,7 @@ button:disabled { cursor: not-allowed; }
   .appearance-panel { top: 58px; right: 12px; }
   .code-block figcaption button span { display: none; }
 }
-:root[data-theme="light"] .live-turn-usage { border-color: #d9e3e6; color: #607782; }
+:root[data-theme="light"] .live-turn-usage { border-color: #d9e3e6; color: #286a9b; }
 :root[data-theme="light"] .context-compact-notice { border-color: #bdd2d6; background: #edf5f4; color: #536a75; }
 :root[data-theme="light"] .compact-icon { background: #d7ebe7; color: #237c70; }
 :root[data-theme="light"] .compact-copy span { color: #506873; }
@@ -778,8 +778,8 @@ button:disabled { cursor: not-allowed; }
 .turn-work-item.thinking .turn-work-detail { color: #b8c2cc; }
 .turn-work-item.thinking .message-content { font-size: 13.5px; line-height: 1.62; }
 .session-working-icon { color: #3b82f6; }
-.live-turn-usage { margin-top: 6px; padding: 7px 0 0; border-top-color: #343434; color: #777; font-size: 10px; }
-.live-turn-usage b { color: #999; font-weight: 500; }
+.live-turn-usage { margin-top: 6px; padding: 7px 0 0; border-top-color: #343434; color: #8fc9f1; font-size: 10px; }
+.live-turn-usage b { color: inherit; font-weight: 500; }
 
 .tool-activity { margin: 2px 0; color: #aaa; font-size: 12px; }
 .tool-activity summary {
@@ -811,10 +811,11 @@ button:disabled { cursor: not-allowed; }
 .tool-activity summary:focus-visible b { color: #ddd; }
 .tool-activity-icon { height: 16px; display: grid; place-items: center; color: #858585; }
 .tool-activity b { color: #b8b8b8; font-size: 12px; font-weight: 550; }
+.tool-activity-meta { min-width: 0; display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
 .tool-activity-status { color: #747474; font-size: 10px; }
 .tool-activity.running .tool-activity-status { color: #a89878; }
-.tool-activity-command { min-width: 0; overflow: hidden; color: #737373; background: transparent; font: 10px/1.4 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.tool-activity-chevron { color: #696969; transition: transform .15s ease; }
+.tool-activity-command { min-width: 0; grid-column: 4; justify-self: start; overflow: hidden; color: #737373; background: transparent; font: 10px/1.4 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.tool-activity-chevron { grid-column: 5; justify-self: end; color: #696969; transition: transform .15s ease; }
 .tool-activity[open] .tool-activity-chevron { transform: rotate(90deg); }
 .tool-activity-body { max-height: 280px; overflow: auto; margin: 0 0 5px 22px; padding: 0; border: 0; }
 .tool-activity-body .turn-work-detail { padding: 2px 0 3px; }
@@ -1450,4 +1451,26 @@ body {
   color: #8fa9b8;
   font-size: 10px;
   white-space: nowrap;
+}
+
+/* Per-message deletion removes both the rendered content and its raw-chat row. */
+.turn-user-entry { position: relative; }
+.chat-message-delete { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 28px; min-height: 28px; padding: 4px 7px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #858585; font: inherit; font-size: 11px; cursor: pointer; }
+.chat-message-delete:hover:not(:disabled) { border-color: #593c3c; background: #3a2525; color: #e29a96; }
+.chat-message-delete:focus-visible { outline: 2px solid #b45d58; outline-offset: 2px; }
+.chat-message-delete:disabled { cursor: not-allowed; opacity: .25; }
+.user-message-delete { position: absolute; z-index: 1; top: 7px; right: 8px; opacity: 0; }
+.turn-user-entry:hover > .user-message-delete,
+.turn-user-entry:focus-within > .user-message-delete { opacity: 1; }
+.turn-user-entry > .markdown-body { padding-right: 26px; }
+.turn-final-toolbar { gap: 5px; }
+.assistant-message-delete span { line-height: 1; }
+.chat-message-delete-dialog { width: min(500px, 100%); }
+.chat-message-delete-dialog > p { color: #b9c5cb; line-height: 1.55; }
+.chat-message-delete-preview { max-height: 130px; overflow: auto; margin: 14px 0; padding: 10px 12px; border: 1px solid #343434; border-radius: 8px; background: #202020; color: #c7c7c7; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+:root[data-theme="light"] .chat-message-delete:hover:not(:disabled) { border-color: #d4aaa7; background: #f8e9e8; color: #a33f3b; }
+:root[data-theme="light"] .chat-message-delete-dialog > p { color: #53646c; }
+:root[data-theme="light"] .chat-message-delete-preview { border-color: #d8d8d8; background: #f4f4f4; color: #3d3d3d; }
+@media (hover: none) {
+  .user-message-delete { opacity: .72; }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -826,12 +826,7 @@ describe("web topic view model", () => {
     expect(sessionContextUsage(restored)?.prompt_tokens).toBe(4_200);
   });
 
-  it("renders response repair as a visible warning", () => {
-    const activity = activityFromTopic(topic("core.model.repair", { attempt: 2, max_attempts: 5, issue: "missing_response_root" }));
-    expect(activity).toMatchObject({ tone: "warning", title: "⚠️ 模型回复偏离协议，重试 (2/5)", detail: "missing_response_root" });
-  });
-
-  it("renders model free talk verbatim without an invented completion label", () => {
+  it("renders response repair as a visible warning with a natural explanation", () => { const activity = activityFromTopic(topic("core.model.repair", { attempt: 2, max_attempts: 5, issue: "missing_response_root", reason: "The required response root is missing." })); expect(activity).toMatchObject({ tone: "warning", title: "⚠️ 模型回复偏离协议，重试 (2/5)", detail: "回复缺少必需的 response 根节点，因此正在重新请求。" }); expect(activity?.detail).not.toContain("missing_response_root"); }); it("hides the recovered-final-answer issue code in legacy repair events", () => { const activity = activityFromTopic(topic("core.model.repair", { attempt: 1, max_attempts: 5, issue: "xml_recovered_final_answer_requires_retry" })); expect(activity).toMatchObject({ tone: "warning", detail: "回复根节点外包含了额外内容。系统虽然识别出了最终回答，但无法将它安全地视为完整响应，因此正在重新请求。" }); expect(activity?.detail).not.toContain("xml_recovered_final_answer_requires_retry"); }); it("renders model free talk verbatim without an invented completion label", () => {
     const activity = activityFromTopic(topic("core.model.response", {
       status: "finished",
       free_talk: "User sent a simple greeting. No tools needed.",
@@ -1383,5 +1378,30 @@ describe("web topic view model", () => {
   it("does not recreate a session when a worker repeats its current state", () => {
     const current = updateSessionWorkerState(session("session_1"), "worker_session_1", "working");
     expect(updateSessionWorkerState(current, "worker_session_1", "working")).toBe(current);
+  });
+
+  it("applies user and assistant message deletion to both turn and chat projections", () => {
+    const current = session("session_1");
+    current.turns = [{
+      ...turn("turn_1", "finished"),
+      user_entries: [
+        { kind: "task", text: "same", created_at_ms: 10 },
+        { kind: "supplement", text: "same", created_at_ms: 20 },
+      ],
+      final_answer: "answer",
+    }];
+    current.messages = [
+      { id: "u1", role: "user", text: "same", created_at_ms: 10 },
+      { id: "u2", role: "user", text: "same", created_at_ms: 20 },
+      { id: "a1", role: "assistant", text: "answer", created_at_ms: 30 },
+    ];
+
+    const withoutSupplement = applyChatMessageDeleted(current, "turn_1", "user", 1);
+    expect(withoutSupplement.turns[0].user_entries.map((entry) => entry.created_at_ms)).toEqual([10]);
+    expect(withoutSupplement.messages.map((message) => message.id)).toEqual(["u1", "a1"]);
+
+    const withoutAnswer = applyChatMessageDeleted(withoutSupplement, "turn_1", "assistant", 0);
+    expect(withoutAnswer.turns[0].final_answer).toBeNull();
+    expect(withoutAnswer.messages.map((message) => message.id)).toEqual(["u1"]);
   });
 });

@@ -212,6 +212,7 @@ export type WireEvent =
   | { type: "session_created"; session: Session }
   | { type: "session_renamed"; session_id: string; display_name: string }
   | { type: "session_deleted"; session_id: string }
+  | { type: "chat_message_deleted"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
   | { type: "session_runtime_updated"; session_id: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
   | { type: "session_runtime_config_updated"; session_id: string; key: string; value: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
   | { type: "session_api_key_revealed"; session_id: string; api_key: string }
@@ -238,6 +239,7 @@ export type ClientCommand =
   | { type: "session_api_key_reveal"; session_id: string }
   | { type: "session_stop"; session_id: string }
   | { type: "session_delete"; session_id: string }
+  | { type: "chat_message_delete"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
   | { type: "turn_submit"; session_id: string; text: string; attachment_ids?: string[]; input_kind?: "toolgen"; source_turn_id?: string }
   | { type: "turn_supplement"; session_id: string; text: string; attachment_ids?: string[] }
   | { type: "turn_cancel"; session_id: string }
