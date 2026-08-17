@@ -143,10 +143,7 @@ pub(crate) fn render_prompt_with_rendered_static(
             let is_action_result = is_action_result_prompt_type(&slice.prompt_type);
             if is_action_result && !last_was_action_result {
                 out.push('\n');
-                out.push_str(&format!(
-                    "The following are results of {} newly initiated actions:\n",
-                    assistant_heading
-                ));
+                out.push_str("The following are results of the actions generated in response:\n");
             }
             out.push('\n');
             if is_action_result {

@@ -3024,6 +3024,15 @@ impl AgentCore {
                 }
             }
             AssistantReplayMode::ExtractedFields => {
+                if let Some(accepted_response) =
+                    parsed.and_then(|parsed| parsed.accepted_response.as_deref())
+                {
+                    let replay = accepted_response.trim();
+                    if !replay.is_empty() {
+                        return vec![("llm_response".to_string(), replay.to_string())];
+                    }
+                }
+
                 let mut slices = Vec::new();
                 if let Some(parsed) = parsed {
                     if !parsed.thought.is_empty() {
