@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseStorageKey, saveQueuedMessagesPause } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, unclaimedQueuedMessages } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -8,6 +8,28 @@ const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => (
 attachmentIds: index === 0 ? ["upload-a"] : [], }));
 
 describe("queued messages", () => {
+  it("direct-sends only an idle session without backlog or a queue pause", () => {
+    expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
+    expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
+    expect(shouldDirectManualMessage("error", 0, false)).toBe(false);
+    expect(shouldDirectManualMessage("stopped", 0, false)).toBe(false);
+    expect(shouldDirectManualMessage("ready", 1, false)).toBe(false);
+    expect(shouldDirectManualMessage("ready", 0, true)).toBe(false);
+  });
+
+  it("requires a new ready-state decision after a direct submission is occupied", () => {
+    expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
+    expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
+  });
+
+  it("hides claimed messages without removing them from the durable queue", () => {
+    const claims = new Set([queuedMessageKey("session_a", "a")]);
+    expect(unclaimedQueuedMessages(messages.slice(0, 3), claims, "session_a").map(({ id }) => id)).toEqual(["b", "c"]);
+    expect(messages.slice(0, 3).map(({ id }) => id)).toEqual(["a", "b", "c"]);
+    releaseQueuedMessageClaim(claims, "session_a", "a");
+    expect(unclaimedQueuedMessages(messages.slice(0, 3), claims, "session_a").map(({ id }) => id)).toEqual(["a", "b", "c"]);
+  });
+
  it("keeps multiple per-message worker roles bound through durable queue storage", () => {
  const values = new Map<string, string>();
  const storage = {

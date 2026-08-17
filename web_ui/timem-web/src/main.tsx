@@ -14,7 +14,7 @@ import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shou
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import { summarizeConsecutiveToolActivities, ToolActivitySummary } from "./activity_groups";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearQueuedMessagesPause, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, loadQueuedMessagesPause, QueuedMessage, queuedMessageKey, QueuedMessagesPauseState, queuedMessagesPauseStorageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, saveQueuedMessagesPause, selectQueuedDispatches } from "./queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearQueuedMessagesPause, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, loadQueuedMessagesPause, QueuedMessage, queuedMessageKey, QueuedMessagesPauseState, queuedMessagesPauseStorageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, saveQueuedMessagesPause, selectQueuedDispatches, shouldDirectManualMessage, unclaimedQueuedMessages } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
@@ -511,7 +511,10 @@ function TimemApp() {
       return;
     }
     if (event.type === "command_ack") {
-      if (event.command_id.startsWith("queued-")) {
+      if (
+        event.command_id.startsWith("queued-")
+        || (event.command_id.startsWith("submit-") && event.status === "rejected")
+      ) {
         setCommandAcks((current) => ({ ...current, [event.command_id]: event }));
       }
       if (event.status === "accepted") {
@@ -1177,7 +1180,13 @@ function TimemApp() {
           onSend={sendText}
           onSendForSession={sendTextForSession}
           selectedRoleIds={selectedRoleIdsForSession}
-          onRolesConsumed={(sessionId) => setSelectedRoleIds((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== sessionId)))}
+          onRolesConsumed={(sessionId, expectedRoleIds) => setSelectedRoleIds((current) => {
+    if (
+      expectedRoleIds
+      && JSON.stringify(current[sessionId] ?? []) !== JSON.stringify(expectedRoleIds)
+    ) return current;
+    return Object.fromEntries(Object.entries(current).filter(([key]) => key !== sessionId));
+  })}
           pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}
           toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}
           onRequestToolGen={(turnId) => {
@@ -1606,7 +1615,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   onSend: (text: string, commandId?: string) => boolean;
   onSendForSession: (sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement?: boolean, roleIds?: readonly string[]) => boolean;
   selectedRoleIds: readonly string[];
-  onRolesConsumed: (sessionId: string) => void;
+  onRolesConsumed: (sessionId: string, expectedRoleIds?: readonly string[]) => void;
   onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
@@ -1633,6 +1642,11 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
  const processedQueuePauseRequestKeyRef = useRef("");
   const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());
   const submittingDraftStartedAtRef = useRef<Map<string, number>>(new Map());
+  const directSubmissionsRef = useRef<Map<string, {
+    commandId: string;
+    text: string;
+    roleIds: string[];
+  }>>(new Map());
   const [submittingDraftSessionIds, setSubmittingDraftSessionIds] = useState<Set<string>>(() => new Set());
   const updateQueuedMessages = useCallback((update: (current: Record<string, QueuedMessage[]>) => Record<string, QueuedMessage[]>) => {
     const previous = queuedMessagesBySessionRef.current;
@@ -1669,9 +1683,12 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   const activeSessionId = activeSession?.session_id;
   const draft = draftForSession(draftsBySession, activeSessionId);
   const queuedMessages = activeSessionId ? queuedMessagesBySession[activeSessionId] ?? [] : [];
+  const displayQueuedMessages = activeSessionId
+    ? unclaimedQueuedMessages(queuedMessages, queuedMessageClaims, activeSessionId)
+    : [];
   const queueExpanded = !!activeSessionId && expandedQueueSessionIds.has(activeSessionId);
-  const visibleQueuedMessages = queueExpanded ? queuedMessages : queuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
-  const hiddenQueuedMessageCount = Math.max(0, queuedMessages.length - COLLAPSED_QUEUE_LIMIT);
+  const visibleQueuedMessages = queueExpanded ? displayQueuedMessages : displayQueuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
+  const hiddenQueuedMessageCount = Math.max(0, displayQueuedMessages.length - COLLAPSED_QUEUE_LIMIT);
  const reservedAttachmentIds = useMemo(() => reservedQueuedAttachmentIds(queuedMessages), [queuedMessages]);
  const availableAttachments = useMemo(
    () => (activeSession?.attachments ?? []).filter((attachment) => !reservedAttachmentIds.has(attachment.id)),
@@ -1769,6 +1786,9 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
       if (!sessionIds.some((sessionId) => key.startsWith(`${sessionId}\u0000`))) queuedMessageClaimsRef.current.delete(key);
     }
     setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+    for (const sessionId of Array.from(directSubmissionsRef.current.keys())) {
+      if (!sessionIds.includes(sessionId)) directSubmissionsRef.current.delete(sessionId);
+    }
     if (pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)) {
       setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     }
@@ -1779,7 +1799,24 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     const appliedCommandIds = new Set<string>();
     const matchedSessionByCommand = new Map<string, string>();
     const rejectedSessionIds = new Set<string>();
+    let directSubmissionReleased = false;
+    const rejectedDirectDrafts = new Map<string, string>();
     for (const ack of Object.values(commandAcks)) {
+      if (ack.command_id.startsWith("submit-")) {
+        appliedCommandIds.add(ack.command_id);
+        for (const [sessionId, submission] of directSubmissionsRef.current) {
+          if (submission.commandId !== ack.command_id) continue;
+          directSubmissionsRef.current.delete(sessionId);
+          submittingDraftStartedAtRef.current.delete(sessionId);
+          rejectedDirectDrafts.set(sessionId, submission.text);
+          directSubmissionReleased = releaseSessionDraftSubmission(
+            submittingDraftSessionIdsRef,
+            sessionId,
+          ) || directSubmissionReleased;
+          break;
+        }
+        continue;
+      }
       if (ack.status === "accepted") continue;
       const result = applyQueuedMessagesAck(nextQueues, ack.command_id, ack.status, ack.error, clientId("queued"));
       if (!result.matchedSessionId) continue;
@@ -1789,9 +1826,31 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
       nextQueues = result.queues;
     }
     if (appliedCommandIds.size === 0) return;
-    if (!reliableStorageScope || !saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current)) return;
-    queuedMessagesBySessionRef.current = nextQueues;
-    setQueuedMessagesBySession(nextQueues);
+    const queuesChanged = matchedSessionByCommand.size > 0;
+    if (
+      queuesChanged
+      && (!reliableStorageScope || !saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current))
+    ) return;
+    if (queuesChanged) {
+      queuedMessagesBySessionRef.current = nextQueues;
+      setQueuedMessagesBySession(nextQueues);
+    }
+    if (rejectedDirectDrafts.size > 0) {
+      setDraftsBySession((current) => {
+        let next = current;
+        for (const [sessionId, rejectedText] of rejectedDirectDrafts) {
+          const newerDraft = draftForSession(next, sessionId);
+          const restored = newerDraft.trim()
+            ? `${rejectedText}\n\n${newerDraft}`
+            : rejectedText;
+          next = setSessionDraft(next, sessionId, restored);
+        }
+        return next;
+      });
+    }
+    if (directSubmissionReleased) {
+      setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+    }
     for (const [commandId, sessionId] of matchedSessionByCommand) {
       releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, commandId);
     }
@@ -1840,6 +1899,25 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
       setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
     }
   }, [completedTurnKey]);
+
+  useEffect(() => {
+    let changed = false;
+    for (const session of sessions) {
+      if (session.state !== "working") continue;
+      const submission = directSubmissionsRef.current.get(session.session_id);
+      if (!submission) continue;
+      directSubmissionsRef.current.delete(session.session_id);
+      submittingDraftStartedAtRef.current.delete(session.session_id);
+      if (submission.roleIds.length > 0) {
+        onRolesConsumed(session.session_id, submission.roleIds);
+      }
+      changed = releaseSessionDraftSubmission(
+        submittingDraftSessionIdsRef,
+        session.session_id,
+      ) || changed;
+    }
+    if (changed) setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+  }, [onRolesConsumed, sessions]);
 
   useEffect(() => {
     if (!completedTurnKey || !activeSessionId || !completedTurnKey.startsWith(`${activeSessionId}:`)) return;
@@ -1901,21 +1979,58 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
     if (reserved === null) return;
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
-    const nextQueues = {
-      ...queuedMessagesBySessionRef.current,
-      [reserved.sessionId]: [...(queuedMessagesBySessionRef.current[reserved.sessionId] ?? []), { id: clientId("queued"), text: reserved.text, createdAtMs: Date.now(), attachmentIds: availableAttachments.map((attachment) => attachment.id), roleIds: [...selectedRoleIds] }],
-    };
-    const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
- if (sent) {
- // A normal manual send joins the durable queue without releasing an
- // abnormal-stop pause and any older queued work behind it.
- updateQueuedMessages(() => nextQueues);
- if (selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId);
- }
+    const attachmentIds = availableAttachments.map((attachment) => attachment.id);
+    const existingQueue = queuedMessagesBySessionRef.current[reserved.sessionId] ?? [];
+    const direct = activeSession?.session_id === reserved.sessionId
+      && shouldDirectManualMessage(activeSession.state, existingQueue.length, !!queuedMessagesPause);
+    let sent: boolean;
+    let directCommandId: string | undefined;
+    if (direct) {
+      directCommandId = clientId("submit");
+      sent = onSendForSession(
+        reserved.sessionId,
+        reserved.text,
+        directCommandId,
+        attachmentIds,
+        false,
+        selectedRoleIds,
+      );
+    } else {
+      const nextQueues = {
+        ...queuedMessagesBySessionRef.current,
+        [reserved.sessionId]: [...existingQueue, {
+          id: clientId("queued"),
+          text: reserved.text,
+          createdAtMs: Date.now(),
+          attachmentIds,
+          roleIds: [...selectedRoleIds],
+        }],
+      };
+      sent = !!reliableStorageScope
+        && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
+      if (sent) {
+        // Busy, paused, and already-backed-up sessions retain durable FIFO ordering.
+        updateQueuedMessages(() => nextQueues);
+      }
+    }
+    if (sent && !directCommandId && selectedRoleIds.length > 0) {
+      onRolesConsumed(reserved.sessionId);
+    }
     // Release the synchronous deduplication lock before publishing the React state
     // snapshot. Calling the mutating helper inside a deferred state updater would
     // leave the next lock snapshot stale and keep the composer stuck on Sending.
     const nextDrafts = finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent);
+    if (sent && directCommandId) {
+      // Keep this Session occupied until Core authoritatively starts the turn.
+      // A rejected command ACK releases the same lock so the user can retry.
+      directSubmissionsRef.current.set(reserved.sessionId, {
+        commandId: directCommandId,
+        text: reserved.text,
+        roleIds: [...selectedRoleIds],
+      });
+      submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());
+      submittingDraftSessionIdsRef.current.add(reserved.sessionId);
+    }
     setDraftsBySession(nextDrafts);
     if (!submittingDraftSessionIdsRef.current.has(reserved.sessionId)) submittingDraftStartedAtRef.current.delete(reserved.sessionId);
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
@@ -2021,13 +2136,13 @@ const toggleQueuedMessages = () => {
       />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
-        {!!activeSession && queuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${queuedMessages.length} queued message${queuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>{queuedMessagesPause ? "自动续发已暂停，手动发送仍可用" : "上一条完成后自动发送"}</small>{queuedMessagesPause && <button type="button" className="queued-message-resume" onClick={resumeQueuedMessages}>继续发送</button>}{hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${queuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}</header><div className="queued-message-items">{visibleQueuedMessages.map((message) => {
+        {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>{queuedMessagesPause ? "自动续发已暂停，手动发送仍可用" : "上一条完成后自动发送"}</small>{queuedMessagesPause && <button type="button" className="queued-message-resume" onClick={resumeQueuedMessages}>继续发送</button>}{hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}</header><div className="queued-message-items">{visibleQueuedMessages.map((message) => {
           const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
           const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
           const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));
           const messageRoleIds = message.roleIds ?? (message.roleId ? [message.roleId] : []);
           const messageRoleNames = messageRoleIds.map((roleId) => activeSession.roles.find((role) => role.id === roleId)?.name ?? roleId);
-          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span><div className="queued-message-preview">{messageRoleNames.length > 0 && <small className="queued-message-roles" title={messageRoleNames.join(" | ")}><BriefcaseBusiness size={11}/><span className="queued-message-role-names">{messageRoleNames.map((roleName, roleIndex) => <span className="queued-message-role" key={`${messageRoleIds[roleIndex]}-${roleIndex}`}>{roleIndex > 0 && <i className="queued-message-role-separator" aria-hidden="true">|</i>}<span>{roleName}</span></span>)}</span></small>}{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}</p>}{message.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{message.attachmentIds.length} 个附件</small>}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</div><div className="queued-message-actions">{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" className="queued-message-edit-cancel" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
+          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && displayQueuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span><div className="queued-message-preview">{messageRoleNames.length > 0 && <small className="queued-message-roles" title={messageRoleNames.join(" | ")}><BriefcaseBusiness size={11}/><span className="queued-message-role-names">{messageRoleNames.map((roleName, roleIndex) => <span className="queued-message-role" key={`${messageRoleIds[roleIndex]}-${roleIndex}`}>{roleIndex > 0 && <i className="queued-message-role-separator" aria-hidden="true">|</i>}<span>{roleName}</span></span>)}</span></small>}{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}</p>}{message.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{message.attachmentIds.length} 个附件</small>}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</div><div className="queued-message-actions">{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" className="queued-message-edit-cancel" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
           if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSession.session_id, queuedMessagesBySession[activeSession.session_id] ?? [], message.id)) return;
           setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
           if (!onSendForSession(activeSession.session_id, message.text, message.id, message.attachmentIds, false, messageRoleIds)) {

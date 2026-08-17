@@ -18,10 +18,14 @@ describe("manual sending while the durable queue is paused", () => {
       "const submitDraftAsSupplement = () => {",
     );
 
+    expect(body).toContain("shouldDirectManualMessage(activeSession.state, existingQueue.length, !!queuedMessagesPause)");
+    expect(body).toContain("onSendForSession(");
+    expect(body).toContain('directCommandId = clientId("submit")');
+    expect(body).toContain("directSubmissionsRef.current.set(reserved.sessionId, {");
+    expect(body).toContain("submittingDraftSessionIdsRef.current.add(reserved.sessionId)");
     expect(body).toContain("saveQueuedMessages(");
     expect(body).toContain("updateQueuedMessages(() => nextQueues)");
     expect(body).not.toContain("resumeQueuedMessages()");
-    expect(body).not.toContain("onSendForSession(");
   });
 
   it("uses Ctrl/Command+Enter as an explicit immediate-send escape hatch", () => {
