@@ -132,7 +132,7 @@ pub struct SessionResumeNotice {
 impl SessionResumeNotice {
     pub fn render(&self) -> String {
         format!(
-            "## SYSTEM\n\nRuntime just restarted. Previous audit chat history's runtime info are valid.\n\nThis session was restored and may not include the full previous context.\n\n{}\n\nDo not assume the whole previous context is loaded. Read this file only when needed for the current task.\nTry to use efficient tools such as tail, rg, jq, or short scripts instead of a huge cat.\n\nCurrent cwd: {}",
+            "## SYSTEM\n\nRuntime just restarted. Previous audit chat history's runtime info are valid.\n\nThis session was restored and may not include the full previous context.\n\n{}\n\nCurrent cwd: {}",
             chat_history_prompt_format_hint(&self.history_path),
             self.current_dir.display()
         )
