@@ -6,10 +6,92 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+#[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
+use std::time::Duration;
+
 pub const DEFAULT_MAX_BYTES: usize = 32 * 1024;
 pub const MAX_RETURN_BYTES: usize = 32 * 1024;
 pub const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_MATCH_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+static TEST_PARALLEL_PROBE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
+#[cfg(test)]
+static TEST_PARALLEL_PROBE_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_PARALLEL_PROBE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_PARALLEL_PROBE_MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) struct TestParallelReadProbe;
+
+#[cfg(test)]
+impl TestParallelReadProbe {
+    pub(crate) fn max_active(&self) -> usize {
+        TEST_PARALLEL_PROBE_MAX_ACTIVE.load(AtomicOrdering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestParallelReadProbe {
+    fn drop(&mut self) {
+        *TEST_PARALLEL_PROBE_ROOT.lock().unwrap() = None;
+        TEST_PARALLEL_PROBE_DELAY_MS.store(0, AtomicOrdering::SeqCst);
+        TEST_PARALLEL_PROBE_ACTIVE.store(0, AtomicOrdering::SeqCst);
+        TEST_PARALLEL_PROBE_MAX_ACTIVE.store(0, AtomicOrdering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_parallel_read_probe(
+    root: PathBuf,
+    delay: Duration,
+) -> TestParallelReadProbe {
+    let root = fs::canonicalize(&root).unwrap_or(root);
+    *TEST_PARALLEL_PROBE_ROOT.lock().unwrap() = Some(root);
+    TEST_PARALLEL_PROBE_DELAY_MS.store(
+        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        AtomicOrdering::SeqCst,
+    );
+    TEST_PARALLEL_PROBE_ACTIVE.store(0, AtomicOrdering::SeqCst);
+    TEST_PARALLEL_PROBE_MAX_ACTIVE.store(0, AtomicOrdering::SeqCst);
+    TestParallelReadProbe
+}
+
+#[cfg(test)]
+struct ActiveTestReadProbe;
+
+#[cfg(test)]
+impl Drop for ActiveTestReadProbe {
+    fn drop(&mut self) {
+        TEST_PARALLEL_PROBE_ACTIVE.fetch_sub(1, AtomicOrdering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn begin_test_parallel_read_probe(path: &Path) -> Option<ActiveTestReadProbe> {
+    let enabled = TEST_PARALLEL_PROBE_ROOT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|root| path.starts_with(root));
+    if !enabled {
+        return None;
+    }
+
+    let active = TEST_PARALLEL_PROBE_ACTIVE.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+    TEST_PARALLEL_PROBE_MAX_ACTIVE.fetch_max(active, AtomicOrdering::SeqCst);
+    let delay_ms = TEST_PARALLEL_PROBE_DELAY_MS.load(AtomicOrdering::SeqCst);
+    if delay_ms > 0 {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+    Some(ActiveTestReadProbe)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Selector {
@@ -75,6 +157,8 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
     let ender = parse_selector(object.get("ender"), "ender")?;
     let requested_encoding = parse_encoding_label(object.get("encoding"))?;
     let candidate = resolve_path(cwd, path_text);
+    #[cfg(test)]
+    let _test_parallel_probe = begin_test_parallel_read_probe(&candidate);
     let (mut file, metadata) = open_regular_file(&candidate)?;
     if metadata.len() > MAX_SCAN_BYTES {
         return Err(ReadfileError::new(

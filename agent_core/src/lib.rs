@@ -2415,17 +2415,22 @@ impl AgentCore {
             }
         }
 
-        let mut handles = Vec::new();
+        let mut approved_bash_handles = Vec::new();
         for (idx, pending) in approved {
-            handles.push(self.spawn_approved_parallel_bash_action(
+            approved_bash_handles.push(self.spawn_approved_parallel_bash_action(
                 idx,
                 pending,
                 Arc::clone(&cancel_requested),
             ));
         }
 
+        let mut action_handles = Vec::new();
         for (idx, action) in actions.iter().cloned().enumerate() {
             if results.get(idx).is_some_and(Option::is_some) || action.action == "run_bash" {
+                continue;
+            }
+            if self.can_spawn_parallel_readfile_action(&action) {
+                action_handles.push(self.spawn_parallel_readfile_action(idx, action));
                 continue;
             }
             match self.execute_action(action, runtime) {
@@ -2435,8 +2440,14 @@ impl AgentCore {
                     }
                 }
                 ActionExecution::NeedsApproval(pending) => {
+                    self.collect_parallel_action_handles(
+                        action_handles,
+                        &mut results,
+                        runtime,
+                        &cancel_requested,
+                    );
                     self.collect_approved_parallel_bash_handles(
-                        handles,
+                        approved_bash_handles,
                         &mut results,
                         runtime,
                         &cancel_requested,
@@ -2446,8 +2457,14 @@ impl AgentCore {
             }
         }
 
+        self.collect_parallel_action_handles(
+            action_handles,
+            &mut results,
+            runtime,
+            &cancel_requested,
+        );
         self.collect_approved_parallel_bash_handles(
-            handles,
+            approved_bash_handles,
             &mut results,
             runtime,
             &cancel_requested,
@@ -3330,6 +3347,41 @@ impl AgentCore {
         self.bash_approval_mode == BashApprovalMode::Approve && action.action == "run_bash"
     }
 
+    fn can_spawn_parallel_readfile_action(&self, action: &ParsedAction) -> bool {
+        if action.action != "readfile"
+            || self
+                .capabilities
+                .validate_action_input(&action.action, &action.raw_input)
+                .is_err()
+        {
+            return false;
+        }
+        matches!(
+            executor::resolve_action(&self.capabilities, &action.action),
+            Ok(executor::ExecutorTarget::Builtin { binding_name })
+                if binding_name == "readfile"
+        )
+    }
+
+    fn spawn_parallel_readfile_action(
+        &mut self,
+        idx: usize,
+        action: ParsedAction,
+    ) -> thread::JoinHandle<(usize, ParsedAction, String)> {
+        let action_for_thread = action.clone();
+        let cwd = self.current_prompt_cwd().to_path_buf();
+        self.current_stats.tool_calls += 1;
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                readfile::execute(&cwd, &action_for_thread.raw_input)
+            }))
+            .unwrap_or_else(|_| {
+                "Action result: readfile\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.".to_string()
+            });
+            (idx, action, result)
+        })
+    }
+
     fn spawn_approved_parallel_bash_action(
         &mut self,
         idx: usize,
@@ -3442,7 +3494,7 @@ impl AgentCore {
         })
     }
 
-    fn collect_parallel_bash_handles(
+    fn collect_parallel_action_handles(
         &self,
         mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
         results: &mut [Option<String>],
@@ -3468,7 +3520,7 @@ impl AgentCore {
                 }
                 Err(_) => {
                     let result =
-                        "Action result: run_bash\nerror: parallel_action_panicked".to_string();
+                        "Action result: parallel\nerror: parallel_action_panicked".to_string();
                     if let Some(slot) = results.iter_mut().find(|slot| slot.is_none()) {
                         *slot = Some(result);
                     }
@@ -3553,12 +3605,16 @@ impl AgentCore {
                 ));
                 continue;
             }
+            if self.can_spawn_parallel_readfile_action(&action) {
+                handles.push(self.spawn_parallel_readfile_action(idx, action));
+                continue;
+            }
             match self.execute_action(action, runtime) {
                 ActionExecution::Completed(result) => {
                     results[idx] = Some(result);
                 }
                 ActionExecution::NeedsApproval(pending) => {
-                    self.collect_parallel_bash_handles(
+                    self.collect_parallel_action_handles(
                         handles,
                         &mut results,
                         runtime,
@@ -3580,7 +3636,7 @@ impl AgentCore {
                 }
             }
         }
-        self.collect_parallel_bash_handles(handles, &mut results, runtime, &cancel_requested);
+        self.collect_parallel_action_handles(handles, &mut results, runtime, &cancel_requested);
         Ok(Self::ordered_parallel_results(results))
     }
 
