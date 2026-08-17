@@ -83,6 +83,39 @@ fn blocked_read_has_structured_timeout_status() {
 }
 
 #[test]
+fn parallel_read_probes_keep_independent_state_and_cleanup() {
+    let first_dir = TempDir::new("independent_probe_first");
+    let second_dir = TempDir::new("independent_probe_second");
+    fs::write(first_dir.path().join("slow.txt"), "first content").unwrap();
+    fs::write(second_dir.path().join("slow.txt"), "second content").unwrap();
+
+    let first_probe = install_test_parallel_read_probe(
+        first_dir.path().to_path_buf(),
+        std::time::Duration::from_millis(100),
+    );
+    let second_probe = install_test_parallel_read_probe(
+        second_dir.path().to_path_buf(),
+        std::time::Duration::from_millis(100),
+    );
+
+    // Releasing one probe must not clear another probe installed for a
+    // different path. The former global probe state violated this invariant.
+    drop(second_probe);
+
+    let outcome = execute_with_timeout_outcome(
+        first_dir.path(),
+        &json!({"path": "slow.txt"}),
+        std::time::Duration::from_millis(10),
+    );
+
+    assert_eq!(outcome.status, crate::ActionStatus::Timeout);
+    assert!(outcome.text.contains("error: timeout"), "{}", outcome.text);
+
+    thread::sleep(std::time::Duration::from_millis(120));
+    drop(first_probe);
+}
+
+#[test]
 fn blocked_read_returns_timeout_error_after_wait_limit() {
     let dir = TempDir::new("timeout");
     fs::write(dir.path().join("slow.txt"), "eventual content").unwrap();
