@@ -1413,7 +1413,7 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(source).toContain('"Ask Timem to investigate, write, or work with you."');
     expect(source).not.toContain("Ask Timem anything about this workspace");
     expect(source).toContain('activeSession?.state === "working" ? "Queue message" : "Send message"');
-    expect(source).toContain('className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuedMessagesPause ? "paused" : ""}`}');
+    expect(source).toContain('className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`}');
     expect(source).toContain('"自动续发已暂停，手动发送仍可用"');
     expect(source).toContain('onClick={resumeQueuedMessages}>继续发送</button>');
     expect(source).toContain('className="queued-message-supplement"');
@@ -1427,10 +1427,21 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(source).toContain('queueExpanded ? "expanded" : "collapsed"');
     expect(source).toContain('aria-expanded={queueExpanded}');
     expect(source).toContain('queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`');
+    expect(source).toContain("const [collapsedQueuePanelSessionIds, setCollapsedQueuePanelSessionIds]");
+    expect(source).toContain('queuePanelCollapsed ? `${displayQueuedMessages.length} 条消息`');
+    expect(source).toContain('className="queued-message-panel-toggle"');
+    expect(source).toContain('title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"}');
+    expect(source).toContain('{!queuePanelCollapsed && <div id={`queued-message-items-${activeSession.session_id}`}');
     expect(source).toContain('className="queued-message-drag" draggable={!editing && !claimed && displayQueuedMessages.length > 1}');
     expect(source).toContain("reorderQueuedMessages(current[activeSessionId] ?? [], draggedQueueMessageId, targetId, queuedMessageClaimsRef.current, activeSessionId)");
     expect(styles).toContain(".queued-message-list.collapsed .queued-message-items { max-height: 224px; overflow: hidden; }");
     expect(styles).toContain(".queued-message-list.expanded .queued-message-items { max-height: min(50vh, 420px); overflow-y: auto;");
+    expect(styles).toContain(".queued-message-list.summary-only { gap: 0; padding-block: 7px; }");
+    expect(styles).toContain(".queued-message-header-actions { flex: 0 0 auto;");
+    expect(styles).toContain(".queued-message-toggle, .queued-message-panel-toggle");
+    expect(styles).toContain(".queued-message-list.summary-only > header { min-height: 26px; padding-bottom: 0; }");
+    expect(styles).toContain(".queued-message-list > header small { min-width: 0; overflow: hidden;");
+    expect(styles).toContain("@media (max-width: 520px) {\n  .queued-message-list > header { gap: 5px; }");
   });
 
   it("keeps queued worker roles in normal flow above long message previews", () => {
