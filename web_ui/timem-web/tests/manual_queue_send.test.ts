@@ -39,7 +39,7 @@ describe("manual sending while the durable queue is paused", () => {
 
     expect(supplementBody).toContain("onSendForSession(");
     expect(supplementBody).toContain('clientId("supplement")');
-    expect(supplementBody).toMatch(/true,\s*\);/);
+    expect(supplementBody).toMatch(/true,\s*selectedRoleIds,\s*\);/);
     expect(keyboardBody).toContain("event.metaKey || event.ctrlKey");
     expect(keyboardBody).toContain("submitDraftAsSupplement()");
     expect(keyboardBody).toContain("submitDraft()");

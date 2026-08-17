@@ -24,6 +24,22 @@ describe("Agent Core live-state delivery", () => {
   });
 });
 
+describe("per-message worker role selection", () => {
+  it("supports multiple selected roles and clears them only after a successful send", () => {
+    expect(source).toContain("useState<Record<string, string[]>>({})");
+    expect(source).toContain("role_ids: [...new Set(roleIds)]");
+    expect(source).toContain("if (selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId)");
+    expect(source).toContain("selectedRoleIds.includes(role.id)");
+  });
+
+  it("shows role annotations on queued and sent user messages", () => {
+    expect(source).toContain('className="queued-message-roles"');
+    expect(source).toContain('className="turn-entry-roles"');
+    expect(source).toContain("entry.worker_roles");
+    expect(styles).toContain(".turn-entry-roles");
+  });
+});
+
 describe("assistant-ui thread integration", () => {
   it("keeps a visible boot state before the React bundle mounts", () => {
     expect(html).toContain('<div id="root">');
@@ -321,11 +337,14 @@ describe("assistant-ui thread integration", () => {
 
   it("labels completed normal and ToolGen work frames distinctly with a visible title treatment", () => {
     expect(source).toContain('isToolGenTurn ? "ToolGen" : "Thought/Action"');
+    expect(source).toContain('<span className="work-title-dot" aria-hidden="true"/>');
     expect(source).toContain("completed-work-title");
     expect(source).toContain("toolgen-completed-title");
     expect(styles).toContain(".working-chip.completed-work-title");
+    expect(styles).toContain(".work-title-dot { width: 5px; height: 5px; flex: none; border-radius: 50%; background: #111; }");
     expect(styles).toContain("border-radius: 999px");
     expect(styles).toContain(":root[data-theme=\"light\"] .working-chip.completed-work-title");
+    expect(styles).toContain(':root[data-theme="light"] .work-title-dot { background: #242424; }');
   });
 
   it("identifies restored ToolGen work by topic rather than event source", () => {
@@ -622,6 +641,16 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<span className="activity-thinking-dot" aria-hidden="true"/>');
     expect(source).not.toContain('activity.tone === "thinking" ? "💡"');
     expect(styles).toContain(".activity-thinking-dot { width: 5px; height: 5px; border-radius: 50%; background: #111; }");
+  });
+
+  it("shows a live elapsed duration only while the turn is working", () => {
+    expect(source).toContain("const [workingElapsedMs, setWorkingElapsedMs] = useState(() => Math.max(0, Date.now() - turn.created_at_ms));");
+    expect(source).toContain('if (turn.state !== "working") return;');
+    expect(source).toContain("const timer = window.setInterval(updateElapsed, 1_000);");
+    expect(source).toContain("return () => window.clearInterval(timer);");
+    expect(source).toContain('className="working-elapsed" aria-hidden="true"');
+    expect(styles).toContain(".working-elapsed { min-width: 3.5ch;");
+    expect(styles).toContain("font-variant-numeric: tabular-nums;");
   });
 
   it("renders Thought Action as an independent trigger attached to a softly tinted process panel", () => {
@@ -1426,7 +1455,7 @@ describe("assistant-ui thread integration", () => {
     const start = source.indexOf("const sendTextForSession = useCallback");
     const end = source.indexOf("const uploadFile = useCallback", start);
     const sendText = source.slice(start, end);
-    expect(sendText).toContain("if (!sendCommand(decision.command, commandId))");
+    expect(sendText).toContain("if (!sendCommand(command, commandId))");
     expect(sendText).not.toContain("setSessions((current)");
     expect(sendText).toContain("return false;");
     expect(source).toContain("const nextDrafts = finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent);");

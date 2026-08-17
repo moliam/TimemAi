@@ -1,11 +1,11 @@
 import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
-import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Menu, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Menu, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
 import { Children, Dispatch, isValidElement, memo, MutableRefObject, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
+import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition } from "./scroll";
 import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
@@ -91,6 +91,7 @@ function TimemApp() {
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
+  const [selectedRoleIds, setSelectedRoleIds] = useState<Record<string, string[]>>({});
   const [activities, setActivities] = useState<Activity[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [connected, setConnected] = useState(false);
@@ -98,6 +99,7 @@ function TimemApp() {
   const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [showToolRepo, setShowToolRepo] = useState(false);
+  const [showRoles, setShowRoles] = useState(false);
   const [toolSearchQuery, setToolSearchQuery] = useState("");
   const [toolSearchResults, setToolSearchResults] = useState<Record<string, ToolSummary[]>>({});
   const [pendingToolSearchKey, setPendingToolSearchKey] = useState("");
@@ -580,6 +582,23 @@ function TimemApp() {
       });
       return;
     }
+    if (event.type === "worker_roles_updated") {
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? { ...session, roles: event.roles }
+        : session));
+      setSelectedRoleIds((current) => {
+        const selected = current[event.session_id] ?? [];
+        const retained = selected.filter((roleId) => event.roles.some((role) => role.id === roleId));
+        if (retained.length === selected.length) return current;
+        if (retained.length === 0) {
+          const next = { ...current };
+          delete next[event.session_id];
+          return next;
+        }
+        return { ...current, [event.session_id]: retained };
+      });
+      return;
+    }
     if (event.type === "chat_message_deleted") {
       const key = chatMessageDeleteKey({
         sessionId: event.session_id,
@@ -794,7 +813,7 @@ function TimemApp() {
         const ordinal = typeof item.ordinal === "number" ? item.ordinal : 0;
         setSessions((current) => current.some((session) => session.session_id === sessionId)
           ? current
-          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, tools: [], mcp_server_ids: [], contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
+          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, tools: [], mcp_server_ids: [], contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], roles: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
         setActiveSessionId((current) => current || sessionId);
       }
     }
@@ -900,7 +919,7 @@ function TimemApp() {
     };
   }, [pushActivity, receive]);
 
-  const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement = false): boolean => {
+  const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement = false, roleIds: readonly string[] = []): boolean => {
     const targetSession = sessionsRef.current.find((session) => session.session_id === sessionId);
     const decision = composerSendDecision(
       targetSession,
@@ -918,7 +937,8 @@ function TimemApp() {
       }
       return false;
     }
-    if (!sendCommand(decision.command, commandId)) {
+    const command = roleIds.length > 0 ? { ...decision.command, role_ids: [...new Set(roleIds)] } : decision.command;
+    if (!sendCommand(command, commandId)) {
       pushActivity({ id: clientId(), sessionId: decision.command.session_id, tone: "error", title: "Runtime unavailable", detail: "Timem Web runtime is not connected. Restart timem-web and reopen the authenticated URL before sending another message.", createdAt: Date.now() });
       return false;
     }
@@ -1022,6 +1042,7 @@ function TimemApp() {
   const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";
   const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";
   const activeToolCount = activeSession?.tools.length ?? 0;
+  const selectedRoleIdsForSession = activeSession ? selectedRoleIds[activeSession.session_id] ?? [] : [];
   const toolRepoLabel = showToolRepo ? "Close ToolRepo" : `Open ToolRepo · ${activeToolCount} reusable tools`;
   const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";
   return <AssistantRuntimeProvider runtime={runtime}>
@@ -1069,6 +1090,7 @@ function TimemApp() {
           <div className="header-identity"><button type="button" ref={runtimeButtonRef} className={`header-model ${showRuntime ? "selected" : ""}`} title={runtimeLabel} aria-label={`${runtimeLabel}: ${headerModelLabel}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown size={12} aria-hidden="true"/></button><HeaderContextUsage session={activeSession}/></div>
           <div className="header-actions">
             <button type="button" ref={mobileSessionButtonRef} title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
+            <button type="button" title="Open worker roles" aria-label="Open worker roles" className="icon-button mobile-role-button" aria-expanded={showRoles} aria-controls="worker-role-panel" onClick={() => setShowRoles(true)}><BriefcaseBusiness size={17}/></button>
             <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowMcp(false); setShowToolRepo(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true); }}><Palette size={17}/></button>
             <button type="button" ref={mcpButtonRef} title="Manage MCP servers" aria-label="Manage MCP servers" className={`icon-button mcp-button ${showMcp ? "selected" : ""}`} aria-expanded={showMcp} aria-controls="mcp-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowToolRepo(false); if (showMcp) closeMcpPanel(); else setShowMcp(true); }}><Plug size={17}/>{(activeSession?.mcp_server_ids.length ?? 0) > 0 && <span className="mcp-enabled-dot" aria-hidden="true"/>}</button>
             <button type="button" ref={toolRepoButtonRef} title={toolRepoLabel} aria-label={toolRepoLabel} className={`icon-button toolrepo-header-button ${showToolRepo ? "selected" : ""} ${toolCountPulseSessionId === activeSession?.session_id ? "count-pulse" : ""}`} aria-expanded={showToolRepo} aria-controls="toolrepo-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowMcp(false); if (showToolRepo) closeToolRepoPanel(); else setShowToolRepo(true); }}><Wrench size={17}/><span className="toolrepo-header-count" aria-hidden="true">{activeToolCount}</span></button>
@@ -1152,6 +1174,8 @@ function TimemApp() {
           onLoadMoreHistory={loadMoreHistory}
           onSend={sendText}
           onSendForSession={sendTextForSession}
+          selectedRoleIds={selectedRoleIdsForSession}
+          onRolesConsumed={(sessionId) => setSelectedRoleIds((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== sessionId)))}
           pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}
           toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}
           onRequestToolGen={(turnId) => {
@@ -1185,6 +1209,30 @@ function TimemApp() {
           }}
         />
       </main>
+      {!showToolRepo && showRoles && <button type="button" className="role-panel-backdrop" aria-label="Close worker roles" onClick={() => setShowRoles(false)}/>}
+      {!showToolRepo && <WorkerRolePanel
+        session={activeSession}
+        mobileOpen={showRoles}
+        onClose={() => setShowRoles(false)}
+        selectedRoleIds={selectedRoleIdsForSession}
+        disabled={runtimeLocked}
+        onSelect={(roleId) => {
+          if (!activeSession) return;
+          setSelectedRoleIds((current) => {
+            const selected = current[activeSession.session_id] ?? [];
+            const nextSelected = selected.includes(roleId)
+              ? selected.filter((selectedId) => selectedId !== roleId)
+              : [...selected, roleId];
+            if (nextSelected.length === 0) {
+              const next = { ...current };
+              delete next[activeSession.session_id];
+              return next;
+            }
+            return { ...current, [activeSession.session_id]: nextSelected };
+          });
+        }}
+        onCommand={(command) => sendCommand(command)}
+      />}
       {showToolRepo && <button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}/>}
       {showToolRepo && <ToolRepoPanel
         panelRef={toolRepoPanelRef}
@@ -1306,6 +1354,51 @@ function TimemApp() {
       />}
     </div>
   </AssistantRuntimeProvider>;
+}
+
+function WorkerRolePanel({ session, selectedRoleIds, disabled, mobileOpen, onClose, onSelect, onCommand }: {
+  session?: Session;
+  selectedRoleIds: readonly string[];
+  disabled: boolean;
+  mobileOpen: boolean;
+  onClose: () => void;
+  onSelect: (roleId: string) => void;
+  onCommand: (command: ClientCommand) => boolean;
+}) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [deleteConfirmId, setDeleteConfirmId] = useState("");
+  const resetEditor = () => { setEditingId(null); setName(""); setDescription(""); };
+  useEffect(() => { resetEditor(); setDeleteConfirmId(""); }, [session?.session_id]);
+  const submit = () => {
+    if (!session || !name.trim() || !description.trim()) return;
+    const command: ClientCommand = editingId
+      ? { type: "worker_role_update", session_id: session.session_id, role_id: editingId, name, description }
+      : { type: "worker_role_create", session_id: session.session_id, name, description };
+    if (onCommand(command)) resetEditor();
+  };
+  return <aside id="worker-role-panel" className={`worker-role-panel ${mobileOpen ? "mobile-open" : ""}`} aria-label="Worker roles">
+    <header><span><BriefcaseBusiness size={16}/> Roles</span><div><button type="button" className="worker-role-close" title="Close roles" aria-label="Close roles" onClick={onClose}><X size={15}/></button></div></header>
+    <p className="worker-role-help">为工作添加工作指导角色</p>
+    <div className="worker-role-list">
+      {(session?.roles ?? []).map((role) => <article className={`worker-role-item ${selectedRoleIds.includes(role.id) ? "selected" : ""}`} key={role.id}>
+        <label title={`Use ${role.name} for the next message`}><input type="checkbox" checked={selectedRoleIds.includes(role.id)} disabled={disabled} onChange={() => onSelect(role.id)}/><span><strong>{role.name}</strong><small>{role.description}</small></span></label>
+        <div><button type="button" disabled={disabled} title={`Edit ${role.name}`} aria-label={`Edit ${role.name}`} onClick={() => { setEditingId(role.id); setName(role.name); setDescription(role.description); setDeleteConfirmId(""); }}><Pencil size={12}/></button><button type="button" className={deleteConfirmId === role.id ? "confirm-delete" : ""} disabled={disabled} title={deleteConfirmId === role.id ? `Confirm delete ${role.name}` : `Delete ${role.name}`} aria-label={deleteConfirmId === role.id ? `Confirm delete ${role.name}` : `Delete ${role.name}`} onClick={() => {
+          if (deleteConfirmId !== role.id) { setDeleteConfirmId(role.id); return; }
+          if (session && onCommand({ type: "worker_role_delete", session_id: session.session_id, role_id: role.id })) setDeleteConfirmId("");
+        }}>{deleteConfirmId === role.id ? <Check size={12}/> : <Trash2 size={12}/>}</button></div>
+      </article>)}
+      {session && session.roles.length === 0 && <div className="worker-role-empty">还没有 Role。创建一个，安排重复的工作步骤、要求。</div>}
+      {!session && <div className="worker-role-empty">Select a session to manage its roles.</div>}
+    </div>
+    {session && <form className="worker-role-editor" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
+      <input value={name} maxLength={80} disabled={disabled} placeholder="称呼，例如：严谨审查员" aria-label="Role name" onChange={(event) => setName(event.target.value)}/>
+      <textarea value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" aria-label="Role description" onChange={(event) => setDescription(event.target.value)}/>
+      <div><button type="submit" disabled={disabled || !name.trim() || !description.trim()}>{editingId ? "保存" : "创建"}</button>{editingId && <button type="button" onClick={resetEditor}>取消</button>}</div>
+    </form>}
+  </aside>;
 }
 
 function ToolRepoPanel({ panelRef, onClose, session, searchQuery, searchPending, onSearchQueryChange, tools, selectedTool, pendingToolDetailId, pendingToolRenameIds, onSelectTool, onCollapseTool, onRenameTool, onOpenTerminal }: {
@@ -1449,7 +1542,7 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisi
   />);
 });
 
-function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequest, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
+function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequest, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, selectedRoleIds, onRolesConsumed, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   activeSession: Session | undefined;
   sessions: Session[];
   completedTurnKey: string;
@@ -1472,7 +1565,9 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   toolGenSessionBusy: boolean;
   onLoadMoreHistory: (session: Session) => void;
   onSend: (text: string, commandId?: string) => boolean;
-  onSendForSession: (sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement?: boolean) => boolean;
+  onSendForSession: (sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement?: boolean, roleIds?: readonly string[]) => boolean;
+  selectedRoleIds: readonly string[];
+  onRolesConsumed: (sessionId: string) => void;
   onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
@@ -1536,6 +1631,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
    () => (activeSession?.attachments ?? []).filter((attachment) => !reservedAttachmentIds.has(attachment.id)),
    [activeSession?.attachments, reservedAttachmentIds],
  );
+  const selectedRoles = activeSession?.roles.filter((role) => selectedRoleIds.includes(role.id)) ?? [];
   const submittingDraft = !!activeSessionId && submittingDraftSessionIds.has(activeSessionId);
   const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Queue message" : "Send message";
   const lockedControlHint = sessionInteractionLocked ? sessionInteractionLockReason : "";
@@ -1671,7 +1767,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     for (const { sessionId, message: next } of dispatches) {
       if (!claimQueuedMessage(queuedMessageClaimsRef.current, sessionId, queuedMessagesBySessionRef.current[sessionId] ?? [], next.id)) continue;
       queuedDispatchSessionIdsRef.current.add(sessionId);
-      if (!onSendForSession(sessionId, next.text, next.id, next.attachmentIds)) {
+      if (!onSendForSession(sessionId, next.text, next.id, next.attachmentIds, false, next.roleIds ?? (next.roleId ? [next.roleId] : []))) {
         queuedDispatchSessionIdsRef.current.delete(sessionId);
         releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, next.id);
         updateQueuedMessages((current) => ({
@@ -1761,13 +1857,14 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     const nextQueues = {
       ...queuedMessagesBySessionRef.current,
-      [reserved.sessionId]: [...(queuedMessagesBySessionRef.current[reserved.sessionId] ?? []), { id: clientId("queued"), text: reserved.text, createdAtMs: Date.now(), attachmentIds: availableAttachments.map((attachment) => attachment.id) }],
+      [reserved.sessionId]: [...(queuedMessagesBySessionRef.current[reserved.sessionId] ?? []), { id: clientId("queued"), text: reserved.text, createdAtMs: Date.now(), attachmentIds: availableAttachments.map((attachment) => attachment.id), roleIds: [...selectedRoleIds] }],
     };
     const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
  if (sent) {
  // A normal manual send joins the durable queue without releasing an
  // abnormal-stop pause and any older queued work behind it.
  updateQueuedMessages(() => nextQueues);
+ if (selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId);
  }
     // Release the synchronous deduplication lock before publishing the React state
     // snapshot. Calling the mutating helper inside a deferred state updater would
@@ -1789,7 +1886,9 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
  clientId("supplement"),
  availableAttachments.map((attachment) => attachment.id),
  true,
+ selectedRoleIds,
  );
+ if (sent && selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId);
  const nextDrafts = finishSessionDraftSubmission(
  submittingDraftSessionIdsRef,
  draftsBySession,
@@ -1879,10 +1978,12 @@ const toggleQueuedMessages = () => {
           const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
           const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
           const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));
-          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span>{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}{message.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{message.attachmentIds.length} 个附件</small>}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</p>}<div>{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
+          const messageRoleIds = message.roleIds ?? (message.roleId ? [message.roleId] : []);
+          const messageRoleNames = messageRoleIds.map((roleId) => activeSession.roles.find((role) => role.id === roleId)?.name ?? roleId);
+          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span>{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}{messageRoleNames.length > 0 && <small className="queued-message-roles"><BriefcaseBusiness size={11}/>{messageRoleNames.join("、")}</small>}{message.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{message.attachmentIds.length} 个附件</small>}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</p>}<div>{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
           if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSession.session_id, queuedMessagesBySession[activeSession.session_id] ?? [], message.id)) return;
           setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-          if (!onSendForSession(activeSession.session_id, message.text, message.id, message.attachmentIds)) {
+          if (!onSendForSession(activeSession.session_id, message.text, message.id, message.attachmentIds, false, messageRoleIds)) {
             releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSession.session_id, message.id);
             setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
             updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: "消息尚未安全保存，请检查浏览器存储后重试" } : candidate) }));
@@ -1918,6 +2019,7 @@ const toggleQueuedMessages = () => {
  }
  }}
  />
+          {selectedRoles.length > 0 && activeSession && <div className="composer-role" title={selectedRoles.map((role) => `${role.name}: ${role.description}`).join("\n")}><BriefcaseBusiness size={14}/><span>本条将使用 <strong>{selectedRoles.map((role) => role.name).join("、")}</strong></span><button type="button" title="Clear roles for this message" aria-label="Clear selected roles" onClick={() => onRolesConsumed(activeSession.session_id)}><X size={13}/></button></div>}
           <div className="composer-actions"><span className="composer-cwd-inline" title={activeSession?.current_dir}>{activeSession && <><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></>}</span><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void cancelActiveSessionTurn()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>
@@ -1945,6 +2047,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   const previousUpdateCount = useRef(turn.events.length + decisions.length);
   const previousTurnState = useRef(turn.state);
   const [pendingUpdates, setPendingUpdates] = useState(0);
+  const [workingElapsedMs, setWorkingElapsedMs] = useState(() => Math.max(0, Date.now() - turn.created_at_ms));
   const lifecycleEvents = useMemo(() => coalesceActionLifecycle(turn.events), [turn.events]);
  const lifecycleItems = useMemo(() => lifecycleEvents.map((event) => ({
  event,
@@ -1981,6 +2084,15 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
     || turn.events.some((event) => (event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen");
   const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);
   const showWorkStream = !canCollapseCompletedWork || showCompletedWork;
+  const workingElapsed = turn.state === "working" ? formatDuration(workingElapsedMs) : undefined;
+
+  useEffect(() => {
+    if (turn.state !== "working") return;
+    const updateElapsed = () => setWorkingElapsedMs(Math.max(0, Date.now() - turn.created_at_ms));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1_000);
+    return () => window.clearInterval(timer);
+  }, [turn.created_at_ms, turn.state]);
   const canDeleteConversationContent = turn.state !== "working" && !sessionInteractionLocked;
 
   useEffect(() => {
@@ -2030,11 +2142,12 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
         <button type="button" className="chat-message-delete user-message-delete" title="Delete this message from the conversation and raw chat log" aria-label="Delete user message" disabled={!canDeleteConversationContent} onClick={() => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "user", roleIndex, preview: entry.text })}><Trash2 size={13}/></button>
         {entry.kind === "supplement" && <span>[补充]</span>}
         <MarkdownContent text={entry.text}/>
+        {(entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).length > 0 && <div className="turn-entry-roles" aria-label={`使用 Role：${(entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).map((role) => role.name).join("、")}`}><BriefcaseBusiness size={12}/><span>Role</span>{(entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).map((role) => <b key={role.id} title={role.description}>{role.name}</b>)}</div>}
         {!!entry.attachments?.length && <div className="turn-entry-attachments">{entry.attachments.map((attachment) => <span key={attachment.id} title={attachment.path}><Paperclip size={13}/><i aria-hidden="true">:</i><b>{attachment.name}</b><small>{formatBytes(attachment.bytes)}</small></span>)}</div>}
       </div>)}</div>
     </section>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}>
-      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading">{canCollapseCompletedWork ? <button type="button" className={`working-chip work-title-chip completed-work-title work-collapse-toggle${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? " toolgen-working toolgen-completed-title" : ""}`} title={showCompletedWork ? "Hide work details" : "Show work details"} aria-label={showCompletedWork ? "Hide work details" : "Show work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/><CheckCheck size={11}/>{isToolGenTurn ? "ToolGen" : "Thought/Action"}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button> : <span className={`working-chip work-title-chip active-work-title${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>}{isToolGenTurn ? "Generating tools…" : "working"}</span>}</div>}
+      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading">{canCollapseCompletedWork ? <button type="button" className={`working-chip work-title-chip completed-work-title work-collapse-toggle${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? " toolgen-working toolgen-completed-title" : ""}`} title={showCompletedWork ? "Hide work details" : "Show work details"} aria-label={showCompletedWork ? "Hide work details" : "Show work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn ? <Wrench size={11}/> : <span className="work-title-dot" aria-hidden="true"/>}{isToolGenTurn ? "ToolGen" : "Thought/Action"}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button> : <span className={`working-chip work-title-chip active-work-title${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>}{isToolGenTurn ? "Generating tools…" : "working"}{workingElapsed && <span className="working-elapsed" aria-hidden="true">{workingElapsed}</span>}</span>}</div>}
       {showWorkStream && <div className="turn-work-panel">
         <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleItems.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
