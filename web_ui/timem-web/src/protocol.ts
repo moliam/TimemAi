@@ -66,6 +66,8 @@ export type ToolDetail = {
   files: Array<{ path: string; bytes: number }>;
 };
 
+export type WorkerRole = { id: string; name: string; description: string };
+
 export type Session = {
   session_id: string;
   display_name: string;
@@ -93,6 +95,7 @@ export type Session = {
   active_context_id: string;
   primary_worker_id: string;
   attachments: Attachment[];
+  roles: WorkerRole[];
   messages: ChatMessage[];
   turns: WebTurn[];
   history_before_cursor?: string | null;
@@ -141,7 +144,7 @@ export type WebTurn = {
   completion?: TurnCompletion | null;
 };
 
-export type WebTurnUserEntry = { kind: "task" | "supplement" | "approval" | string; text: string; attachments?: Attachment[]; created_at_ms: number };
+export type WebTurnUserEntry = { kind: "task" | "supplement" | "approval" | string; text: string; attachments?: Attachment[]; worker_roles?: WorkerRole[]; /** Legacy history compatibility. */ worker_role?: WorkerRole; created_at_ms: number };
 export type WebTurnEvent = { event_id: string; source: "core_topic" | "worker_activity" | string; payload: Record<string, unknown>; created_at_ms: number };
 
 export type Attachment = { id: string; name: string; path: string; bytes: number };
@@ -212,6 +215,7 @@ export type WireEvent =
   | { type: "session_created"; session: Session }
   | { type: "session_renamed"; session_id: string; display_name: string }
   | { type: "session_deleted"; session_id: string }
+  | { type: "worker_roles_updated"; session_id: string; roles: WorkerRole[] }
   | { type: "chat_message_deleted"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
   | { type: "session_runtime_updated"; session_id: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
   | { type: "session_runtime_config_updated"; session_id: string; key: string; value: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
@@ -240,8 +244,11 @@ export type ClientCommand =
   | { type: "session_stop"; session_id: string }
   | { type: "session_delete"; session_id: string }
   | { type: "chat_message_delete"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
-  | { type: "turn_submit"; session_id: string; text: string; attachment_ids?: string[]; input_kind?: "toolgen"; source_turn_id?: string }
-  | { type: "turn_supplement"; session_id: string; text: string; attachment_ids?: string[] }
+  | { type: "worker_role_create"; session_id: string; name: string; description: string }
+  | { type: "worker_role_update"; session_id: string; role_id: string; name: string; description: string }
+  | { type: "worker_role_delete"; session_id: string; role_id: string }
+  | { type: "turn_submit"; session_id: string; text: string; attachment_ids?: string[]; role_ids?: string[]; input_kind?: "toolgen"; source_turn_id?: string }
+  | { type: "turn_supplement"; session_id: string; text: string; attachment_ids?: string[]; role_ids?: string[] }
   | { type: "turn_cancel"; session_id: string }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
   | { type: "history_page"; session_id: string; before_cursor?: string | null; /** Maximum complete tasks (turns), not JSONL records. */ limit?: number }

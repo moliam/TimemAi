@@ -8,6 +8,27 @@ const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => (
 attachmentIds: index === 0 ? ["upload-a"] : [], }));
 
 describe("queued messages", () => {
+ it("keeps multiple per-message worker roles bound through durable queue storage", () => {
+ const values = new Map<string, string>();
+ const storage = {
+ get length() { return values.size; },
+ key: (index: number) => Array.from(values.keys())[index] ?? null,
+ getItem: (key: string) => values.get(key) ?? null,
+ setItem: (key: string, value: string) => { values.set(key, value); },
+ removeItem: (key: string) => { values.delete(key); },
+ };
+ const message: QueuedMessage = { id: "role-message", text: "review this", createdAtMs: 1, attachmentIds: [], roleIds: ["role-reviewer", "role-tester"] };
+ expect(saveQueuedMessages(storage, "scope", { session_a: [message] })).toBe(true);
+ expect(loadQueuedMessages(storage, "scope")).toEqual({ session_a: [message] });
+ });
+ it("upgrades a legacy single worker role while loading durable queue storage", () => {
+ const values = new Map<string, string>();
+ const scope = "legacy-role";
+ const key = queuedMessagesStorageKey(scope, "legacy-message");
+ values.set(key, JSON.stringify({ sessionId: "session_a", position: 0, message: { id: "legacy-message", text: "review", createdAtMs: 1, attachmentIds: [], roleId: "role-reviewer" } }));
+ const storage = { get length() { return values.size; }, key: (index: number) => Array.from(values.keys())[index] ?? null, getItem: (storageKey: string) => values.get(storageKey) ?? null };
+ expect(loadQueuedMessages(storage, scope).session_a[0].roleIds).toEqual(["role-reviewer"]);
+ });
  it("keeps attachment ids bound to their queued message", () => {
  const ids = reservedQueuedAttachmentIds([
  { id: "one", text: "first", createdAtMs: 1, attachmentIds: ["upload-a", "upload-b"] },

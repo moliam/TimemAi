@@ -5,6 +5,9 @@ export type QueuedMessage = {
  text: string;
  createdAtMs: number;
  attachmentIds: string[];
+ roleIds?: string[];
+ /** Legacy queue compatibility. */
+ roleId?: string;
  deliveryError?: string;
 };
 
@@ -92,6 +95,8 @@ function parseStoredQueuedMessage(raw: string | null): StoredQueuedMessage | nul
  || typeof message.id !== "string"
  || typeof message.text !== "string"
  || typeof message.createdAtMs !== "number"
+ || (message.roleId !== undefined && typeof message.roleId !== "string")
+ || (message.roleIds !== undefined && (!Array.isArray(message.roleIds) || message.roleIds.some((id) => typeof id !== "string")))
  || (message.deliveryError !== undefined && typeof message.deliveryError !== "string")
  ) return null;
  if (
@@ -106,6 +111,9 @@ function parseStoredQueuedMessage(raw: string | null): StoredQueuedMessage | nul
  text: message.text,
  createdAtMs: message.createdAtMs,
  attachmentIds: Array.from(new Set(message.attachmentIds ?? [])),
+ ...((message.roleIds?.length ?? 0) > 0 || message.roleId !== undefined
+   ? { roleIds: Array.from(new Set([...(message.roleIds ?? []), ...(message.roleId === undefined ? [] : [message.roleId])])) }
+   : {}),
  ...(message.deliveryError === undefined ? {} : { deliveryError: message.deliveryError }),
  },
  };
