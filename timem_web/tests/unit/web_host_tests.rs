@@ -3716,6 +3716,90 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
 }
 
 #[test]
+fn web_host_startup_restore_appends_a_visible_raw_chat_restart_marker() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restart_marker"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restart_marker_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Restart marker".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    start_web_turn(&state, &session_id, "before restart").unwrap();
+    let history_path = current_session_store(&state)
+        .unwrap()
+        .history_path_for_session(&session_id);
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&restarted).unwrap(),
+        1
+    );
+
+    let records = read_all_history_records(&history_path).unwrap();
+    let markers = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    kind: Some(kind),
+                    content,
+                    ..
+                } if kind == RUNTIME_RESTART_HISTORY_KIND
+                    && content == RUNTIME_RESTART_HISTORY_CONTENT
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(markers.len(), 1, "startup must append one raw-chat marker");
+
+    let sessions = restarted.sessions.lock().unwrap();
+    let restored = &sessions[&session_id];
+    assert_eq!(
+        restored.turns.len(),
+        1,
+        "marker must not create an empty turn"
+    );
+    assert_eq!(
+        restored
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "system"
+                    && message.kind.as_deref() == Some(RUNTIME_RESTART_HISTORY_KIND)
+            })
+            .count(),
+        1,
+        "marker must be present in the restored Session chat timeline"
+    );
+    assert_eq!(
+        restored
+            .messages
+            .last()
+            .map(|message| message.text.as_str()),
+        Some(RUNTIME_RESTART_HISTORY_CONTENT)
+    );
+}
+
+#[test]
 fn restore_keeps_multiple_legacy_sessions_when_retired_provider_cache_is_present() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_legacy_sessions"));
@@ -4428,6 +4512,23 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
         .sessions
         .iter()
         .any(|session| session.session_id == alpha_session));
+    let beta_history_path = current_session_store(&state)
+        .unwrap()
+        .history_path_for_session(&beta_session);
+    assert!(
+        read_all_history_records(&beta_history_path)
+            .unwrap()
+            .iter()
+            .all(|record| !matches!(
+                record,
+                ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    kind: Some(kind),
+                    ..
+                } if kind == RUNTIME_RESTART_HISTORY_KIND
+            )),
+        "switching memory spaces inside one process is not a runtime restart"
+    );
     let journal_path = state.event_journal.lock().unwrap().path().to_path_buf();
     assert_eq!(
         journal_path,
