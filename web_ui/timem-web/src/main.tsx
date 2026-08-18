@@ -10,7 +10,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole } from "./protocol";
 import { canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, wheelDeltaPixels } from "./scroll";
-import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
+import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
@@ -2372,14 +2372,14 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  );
  const omitted = timelineItems.length - visibleItems.length;
  const hasVisibleProcess = processActivities.length > 0 || supplementItems.length > 0 || decisions.length > 0 || turn.state === "working";
-  const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
   const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
-  const [showCompletedWork, setShowCompletedWork] = useState(() => !interruptedByUser && (turn.state === "working" || !hasOnlyFreeTalk));
+  const [showWorkStream, setShowWorkStream] = useState(() => turn.state === "working");
   const isToolGenTurn = turn.turn_id.startsWith("web_toolgen_turn_")
     || turn.user_entries.some((entry) => entry.kind === "toolgen_instruction")
     || turn.events.some((event) => (event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen");
   const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);
-  const showWorkStream = !canCollapseCompletedWork || showCompletedWork;
+  const canToggleWorkStream = turn.state === "working" || canCollapseCompletedWork;
+  const workStreamVisible = !canToggleWorkStream || showWorkStream;
   const workingElapsed = turn.state === "working" ? formatDuration(workingElapsedMs) : undefined;
 
   useEffect(() => {
@@ -2394,8 +2394,9 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   useEffect(() => {
     const wasWorking = previousTurnState.current === "working";
     previousTurnState.current = turn.state;
-    if (wasWorking && turn.state !== "working" && (hasOnlyFreeTalk || interruptedByUser)) setShowCompletedWork(false);
-  }, [hasOnlyFreeTalk, interruptedByUser, turn.state]);
+    if (!wasWorking && turn.state === "working") setShowWorkStream(true);
+    if (wasWorking && turn.state !== "working") setShowWorkStream(false);
+  }, [turn.state]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -2421,7 +2422,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  });
  observer.observe(content);
  return () => observer.disconnect();
- }, [showWorkStream]);
+ }, [workStreamVisible]);
 
 
   const scrollWorkToLatest = () => {
@@ -2449,9 +2450,9 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
         {!!entry.attachments?.length && <div className="turn-entry-attachments">{entry.attachments.map((attachment) => <span key={attachment.id} title={attachment.path}><Paperclip size={13}/><i aria-hidden="true">:</i><b>{attachment.name}</b><small>{formatBytes(attachment.bytes)}</small></span>)}</div>}
       </div>)}</div>
     </section>}
-    {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}>
-      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading">{canCollapseCompletedWork ? <button type="button" className={`working-chip work-title-chip completed-work-title work-collapse-toggle${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? " toolgen-working toolgen-completed-title" : ""}`} title={showCompletedWork ? "Hide work details" : "Show work details"} aria-label={showCompletedWork ? "Hide work details" : "Show work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {isToolGenTurn ? "ToolGen" : "Thought/Action"}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button> : <span className={`working-chip work-title-chip active-work-title${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn && <Wrench size={11}/>} {isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>}{workingElapsed && <span className="working-elapsed" aria-hidden="true">{workingElapsed}</span>}</span>}{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
-      {showWorkStream && <div className="turn-work-panel">
+    {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}>
+      {canToggleWorkStream && <div className="turn-assistant-heading"><button type="button" className={`working-chip work-title-chip work-collapse-toggle${turn.state === "working" ? " active-work-title" : " completed-work-title"}${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? ` toolgen-working${turn.state === "working" ? "" : " toolgen-completed-title"}` : ""}`} title={showWorkStream ? "Hide work details" : "Show work details"} aria-label={showWorkStream ? "Hide work details" : "Show work details"} aria-expanded={showWorkStream} onClick={() => setShowWorkStream((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {turn.state === "working" ? (isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>) : (isToolGenTurn ? "ToolGen" : "Thought/Action")}{workingElapsed && <span className="working-elapsed" aria-hidden="true">{workingElapsed}</span>}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button>{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
+      {workStreamVisible && <div className="turn-work-panel">
         <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleItems.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
           if (followLatest.current) setPendingUpdates(0);

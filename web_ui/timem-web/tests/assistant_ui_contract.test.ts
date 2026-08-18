@@ -669,8 +669,8 @@ describe("assistant-ui thread integration", () => {
   it("carries the live working marker into the completed Thought Action chip", () => {
     expect(styles).toContain(".turn-assistant-frame.working .working-chip { font-size: 14px; font-weight: 720; color: #7ebce8; letter-spacing: 0; }");
     expect(styles).toContain(".turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; }");
-    expect(source).toContain("working-chip work-title-chip active-work-title");
-    expect(source).toContain("working-chip work-title-chip completed-work-title work-collapse-toggle");
+    expect(source).toContain("working-chip work-title-chip work-collapse-toggle");
+    expect(source).toContain('turn.state === "working" ? " active-work-title" : " completed-work-title"');
     expect(source).not.toContain('<span className="work-title-dot" aria-hidden="true"/>');
     expect(source).not.toContain('isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>');
     expect(styles).toContain(".work-collapse-toggle:hover { color: #f0f0f0; }");
@@ -678,7 +678,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).not.toContain(".working-chip.interrupted-work-title { border-color:");
     expect(styles).not.toContain(".working-chip.completed-work-title.toolgen-completed-title { border-color:");
     expect(styles).toContain(".working-chip.work-title-chip { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }");
-    expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 0; color: #8fc9f1; font-size: 10px; font-weight: 700; letter-spacing: 0; }");
+    expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 0; color: #8fc9f1; font-size: 11px; font-weight: 700; letter-spacing: 0; }");
     expect(source).toContain('<span className="working-label">working</span>');
     expect(styles).toContain(".turn-assistant-frame.working .working-label {");
     expect(styles).toContain("background-size: 320% 100%;");
@@ -705,6 +705,7 @@ describe("assistant-ui thread integration", () => {
 expect(source).toContain('className={`worker-role-editor ${editingId ? "editing" : "creating"}`}');
 expect(styles).toContain(".worker-role-editor input { height: 34px; padding: 0 9px; font-size: var(--content-size); line-height: 1.4; }");
 expect(styles).toContain(".worker-role-editor textarea { min-height: 112px; resize: vertical; padding: 9px; font-size: var(--content-size); line-height: 1.5; }");
+expect(styles).toContain(".worker-role-editor > div button { min-height: 29px; padding: 0 10px; font-size: var(--content-size); }");
 expect(styles).not.toContain("font: 12px/1.45 var(--ui-font);");
 expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(160px, 30dvh, 360px);");
 expect(source).toContain('className="worker-role-action worker-role-edit"');
@@ -736,7 +737,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(styles).toContain('.turn-work-scroll { padding: 14px 10px 7px; }');
     expect(styles).toContain(':root[data-theme="light"] .turn-work-panel { background: #fafbfb; }');
     expect(styles).toContain(':root[data-theme="light"] .turn-user-content::after { background: rgb(145 160 168 / 60%); }');
-    expect(source).toContain('{showWorkStream && <div className="turn-work-panel">');
+    expect(source).toContain('{workStreamVisible && <div className="turn-work-panel">');
   });
 
   it("keeps ToolGen retrospective attached to its final delivery", () => {
@@ -1683,7 +1684,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
 
   it("groups each task into user input, bounded process, and separate final delivery", () => {
     expect(source).toContain('className="turn-user-frame"');
-    expect(source).toContain('className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}');
+    expect(source).toContain('className={`turn-assistant-frame ${turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}');
     expect(source).toContain('sessionId={activeSession?.session_id ?? ""}');
     expect(source).toContain('function TurnInteraction({ sessionId, turn, decisions');
     expect(source).toContain('<ActivityView key={item.key} activity={activity}/>');
@@ -1703,21 +1704,23 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
  expect(styles).toContain(".turn-work-item.user-supplement");
  expect(styles).toContain(".user-supplement-line strong");
  expect(source).toContain('const lifecycleItems = useMemo(() => lifecycleEvents.map((event) => ({'); expect(source).toContain('const processActivities = useMemo(() => timelineItems'); expect(source).toContain("id: event.event_id,"); expect(source).toContain("createdAt: event.created_at_ms,"); expect(source).not.toContain("scrollEventActivities");
-    expect(source).toContain('const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);');
-    expect(source).toContain('hasOnlyFreeTalkActivity, manualToolGenCommand');
+    expect(source).not.toContain('const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);');
     expect(source).toContain('const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";');
-    expect(source).toContain('const [showCompletedWork, setShowCompletedWork] = useState(() => !interruptedByUser && (turn.state === "working" || !hasOnlyFreeTalk));');
-    expect(source).toContain('if (wasWorking && turn.state !== "working" && (hasOnlyFreeTalk || interruptedByUser)) setShowCompletedWork(false);');
+    expect(source).toContain('const [showWorkStream, setShowWorkStream] = useState(() => turn.state === "working");');
+    expect(source).toContain('if (!wasWorking && turn.state === "working") setShowWorkStream(true);');
+    expect(source).toContain('if (wasWorking && turn.state !== "working") setShowWorkStream(false);');
     expect(source).toContain('const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);');
-    expect(source).toContain('const showWorkStream = !canCollapseCompletedWork || showCompletedWork;');
-    expect(source).toContain('className={`working-chip work-title-chip completed-work-title work-collapse-toggle');
+    expect(source).toContain('const canToggleWorkStream = turn.state === "working" || canCollapseCompletedWork;');
+    expect(source).toContain('const workStreamVisible = !canToggleWorkStream || showWorkStream;');
+    expect(source).toContain('className={`working-chip work-title-chip work-collapse-toggle');
+    expect(source).toContain('turn.state === "working" ? " active-work-title" : " completed-work-title"');
     expect(source).toContain('className="work-collapse-arrow"');
-    expect(source).toContain('aria-expanded={showCompletedWork}');
-    expect(source).toContain('onClick={() => setShowCompletedWork((visible) => !visible)}');
+    expect(source).toContain('aria-expanded={showWorkStream}');
+    expect(source).toContain('onClick={() => setShowWorkStream((visible) => !visible)}');
     expect(source).toContain('<span className="work-title-status">(Interrupted)</span>');
     expect(styles).toContain('.working-chip.interrupted-work-title');
-    expect(source).toContain('{showWorkStream && <div className="turn-work-panel">');
-    expect(source).toContain('{showWorkStream && <div className="turn-work-panel">');
+    expect(source).toContain('{workStreamVisible && <div className="turn-work-panel">');
+    expect(source).toContain('{workStreamVisible && <div className="turn-work-panel">');
     expect(source).toContain('<div className={`turn-work-scroll');
     expect(source).toContain('{pendingUpdates > 0 && <button type="button" className="turn-new-updates"');
     expect(styles).toContain(".turn-work-scroll { max-height:");
