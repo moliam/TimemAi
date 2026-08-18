@@ -568,6 +568,19 @@ fn configured_round_budget(value: Option<&str>) -> u32 {
         .unwrap_or(DEFAULT_ROUND_BUDGET)
 }
 
+pub(crate) fn runtime_process_owner_id() -> &'static str {
+    static OWNER_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OWNER_ID
+        .get_or_init(|| {
+            let started_at_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            format!("{}-{started_at_ns}", std::process::id())
+        })
+        .as_str()
+}
+
 fn configured_round_budget_from_env() -> u32 {
     configured_round_budget(std::env::var("TIMEM_MAX_ROUNDS").ok().as_deref())
 }

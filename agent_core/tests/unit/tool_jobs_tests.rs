@@ -72,6 +72,53 @@ fn command_tool_background_job_can_be_cancelled() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn shutdown_terminates_only_background_jobs_owned_by_this_process() {
+    let dir = temp_case_dir("command_tool_shutdown");
+    let script = dir.join("sleep_payload.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\npython3 -c 'import time; print(\"started\", flush=True); time.sleep(30)'\n",
+    )
+    .unwrap();
+    let store = FileToolJobStore::new(&dir);
+
+    let started = store.spawn("local_sleep", &script, &json!({"args":{}}));
+    let job_id = started
+        .lines()
+        .find_map(|line| line.strip_prefix("job_id: "))
+        .expect("job id");
+    assert_eq!(store.terminate_owned_running(), 1);
+    assert!(store.status(job_id, 0).contains("state: cancelled"));
+    assert_eq!(store.terminate_owned_running(), 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn shutdown_does_not_signal_a_job_record_owned_by_another_process() {
+    let dir = temp_case_dir("foreign_command_tool_shutdown");
+    let store = FileToolJobStore::new(&dir);
+    let status_file = dir.join("foreign.status");
+    let record = ToolJobRecord {
+        id: "foreign-job".to_string(),
+        created_at_ms: now_ms(),
+        pid: std::process::id(),
+        owner_id: Some("foreign-runtime-owner".to_string()),
+        action: "foreign".to_string(),
+        command_path: "/tmp/foreign".to_string(),
+        payload_file: dir.join("foreign.payload").display().to_string(),
+        output_file: dir.join("foreign.out").display().to_string(),
+        status_file: status_file.display().to_string(),
+    };
+    store.append(&record).unwrap();
+
+    assert_eq!(store.terminate_owned_running(), 0);
+    assert!(!status_file.exists());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn tool_job_terminate_ignores_missing_pid_without_signalling_broadly() {
