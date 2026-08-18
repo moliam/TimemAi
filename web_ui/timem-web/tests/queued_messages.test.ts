@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, unclaimedQueuedMessages } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, shouldPauseQueuedMessages, unclaimedQueuedMessages } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -20,6 +20,16 @@ describe("queued messages", () => {
   it("requires a new ready-state decision after a direct submission is occupied", () => {
     expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
+  });
+
+  it("pauses automatic queue dispatch after every abnormal turn stop", () => {
+    expect(shouldPauseQueuedMessages("CancelledByUser")).toBe(true);
+    expect(shouldPauseQueuedMessages("ModelError")).toBe(true);
+    expect(shouldPauseQueuedMessages("OutputLimitStoppedByUser")).toBe(true);
+    expect(shouldPauseQueuedMessages("RoundLimitReached")).toBe(true);
+    expect(shouldPauseQueuedMessages("ProtocolRepairFailed")).toBe(true);
+    expect(shouldPauseQueuedMessages("")).toBe(false);
+    expect(shouldPauseQueuedMessages(undefined)).toBe(false);
   });
 
   it("hides claimed messages without removing them from the durable queue", () => {

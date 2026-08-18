@@ -182,6 +182,10 @@ export function shouldDirectManualMessage(
  return sessionState === "ready" && queuedMessageCount === 0 && !paused;
 }
 
+export function shouldPauseQueuedMessages(stopReason: unknown): stopReason is string {
+ return typeof stopReason === "string" && stopReason.trim().length > 0;
+}
+
 export type QueuedMessageClaims = Set<string>;
 
 export function queuedMessageKey(sessionId: string, messageId: string) {

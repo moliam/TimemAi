@@ -1045,6 +1045,14 @@ describe("web topic view model", () => {
     expect(sessionContextUsage(restored)?.prompt_tokens).toBe(4_200);
   });
 
+  it("uses the current protocol repair limit for legacy events without a maximum", () => {
+    const activity = activityFromTopic(topic("core.model.repair", {
+      attempt: 1,
+      issue: "missing_response_root",
+    }));
+    expect(activity?.title).toBe("⚠️ 模型回复偏离协议，重试 (第 1 次)");
+  });
+
   it("renders response repair as a visible warning with a natural explanation", () => { const activity = activityFromTopic(topic("core.model.repair", { attempt: 2, max_attempts: 5, issue: "missing_response_root", reason: "The required response root is missing." })); expect(activity).toMatchObject({ tone: "warning", title: "⚠️ 模型回复偏离协议，重试 (2/5)", detail: "回复缺少必需的 response 根节点，因此正在重新请求。" }); expect(activity?.detail).not.toContain("missing_response_root"); }); it("hides the recovered-final-answer issue code in legacy repair events", () => { const activity = activityFromTopic(topic("core.model.repair", { attempt: 1, max_attempts: 5, issue: "xml_recovered_final_answer_requires_retry" })); expect(activity).toMatchObject({ tone: "warning", detail: "回复根节点外包含了额外内容。系统虽然识别出了最终回答，但无法将它安全地视为完整响应，因此正在重新请求。" }); expect(activity?.detail).not.toContain("xml_recovered_final_answer_requires_retry"); }); it("renders model free talk verbatim without an invented completion label", () => {
     const activity = activityFromTopic(topic("core.model.response", {
       status: "finished",

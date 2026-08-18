@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn retry_policy_defaults_match_user_visible_contract() {
     let policy = ModelSystemRetryPolicy::default();
-    assert_eq!(policy.max_attempts, 5);
+    assert_eq!(policy.max_attempts, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES);
     assert_eq!(policy.delay, Duration::ZERO);
 }
 

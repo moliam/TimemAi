@@ -6,7 +6,8 @@ use agent_core::{
     BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard, ModelServiceConfig,
     OutputExpansionRequest, OutputExpansionResolution, ResponseProtocolKind,
     RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail,
-    TurnStopReason, UsageStats, UserSupplement, UNLIMITED_ROUND_BUDGET, WORKER_ROLE_CONTEXT_PREFIX,
+    TurnStopReason, UsageStats, UserSupplement, MAX_PROTOCOL_REPAIR_ATTEMPTS,
+    UNLIMITED_ROUND_BUDGET, WORKER_ROLE_CONTEXT_PREFIX,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -2526,7 +2527,7 @@ fn plain_text_after_repair_failure_is_not_exposed_as_a_final_answer() {
         prompt: String::new(),
         rounds_remaining: 0,
     };
-    for _ in 0..=5 {
+    for _ in 0..=MAX_PROTOCOL_REPAIR_ATTEMPTS {
         step = core.apply_model_response(LlmResponse {
             content: "not json".to_string(),
             model_name: "qwen-plus".to_string(),
@@ -2782,7 +2783,7 @@ fn protocol_repair_can_retry_multiple_times_before_failing() {
     core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("继续", None);
 
-    for attempt in 1..=5 {
+    for attempt in 1..=MAX_PROTOCOL_REPAIR_ATTEMPTS {
         let step = core.apply_model_response(LlmResponse {
             content: format!("{{ malformed attempt {attempt}"),
             model_name: "qwen-plus".to_string(),
@@ -2790,8 +2791,7 @@ fn protocol_repair_can_retry_multiple_times_before_failing() {
             truncated: false,
         });
         let prompt = match step {
-            CoreStep::NeedModel { prompt, .. } if attempt < 5 => prompt,
-            CoreStep::NeedModel { prompt, .. } if attempt == 5 => prompt,
+            CoreStep::NeedModel { prompt, .. } => prompt,
             other => panic!("attempt {attempt}: expected repair prompt, got {other:?}"),
         };
         assert!(prompt.contains("temp_repair_"));
@@ -2908,7 +2908,7 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
         truncated: false,
     });
     assert!(matches!(step, CoreStep::NeedModel { .. }));
-    for idx in 3..=5 {
+    for idx in 3..=MAX_PROTOCOL_REPAIR_ATTEMPTS {
         step = core.apply_model_response(LlmResponse {
             content: format!("{{still invalid repair attempt {idx}"),
             model_name: "qwen-plus".to_string(),
@@ -3084,7 +3084,7 @@ fn truncated_repair_failure_explains_model_max_token_reason() {
         truncated: true,
     });
     assert!(matches!(step, CoreStep::NeedModel { .. }));
-    for idx in 3..=5 {
+    for idx in 3..=MAX_PROTOCOL_REPAIR_ATTEMPTS {
         step = core.apply_model_response(LlmResponse {
             content: format!("{{\"free_talk\":\"still partial repair {idx}"),
             model_name: "qwen-plus".to_string(),
@@ -3257,7 +3257,7 @@ fn malformed_complex_protocol_is_blocked_without_raw_leak() {
         truncated: false,
     });
     assert!(matches!(step, CoreStep::NeedModel { .. }));
-    for idx in 3..=5 {
+    for idx in 3..=MAX_PROTOCOL_REPAIR_ATTEMPTS {
         step = core.apply_model_response(LlmResponse {
             content: format!("still ``` not {{ valid repair {idx}"),
             model_name: "aws-claude-sonnet-4-6".to_string(),

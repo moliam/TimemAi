@@ -939,8 +939,14 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const detail = [freeTalk, progress].filter((text) => text.trim()).join("\n\n");
       return detail ? { id: clientId(), sessionId: event.session_id, tone: "thinking", kind: "free_talk", title: "", detail, createdAt: Date.now() } : null;
     }
-    case "core.model.repair":
-      return { id: clientId(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: protocolRepairDisplayReason(payload), createdAt: Date.now() };
+    case "core.model.repair": {
+      const attempt = payload.attempt ?? 0;
+      const maxAttempts = payload.max_attempts;
+      const retryProgress = typeof maxAttempts === "number"
+        ? `${attempt}/${maxAttempts}`
+        : `第 ${attempt} 次`;
+      return { id: clientId(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${retryProgress})`, detail: protocolRepairDisplayReason(payload), createdAt: Date.now() };
+    }
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";
