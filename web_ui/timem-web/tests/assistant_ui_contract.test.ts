@@ -728,8 +728,30 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(source).not.toContain("turn.completion?.toolgen_retrospect");
   });
 
+  it("shows refined transient recovery controls beside the working label", () => {
+    expect(source).toContain(
+      "const modelRetryStatus = useMemo(() => activeModelRetryStatus(turn), [turn]);",
+    );
+    expect(source).toContain("model-retry-status");
+    expect(source).toContain("modelRetryStatus.label");
+    expect(source).toContain("modelRetryStatus.progress");
+    expect(source).toContain(
+      'kind === "model_request" || kind === "model_response" || kind === "model_retry"',
+    );
+    expect(source).toContain(
+      'kind !== "model_request" && kind !== "model_response" && kind !== "model_retry"',
+    );
+    expect(viewModelSource).toContain('case "core.model.repair":');
+    expect(styles).toContain(".model-retry-status");
+    expect(styles).toContain(".model-retry-detail");
+    expect(styles).toContain("font-size: 10px");
+    expect(styles).toContain("font-size: 9px");
+    expect(styles).toContain("font-size: 11px");
+    expect(styles).toContain("min-height: 20px");
+  });
+
   it("does not expose internal model transport bookkeeping or duplicate activity labels", () => {
-    expect(source).toContain('kind !== "model_request" && kind !== "model_response"');
+    expect(source).toContain('kind !== "model_request" && kind !== "model_response" && kind !== "model_retry"');
     expect(source).not.toContain("Model completed a response");
     expect(source).not.toContain("LIVE ACTIVITY");
     expect(source).not.toContain("Working view");
@@ -1104,7 +1126,7 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(source).toContain('aria-label="Create session"');
     expect(source).toContain('creating ? "Creating…" : "Create session"');
     expect(source).toContain("disabled={creating}");
-    expect(source).toContain('import { activityFromTopic');
+    expect(source).toContain('activeModelRetryStatus, activityFromTopic');
     expect(source).toContain('sessionCreateDecision');
     expect(source).toContain("const canCreateSession = createDecision.kind === \"send\";");
     expect(source).toContain("disabled={creating || workspaces.length === 0}");

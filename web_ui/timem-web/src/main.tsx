@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole } from "./protocol";
 import { isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
+import { activeModelRetryStatus, activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
@@ -753,7 +753,7 @@ function TimemApp() {
     }
     if (event.type === "worker_activity") {
       const kind = String(event.event.kind ?? "worker_event");
-      if (kind !== "model_request" && kind !== "model_response") {
+      if (kind !== "model_request" && kind !== "model_response" && kind !== "model_retry") {
         const detail = Object.entries(event.event).filter(([key]) => !["kind", "session_id", "context_id", "worker_id"].includes(key)).map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`).join("\n");
         const activity: Activity = { id: clientId(), sessionId: event.session_id, tone: kind.includes("error") ? "error" : kind.includes("retry") ? "warning" : "notice", title: kind.replaceAll("_", " "), detail, createdAt: Date.now() };
         pushActivity(activity);
@@ -2232,6 +2232,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  const processActivities = useMemo(() => lifecycleItems
  .map(({ activity }) => activity)
  .filter((activity): activity is Activity => activity !== null), [lifecycleItems]);
+ const modelRetryStatus = useMemo(() => activeModelRetryStatus(turn), [turn]);
  const persistentToolGenItems = useMemo(() => visibleItems.filter(({ activity }) => (
  activity?.kind === "toolgen" && activity.toolgen_phase === "published"
  )), [visibleItems]);
@@ -2322,7 +2323,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       </div>)}</div>
     </section>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}>
-      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading">{canCollapseCompletedWork ? <button type="button" className={`working-chip work-title-chip completed-work-title work-collapse-toggle${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? " toolgen-working toolgen-completed-title" : ""}`} title={showCompletedWork ? "Hide work details" : "Show work details"} aria-label={showCompletedWork ? "Hide work details" : "Show work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {isToolGenTurn ? "ToolGen" : "Thought/Action"}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button> : <span className={`working-chip work-title-chip active-work-title${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn && <Wrench size={11}/>} {isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>}{workingElapsed && <span className="working-elapsed" aria-hidden="true">{workingElapsed}</span>}</span>}</div>}
+      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading">{canCollapseCompletedWork ? <button type="button" className={`working-chip work-title-chip completed-work-title work-collapse-toggle${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? " toolgen-working toolgen-completed-title" : ""}`} title={showCompletedWork ? "Hide work details" : "Show work details"} aria-label={showCompletedWork ? "Hide work details" : "Show work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {isToolGenTurn ? "ToolGen" : "Thought/Action"}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button> : <span className={`working-chip work-title-chip active-work-title${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn && <Wrench size={11}/>} {isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>}{workingElapsed && <span className="working-elapsed" aria-hidden="true">{workingElapsed}</span>}</span>}{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
       {showWorkStream && <div className="turn-work-panel">
         <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleItems.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
@@ -2491,7 +2492,7 @@ function activityFromTurnEvent(event: WebTurnEvent, sessionId: string): Activity
  }
  if (event.source !== "worker_activity") return null;
   const kind = String(event.payload.kind ?? "worker_event");
-  if (kind === "model_request" || kind === "model_response") return null;
+  if (kind === "model_request" || kind === "model_response" || kind === "model_retry") return null;
   const detail = Object.entries(event.payload)
     .filter(([key]) => !["kind", "session_id", "context_id", "worker_id"].includes(key))
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)

@@ -929,6 +929,65 @@ function protocolRepairDisplayReason(payload: Record<string, unknown>): string {
   return reason || "模型回复格式不符合当前协议要求，系统正在自动重新请求。";
 }
 
+export type ActiveModelRetryStatus = {
+  kind: "reconnecting" | "retrying";
+  label: "reconnecting" | "retrying";
+  progress?: string;
+  detail: string;
+};
+
+function retryProgress(payload: Record<string, unknown>): string | undefined {
+  const attempt = typeof payload.attempt === "number" ? payload.attempt : undefined;
+  const maxAttempts = typeof payload.max_attempts === "number" ? payload.max_attempts : undefined;
+  if (attempt === undefined) return undefined;
+  return maxAttempts === undefined ? `第 ${attempt} 次` : `${attempt}/${maxAttempts}`;
+}
+
+export function activeModelRetryStatus(turn: WebTurn): ActiveModelRetryStatus | null {
+  if (turn.state !== "working") return null;
+
+  let status: ActiveModelRetryStatus | null = null;
+  for (const event of turn.events) {
+    if (event.source === "worker_activity") {
+      const kind = event.payload.kind;
+      if (kind === "model_response") {
+        status = null;
+        continue;
+      }
+      if (kind !== "model_retry") continue;
+
+      const progress = retryProgress(event.payload);
+      const error = typeof event.payload.error === "string" ? event.payload.error.trim() : "";
+      const delayMs = typeof event.payload.delay_ms === "number" ? event.payload.delay_ms : undefined;
+      const detail = [
+        "模型服务连接暂时失败，系统正在自动重连。",
+        progress ? `重连进度：${progress}` : "",
+        delayMs !== undefined ? `下次尝试：约 ${Math.ceil(delayMs / 1000)} 秒后` : "",
+        error ? `错误详情：${error}` : "",
+      ].filter(Boolean).join("\n\n");
+      status = { kind: "reconnecting", label: "reconnecting", progress, detail };
+      continue;
+    }
+
+    if (event.source !== "core_topic") continue;
+    const topic = event.payload as unknown as CoreTopicEvent;
+    if (topic.topic?.name !== "core.model.repair") continue;
+
+    const progress = retryProgress(topic.payload);
+    status = {
+      kind: "retrying",
+      label: "retrying",
+      progress,
+      detail: [
+        "模型回复偏离当前响应协议，系统正在自动重新请求。",
+        progress ? `修复进度：${progress}` : "",
+        protocolRepairDisplayReason(topic.payload),
+      ].filter(Boolean).join("\n\n"),
+    };
+  }
+  return status;
+}
+
 export function activityFromTopic(event: CoreTopicEvent): Activity | null {
   const payload = event.payload;
   const label = (value: unknown) => typeof value === "string" ? value : "";
@@ -939,14 +998,8 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const detail = [freeTalk, progress].filter((text) => text.trim()).join("\n\n");
       return detail ? { id: clientId(), sessionId: event.session_id, tone: "thinking", kind: "free_talk", title: "", detail, createdAt: Date.now() } : null;
     }
-    case "core.model.repair": {
-      const attempt = payload.attempt ?? 0;
-      const maxAttempts = payload.max_attempts;
-      const retryProgress = typeof maxAttempts === "number"
-        ? `${attempt}/${maxAttempts}`
-        : `第 ${attempt} 次`;
-      return { id: clientId(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${retryProgress})`, detail: protocolRepairDisplayReason(payload), createdAt: Date.now() };
-    }
+    case "core.model.repair":
+      return null;
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";
