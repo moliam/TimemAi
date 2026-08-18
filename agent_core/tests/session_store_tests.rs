@@ -679,7 +679,7 @@ fn resume_notice_references_history_format_without_web_specific_language() {
         current_dir: PathBuf::from("/work/project"),
     };
     let rendered = notice.render();
-    assert!(rendered.starts_with("## SYSTEM"));
+    assert!(rendered.starts_with("## RUNTIME"));
     assert!(rendered.contains(
         "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
     ));

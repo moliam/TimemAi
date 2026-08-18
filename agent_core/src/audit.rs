@@ -82,7 +82,7 @@ fn empty_repair_output_doc() -> Value {
         "kind": "timem_realtime_repair_output_log",
         "notes": [
             "Realtime model-output protocol repair diagnostics.",
-            "Each record includes the malformed assistant response and the SYSTEM repair message shown to the model.",
+            "Each record includes the malformed assistant response and the RUNTIME repair message shown to the model.",
             "assistant_response may be capped to avoid unbounded diagnostic growth."
         ],
         "records": []
@@ -261,7 +261,7 @@ pub fn model_repair_output_event(
         "repair_calls": repair_calls,
         "repair_calls_delta": repair_calls_delta,
         "rendered": format!(
-            "---- {} / {} ----\n## assistant:\n{}\n\n## SYSTEM\n{}",
+            "---- {} / {} ----\n## assistant:\n{}\n\n## RUNTIME\n{}",
             time_ms, turn_id, assistant_response, system_message
         ),
         "summary": format!("{} repair for {}", issue_text, turn_id),

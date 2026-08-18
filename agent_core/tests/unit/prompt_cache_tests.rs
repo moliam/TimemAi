@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn cache_planner_splits_xml_static_prompt_boundary_from_xml_deltas() {
-    let prompt = "<Timem System Prompt>\nSTATIC XML\n</Timem System Prompt>\n<prompt_delta id=\"pd_1\" time_ms=\"1\">\n\n## USER\ndelta1\n</prompt_delta>\n<prompt_delta id=\"pd_2\" time_ms=\"2\">\n\n## SYSTEM\ndelta2\n</prompt_delta>";
+    let prompt = "<Timem System Prompt>\nSTATIC XML\n</Timem System Prompt>\n<prompt_delta id=\"pd_1\" time_ms=\"1\">\n\n## USER\ndelta1\n</prompt_delta>\n<prompt_delta id=\"pd_2\" time_ms=\"2\">\n\n## RUNTIME\ndelta2\n</prompt_delta>";
 
     let (static_prompt, dynamic_prompt) = split_prompt(prompt);
     assert_eq!(static_prompt, "STATIC XML");
@@ -118,7 +118,7 @@ fn cache_planner_marks_only_recent_dynamic_tail() {
 
 #[test]
 fn cache_planner_keeps_one_delta_as_one_addressable_block() {
-    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nslice one\n\n## SYSTEM\nslice two\n[END DELTA]";
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nslice one\n\n## RUNTIME\nslice two\n[END DELTA]";
 
     let blocks = plan_prompt_cache(prompt);
 
@@ -160,7 +160,7 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
 #[test]
 fn temporary_repair_delta_is_not_cache_controlled() {
     let prompt = format!(
-            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## SYSTEM\nrepair\n[END DELTA]\n\n{}",
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## RUNTIME\nrepair\n[END DELTA]\n\n{}",
             crate::prompt_render::formatted_response_trailer(
                 "one Markdown response with one state branch",
                 "TIMEM_ASSISTANT",

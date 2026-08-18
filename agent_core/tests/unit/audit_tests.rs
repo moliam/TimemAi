@@ -209,5 +209,5 @@ fn action_related_audit_event_builders_are_structured() {
     assert!(repair_output["rendered"]
         .as_str()
         .unwrap()
-        .contains("## SYSTEM\nAi1's previous response"));
+        .contains("## RUNTIME\nAi1's previous response"));
 }
