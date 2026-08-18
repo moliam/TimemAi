@@ -2321,29 +2321,57 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   const workScrollRef = useRef<HTMLDivElement | null>(null);
  const workContentRef = useRef<HTMLDivElement | null>(null);
  const followLatest = useRef(true);
-  const previousUpdateCount = useRef(turn.events.length + decisions.length);
+  const previousUpdateCount = useRef(
+    turn.events.length
+      + turn.user_entries.filter((entry) => entry.kind === "supplement").length
+      + decisions.length,
+  );
   const previousTurnState = useRef(turn.state);
   const [pendingUpdates, setPendingUpdates] = useState(0);
   const [workingElapsedMs, setWorkingElapsedMs] = useState(() => Math.max(0, Date.now() - turn.created_at_ms));
   const lifecycleEvents = useMemo(() => coalesceActionLifecycle(turn.events), [turn.events]);
  const lifecycleItems = useMemo(() => lifecycleEvents.map((event) => ({
+ type: "event" as const,
+ key: event.event_id,
+ createdAt: event.created_at_ms,
  event,
  activity: activityFromTurnEvent(event, sessionId),
  })), [lifecycleEvents, sessionId]);
- const visibleItems = useMemo(() => lifecycleItems.slice(-MAX_RENDERED_TURN_EVENTS), [lifecycleItems]);
- const processActivities = useMemo(() => lifecycleItems
+ const supplementItems = useMemo(() => turn.user_entries
+ .map((entry, roleIndex) => ({ entry, roleIndex }))
+ .filter(({ entry }) => entry.kind === "supplement")
+ .map(({ entry, roleIndex }) => ({
+ type: "supplement" as const,
+ key: `user-supplement-${entry.created_at_ms}-${roleIndex}`,
+ createdAt: entry.created_at_ms,
+ activity: {
+ id: `user-supplement-${turn.turn_id}-${entry.created_at_ms}-${roleIndex}`,
+ sessionId,
+ tone: "thinking" as const,
+ kind: "user_supplement" as const,
+ title: "[用户补充]",
+ detail: entry.text,
+ createdAt: entry.created_at_ms,
+ },
+ })), [sessionId, turn.turn_id, turn.user_entries]);
+ const timelineItems = useMemo(() => [...lifecycleItems, ...supplementItems]
+ .sort((left, right) => left.createdAt - right.createdAt), [lifecycleItems, supplementItems]);
+ const visibleItems = useMemo(() => timelineItems.slice(-MAX_RENDERED_TURN_EVENTS), [timelineItems]);
+ const processActivities = useMemo(() => timelineItems
  .map(({ activity }) => activity)
- .filter((activity): activity is Activity => activity !== null), [lifecycleItems]);
+ .filter((activity): activity is Activity => activity !== null), [timelineItems]);
  const modelRetryStatus = useMemo(() => activeModelRetryStatus(turn), [turn]);
- const persistentToolGenItems = useMemo(() => visibleItems.filter(({ activity }) => (
- activity?.kind === "toolgen" && activity.toolgen_phase === "published"
+ const persistentToolGenItems = useMemo(() => visibleItems.filter((item) => (
+ item.type === "event"
+ && item.activity?.kind === "toolgen"
+ && item.activity.toolgen_phase === "published"
  )), [visibleItems]);
- const persistentToolGenEventIds = useMemo(() => new Set(
- persistentToolGenItems.map(({ event }) => event.event_id)
+ const persistentToolGenItemKeys = useMemo(() => new Set(
+ persistentToolGenItems.map(({ key }) => key)
  ), [persistentToolGenItems]);
  const scrollItems = useMemo(() => visibleItems.filter(
- ({ event }) => !persistentToolGenEventIds.has(event.event_id)
- ), [persistentToolGenEventIds, visibleItems]);
+ item => !persistentToolGenItemKeys.has(item.key)
+ ), [persistentToolGenItemKeys, visibleItems]);
  const toolActivityRuns = useMemo(
  () => summarizeConsecutiveToolActivities(scrollItems.map(({ activity }) => activity)),
  [scrollItems],
@@ -2352,8 +2380,8 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
  [toolActivityRuns],
  );
- const omitted = lifecycleItems.length - visibleItems.length;
- const hasVisibleProcess = processActivities.length > 0 || decisions.length > 0 || turn.state === "working";
+ const omitted = timelineItems.length - visibleItems.length;
+ const hasVisibleProcess = processActivities.length > 0 || supplementItems.length > 0 || decisions.length > 0 || turn.state === "working";
   const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
   const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const [showCompletedWork, setShowCompletedWork] = useState(() => !interruptedByUser && (turn.state === "working" || !hasOnlyFreeTalk));
@@ -2381,7 +2409,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
-    const updateCount = turn.events.length + decisions.length;
+    const updateCount = turn.events.length + supplementItems.length + decisions.length;
     const added = Math.max(0, updateCount - previousUpdateCount.current);
     previousUpdateCount.current = updateCount;
     if (!scroll) return;
@@ -2391,7 +2419,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
     } else if (added > 0) {
       setPendingUpdates((count) => count + added);
     }
-  }, [turn.events.length, decisions.length]);
+  }, [turn.events.length, supplementItems.length, decisions.length]);
  useLayoutEffect(() => {
  const scroll = workScrollRef.current;
  const content = workContentRef.current;
@@ -2431,14 +2459,14 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
           if (followLatest.current) setPendingUpdates(0);
         }}>
-          <div className="turn-work-content" ref={workContentRef}> {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>} {scrollItems.map(({ event, activity }, index) => { if (activity?.tone === "action") { const summary = toolActivityRunByStartIndex.get(index); return summary ? <ToolActivityGroup key={`tool-activity-group-${event.event_id}`} summary={summary}/> : null; } return activity ? <ActivityView key={event.event_id} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
+          <div className="turn-work-content" ref={workContentRef}> {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>} {scrollItems.map((item, index) => { const { activity } = item; if (activity?.tone === "action") { const summary = toolActivityRunByStartIndex.get(index); return summary ? <ToolActivityGroup key={`tool-activity-group-${item.key}`} summary={summary}/> : null; } return activity ? <ActivityView key={item.key} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
           {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
           {visibleItems.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>} </div>
         </div>
         {pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13} aria-hidden="true"/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
       </div>}
     </section>}
-    {persistentToolGenItems.length > 0 && <div className="turn-persistent-toolgen" aria-label="ToolGen result">{persistentToolGenItems.map(({ event, activity }) => activity ? <ActivityView key={event.event_id} activity={activity}/> : null)}</div>}
+    {persistentToolGenItems.length > 0 && <div className="turn-persistent-toolgen" aria-label="ToolGen result">{persistentToolGenItems.map(({ key, activity }) => activity ? <ActivityView key={key} activity={activity}/> : null)}</div>}
     {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)} onDelete={canDeleteConversationContent ? () => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "assistant", roleIndex: 0, preview: turn.final_answer ?? "" }) : undefined}/>}
     {!turn.final_answer && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
   </article>;
@@ -2502,6 +2530,10 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
 function ActivityView({ activity }: { activity: Activity }) {
  if (activity.kind === "context_compact") return <ContextCompactNotice activity={activity}/>;
  if (activity.kind === "toolgen") return <ToolGenNotice activity={activity}/>;
+ if (activity.kind === "user_supplement") return <div className="turn-work-item thinking user-supplement">
+ <span className="activity-mark" aria-hidden="true">💡</span>
+ <div className="user-supplement-line"><strong>{activity.title}</strong>{activity.detail && <span>{activity.detail}</span>}</div>
+ </div>;
  if (activity.tone === "action") return <ToolActivity activity={activity}/>;
  return <div className={`turn-work-item ${activity.tone}${activity.kind === "free_talk" ? " free-talk" : ""}`}>
  <span className="activity-mark">{activity.tone === "thinking" ? <span className="activity-thinking-dot" aria-hidden="true"/> : activity.tone === "warning" ? "⚠️" : activity.tone === "error" ? "×" : "i"}</span>
