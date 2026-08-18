@@ -1190,7 +1190,7 @@ button:disabled { cursor: not-allowed; }
 .turn-assistant-frame, .turn-final-delivery { font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-weight: var(--agent-font-weight); }
 .completion-card { line-height: 1.55; }
 .composer-wrap { isolation: isolate; }
-.composer textarea { resize: none; }
+.composer textarea { resize: none; overflow-y: auto; }
 .composer-cwd-inline { min-width: 0; display: inline-flex; align-items: center; gap: 5px; overflow: hidden; color: #8c9ba3; font-family: var(--ui-font); font-size: 11px; font-weight: 450; letter-spacing: 0; }
 .composer-cwd-inline b { flex: none; color: #71828a; font-size: 10px; font-weight: 650; letter-spacing: .03em; }
 .composer-cwd-inline span { min-width: 0; overflow: hidden; color: #9cabb2; text-overflow: ellipsis; white-space: nowrap; }

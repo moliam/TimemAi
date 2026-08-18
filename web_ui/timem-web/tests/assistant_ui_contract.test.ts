@@ -96,6 +96,21 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("[activeSessionId, latestTurn?.turn_id]");
   });
 
+  it("prioritizes a focused multiline composer before scrolling the chat viewport", () => {
+    expect(source).toContain("const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);");
+    expect(source).toContain("ref={composerTextareaRef}");
+    expect(source).toContain('textarea.addEventListener("wheel", prioritizeComposerScroll, { passive: false });');
+    expect(source).toContain('return () => textarea.removeEventListener("wheel", prioritizeComposerScroll);');
+    expect(source).toContain("if (document.activeElement !== textarea) return;");
+    expect(source).toContain("const deltaY = wheelDeltaPixels(event.deltaY, event.deltaMode, textarea.clientHeight);");
+    expect(source).toContain("if (!canScrollInDirection(textarea, deltaY)) return;");
+    expect(source).toContain("event.preventDefault();");
+    expect(source).toContain("event.stopPropagation();");
+    expect(source).toContain("textarea.scrollTop += deltaY;");
+    expect(source).not.toContain("onWheel={(event) =>");
+    expect(styles).toContain(".composer textarea { resize: none; overflow-y: auto; }");
+  });
+
   it("renders durable runtime restarts as accessible chat timeline dividers", () => {
     expect(protocolSource).toContain('role: "user" | "assistant" | "system"');
     expect(source).toContain('message.kind === "runtime_restart"');
