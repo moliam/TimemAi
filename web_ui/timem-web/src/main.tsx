@@ -9,7 +9,7 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole } from "./protocol";
-import { isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition } from "./scroll";
+import { canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
@@ -1665,6 +1665,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
   const sessionScrollPositionsRef = useRef<Map<string, SessionScrollPosition>>(new Map());
   const renderedSessionIdRef = useRef<string | undefined>(undefined);
@@ -1781,6 +1782,21 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   const liveSessionKey = sessionIds.join("\u0000");
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
+
+  useEffect(() => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) return;
+    const prioritizeComposerScroll = (event: WheelEvent) => {
+      if (document.activeElement !== textarea) return;
+      const deltaY = wheelDeltaPixels(event.deltaY, event.deltaMode, textarea.clientHeight);
+      if (!canScrollInDirection(textarea, deltaY)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      textarea.scrollTop += deltaY;
+    };
+    textarea.addEventListener("wheel", prioritizeComposerScroll, { passive: false });
+    return () => textarea.removeEventListener("wheel", prioritizeComposerScroll);
+  }, []);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -2256,6 +2272,7 @@ const toggleQueuedMessages = () => {
         })}</div>}
         <form className="composer" onSubmit={(event) => { event.preventDefault(); submitDraft(); }}>
           <textarea
+            ref={composerTextareaRef}
             value={draft}
             placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? sessionInteractionLockReason : activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."}
             aria-label="Message Timem"
