@@ -135,6 +135,61 @@ fn command_action_contains_script_sigsegv_and_executor_remains_usable() {
 }
 
 #[test]
+fn command_action_drains_large_output_without_pipe_deadlock() {
+    let dir = temp_case_dir("command_large_output");
+    fs::write(
+        dir.join("large_output.sh"),
+        "#!/bin/sh\npython3 - <<'PY'\nprint('x' * 262144)\nPY\n",
+    )
+    .unwrap();
+
+    let result = execute_command_action(
+        "large_output_tool",
+        &dir.join("large_output.sh"),
+        &json!({}),
+        2000,
+    );
+
+    assert!(result.contains("status: 0"), "{result}");
+    assert!(result.contains("xxxx"), "{result}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn command_action_timeout_terminates_descendant_process_group() {
+    let dir = temp_case_dir("command_timeout_descendants");
+    let pid_file = dir.join("child.pid");
+    fs::write(
+        dir.join("descendant.sh"),
+        format!(
+            "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+
+    let result = execute_command_action("slow_tree", &dir.join("descendant.sh"), &json!({}), 1000);
+    assert!(result.contains("error: timeout"), "{result}");
+
+    let child_pid: i32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while unsafe { libc::kill(child_pid, 0) } == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_ne!(
+        unsafe { libc::kill(child_pid, 0) },
+        0,
+        "descendant process {child_pid} survived command timeout"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn command_action_timeout_is_bounded() {
     let dir = temp_case_dir("command_timeout");
     fs::write(dir.join("slow.sh"), "#!/bin/sh\nsleep 2\n").unwrap();

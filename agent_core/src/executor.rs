@@ -1,11 +1,17 @@
 use crate::capability::CapabilityRegistry;
 use crate::ActionOutcome;
 use serde_json::Value;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+const COMMAND_OUTPUT_CAPTURE_BYTES: usize = 64 * 1024;
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutorTarget {
@@ -70,13 +76,17 @@ pub(crate) fn execute_command_action_outcome(
     payload: &Value,
     timeout_ms: u64,
 ) -> ActionOutcome {
-    let mut child = match Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
     {
+        command.process_group(0);
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
             return ActionOutcome::failed(format!(
@@ -89,66 +99,136 @@ pub(crate) fn execute_command_action_outcome(
         let _ = stdin.write_all(payload.to_string().as_bytes());
         let _ = stdin.write_all(b"\n");
     }
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_bounded_reader(stdout, COMMAND_OUTPUT_CAPTURE_BYTES));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_bounded_reader(stderr, COMMAND_OUTPUT_CAPTURE_BYTES));
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms.clamp(1000, 15000));
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_command_process(&mut child);
+                let _ = join_bounded_reader(stdout_reader);
+                let _ = join_bounded_reader(stderr_reader);
                 return ActionOutcome::timeout(format!("Action result: {action}\nerror: timeout"));
             }
-            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => thread::sleep(COMMAND_POLL_INTERVAL),
             Err(err) => {
+                terminate_command_process(&mut child);
+                let _ = join_bounded_reader(stdout_reader);
+                let _ = join_bounded_reader(stderr_reader);
                 return ActionOutcome::failed(format!(
                     "Action result: {action}\nerror: command_wait_failed\nreason: {}",
                     compact_text(&err.to_string(), 1000)
-                ))
+                ));
             }
         }
-    }
-    match child.wait_with_output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let mut combined = String::new();
-            if !stdout.trim().is_empty() {
-                combined.push_str(stdout.trim_end());
+    };
+    let stdout = match join_bounded_reader(stdout_reader) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => {
+            return ActionOutcome::failed(format!(
+                "Action result: {action}\nerror: command_output_failed\nreason: {error}"
+            ))
+        }
+    };
+    let stderr = match join_bounded_reader(stderr_reader) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => {
+            return ActionOutcome::failed(format!(
+                "Action result: {action}\nerror: command_output_failed\nreason: {error}"
+            ))
+        }
+    };
+    render_command_output(action, status, &stdout, &stderr)
+}
+
+fn spawn_bounded_reader(
+    mut reader: impl Read + Send + 'static,
+    max_bytes: usize,
+) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut captured = Vec::with_capacity(max_bytes.min(8192));
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                return Ok(captured);
             }
-            if !stderr.trim().is_empty() {
-                if !combined.is_empty() {
-                    combined.push('\n');
-                }
-                combined.push_str("stderr: ");
-                combined.push_str(stderr.trim_end());
-            }
-            if combined.is_empty() {
-                combined = "<no output>".to_string();
-            }
-            if let Some(signal) = exit_signal(&output.status) {
-                ActionOutcome::failed(format!(
-                    "Action result: {action}\nerror: terminated_by_signal\nsignal: {signal}\noutput:\n{}",
-                    compact_text(&combined, 4000)
-                ))
-            } else {
-                let code = output.status.code().unwrap_or(-1);
-                let text = format!(
-                    "Action result: {action}\nstatus: {code}\noutput:\n{}",
-                    compact_text(&combined, 4000)
-                );
-                if code == 0 {
-                    ActionOutcome::completed(text)
-                } else {
-                    ActionOutcome::failed(text)
-                }
+            let remaining = max_bytes.saturating_sub(captured.len());
+            if remaining > 0 {
+                captured.extend_from_slice(&buffer[..read.min(remaining)]);
             }
         }
-        Err(err) => ActionOutcome::failed(format!(
-            "Action result: {action}\nerror: command_output_failed\nreason: {}",
-            compact_text(&err.to_string(), 1000)
-        )),
+    })
+}
+
+fn join_bounded_reader(
+    reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Result<Vec<u8>, String> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .join()
+        .map_err(|_| "command_output_reader_panicked".to_string())?
+        .map_err(|error| compact_text(&error.to_string(), 1000))
+}
+
+fn render_command_output(
+    action: &str,
+    status: ExitStatus,
+    stdout: &str,
+    stderr: &str,
+) -> ActionOutcome {
+    let mut combined = String::new();
+    if !stdout.trim().is_empty() {
+        combined.push_str(stdout.trim_end());
     }
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str("stderr: ");
+        combined.push_str(stderr.trim_end());
+    }
+    if combined.is_empty() {
+        combined = "<no output>".to_string();
+    }
+    if let Some(signal) = exit_signal(&status) {
+        return ActionOutcome::failed(format!(
+            "Action result: {action}\nerror: terminated_by_signal\nsignal: {signal}\noutput:\n{}",
+            compact_text(&combined, 4000)
+        ));
+    }
+    let code = status.code().unwrap_or(-1);
+    let text = format!(
+        "Action result: {action}\nstatus: {code}\noutput:\n{}",
+        compact_text(&combined, 4000)
+    );
+    if code == 0 {
+        ActionOutcome::completed(text)
+    } else {
+        ActionOutcome::failed(text)
+    }
+}
+
+fn terminate_command_process(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        let pid = child.id() as libc::pid_t;
+        if pid > 1 && pid != libc::getpgrp() {
+            let _ = libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(unix)]
