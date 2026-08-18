@@ -53,6 +53,7 @@ impl ResponseProtocolKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedAction {
     pub action: String,
+    pub name: Option<String>,
     pub raw_input: Value,
 }
 impl ParsedAction {
@@ -259,6 +260,7 @@ fn validate_parsed_action(
     }
     Ok(ParsedAction {
         action: name,
+        name: None,
         raw_input: input,
     })
 }

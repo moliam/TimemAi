@@ -107,6 +107,52 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
 }
 
 #[test]
+fn xml_action_result_preserves_name_and_escapes_xml() {
+    let rendered = render_xml_action_result(
+        "run_bash",
+        Some(r#" check <diff> & "status" "#),
+        "output <ready> & done",
+    );
+    assert_eq!(
+        rendered,
+        "<action_result><run_bash name=\"check &lt;diff&gt; &amp; &quot;status&quot;\">output &lt;ready&gt; &amp; done</run_bash></action_result>"
+    );
+
+    let fallback = render_xml_action_result("readfile", None, "ok");
+    assert_eq!(
+        fallback,
+        "<action_result><readfile name=\"readfile\">ok</readfile></action_result>"
+    );
+}
+
+#[test]
+fn oversized_xml_action_result_is_truncated_before_wrapping() {
+    let result = format!(
+        "{}界 <tag> & tail words",
+        "&".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
+    );
+    let rendered = render_xml_action_result(
+        "run_bash",
+        Some(r#"inspect <large> & "escaped" output"#),
+        &result,
+    );
+
+    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
+    assert!(rendered.starts_with(
+        r#"<action_result><run_bash name="inspect &lt;large&gt; &amp; &quot;escaped&quot; output">"#
+    ));
+    assert!(rendered.ends_with("</run_bash></action_result>"));
+    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
+    assert!(!rendered.contains("<tag>"));
+    assert!(!rendered.contains(" & tail"));
+    assert_eq!(
+        truncate_action_result_for_prompt(&rendered),
+        rendered,
+        "generic action-result truncation must not cut the XML wrapper"
+    );
+}
+
+#[test]
 fn action_result_truncation_is_byte_safe_and_reports_omitted_words() {
     assert_eq!(MAX_ACTION_RESULT_PROMPT_BYTES, 32 * 1024);
     let input = format!(

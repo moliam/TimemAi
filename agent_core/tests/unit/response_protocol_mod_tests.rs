@@ -25,6 +25,30 @@ fn confirmed_xml(body: &str) -> String {
     )
 }
 
+fn actions_without_protocol_metadata(actions: &[ParsedAction]) -> Vec<ParsedAction> {
+    actions
+        .iter()
+        .cloned()
+        .map(|mut action| {
+            action.name = None;
+            action
+        })
+        .collect()
+}
+
+fn groups_without_protocol_metadata(groups: &[ParsedActionGroup]) -> Vec<ParsedActionGroup> {
+    groups
+        .iter()
+        .cloned()
+        .map(|mut group| {
+            for action in &mut group.actions {
+                action.name = None;
+            }
+            group
+        })
+        .collect()
+}
+
 fn assert_protocols_equivalent(json_raw: &str, markdown_raw: &str, xml_raw: &str) {
     let json_env = parse_json(json_raw);
     let markdown_env = parse_markdown(markdown_raw);
@@ -49,10 +73,22 @@ fn assert_protocols_equivalent(json_raw: &str, markdown_raw: &str, xml_raw: &str
         xml_env.thought_keep_in_context,
         json_env.thought_keep_in_context
     );
-    assert_eq!(markdown_env.next_actions, json_env.next_actions);
-    assert_eq!(xml_env.next_actions, json_env.next_actions);
-    assert_eq!(markdown_env.action_groups, json_env.action_groups);
-    assert_eq!(xml_env.action_groups, json_env.action_groups);
+    assert_eq!(
+        actions_without_protocol_metadata(&markdown_env.next_actions),
+        actions_without_protocol_metadata(&json_env.next_actions)
+    );
+    assert_eq!(
+        actions_without_protocol_metadata(&xml_env.next_actions),
+        actions_without_protocol_metadata(&json_env.next_actions)
+    );
+    assert_eq!(
+        groups_without_protocol_metadata(&markdown_env.action_groups),
+        groups_without_protocol_metadata(&json_env.action_groups)
+    );
+    assert_eq!(
+        groups_without_protocol_metadata(&xml_env.action_groups),
+        groups_without_protocol_metadata(&json_env.action_groups)
+    );
     assert_eq!(markdown_env.context_compacts, json_env.context_compacts);
     assert_eq!(xml_env.context_compacts, json_env.context_compacts);
 }
@@ -128,7 +164,7 @@ fn json_markdown_xml_protocols_parse_readfile_selector_objects() {
     assert_protocols_equivalent(
         r#"{"free_talk":"reading","working_still_action":{"readfile":{"path":"src/main.rs","encoding":"utf-8","starter":{"line_nr":20},"ender":{"match":"fn main"},"max_bytes":8192}}}"#,
         "## Free_talk\nreading\n\n## Working_Still_Action\n```action\n{\"readfile\":{\"path\":\"src/main.rs\",\"encoding\":\"utf-8\",\"starter\":{\"line_nr\":20},\"ender\":{\"match\":\"fn main\"},\"max_bytes\":8192}}\n```",
-        "<response><free_talk>reading</free_talk><actions><readfile encoding=\"utf-8\" max_bytes=\"8192\"><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><match>fn main</match></ender></readfile></actions></response>",
+        "<response><free_talk>reading</free_talk><actions><readfile name=\"read main source range\" encoding=\"utf-8\" max_bytes=\"8192\"><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><match>fn main</match></ender></readfile></actions></response>",
     );
 }
 
@@ -137,7 +173,7 @@ fn json_markdown_xml_protocols_parse_same_working_actions() {
     assert_protocols_equivalent(
             r#"{"free_talk":"state","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Free_talk\nstate\n\n## Working_Still_Action\n```action\n[{\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}},{\"run_bash\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]\n```",
-            r#"<response><free_talk>state</free_talk><actions><parallel><memmgr type="durable" op="sql" limit="5"><sql>SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5</sql><params><item>%project%</item></params></memmgr><run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash></parallel></actions></response>"#,
+            r#"<response><free_talk>state</free_talk><actions><parallel><memmgr name="search durable project memory" type="durable" op="sql" limit="5"><sql>SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5</sql><params><item>%project%</item></params></memmgr><run_bash name="inspect working directory" timeout_ms="5000"><cmd>pwd</cmd></run_bash></parallel></actions></response>"#,
         );
 }
 
@@ -146,7 +182,7 @@ fn json_markdown_xml_protocols_parse_same_bare_action_array() {
     assert_protocols_equivalent(
             r#"{"free_talk":"checking","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Free_talk\nchecking\n\n## Working_Still_Action\n```action\n[{\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}},{\"run_bash\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]\n```",
-            r#"<response><free_talk>checking</free_talk><actions><parallel><memmgr type="durable" op="sql" limit="5"><sql>SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5</sql><params><item>%project%</item></params></memmgr><run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash></parallel></actions></response>"#,
+            r#"<response><free_talk>checking</free_talk><actions><parallel><memmgr name="search durable project memory" type="durable" op="sql" limit="5"><sql>SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5</sql><params><item>%project%</item></params></memmgr><run_bash name="inspect working directory" timeout_ms="5000"><cmd>pwd</cmd></run_bash></parallel></actions></response>"#,
         );
 }
 
@@ -155,7 +191,7 @@ fn json_markdown_xml_protocols_parse_same_mixed_action_group_array() {
     assert_protocols_equivalent(
             r#"{"free_talk":"checking","working_still_action":[[{"run_bash":{"cmd":"printf a","timeout_ms":5000}},{"run_bash":{"cmd":"printf b","timeout_ms":5000}}],{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
             "## Free_talk\nchecking\n\n## Working_Still_Action\n```action\n[[{\"run_bash\":{\"cmd\":\"printf a\",\"timeout_ms\":5000}},{\"run_bash\":{\"cmd\":\"printf b\",\"timeout_ms\":5000}}],{\"run_bash\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]\n```",
-            r#"<response><free_talk>checking</free_talk><actions><parallel><run_bash timeout_ms="5000"><cmd>printf a</cmd></run_bash><run_bash timeout_ms="5000"><cmd>printf b</cmd></run_bash></parallel><run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash></actions></response>"#,
+            r#"<response><free_talk>checking</free_talk><actions><parallel><run_bash name="print first marker" timeout_ms="5000"><cmd>printf a</cmd></run_bash><run_bash name="print second marker" timeout_ms="5000"><cmd>printf b</cmd></run_bash></parallel><run_bash name="inspect working directory" timeout_ms="5000"><cmd>pwd</cmd></run_bash></actions></response>"#,
         );
 }
 
@@ -168,7 +204,7 @@ fn json_markdown_xml_protocols_parse_complex_actions_with_protocol_like_string_a
     let markdown_raw = format!(
             "## Free_talk\nPlan text includes {{\"action\":\"run_bash\"}} only as text. Note text includes <working_still_action>fake</working_still_action>.\n\n## Working_Still_Action\n```action\n{action_payload}\n```"
         );
-    let xml_raw = r#"<response><free_talk><![CDATA[Plan text includes {"action":"run_bash"} only as text. Note text includes <working_still_action>fake</working_still_action>.]]></free_talk><actions><parallel><run_bash timeout_ms="5000"><cmd><![CDATA[printf '%s\n' '<working_still_action>{"action":"run_bash"}</working_still_action>' && printf '%s\n' '## Final_Answer not a section']]></cmd></run_bash><memmgr type="raw_chat" op="sql" limit="5"><sql>SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5</sql><params><item><![CDATA[%<response><status>ALL_FINISHED</status></response> {"working_still_action":[]} ## Working_Still_Action%]]></item></params></memmgr></parallel><run_bash timeout_ms="5000"><cmd>printf done</cmd></run_bash></actions></response>"#.to_string();
+    let xml_raw = r#"<response><free_talk><![CDATA[Plan text includes {"action":"run_bash"} only as text. Note text includes <working_still_action>fake</working_still_action>.]]></free_talk><actions><parallel><run_bash name="print protocol-like text" timeout_ms="5000"><cmd><![CDATA[printf '%s\n' '<working_still_action>{"action":"run_bash"}</working_still_action>' && printf '%s\n' '## Final_Answer not a section']]></cmd></run_bash><memmgr name="search protocol-like chat text" type="raw_chat" op="sql" limit="5"><sql>SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5</sql><params><item><![CDATA[%<response><status>ALL_FINISHED</status></response> {"working_still_action":[]} ## Working_Still_Action%]]></item></params></memmgr></parallel><run_bash name="print completion marker" timeout_ms="5000"><cmd>printf done</cmd></run_bash></actions></response>"#.to_string();
 
     assert_protocols_equivalent(&json_raw, &markdown_raw, &xml_raw);
 
@@ -258,11 +294,17 @@ fn json_markdown_xml_protocols_share_action_input_shape() {
         action
     ));
     let xml_env = parse_xml(
-        "<response><actions><run_bash timeout_ms=\"5000\"><cmd>pwd</cmd></run_bash></actions></response>",
+        "<response><actions><run_bash name=\"inspect working directory\" timeout_ms=\"5000\"><cmd>pwd</cmd></run_bash></actions></response>",
     );
     assert_eq!(json_env.repair_issue, None);
     assert_eq!(markdown_env.repair_issue, None);
     assert_eq!(xml_env.repair_issue, None);
-    assert_eq!(json_env.next_actions, markdown_env.next_actions);
-    assert_eq!(json_env.next_actions, xml_env.next_actions);
+    assert_eq!(
+        actions_without_protocol_metadata(&json_env.next_actions),
+        actions_without_protocol_metadata(&markdown_env.next_actions)
+    );
+    assert_eq!(
+        actions_without_protocol_metadata(&json_env.next_actions),
+        actions_without_protocol_metadata(&xml_env.next_actions)
+    );
 }

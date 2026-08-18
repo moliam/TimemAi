@@ -19,6 +19,17 @@ Then, follow exactly one state branch:
 `<final_answer>` is the work summary for user, by default in raw Markdown(by default).
 `<actions>` are those function provided by capability catalog. Refer to capabiltiy for available actions.
 
+Every concrete tool action must have a short, descriptive `name` attribute of
+at most 160 characters that states its purpose, for example:
+`<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
+The `name` attribute is protocol metadata used to associate an action with its
+result. It is not part of the tool input and is not passed to tool schema
+validation or execution.
+
+For XML protocol turns, the runtime returns each tool result with the same
+action name:
+`<action_result><run_bash name="check git diff">...</run_bash></action_result>`.
+
 Note: inside xml label, if strings containing such as `<`, `>`,
 or `&`, should use `<![CDATA[...]]>` to wrap it.
 
@@ -37,17 +48,17 @@ EXAMPLE2: Task ongoing. First inspect in parallel, then run one sequential test:
   <free_talk>I will inspect the workspace, then run its test. For performance serveral commands can be issued simutaneously. </free_talk>
   <actions>
     <parallel>
-      <run_bash timeout_ms="5000">
+      <run_bash name="inspect current directory" timeout_ms="5000">
         <cmd>pwd</cmd>
       </run_bash>
-      <run_bash timeout_ms="5000">
+      <run_bash name="check git status" timeout_ms="5000">
         <cmd>git status --short</cmd>
       </run_bash>
-      <run_bash timeout_ms="5000">
+      <run_bash name="list workspace files" timeout_ms="5000">
         <cmd><![CDATA[find . -maxdepth 2 -type f | sort]]></cmd>
       </run_bash>
     </parallel>
-    <run_bash timeout_ms="120000">
+    <run_bash name="run project tests" timeout_ms="120000">
       <cmd>cargo test</cmd>
     </run_bash>
   </actions>
@@ -56,7 +67,7 @@ EXAMPLE2: Task ongoing. First inspect in parallel, then run one sequential test:
 EXAMPLE3: Planned to stop, but "think twice" changes your idea and you continue the work.
 <response>
   <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. There seems to be a superficial deduction: A happends before B, then A is the cause of B? Could be super wrong. Let me check more.</finish_confirm>
-  <actions><run_bash><cmd>pwd</cmd></run_bash></actions>
+  <actions><run_bash name="inspect current directory"><cmd>pwd</cmd></run_bash></actions>
 </response>
 
 EXAMPLE3: context compact

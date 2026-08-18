@@ -78,6 +78,90 @@ fn is_action_result_prompt_type(prompt_type: &str) -> bool {
     prompt_type == "result_of_llm_action"
 }
 
+fn escape_xml_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_xml_attribute(text: &str) -> String {
+    escape_xml_text(text)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn escaped_xml_text_len(text: &str) -> usize {
+    text.chars()
+        .map(|ch| match ch {
+            '&' => 5,
+            '<' | '>' => 4,
+            _ => ch.len_utf8(),
+        })
+        .sum()
+}
+
+fn xml_prefix_end_for_escaped_budget(text: &str, budget: usize) -> usize {
+    let mut escaped_bytes = 0usize;
+    let mut end = 0usize;
+    for (index, ch) in text.char_indices() {
+        let char_bytes = match ch {
+            '&' => 5,
+            '<' | '>' => 4,
+            _ => ch.len_utf8(),
+        };
+        if escaped_bytes.saturating_add(char_bytes) > budget {
+            break;
+        }
+        escaped_bytes += char_bytes;
+        end = index + ch.len_utf8();
+    }
+    end
+}
+
+fn truncate_xml_result_text_for_budget(text: &str, budget: usize) -> String {
+    if escaped_xml_text_len(text) <= budget {
+        return escape_xml_text(text);
+    }
+
+    let mut retained_end = xml_prefix_end_for_escaped_budget(text, budget);
+    loop {
+        let truncated_words = text[retained_end..].split_whitespace().count();
+        let notice = format!(
+            "!!!Too long, {truncated_words} words truncated. Generate more actions if necessary !!!"
+        );
+        let notice_bytes = escaped_xml_text_len(&notice).saturating_add(1);
+        let retained_budget = budget.saturating_sub(notice_bytes);
+        let next_end = xml_prefix_end_for_escaped_budget(text, retained_budget);
+        if next_end == retained_end {
+            return format!(
+                "{}\n{}",
+                escape_xml_text(text[..retained_end].trim_end()),
+                escape_xml_text(&notice)
+            );
+        }
+        retained_end = next_end;
+    }
+}
+
+pub(crate) fn render_xml_action_result(
+    action: &str,
+    action_name: Option<&str>,
+    result: &str,
+) -> String {
+    let display_name = action_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(action);
+    let escaped_name = escape_xml_attribute(display_name);
+    let prefix = format!("<action_result><{action} name=\"{escaped_name}\">");
+    let suffix = format!("</{action}></action_result>");
+    let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES
+        .saturating_sub(prefix.len())
+        .saturating_sub(suffix.len());
+    let escaped_result = truncate_xml_result_text_for_budget(result.trim(), body_budget);
+    format!("{prefix}{escaped_result}{suffix}")
+}
+
 pub(crate) fn render_static_prompt(
     static_prompt: &str,
     capabilities: &CapabilityRegistry,
@@ -150,7 +234,7 @@ pub(crate) fn render_prompt_with_rendered_static(
                 last_was_action_result = false;
             }
             let is_action_result = is_action_result_prompt_type(&slice.prompt_type);
-            if is_action_result && !last_was_action_result {
+            if is_action_result && !last_was_action_result && !xml_delta {
                 out.push('\n');
                 out.push_str("The following are results of the actions generated in response:\n");
             }

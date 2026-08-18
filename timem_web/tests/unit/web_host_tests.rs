@@ -7656,8 +7656,8 @@ impl ModelClient for ToolGenPublishModel {
     ) -> Result<LlmResponse, String> {
         self.calls += 1;
         let content = if self.calls == 1 {
-            "<response><free_talk>Checking the reusable workflow.</free_talk><actions><run_bash timeout_ms=\"5000\"><cmd>printf toolgen-host-check</cmd></run_bash></actions></response>".to_string()
-        } else if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
+            "<response><free_talk>Checking the reusable workflow.</free_talk><actions><run_bash name=\"check reusable workflow\" timeout_ms=\"5000\"><cmd>printf toolgen-host-check</cmd></run_bash></actions></response>".to_string()
+        } else if prompt.contains(r#"<action_result><toolgen name="publish verified draft">"#) {
             confirmed_xml_response("<toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";
@@ -7689,7 +7689,7 @@ impl ModelClient for ToolGenPublishModel {
             )
             .unwrap();
             format!(
-                "<response><free_talk>Publishing the verified draft.</free_talk><actions><toolgen op=\"publish\"><draft_path>{}</draft_path></toolgen></actions></response>",
+                "<response><free_talk>Publishing the verified draft.</free_talk><actions><toolgen name=\"publish verified draft\" op=\"publish\"><draft_path>{}</draft_path></toolgen></actions></response>",
                 draft
             )
         };
@@ -7722,7 +7722,7 @@ impl ModelClient for InspectPathModel {
     ) -> Result<LlmResponse, String> {
         self.round += 1;
         let content = if self.round == 1 {
-            "<response><actions><self_tool type=\"path\"/></actions></response>".to_string()
+            "<response><actions><self_tool name=\"inspect runtime paths\" type=\"path\"/></actions></response>".to_string()
         } else {
             confirmed_xml_response("<final_answer>paths inspected</final_answer>")
         };
@@ -8045,10 +8045,10 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     assert!(prompt.contains("## ToolGen test"));
     assert!(!prompt.contains("ToolGen test_TOOLGEN"));
     let marker = "[TOOL_GEN_TASK] Please extract the reusable function";
-    let delta_start = prompt[..prompt.find(marker).unwrap()]
-        .rfind("[BEGIN DELTA]")
-        .unwrap();
-    let delta_end = prompt[delta_start..].find("[END DELTA]").unwrap() + delta_start;
+    let marker_at = prompt.find(marker).unwrap();
+    let delta_start = prompt[..marker_at].rfind("<prompt_delta ").unwrap();
+    let delta_end =
+        prompt[marker_at..].find("</prompt_delta>").unwrap() + marker_at + "</prompt_delta>".len();
     let toolgen_delta = &prompt[delta_start..delta_end];
     assert!(toolgen_delta.contains("## SYSTEM"));
     assert!(!toolgen_delta.contains("## USER"));
@@ -8098,8 +8098,10 @@ fn manual_toolgen_adds_optional_guidance_as_user_component() {
     let guidance_at = prompt
         .find("Prefer a Python CLI with JSON output.")
         .expect("optional ToolGen guidance must reach the model");
-    let delta_start = prompt[..guidance_at].rfind("[BEGIN DELTA]").unwrap();
-    let delta_end = prompt[guidance_at..].find("[END DELTA]").unwrap() + guidance_at;
+    let delta_start = prompt[..guidance_at].rfind("<prompt_delta ").unwrap();
+    let delta_end = prompt[guidance_at..].find("</prompt_delta>").unwrap()
+        + guidance_at
+        + "</prompt_delta>".len();
     let toolgen_delta = &prompt[delta_start..delta_end];
     assert!(toolgen_delta.contains("## USER"));
     let system_at = toolgen_delta.find("## SYSTEM").unwrap();

@@ -452,7 +452,7 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
     let _ = core.begin_turn("inspect runtime", None);
     let response = r#"<response>
   <free_talk>Inspecting the runtime.</free_talk>
-  <actions><self_tool type="params"/></actions>
+  <actions><self_tool name="inspect runtime parameters" type="params"/></actions>
 </response>"#;
     let step = core.apply_model_response(LlmResponse {
         content: response.to_string(),
@@ -469,8 +469,86 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
     assert!(prompt.contains("## Session Assistant"));
     assert!(prompt.contains(response));
     assert_eq!(prompt.matches("<response>").count(), 1);
-    assert!(prompt.contains("The following are results of the actions generated in response:"));
+    assert!(prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#));
+    assert!(!prompt.contains("The following are results of the actions generated in response:"));
     assert!(!prompt.contains("newly initiated actions"));
+}
+
+#[test]
+fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("xml_named_action_results"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Xml);
+    let _ = core.begin_turn("inspect runtime", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: r#"<response>
+  <actions>
+    <self_tool name="inspect runtime paths" type="path"/>
+    <parallel>
+      <self_tool name="inspect runtime parameters" type="params"/>
+      <self_tool name="inspect current directory" type="cwd" new_path="."/>
+    </parallel>
+  </actions>
+</response>"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected named XML action results, got {other:?}"),
+    };
+
+    assert!(
+        prompt.contains(r#"<action_result><self_tool name="inspect runtime paths">"#),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(r#"<action_result><self_tool name="inspect current directory">"#),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("The following are results of the actions generated in response:"));
+}
+
+#[test]
+fn xml_denied_approval_result_preserves_action_name() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("xml_named_denied_approval"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Xml);
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
+    let _ = core.begin_turn("remove a missing file", None);
+
+    let request = match core.apply_model_response(LlmResponse {
+        content: r#"<response><actions><run_bash name="remove missing file"><cmd>rm missing_named_file</cmd></run_bash></actions></response>"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedsUserApproval { request } => request,
+        other => panic!("expected approval request, got {other:?}"),
+    };
+
+    let prompt = match core.resolve_user_approval(&request.approval_id, false) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected denied approval result, got {other:?}"),
+    };
+    assert!(
+        prompt.contains(r#"<action_result><run_bash name="remove missing file">"#),
+        "{prompt}"
+    );
+    assert!(prompt.contains("status: denied_by_user"), "{prompt}");
 }
 
 #[test]
@@ -517,11 +595,11 @@ fn xml_raw_replay_uses_the_largest_response_accepted_by_runtime() {
 
     let _ = core.begin_turn("run the selected action", None);
     let raw = r#"discard-before
-<response><actions><self_tool type="path"/></actions></response>
+<response><actions><self_tool name="inspect runtime paths" type="path"/></actions></response>
 between-roots
 <response>
   <free_talk>selected larger response</free_talk>
-  <actions><self_tool type="params"/></actions>
+  <actions><self_tool name="inspect runtime parameters" type="params"/></actions>
 </response>
 discard-after"#;
     let step = core.apply_model_response(LlmResponse {
@@ -536,8 +614,8 @@ discard-after"#;
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("selected larger response"));
-    assert!(prompt.contains(r#"<self_tool type="params"/>"#));
-    assert!(!prompt.contains(r#"<self_tool type="path"/>"#));
+    assert!(prompt.contains(r#"<self_tool name="inspect runtime parameters" type="params"/>"#));
+    assert!(!prompt.contains(r#"<self_tool name="inspect runtime paths" type="path"/>"#));
     assert!(!prompt.contains("discard-before"));
     assert!(!prompt.contains("between-roots"));
     assert!(!prompt.contains("discard-after"));
@@ -3360,7 +3438,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         content: scored(
             r#"<response>
   <free_talk>用 SQL 列出 durable memory 最近记录来确认现状。</free_talk>
-  <actions><memmgr type="durable" op="sql" limit="10"><sql>SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 10</sql></memmgr></actions>
+  <actions><memmgr name="list recent durable memories" type="durable" op="sql" limit="10"><sql>SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 10</sql></memmgr></actions>
 </response>"#,
         ),
         model_name: "qwen-plus".to_string(),
@@ -3372,7 +3450,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(prompt.contains(r#"<action_result><memmgr name="list recent durable memories">"#));
     assert!(prompt.contains("第二条 durable 记录"));
     assert!(prompt.contains("第一条 durable 记录"));
 }
