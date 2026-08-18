@@ -20,7 +20,7 @@ Then, follow exactly one state branch:
 `<actions>` are those function provided by capability catalog. Refer to capabiltiy for available actions.
 
 Every concrete tool action must have a short, descriptive `name` attribute of
-at most 160 characters that states its purpose, for example:
+at most 128 characters that states its purpose, for example:
 `<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
 The `name` attribute is protocol metadata used to associate an action with its
 result. It is not part of the tool input and is not passed to tool schema
