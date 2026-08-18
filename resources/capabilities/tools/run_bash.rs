@@ -366,6 +366,7 @@ impl FileShellJobStore {
         .text
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_with_timeout_outcome(
         &self,
         command: &str,
@@ -382,6 +383,7 @@ impl FileShellJobStore {
         .to_action_outcome("run_bash")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_with_timeout_structured(
         &self,
         command: &str,
@@ -1360,6 +1362,7 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn polling_result(
     command: &str,
     state: &str,

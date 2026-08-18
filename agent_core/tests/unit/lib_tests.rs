@@ -287,10 +287,13 @@ fn action_output_at_or_below_safety_limit_is_preserved() {
 
 #[test]
 fn action_output_budget_accepts_exact_95_percent_and_rejects_the_next_token() {
+    const MAX_INPUT_TOKENS: u32 = 10_000;
+    const SAFETY_LIMIT_TOKENS: u32 = MAX_INPUT_TOKENS * ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT / 100;
+
     let mut at_limit = test_core("action_output_exact_95");
-    at_limit.set_max_llm_input_tokens(4_000);
+    at_limit.set_max_llm_input_tokens(MAX_INPUT_TOKENS);
     let current_tokens = estimate_prompt_tokens(&at_limit.render_prompt());
-    let available_tokens = 3_800u32
+    let available_tokens = SAFETY_LIMIT_TOKENS
         .saturating_sub(current_tokens)
         .saturating_sub(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS);
     assert!(available_tokens > 10);
@@ -301,9 +304,9 @@ fn action_output_budget_accepts_exact_95_percent_and_rejects_the_next_token() {
     )]));
 
     let mut over_limit = test_core("action_output_over_95");
-    over_limit.set_max_llm_input_tokens(4_000);
+    over_limit.set_max_llm_input_tokens(MAX_INPUT_TOKENS);
     let current_tokens = estimate_prompt_tokens(&over_limit.render_prompt());
-    let available_tokens = 3_800u32
+    let available_tokens = SAFETY_LIMIT_TOKENS
         .saturating_sub(current_tokens)
         .saturating_sub(PROMPT_DELTA_RENDER_OVERHEAD_TOKENS);
     let one_token_over = "x".repeat(available_tokens as usize * 4 + 1);
