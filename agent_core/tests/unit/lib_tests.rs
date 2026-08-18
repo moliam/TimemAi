@@ -53,7 +53,7 @@ fn test_core(name: &str) -> AgentCore {
         super::unique_id("tmp")
     ));
     AgentCore::new(
-        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
         CoreProfile {
             model: "test".to_string(),
         },

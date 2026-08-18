@@ -147,11 +147,7 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
     let runtime = McpRuntime::default();
     let tools: Vec<McpTool> = runtime.connect(&config).unwrap();
     let memory_dir = tmp_dir("mcp_full_path");
-    let mut core = test_core(
-        "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
-        profile("model"),
-        &memory_dir,
-    );
+    let mut core = test_core("STATIC\n{{TOOL_CATALOG}}\n", profile("model"), &memory_dir);
     core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
         .unwrap();
     let prompt = match core.begin_turn("Use the MCP echo tool", None) {
@@ -192,11 +188,7 @@ fn mcp_server_error_becomes_action_evidence_instead_of_protocol_repair() {
     let runtime = McpRuntime::default();
     let tools = runtime.connect(&config).unwrap();
     let memory_dir = tmp_dir("mcp_server_error");
-    let mut core = test_core(
-        "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
-        profile("model"),
-        &memory_dir,
-    );
+    let mut core = test_core("STATIC\n{{TOOL_CATALOG}}\n", profile("model"), &memory_dir);
     core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
         .unwrap();
     assert!(matches!(
@@ -244,11 +236,7 @@ fn unresponsive_mcp_tool_times_out_as_action_evidence_and_agent_continues() {
     let runtime = McpRuntime::default();
     let tools = runtime.connect(&config).unwrap();
     let memory_dir = tmp_dir("mcp_timeout_evidence");
-    let mut core = test_core(
-        "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
-        profile("model"),
-        &memory_dir,
-    );
+    let mut core = test_core("STATIC\n{{TOOL_CATALOG}}\n", profile("model"), &memory_dir);
     core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
         .unwrap();
     assert!(matches!(
@@ -1629,7 +1617,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
 #[test]
 fn response_context_compact_does_not_append_redundant_mcp_summary() {
     let mut core = test_core(
-        "STATIC\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+        "STATIC\n{{TOOL_CATALOG}}\n",
         profile("qwen-plus"),
         tmp_dir("response_context_compact_mcp"),
     );
@@ -6282,7 +6270,6 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(template.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     assert!(template.contains("{{CURRENT_PROTOCOL_LANG}}"));
     assert!(template.contains("{{TOOL_CATALOG}}"));
-    assert!(!template.contains("{{SKILL_HEADERS}}"));
     assert!(template.contains("Do not expose internal mechanisms"));
     assert!(template.contains("memory/storage structure"));
     assert!(template.contains("tool/capability catalog"));
@@ -6822,7 +6809,7 @@ fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
 #[test]
 fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
     let mut core = test_core(
-        "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
+        "## Tools\n{{TOOL_CATALOG}}",
         profile("qwen-plus"),
         tmp_dir("capability_prompt_catalog"),
     );
@@ -6845,8 +6832,7 @@ fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
 
 #[test]
 fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
-    let prompt =
-        CapabilityRegistry::builtin().enrich_static_prompt("{{TOOL_CATALOG}}\n\n{{SKILL_HEADERS}}");
+    let prompt = CapabilityRegistry::builtin().enrich_static_prompt("{{TOOL_CATALOG}}");
     let start = prompt.find("#### `memmgr`").expect("memmgr section");
     let rest = &prompt[start + "#### `memmgr`".len()..];
     let end = rest
@@ -7567,7 +7553,7 @@ example_json: |
     )
     .unwrap();
     let mut core = test_core(
-        "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
+        "## Tools\n{{TOOL_CATALOG}}",
         profile("qwen-plus"),
         tmp_dir("overlay_add_remove_active"),
     );
@@ -7599,7 +7585,7 @@ example_json: |
     )
     .unwrap();
     let mut filtered_core = test_core(
-        "## Tools\n{{TOOL_CATALOG}}\n\n## Skills\n{{SKILL_HEADERS}}",
+        "## Tools\n{{TOOL_CATALOG}}",
         profile("qwen-plus"),
         tmp_dir("overlay_add_remove_filtered"),
     );

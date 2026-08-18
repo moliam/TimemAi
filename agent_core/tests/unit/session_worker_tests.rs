@@ -3814,7 +3814,7 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
 
     let dir = tmp_dir("mcp_update_before_turn");
     let core = AgentCore::new(
-        "You are Timem.\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n{{SKILL_HEADERS}}",
+        "You are Timem.\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
         CoreProfile {
             model: "test-model".to_string(),
         },

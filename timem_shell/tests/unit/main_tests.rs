@@ -82,7 +82,6 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(STATIC_PROMPT.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     // Response schema is now inside protocol section file
     assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));
-    assert!(STATIC_PROMPT.contains("{{SKILL_HEADERS}}"));
     assert!(!STATIC_PROMPT.contains("resources/response_v1_summary.json"));
     assert!(!STATIC_PROMPT.contains("response_v1` schema summary"));
     assert!(!STATIC_PROMPT.contains("\"acceptance_check?\""));

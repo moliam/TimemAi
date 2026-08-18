@@ -26,7 +26,7 @@ optional TIMEM_CAPABILITIES_DIR overlay
         ↓ load at runtime
 CapabilityRegistry
         ↓ render
-{{TOOL_CATALOG}} / {{SKILL_HEADERS}} in the Markdown static prompt
+{{TOOL_CATALOG}} in the Markdown static prompt
         ↓ generic parse
 parse model next_actions action/intent/args
         ↓ resolve binding
