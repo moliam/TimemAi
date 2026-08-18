@@ -6420,7 +6420,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(template.contains("exactly protocol-compliant response"));
     assert!(template.contains("Answer based on collected evidence"));
     assert!(template.contains("Use emoji sparingly"));
-    assert!(template.contains("your response in this round"));
+    assert!(template.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!template.contains("replay of your response"));
     assert!(template.contains("Do not decorate ordinary headings, status updates, test results"));
     assert!(template.contains("Context maintenance"));
@@ -6585,6 +6585,11 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(json_prompt.contains("protocol-compliant response in JSON format"));
     assert!(json_prompt.contains("\"working_still_action\""));
     assert!(json_prompt.contains("\"ALL_FINISHED\""));
+    assert!(json_prompt.contains("[BEGIN DELTA]\ndelta_id: pd_1\ntime: 123"));
+    assert!(json_prompt.contains("[END DELTA]"));
+    assert!(!json_prompt.contains("<prompt_delta "));
+    assert!(!json_prompt.contains("</prompt_delta>"));
+    assert!(!json_prompt.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!json_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
     let mut xml_core = test_core(
@@ -6612,6 +6617,12 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("<summary>"));
     assert!(xml_prompt.contains("offload: will be saved into scratch memory"));
     assert!(xml_prompt.contains("## RESPONSE EXAMPLES"));
+    assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
+    assert!(xml_prompt.contains("</prompt_delta>"));
+    assert!(!xml_prompt.contains("[BEGIN DELTA]"));
+    assert!(!xml_prompt.contains("[END DELTA]"));
+    assert!(!xml_prompt.contains("delta_id: pd_1"));
+    assert!(!xml_prompt.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!xml_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }
 

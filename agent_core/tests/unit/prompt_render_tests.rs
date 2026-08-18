@@ -290,6 +290,42 @@ fn prompt_renderer_replaces_current_protocol_language() {
 }
 
 #[test]
+fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
+    let template = "{{PROMPT_DELTA_EXAMPLE}}";
+    let json = render_static_prompt(
+        template,
+        &CapabilityRegistry::builtin(),
+        &JsonSuiteV1,
+        "Ai7",
+        "startup",
+    );
+    let xml = render_static_prompt(
+        template,
+        &CapabilityRegistry::builtin(),
+        &XmlSuiteV1,
+        "Ai7",
+        "startup",
+    );
+
+    assert!(json.contains("[BEGIN DELTA]\ndelta_id: pd_1\ntime: 123"));
+    assert!(json.contains("[END DELTA]"));
+    assert!(!json.contains("<prompt_delta "));
+    assert!(!json.contains("</prompt_delta>"));
+    assert!(json.contains("## Ai7"));
+
+    assert!(xml.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
+    assert!(xml.contains("</prompt_delta>"));
+    assert!(!xml.contains("[BEGIN DELTA]"));
+    assert!(!xml.contains("[END DELTA]"));
+    assert!(!xml.contains("delta_id: pd_1"));
+    assert!(xml.contains("## Ai7"));
+
+    assert!(!json.contains("{{PROMPT_DELTA_EXAMPLE}}"));
+    assert!(!xml.contains("{{PROMPT_DELTA_EXAMPLE}}"));
+}
+
+
+#[test]
 fn prompt_renderer_uses_protocol_native_tool_synopses() {
     let template = "# Tools\n\n{{TOOL_CATALOG}}\n\n{{RESPONSE_PROTOCOL_SECTION}}";
     let xml = render_static_prompt(
