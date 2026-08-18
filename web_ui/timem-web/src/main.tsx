@@ -2587,7 +2587,7 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
   const after = activity.after_tokens;
   const ratio = before && after !== undefined ? Math.max(6, Math.min(100, (after / before) * 100)) : 36;
   return <section className="context-compact-notice" aria-label="Context compacted">
-    <div className="compact-icon"><Gauge size={17}/></div>
+    <div className="compact-icon"><Gauge size={13}/></div>
     <div className="compact-copy"><span>Context compacted</span><strong>{formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}</strong></div>
     <div className="compact-meter" aria-hidden="true"><span className="compact-before"/><span className="compact-after" style={{ width: `${ratio}%` }}/></div>
   </section>;
