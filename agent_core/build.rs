@@ -3,8 +3,6 @@ fn main() {
         "../resources/system_prompt/system_prompt.md",
         "../resources/protocol/json/response_protocol.md",
         "../resources/protocol/json/response_schema_summary.json",
-        "../resources/protocol/markdown/response_protocol.md",
-        "../resources/protocol/markdown/response_schema_summary.md",
         "../resources/protocol/xml/response_protocol.md",
         "../resources/capabilities/tools/capmgr.yaml",
         "../resources/capabilities/tools/memmgr.yaml",

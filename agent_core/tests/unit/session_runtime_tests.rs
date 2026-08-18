@@ -688,12 +688,12 @@ fn session_turn_repairs_empty_model_content() {
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Ok(llm("", 1_000, false)),
         Ok(llm(
-            "## Status\nfinished\n\n## Final_Answer\n空回复修复后成功。",
+            r#"{"status":"ALL_FINISHED","final_answer":"空回复修复后成功。"}"#,
             1_100,
             false,
         )),
@@ -1652,27 +1652,16 @@ fn sequential_group_with_long_timeout_command_hands_status_to_model() {
     core.shell_jobs
         .set_long_running_prompt_after_for_tests(Duration::from_millis(50));
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"## Free_talk
-启动顺序动作组。
-## Working_Still_Action
-```action
-[
-  {"run_bash":{"cmd":"printf quick","timeout_ms":3000}},
-  [{"run_bash":{"cmd":"sleep 2; printf late","timeout_ms":5000}}]
-]
-```"#,
+            r#"{"free_talk":"启动顺序动作组。","working_still_action":[{"run_bash":{"cmd":"printf quick","timeout_ms":3000}},[{"run_bash":{"cmd":"sleep 2; printf late","timeout_ms":5000}}]]}"#,
             1_000,
             false,
         )),
         Ok(llm(
-            r#"## Status
-finished
-## Final_Answer
-模型已根据长命令状态继续。"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"模型已根据长命令状态继续。"}"#,
             1_200,
             false,
         )),
@@ -1725,32 +1714,16 @@ fn session_turn_executes_parallel_action_group_before_next_group() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"## Free_talk
-正在并行检查两个本地状态。
-
-## Working_Still_Action
-```action
-[
-  [
-    {"run_bash":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
-    {"run_bash":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
-  ],
-  {"run_bash":{"cmd":"printf group_c","timeout_ms":3000}}
-]
-```"#,
+            r#"{"free_talk":"正在并行检查两个本地状态。","working_still_action":[[{"run_bash":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},{"run_bash":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}],{"run_bash":{"cmd":"printf group_c","timeout_ms":3000}}]}"#,
             1_000,
             false,
         )),
         Ok(llm(
-            r#"## Status
-finished
-
-## Final_Answer
-分组动作完成。"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"分组动作完成。"}"#,
             1_200,
             false,
         )),
@@ -1795,7 +1768,7 @@ fn session_turn_cancels_parallel_long_running_bash_actions() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let started = Instant::now();
     let mut ui = CancelAfterDelayUi {
         started,
@@ -1810,13 +1783,10 @@ fn session_turn_cancels_parallel_long_running_bash_actions() {
         shell_quote(&pid_b)
     );
     let response = format!(
-        r#"## Working_Still_Action
-```action
-[[
+        r#"{{"working_still_action":[[
   {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
   {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
-]]
-```"#,
+]]}}"#,
         serde_json::to_string(&command_a).unwrap(),
         serde_json::to_string(&command_b).unwrap(),
     );
@@ -1869,7 +1839,7 @@ fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_act
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let started = Instant::now();
     let mut ui = CancelAfterDelayUi {
         started,
@@ -1881,13 +1851,10 @@ fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_act
         shell_quote(&running_pid)
     );
     let response = format!(
-        r#"## Working_Still_Action
-```action
-[[
+        r#"{{"working_still_action":[[
   {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
   {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
-]]
-```"#,
+]]}}"#,
         serde_json::to_string(&completed_command).unwrap(),
         serde_json::to_string(&running_command).unwrap(),
     );
@@ -1935,7 +1902,7 @@ fn session_turn_stop_cancels_parallel_bash_after_approval() {
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let started = Instant::now();
     let mut ui = ApproveAndCancelAfterDelayUi {
         started,
@@ -1950,13 +1917,10 @@ fn session_turn_stop_cancels_parallel_bash_after_approval() {
         )
     });
     let response = format!(
-        r#"## Working_Still_Action
-```action
-[[
+        r#"{{"working_still_action":[[
   {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
   {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}}
-]]
-```"#,
+]]}}"#,
         serde_json::to_string(&commands[0]).unwrap(),
         serde_json::to_string(&commands[1]).unwrap(),
     );
@@ -2000,32 +1964,16 @@ fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_orde
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"## Free_talk
-并行执行两个 bash，同时执行一个 builtin 查询。
-
-## Working_Still_Action
-```action
-[
-  [
-    {"run_bash":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},
-    {"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
-    {"run_bash":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}
-  ]
-]
-```"#,
+            r#"{"free_talk":"并行执行两个 bash，同时执行一个 builtin 查询。","working_still_action":[[{"run_bash":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},{"run_bash":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}]]}"#,
             1_000,
             false,
         )),
         Ok(llm(
-            r#"## Status
-finished
-
-## Final_Answer
-混合并行动作完成。"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"混合并行动作完成。"}"#,
             1_200,
             false,
         )),
@@ -2080,31 +2028,16 @@ fn session_turn_parallel_group_runs_readfiles_concurrently_and_keeps_declared_or
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.change_prompt_cwd(dir.to_string_lossy()).unwrap();
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"## Free_talk
-并行读取两个文件。
-
-## Working_Still_Action
-```action
-[
-  [
-    {"readfile":{"path":"first.txt"}},
-    {"readfile":{"path":"second.txt"}}
-  ]
-]
-```"#,
+            r#"{"free_talk":"并行读取两个文件。","working_still_action":[[{"readfile":{"path":"first.txt"}},{"readfile":{"path":"second.txt"}}]]}"#,
             1_000,
             false,
         )),
         Ok(llm(
-            r#"## Status
-finished
-
-## Final_Answer
-并行读取完成。"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"并行读取完成。"}"#,
             1_200,
             false,
         )),
@@ -2152,34 +2085,18 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = ApproveAllUi {
         approval_requests: 0,
     };
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"## Free_talk
-先审批两个 Bash，然后并发执行。
-
-## Working_Still_Action
-```action
-[
-  [
-    {"run_bash":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},
-    {"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},
-    {"run_bash":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}
-  ]
-]
-```"#,
+            r#"{"free_talk":"先审批两个 Bash，然后并发执行。","working_still_action":[[{"run_bash":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},{"run_bash":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}]]}"#,
             1_000,
             false,
         )),
         Ok(llm(
-            r#"## Status
-finished
-
-## Final_Answer
-审批后的并行动作完成。"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"审批后的并行动作完成。"}"#,
             1_200,
             false,
         )),
@@ -2210,20 +2127,29 @@ finished
             "approved parallel bash actions should run concurrently after approval; elapsed={elapsed:?}"
         );
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
-    let first_bash = second_parts
+    let results_start = second_parts
         .new_delta
-        .find("Command: sleep 1; printf approved_a")
+        .find("Action result: run_bash")
         .unwrap();
-    let builtin = second_parts
-        .new_delta
+    let results = &second_parts.new_delta[results_start..];
+    let mut bash_results = results.match_indices("Action result: run_bash");
+    let first_bash = bash_results.next().expect("first run_bash result").0;
+    let second_bash = bash_results.next().expect("second run_bash result").0;
+    assert!(
+        bash_results.next().is_none(),
+        "expected exactly two run_bash results: {results}"
+    );
+    let builtin = results
         .find("Action result: memmgr")
-        .unwrap();
-    let second_bash = second_parts
-        .new_delta
-        .find("Command: sleep 1; printf approved_b")
-        .unwrap();
-    assert!(first_bash < builtin);
-    assert!(builtin < second_bash);
+        .expect("memmgr result");
+    assert!(first_bash < builtin, "{results}");
+    assert!(builtin < second_bash, "{results}");
+    assert!(
+        results[first_bash..builtin].contains("approved_a"),
+        "{results}"
+    );
+    assert!(results[second_bash..].contains("approved_b"), "{results}");
+    assert!(!results.contains("Command:"), "{results}");
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_approval"), 2);
     let _ = std::fs::remove_dir_all(dir);
@@ -2517,7 +2443,6 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
         test_profile(),
         &dir,
     );
-    core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -2560,83 +2485,6 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
     assert!(second_parts
         .static_prompt
         .contains("Always use exactly one top-level JSON object."));
-    assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
-    assert!(second_parts.new_delta.contains("Action result: memmgr"));
-    let second_blocks = crate::plan_incremental_cache(second_parts);
-    assert_eq!(second_blocks.len(), 3);
-    assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);
-    assert!(second_blocks[1..]
-        .iter()
-        .all(|block| block.cache == crate::CacheControl::Ephemeral));
-}
-
-#[test]
-fn session_turn_preserves_cache_plan_with_markdown_response_protocol() {
-    let dir = tmp_dir("session_cache_plan_markdown_protocol");
-    let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
-        test_profile(),
-        &dir,
-    );
-    core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
-    let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
-    let mut ui = NoopTurnUi;
-    let mut model = ReplayModel::new([
-        Ok(llm(
-            r##"## Free_talk
-查询 scratch 后继续。
-
-## Working_Still_Action
-```action
-{"memmgr": {
-    "type": "scratch",
-    "op": "search",
-    "search_text": "",
-    "limit": 3
-  }
-}
-```"##,
-            5_000,
-            false,
-        )),
-        Ok(llm(
-            r#"## Status
-finished
-
-## Final_Answer
-没有找到相关 scratch。"#,
-            5_800,
-            false,
-        )),
-    ]);
-
-    let outcome = run_session_turn_with_model_client(
-        &mut core,
-        &mut config,
-        TurnInput {
-            input: "帮我看看最近 scratch 里有什么",
-            session: "cache_markdown_session",
-            audit_file: &audit,
-            runtime: "timem_native_shell",
-            run_bash_target: "user_local_machine",
-            additional_context: None,
-        },
-        &mut ui,
-        None,
-        &mut model,
-    );
-
-    assert_eq!(outcome.text, "没有找到相关 scratch。");
-    assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[0].contains("The top-level response is Markdown, not JSON."));
-    assert!(model.prompts[1].contains("The top-level response is Markdown, not JSON."));
-
-    let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
-    assert!(second_parts
-        .static_prompt
-        .contains("The top-level response is Markdown, not JSON."));
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
     assert!(second_parts.new_delta.contains("Action result: memmgr"));
     let second_blocks = crate::plan_incremental_cache(second_parts);
@@ -3218,61 +3066,6 @@ fn session_turn_terminal_protocol_failure_does_not_consume_or_revive_late_supple
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_supplement"), 0);
     assert_eq!(audit_event_count(&events, "turn_final"), 1);
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn session_turn_markdown_repair_keeps_markdown_protocol_instruction() {
-    let dir = tmp_dir("markdown_repair_protocol_instruction");
-    let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
-        test_profile(),
-        &dir,
-    );
-    core.set_response_protocol(crate::ResponseProtocolKind::Markdown);
-    let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
-    let mut ui = NoopTurnUi;
-    let mut model = ReplayModel::new([
-        Ok(llm(
-            "## Free_talk\nI know the answer but forgot to provide an answer section.",
-            5_000,
-            false,
-        )),
-        Ok(llm(
-            "## Status\nfinished\n\n## Final_Answer\n当前协议要求回复 Markdown sections。",
-            5_100,
-            false,
-        )),
-    ]);
-
-    let outcome = run_session_turn_with_model_client(
-        &mut core,
-        &mut config,
-        TurnInput {
-            input: "现在给你的 prompt 让你回复 JSON 还是 Markdown？",
-            session: "markdown_repair_session",
-            audit_file: &audit,
-            runtime: "timem_native_shell",
-            run_bash_target: "user_local_machine",
-            additional_context: None,
-        },
-        &mut ui,
-        None,
-        &mut model,
-    );
-
-    assert_eq!(outcome.text, "当前协议要求回复 Markdown sections。");
-    assert_eq!(model.prompts.len(), 2);
-    let repair_prompt = &model.prompts[1];
-    assert!(repair_prompt.contains("## SYSTEM"));
-    assert!(repair_prompt.contains("response is not protocol compliant"));
-    assert!(repair_prompt.contains("Markdown response protocol"));
-    assert!(repair_prompt.contains("## Free_talk"));
-    assert!(repair_prompt.contains("## Working_Still_Action"));
-    assert!(!repair_prompt.contains("Return exactly one valid JSON object"));
-    assert!(!repair_prompt.contains("Do not use markdown fences"));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -4116,14 +3909,15 @@ impl ModelClient for CompactThenFinishModel {
                 .expect("delta id in first prompt");
             Ok(llm(
                 format!(
-                    "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndiscard: {delta_id}\nsummary:\n保留当前任务目标和下一步。"
+                    r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"保留当前任务目标和下一步。"}}}}"#,
+                    serde_json::to_string(&delta_id).unwrap()
                 ),
                 3_000,
                 false,
             ))
         } else {
             Ok(llm(
-                "## Status\nfinished\n\n## Final_Answer\ncompact done",
+                r#"{"status":"ALL_FINISHED","final_answer":"compact done"}"#,
                 1_500,
                 false,
             ))
@@ -4137,7 +3931,7 @@ fn session_turn_context_compact_emits_structured_topic() {
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
+    config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = RecordingTopicUi::default();
     let mut model = CompactThenFinishModel {
         prompts: Vec::new(),
@@ -4171,88 +3965,6 @@ fn session_turn_context_compact_emits_structured_topic() {
     assert_eq!(compact.discarded_delta_ids.len(), 1);
     assert!(compact.offloaded_delta_ids.is_empty());
     assert!(compact.scratch_id.is_none());
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn session_turn_markdown_protocol_executes_actions_and_emits_topic_events() {
-    let dir = tmp_dir("markdown_protocol_observation_e2e");
-    let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
-    core.set_bash_approval_mode(BashApprovalMode::Approve);
-    let mut config = test_config();
-    config.response_protocol = crate::ResponseProtocolKind::Markdown;
-    let mut ui = RecordingTopicUi::default();
-    let mut model = ReplayModel::new([
-        Ok(llm(
-            r#"## Free_talk
-正在检查本地 shell。
-
-## Working_Still_Action
-```action
-{"run_bash": {
-    "cmd": "printf markdown-ok",
-    "timeout_ms": 5000
-  }
-}
-```"#,
-            2_000,
-            false,
-        )),
-        Ok(llm(
-            r#"## Status
-finished
-
-## Final_Answer
-Markdown 协议动作已执行。"#,
-            2_200,
-            false,
-        )),
-    ]);
-
-    let outcome = run_session_turn_with_model_client(
-        &mut core,
-        &mut config,
-        TurnInput {
-            input: "用 markdown 协议执行一次 shell",
-            session: "markdown_session",
-            audit_file: &audit,
-            runtime: "timem_native_shell",
-            run_bash_target: "user_local_machine",
-            additional_context: None,
-        },
-        &mut ui,
-        None,
-        &mut model,
-    );
-
-    assert_eq!(outcome.text, "Markdown 协议动作已执行。");
-    assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains("Action result: run_bash"));
-    assert!(model.prompts[1].contains("markdown-ok"));
-    assert!(ui.events.iter().any(|event| {
-        event
-            .as_model_response()
-            .map(|topic| topic.free_talk.contains("正在检查本地 shell。"))
-            .unwrap_or(false)
-    }));
-    assert!(ui.events.iter().any(|event| {
-        event.as_action().is_some_and(|topic| {
-            topic.action == "run_bash"
-                && topic.active
-                && topic.kind
-                    == CoreActionKind::Bash {
-                        command: "printf markdown-ok".to_string(),
-                        mode: "normal".to_string(),
-                        interval_ms: None,
-                        timeout_ms: Some(5000),
-                        loop_timeout_ms: None,
-                        once_timeout_ms: None,
-                    }
-        })
-    }));
-    let events = read_audit_events(&audit);
-    assert_eq!(audit_event_count(&events, "turn_final"), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
 

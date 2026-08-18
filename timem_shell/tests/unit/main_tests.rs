@@ -465,7 +465,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         timeout_secs: 120,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
@@ -550,7 +550,7 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
         timeout_secs: 120,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
@@ -608,7 +608,7 @@ fn config_protocol_update_preserves_explicit_endpoint() {
         timeout_secs: 120,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
@@ -671,7 +671,7 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let banner = render_startup_banner(
@@ -813,7 +813,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let default_banner = render_startup_banner(
@@ -835,7 +835,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let override_banner = render_startup_banner(
@@ -870,7 +870,7 @@ fn startup_banner_highlights_custom_model_and_base_url() {
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let banner = render_startup_banner(
@@ -2143,10 +2143,7 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
     fs::create_dir_all(&workspace).unwrap();
     let launch_env = HashMap::from([
         ("TIMEM_MODEL".to_string(), "launch-model".to_string()),
-        (
-            "TIMEM_RESPONSE_PROTOCOL".to_string(),
-            "markdown".to_string(),
-        ),
+        ("TIMEM_RESPONSE_PROTOCOL".to_string(), "json".to_string()),
     ]);
     let session = StoredSession {
         session_id: "web_session_env".to_string(),

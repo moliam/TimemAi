@@ -1,4 +1,5 @@
 use crate::prompt_render::{split_formatted_response_trailer, RESPONSE_TRAILER};
+use crate::response_protocol::KNOWN_PROMPT_BOUNDARIES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptBlockRole {
@@ -34,22 +35,24 @@ struct PromptSegment {
 const DYNAMIC_TAIL_CACHE_BLOCKS: usize = 3;
 
 pub fn split_prompt(full_prompt: &str) -> (String, String) {
-    const BEGIN_MARKER: &str = "[BEGIN SYSTEM PROMPT]";
-    const END_MARKER: &str = "[END SYSTEM PROMPT]";
-    let Some(begin_idx) = full_prompt.find(BEGIN_MARKER) else {
-        return (String::new(), full_prompt.to_string());
-    };
-    let content_start = begin_idx + BEGIN_MARKER.len();
-    let Some(end_idx) = full_prompt[content_start..].find(END_MARKER) else {
-        return (String::new(), full_prompt.to_string());
-    };
-    let static_content = full_prompt[content_start..content_start + end_idx]
-        .trim()
-        .to_string();
-    let dynamic_part = full_prompt[content_start + end_idx + END_MARKER.len()..]
-        .trim_start_matches(['\n', '\r', ' ', '\t'])
-        .to_string();
-    (static_content, dynamic_part)
+    for boundaries in KNOWN_PROMPT_BOUNDARIES {
+        let Some(begin_idx) = full_prompt.find(boundaries.static_begin) else {
+            continue;
+        };
+        let content_start = begin_idx + boundaries.static_begin.len();
+        let Some(end_idx) = full_prompt[content_start..].find(boundaries.static_end) else {
+            continue;
+        };
+        let static_content = full_prompt[content_start..content_start + end_idx]
+            .trim()
+            .to_string();
+        let dynamic_part = full_prompt[content_start + end_idx + boundaries.static_end.len()..]
+            .trim_start_matches(['\n', '\r', ' ', '\t'])
+            .to_string();
+        return (static_content, dynamic_part);
+    }
+
+    (String::new(), full_prompt.to_string())
 }
 
 pub fn split_old_and_new_delta(dynamic_prompt: &str) -> (String, String) {
@@ -169,15 +172,14 @@ pub fn stable_text_fingerprint(text: &str) -> String {
 
 fn prompt_delta_segment_starts(text: &str) -> Vec<usize> {
     let mut starts = Vec::new();
-    if text.starts_with("[BEGIN DELTA]")
-        || text.starts_with("[BEGIN SEGMENT ")
-        || text.starts_with("<prompt_delta ")
-    {
-        starts.push(0);
-    }
-    for marker in ["\n[BEGIN DELTA]", "\n[BEGIN SEGMENT ", "\n<prompt_delta "] {
+    for boundaries in KNOWN_PROMPT_BOUNDARIES {
+        let marker = boundaries.delta_start_marker();
+        if text.starts_with(marker) {
+            starts.push(0);
+        }
+        let line_marker = format!("\n{marker}");
         let mut offset = 0;
-        while let Some(relative) = text[offset..].find(marker) {
+        while let Some(relative) = text[offset..].find(&line_marker) {
             let start = offset + relative + 1;
             if !starts.contains(&start) {
                 starts.push(start);
@@ -190,23 +192,9 @@ fn prompt_delta_segment_starts(text: &str) -> Vec<usize> {
 }
 
 fn segment_delta_id(segment: &str) -> Option<String> {
-    let first_line = segment.lines().next().unwrap_or_default();
-    if let Some(rest) = first_line.strip_prefix("<prompt_delta ") {
-        if let Some(rest) = rest.split_once("id=\"").map(|(_, rest)| rest) {
-            if let Some((id, _)) = rest.split_once('"') {
-                if !id.is_empty() {
-                    return Some(id.to_string());
-                }
-            }
-        }
-    }
-
-    segment.lines().find_map(|line| {
-        line.strip_prefix("delta_id:")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
+    KNOWN_PROMPT_BOUNDARIES
+        .iter()
+        .find_map(|boundaries| boundaries.parse_delta_id(segment))
 }
 
 fn split_prompt_segments(dynamic_prompt: &str) -> Vec<PromptSegment> {

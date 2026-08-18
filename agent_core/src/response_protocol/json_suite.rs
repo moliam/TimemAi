@@ -1,6 +1,9 @@
 use serde_json::Value;
 
-use super::{ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite};
+use super::{
+    ParsedContextCompact, ParsedEnvelope, PromptBoundarySpec, ResponseProtocolSuite,
+    BRACKETED_PROMPT_BOUNDARIES,
+};
 use crate::capability::CapabilityRegistry;
 
 /// JSON envelope v1 response protocol.
@@ -15,8 +18,14 @@ impl ResponseProtocolSuite for JsonSuiteV1 {
     fn name(&self) -> &str {
         "json_v1"
     }
+    fn prompt_boundaries(&self) -> &'static PromptBoundarySpec {
+        &BRACKETED_PROMPT_BOUNDARIES
+    }
     fn lang_format(&self) -> &str {
         "JSON"
+    }
+    fn action_result_heading(&self) -> Option<&str> {
+        Some("The following are results of the actions generated in response:")
     }
     fn response_shape_hint(&self) -> &str {
         "one JSON object {...}"
@@ -320,6 +329,9 @@ pub fn protocol_repair_instruction(issue: &str) -> &'static str {
         return "检查到刚刚的输出格式有点问题：final_answer/final_response 不是工具 action。最终回答请使用 status:\"ALL_FINISHED\" 和 final_answer 顶层字段，不要放在 working_still_action/action 中。Return exactly one valid JSON object. Do not use markdown fences.";
     }
     match issue {
+        "truncated_model_output" => {
+            "检查到刚刚的输出被 max output token 截断，未形成完整 JSON。请返回更短的、完整的 JSON object；长报告可用 run_bash 写入文件后在 final_answer 中给出路径。Return exactly one valid JSON object. Do not use markdown fences."
+        }
         "final_answer_requires_status_finished" => {
             "检查到刚刚的输出格式有点问题：你提供了 final_answer，但缺少 status:\"ALL_FINISHED\"。如果所有用户的 open/pending 请求已经完成，请同时提供 status:\"ALL_FINISHED\" 和 final_answer；这不会关闭 Timem session。如果仍需要 runtime 继续工作，请去掉 final_answer，并提供 working_still_action。Return exactly one valid JSON object. Do not use markdown fences."
         }

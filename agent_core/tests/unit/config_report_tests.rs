@@ -10,7 +10,7 @@ fn config() -> ModelServiceConfig {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol: ApiProtocol::OpenAiCompatible,
-        response_protocol: crate::ResponseProtocolKind::Markdown,
+        response_protocol: crate::ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }

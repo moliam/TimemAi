@@ -149,7 +149,7 @@ fn test_config() -> ModelServiceConfig {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol: ApiProtocol::OpenAiCompatible,
-        response_protocol: crate::ResponseProtocolKind::Markdown,
+        response_protocol: crate::ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
@@ -205,7 +205,7 @@ impl ModelClient for ImmediateFinalPromptCaptureModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         Ok(LlmResponse {
-            content: "## Status\nfinished\n\n## Final_Answer\nIMMEDIATE_FINAL".to_string(),
+            content: r#"{"status":"ALL_FINISHED","final_answer":"IMMEDIATE_FINAL"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -242,9 +242,9 @@ impl ModelClient for SupplementReplayModel {
         }
         let has_supplement = prompt.contains("## USER") && prompt.contains("SUPPLEMENT");
         let content = if has_supplement {
-            "## Status\nfinished\n\n## Final_Answer\nSUPPLEMENT_WORKER_OK"
+            r#"{"status":"ALL_FINISHED","final_answer":"SUPPLEMENT_WORKER_OK"}"#
         } else {
-            "## Status\nfinished\n\n## Final_Answer\nSTALE"
+            r#"{"status":"ALL_FINISHED","final_answer":"STALE"}"#
         };
         Ok(LlmResponse {
             content: content.to_string(),
@@ -1010,16 +1010,13 @@ impl ModelClient for LongToolGenWorkflowModel {
 fn toolgen_completion_instruction_tracks_the_active_response_protocol() {
     let xml = toolgen_completion_instruction(ResponseProtocolKind::Xml);
     let json = toolgen_completion_instruction(ResponseProtocolKind::Json);
-    let markdown = toolgen_completion_instruction(ResponseProtocolKind::Markdown);
     assert!(xml.contains("<toolgen_retrospect>"));
     assert!(xml.contains("<finish_confirm>"));
     assert!(xml.contains("<final_answer>"));
     assert!(json.contains("\"toolgen_retrospect\""));
     assert!(json.contains("\"status\":\"ALL_FINISHED\""));
-    assert!(markdown.contains("## ToolGen_Retrospect"));
-    assert!(markdown.contains("## Final_Answer"));
     assert!(!json.contains("## ToolGen_Retrospect"));
-    assert!(!markdown.contains("<toolgen_retrospect>"));
+    assert!(!json.contains("<toolgen_retrospect>"));
 }
 
 #[test]
@@ -1048,11 +1045,7 @@ fn toolgen_system_task_is_marked_and_contains_a_complete_fence_free_reference() 
 
 #[test]
 fn ordinary_prompt_does_not_advertise_manual_toolgen_response_fields() {
-    for protocol in [
-        ResponseProtocolKind::Xml,
-        ResponseProtocolKind::Json,
-        ResponseProtocolKind::Markdown,
-    ] {
+    for protocol in [ResponseProtocolKind::Xml, ResponseProtocolKind::Json] {
         let dir = tmp_dir("ordinary_prompt_without_toolgen");
         let mut core = AgentCore::new(
             "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
@@ -1345,7 +1338,7 @@ impl ModelClient for ManagerOkModel {
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
         Ok(LlmResponse {
-            content: "## Status\nfinished\n\n## Final_Answer\nMANAGER_OK".to_string(),
+            content: r#"{"status":"ALL_FINISHED","final_answer":"MANAGER_OK"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -1633,7 +1626,7 @@ impl ModelClient for BlockingManagerModel {
             thread::sleep(Duration::from_millis(5));
         }
         Ok(LlmResponse {
-            content: "## Status\nfinished\n\n## Final_Answer\nCOUNT_OK".to_string(),
+            content: r#"{"status":"ALL_FINISHED","final_answer":"COUNT_OK"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -1736,20 +1729,9 @@ impl ModelClient for ApprovalReplayModel {
         let call_no = *calls;
         drop(calls);
         let content = if prompt.contains("denied_by_user") {
-            "## Status\nfinished\n\n## Final_Answer\nDENIED_OK"
+            r#"{"status":"ALL_FINISHED","final_answer":"DENIED_OK"}"#
         } else {
-            r#"## Free_talk
-需要用户确认后执行本地命令。
-
-## Working_Still_Action
-```action
-{
-  "run_bash": {
-    "cmd": "printf approval-worker-ok",
-    "timeout_ms": 5000
-  }
-}
-```"#
+            r#"{"free_talk":"需要用户确认后执行本地命令。","working_still_action":{"run_bash":{"cmd":"printf approval-worker-ok","timeout_ms":5000}}}"#
         };
         Ok(LlmResponse {
             content: content.to_string(),
@@ -1789,7 +1771,7 @@ impl ModelClient for AssistantHeadingModel {
             );
         }
         Ok(LlmResponse {
-            content: "## Status\nfinished\n\n## Final_Answer\nok".to_string(),
+            content: r#"{"status":"ALL_FINISHED","final_answer":"ok"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -2006,7 +1988,7 @@ impl ModelClient for CancellableCountingModel {
             std::thread::sleep(Duration::from_millis(10));
         }
         Ok(LlmResponse {
-            content: "## Status\nfinished\n\n## Final_Answer\nDONE".to_string(),
+            content: r#"{"status":"ALL_FINISHED","final_answer":"DONE"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -2253,7 +2235,10 @@ impl ModelClient for ConcurrentWorkerModel {
             _ => "UNKNOWN_WORKER",
         };
         Ok(LlmResponse {
-            content: format!("## Status\nfinished\n\n## Final_Answer\n{answer}"),
+            content: format!(
+                r#"{{"status":"ALL_FINISHED","final_answer":{}}}"#,
+                serde_json::to_string(&answer).unwrap()
+            ),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -2392,10 +2377,10 @@ impl ModelClient for WorkerCountModel {
         self.call_no += 1;
         let content = if self.call_no == 1 {
             self.first_call_barrier.wait();
-            "## Status\nworking\n\n## Free_talk\n正在执行并发计数测试。\n\n## Working_Still_Action\n```action\n{\"self_tool\":{\"type\":\"params\"}}\n```"
+            r#"{"status":"working","free_talk":"正在执行并发计数测试。","working_still_action":{"self_tool":{"type":"params"}}}"#
                     .to_string()
         } else {
-            "## Status\nfinished\n\n## Final_Answer\nWORKER_COUNT_DONE".to_string()
+            r#"{"status":"ALL_FINISHED","final_answer":"WORKER_COUNT_DONE"}"#.to_string()
         };
         Ok(LlmResponse {
             content,
@@ -2752,9 +2737,6 @@ fn protocol_turn_payload(protocol: ResponseProtocolKind, answer: &str, free_talk
             "final_answer": answer,
         })
         .to_string(),
-        ResponseProtocolKind::Markdown => {
-            format!("## Free_talk\n{free_talk}\n\n## Status\nfinished\n\n## Final_Answer\n{answer}")
-        }
         ResponseProtocolKind::Xml => {
             confirmed_xml_response(&format!("<response><free_talk>{free_talk}</free_talk><final_answer>{answer}</final_answer></response>"))
         }
@@ -2955,8 +2937,13 @@ impl ModelClient for StressWorkerModel {
         }
         if completed_actions < target_actions {
             let content = format!(
-                "## Free_talk\n{}\n\n## Working_Still_Action\n```action\n{}\n```",
-                stress_progress(self.worker_idx, turn_idx, completed_actions),
+                r#"{{"free_talk":{},"working_still_action":{}}}"#,
+                serde_json::to_string(&stress_progress(
+                    self.worker_idx,
+                    turn_idx,
+                    completed_actions
+                ))
+                .unwrap(),
                 stress_action_response(self.worker_idx, turn_idx, completed_actions)
             );
             return Ok(LlmResponse {
@@ -2980,7 +2967,10 @@ impl ModelClient for StressWorkerModel {
             format!("WORKER_{}_TURN_{turn_idx}_OK", self.worker_idx)
         };
         Ok(LlmResponse {
-            content: format!("## Status\nfinished\n\n## Final_Answer\n{answer}"),
+            content: format!(
+                r#"{{"status":"ALL_FINISHED","final_answer":{}}}"#,
+                serde_json::to_string(&answer).unwrap()
+            ),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -3013,12 +3003,12 @@ fn session_workers_stress_ui_threads_supplements_and_renames() {
             },
             &dir,
         );
-        core.set_response_protocol(ResponseProtocolKind::Markdown);
+        core.set_response_protocol(ResponseProtocolKind::Json);
         core.set_bash_approval_mode(BashApprovalMode::Approve);
         core.set_max_rounds(TEST_MAX_ROUNDS as u32);
         core.set_max_llm_input_tokens(1_000_000);
         let mut config = test_config();
-        config.response_protocol = ResponseProtocolKind::Markdown;
+        config.response_protocol = ResponseProtocolKind::Json;
         let worker = CoreSessionWorker::spawn_with_model_client(
             core,
             config,
@@ -3206,7 +3196,7 @@ fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
     for worker_idx in 0..WORKERS {
         let protocol = match worker_idx % 3 {
             0 => ResponseProtocolKind::Json,
-            1 => ResponseProtocolKind::Markdown,
+            1 => ResponseProtocolKind::Json,
             _ => ResponseProtocolKind::Xml,
         };
         let dir = tmp_dir(&format!("protocol_turn_stress_worker_{worker_idx}"));
@@ -3347,7 +3337,7 @@ fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
     );
     for protocol in [
         ResponseProtocolKind::Json,
-        ResponseProtocolKind::Markdown,
+        ResponseProtocolKind::Json,
         ResponseProtocolKind::Xml,
     ] {
         assert!(
@@ -3483,7 +3473,7 @@ fn update_runtime_config_applies_before_next_model_request_of_active_turn() {
                     .recv_timeout(Duration::from_secs(5))
                     .expect("test should release the first model request");
                 return Ok(LlmResponse {
-                    content: "## Status working ## Working_Still_Action ```action {\"self_tool\":{\"type\":\"params\"}} ```"
+                    content: r#"{"status":"working","working_still_action":{"self_tool":{"type":"params"}}}"#
                         .to_string(),
                     model_name: config.model.clone(),
                     usage: UsageStats::zero(),
@@ -3491,7 +3481,7 @@ fn update_runtime_config_applies_before_next_model_request_of_active_turn() {
                 });
             }
             Ok(LlmResponse {
-                content: "## Status finished ## Final_Answer Done".to_string(),
+                content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
                 model_name: config.model.clone(),
                 usage: UsageStats::zero(),
                 truncated: false,
@@ -3596,13 +3586,7 @@ fn update_runtime_config_changes_worker_model_service_config() {
             self.calls += 1;
             if self.calls == 1 {
                 return Ok(LlmResponse {
-                    content: "## Status
-working
-
-## Working_Still_Action
-```action
-{\"self_tool\":{\"type\":\"params\"}}
-```"
+                    content: r#"{"status":"working","working_still_action":{"self_tool":{"type":"params"}}}"#
                     .to_string(),
                     model_name: config.model.clone(),
                     usage: UsageStats::zero(),
@@ -3610,12 +3594,7 @@ working
                 });
             }
             Ok(LlmResponse {
-                content: "## Status
-finished
-
-## Final_Answer
-Done"
-                    .to_string(),
+                content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
                 model_name: config.model.clone(),
                 usage: UsageStats::zero(),
                 truncated: false,
@@ -3724,12 +3703,7 @@ fn update_runtime_config_max_input_also_updates_core() {
         ) -> Result<LlmResponse, String> {
             *self.captured_prompt_len.lock().unwrap() = prompt.len();
             Ok(LlmResponse {
-                content: "## Status
-finished
-
-## Final_Answer
-Done"
-                    .to_string(),
+                content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
                 model_name: "test".to_string(),
                 usage: UsageStats::zero(),
                 truncated: false,
@@ -3809,7 +3783,7 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
         ) -> Result<LlmResponse, String> {
             *self.prompt.lock().unwrap() = prompt.to_string();
             Ok(LlmResponse {
-                content: "## Status\nfinished\n\n## Final_Answer\nDone".to_string(),
+                content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
                 model_name: "test".to_string(),
                 usage: UsageStats::zero(),
                 truncated: false,

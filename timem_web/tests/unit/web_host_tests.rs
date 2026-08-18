@@ -3515,10 +3515,7 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     ]);
     let second_env = BTreeMap::from([
         ("TIMEM_MODEL".to_string(), "qwen-session-b".to_string()),
-        (
-            "TIMEM_RESPONSE_PROTOCOL".to_string(),
-            "markdown".to_string(),
-        ),
+        ("TIMEM_RESPONSE_PROTOCOL".to_string(), "xml".to_string()),
         ("TIMEM_MAX_LLM_INPUT".to_string(), "64K".to_string()),
         ("TIMEM_ENABLE_THINKING".to_string(), "true".to_string()),
         ("TIMEM_REASONING_EFFORT".to_string(), "max".to_string()),
@@ -3545,10 +3542,7 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     assert_eq!(sessions[&first].runtime_profile.response_protocol, "json");
     assert_eq!(sessions[&first].max_llm_input_tokens, 128_000);
     assert_eq!(sessions[&second].runtime_profile.model, "qwen-session-b");
-    assert_eq!(
-        sessions[&second].runtime_profile.response_protocol,
-        "markdown"
-    );
+    assert_eq!(sessions[&second].runtime_profile.response_protocol, "xml");
     assert_eq!(sessions[&second].max_llm_input_tokens, 64_000);
     assert_eq!(
         sessions[&second]
@@ -3619,7 +3613,7 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     );
     assert_eq!(
         lifecycle_profiles.get(&second),
-        Some(&("qwen-session-b".to_string(), "markdown".to_string(), 64_000,))
+        Some(&("qwen-session-b".to_string(), "xml".to_string(), 64_000,))
     );
     assert!(!lifecycle_leaked_secret);
 }
@@ -3644,10 +3638,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
             workspace_dir: Some(root.display().to_string()),
             env: BTreeMap::from([
                 ("TIMEM_MODEL".to_string(), "model-from-dialog".to_string()),
-                (
-                    "TIMEM_RESPONSE_PROTOCOL".to_string(),
-                    "markdown".to_string(),
-                ),
+                ("TIMEM_RESPONSE_PROTOCOL".to_string(), "xml".to_string()),
                 ("TIMEM_MAX_LLM_INPUT".to_string(), "42K".to_string()),
                 ("TIMEM_BASH_APPROVAL".to_string(), "approve".to_string()),
             ]),
@@ -3661,7 +3652,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
     };
     assert_eq!(session.display_name, "Override session");
     assert_eq!(session.runtime_profile.model, "model-from-dialog");
-    assert_eq!(session.runtime_profile.response_protocol, "markdown");
+    assert_eq!(session.runtime_profile.response_protocol, "xml");
     assert_eq!(session.runtime_profile.max_llm_input_tokens, 42_000);
     assert_eq!(session.runtime_profile.bash_approval, "approve");
 
@@ -3670,7 +3661,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
     assert_eq!(stored.runtime.settings.config.model, "model-from-dialog");
     assert_eq!(
         stored.runtime.settings.config.response_protocol.name(),
-        "markdown"
+        "xml"
     );
     assert_eq!(stored.runtime.settings.config.max_llm_input_tokens, 42_000);
     assert_eq!(

@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn cache_planner_splits_xml_static_prompt_boundary_from_xml_deltas() {
+    let prompt = "<Timem System Prompt>\nSTATIC XML\n</Timem System Prompt>\n<prompt_delta id=\"pd_1\" time_ms=\"1\">\n\n## USER\ndelta1\n</prompt_delta>\n<prompt_delta id=\"pd_2\" time_ms=\"2\">\n\n## SYSTEM\ndelta2\n</prompt_delta>";
+
+    let (static_prompt, dynamic_prompt) = split_prompt(prompt);
+    assert_eq!(static_prompt, "STATIC XML");
+    assert!(dynamic_prompt.starts_with("<prompt_delta id=\"pd_1\""));
+    assert!(!dynamic_prompt.contains("<Timem System Prompt>"));
+
+    let parts = prompt_parts_from_rendered_prompt(prompt);
+    assert_eq!(parts.static_prompt, "STATIC XML");
+    assert!(parts.old_deltas.contains("pd_1"));
+    assert!(parts.new_delta.contains("pd_2"));
+
+    let blocks = plan_prompt_cache(prompt);
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks[0].role, PromptBlockRole::System);
+    assert_eq!(blocks[0].text, "STATIC XML");
+    assert!(blocks[1].text.contains("pd_1"));
+    assert!(blocks[2].text.contains("pd_2"));
+}
+
+#[test]
 fn cache_planner_supports_xml_style_prompt_delta_boundaries() {
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n<prompt_delta id=\"pd_1\" time_ms=\"1\">\n\n## USER\ndelta1\n</prompt_delta>\n<prompt_delta id=\"pd_2\" time_ms=\"2\">\n\n## USER\ndelta2\n</prompt_delta>";
 

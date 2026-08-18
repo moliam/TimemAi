@@ -2910,8 +2910,7 @@ impl AgentCore {
             &self.rendered_static_prompt,
             &self.deltas,
             &self.assistant_speaker_name,
-            self.response_protocol.suite().response_shape_hint(),
-            self.response_protocol.lang_format(),
+            self.response_protocol.suite(),
         )
     }
 
@@ -3092,8 +3091,7 @@ impl AgentCore {
             &self.rendered_static_prompt,
             &deltas,
             &self.assistant_speaker_name,
-            self.response_protocol.suite().response_shape_hint(),
-            self.response_protocol.lang_format(),
+            self.response_protocol.suite(),
         )
     }
 

@@ -1061,7 +1061,7 @@ fn shell_renders_worker_identity_from_lifecycle_topic() {
     let event = agent_core::core_initialized_topic_event_with_worker(
         "session_worker",
         &profile,
-        "markdown",
+        "json",
         100_000,
         50,
         6,

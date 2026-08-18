@@ -135,7 +135,7 @@ export TIMEM_MODEL=...
 - `anthropic`
 
 `TIMEM_RESPONSE_PROTOCOL` chooses the model response format parsed by the local
-runtime. Supported values are `xml`, `markdown`, and `json`; default is `xml`.
+runtime. Supported values are `xml` and `json`; default is `xml`.
 
 ## Runtime Options
 
