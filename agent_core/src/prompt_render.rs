@@ -1,6 +1,6 @@
 use crate::capability::CapabilityRegistry;
 use crate::prompt_spec;
-use crate::response_protocol::ResponseProtocolSuite;
+use crate::response_protocol::{PromptBoundarySpec, ResponseProtocolSuite};
 use crate::{PromptDelta, PromptSlice};
 
 pub(crate) const RESPONSE_TRAILER: &str =
@@ -54,11 +54,11 @@ enum VisiblePromptRole {
 }
 
 impl VisiblePromptRole {
-    fn heading(self, assistant_heading: &str) -> String {
+    fn heading(self, assistant_heading: &str, spec: &PromptBoundarySpec) -> String {
         match self {
-            VisiblePromptRole::User => "USER".to_string(),
+            VisiblePromptRole::User => spec.user_role.to_string(),
             VisiblePromptRole::You => assistant_heading.to_string(),
-            VisiblePromptRole::Runtime => "RUNTIME".to_string(),
+            VisiblePromptRole::Runtime => spec.runtime_role.to_string(),
         }
     }
 }
@@ -237,7 +237,10 @@ pub(crate) fn render_prompt_with_rendered_static(
             let role = visible_role(&slice.prompt_type);
             if last_role != Some(role) {
                 out.push('\n');
-                out.push_str(&format!("## {}\n", role.heading(assistant_heading)));
+                out.push_str(&format!(
+                    "## {}\n",
+                    role.heading(assistant_heading, boundaries)
+                ));
                 last_role = Some(role);
                 last_was_action_result = false;
             }

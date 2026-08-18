@@ -16,18 +16,27 @@ pub struct PromptBoundarySpec {
     pub static_begin: &'static str,
     pub static_end: &'static str,
     pub delta_boundary: PromptDeltaBoundary,
+    pub user_role: &'static str,
+    pub runtime_role: &'static str,
+    pub assistant_role: &'static str,
 }
 
 pub const BRACKETED_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
     static_begin: "[BEGIN SYSTEM PROMPT]",
     static_end: "[END SYSTEM PROMPT]",
     delta_boundary: PromptDeltaBoundary::Bracketed,
+    user_role: "USER",
+    runtime_role: "RUNTIME",
+    assistant_role: "ASSISTANT",
 };
 
 pub const XML_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
     static_begin: "<Timem System Prompt>",
     static_end: "</Timem System Prompt>",
     delta_boundary: PromptDeltaBoundary::XmlElement,
+    user_role: "USER",
+    runtime_role: "RUNTIME",
+    assistant_role: "ASSISTANT",
 };
 
 pub const KNOWN_PROMPT_BOUNDARIES: &[PromptBoundarySpec] =
@@ -36,6 +45,18 @@ pub const KNOWN_PROMPT_BOUNDARIES: &[PromptBoundarySpec] =
 impl PromptBoundarySpec {
     pub fn wrap_static_prompt(self, prompt: &str) -> String {
         format!("{}\n{}\n{}", self.static_begin, prompt, self.static_end)
+    }
+
+    pub fn user_heading_line(&self) -> String {
+        format!("## {}", self.user_role)
+    }
+
+    pub fn runtime_heading_line(&self) -> String {
+        format!("## {}", self.runtime_role)
+    }
+
+    pub fn assistant_heading_line(&self, id: &str) -> String {
+        format!("## {}", id)
     }
 
     pub fn render_delta_open(self, delta_id: &str, time_ms: i64) -> String {

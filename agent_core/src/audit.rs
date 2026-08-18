@@ -240,6 +240,7 @@ pub fn model_repair_output_event(
     truncated: bool,
     repair_calls: u32,
     repair_calls_delta: u32,
+    spec: &crate::response_protocol::PromptBoundarySpec,
 ) -> Value {
     let (assistant_response, capped) =
         cap_repair_output_text(assistant_response, REPAIR_OUTPUT_RESPONSE_LIMIT_CHARS);
@@ -261,8 +262,8 @@ pub fn model_repair_output_event(
         "repair_calls": repair_calls,
         "repair_calls_delta": repair_calls_delta,
         "rendered": format!(
-            "---- {} / {} ----\n## assistant:\n{}\n\n## RUNTIME\n{}",
-            time_ms, turn_id, assistant_response, system_message
+            "---- {} / {} ----\n## {}:\n{}\n\n## {}\n{}",
+            time_ms, turn_id, spec.assistant_role, assistant_response, spec.runtime_role, system_message
         ),
         "summary": format!("{} repair for {}", issue_text, turn_id),
     })

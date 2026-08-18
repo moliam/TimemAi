@@ -389,17 +389,26 @@ fn worker_role_display_name(name: &str) -> String {
         .replace('\n', "\\n")
 }
 
-fn worker_role_full_instruction(name: &str, description: &str) -> String {
+fn worker_role_full_instruction(
+    name: &str,
+    description: &str,
+    spec: &crate::response_protocol::PromptBoundarySpec,
+) -> String {
     format!(
-        "## RUNTIME\nUser involves the worker role ‘{}’ for this round input's related task. When you work for this task, comply this worker's methodology: {}",
+        "{}\nUser involves the worker role ‘{}’ for this round input's related task. When you work for this task, comply this worker's methodology: {}",
+        spec.runtime_heading_line(),
         worker_role_display_name(name),
         description
     )
 }
 
-fn worker_role_reference_instruction(name: &str) -> String {
+fn worker_role_reference_instruction(
+    name: &str,
+    spec: &crate::response_protocol::PromptBoundarySpec,
+) -> String {
     format!(
-        "## RUNTIME\nUser involves the worker role ‘{}’ for this round input's related task (also used in the above). Refer to this role's description above for working methodology.",
+        "{}\nUser involves the worker role ‘{}’ for this round input's related task (also used in the above). Refer to this role's description above for working methodology.",
+        spec.runtime_heading_line(),
         worker_role_display_name(name)
     )
 }
@@ -1787,11 +1796,12 @@ impl AgentCore {
                 let Some(description) = payload.get("description").and_then(Value::as_str) else {
                     return line.to_string();
                 };
-                let full = worker_role_full_instruction(name, description);
+                let spec = self.response_protocol.suite().prompt_boundaries();
+                let full = worker_role_full_instruction(name, description, spec);
                 if self.current_visible_context_contains(&full)
                     || rendered_in_this_context.contains(&full)
                 {
-                    worker_role_reference_instruction(name)
+                    worker_role_reference_instruction(name, spec)
                 } else {
                     rendered_in_this_context.insert(full.clone());
                     full
@@ -2473,6 +2483,7 @@ impl AgentCore {
                     response_truncated,
                     repair_calls_after,
                     repair_calls_after.saturating_sub(repair_calls_before),
+                    self.response_protocol.suite().prompt_boundaries(),
                 ),
             );
         }
@@ -4271,6 +4282,7 @@ impl AgentCore {
             .map(|delta| delta.delta_id.clone())
             .collect::<HashSet<_>>();
         let mut matched_delta_ids = HashSet::new();
+        let spec = self.response_protocol.suite().prompt_boundaries();
         let mut matched_slice_ids = HashSet::new();
         let mut sections = Vec::new();
         for delta in &self.deltas {
@@ -4283,7 +4295,7 @@ impl AgentCore {
                 ));
                 for slice in rendered {
                     matched_slice_ids.insert(slice.slice_id.clone());
-                    sections.push(format_prompt_slice_for_scratch(&slice));
+                    sections.push(format_prompt_slice_for_scratch(&slice, spec));
                 }
                 sections.push(format!("[END SCRATCH OFFLOAD DELTA {}]", delta.delta_id));
                 continue;
@@ -4291,7 +4303,7 @@ impl AgentCore {
             for slice in rendered {
                 if slice_id_set.contains(&slice.slice_id) {
                     matched_slice_ids.insert(slice.slice_id.clone());
-                    sections.push(format_prompt_slice_for_scratch(&slice));
+                    sections.push(format_prompt_slice_for_scratch(&slice, spec));
                 }
             }
         }
@@ -5590,21 +5602,27 @@ pub(crate) fn format_scratch_read_result(record: &ScratchNoteRecord) -> String {
     )
 }
 
-fn prompt_type_role_for_scratch(prompt_type: &str) -> &'static str {
+fn prompt_type_role_for_scratch(
+    prompt_type: &str,
+    spec: &crate::response_protocol::PromptBoundarySpec,
+) -> &'static str {
     match prompt_type {
-        "user_question" | "user_supplement" => "USER",
-        "llm_response" | "llm_free_talk" => "ASSISTANT",
-        "result_of_llm_action" => "RUNTIME",
-        _ => "RUNTIME",
+        "user_question" | "user_supplement" => spec.user_role,
+        "llm_response" | "llm_free_talk" => spec.assistant_role,
+        "result_of_llm_action" => spec.runtime_role,
+        _ => spec.runtime_role,
     }
 }
 
-fn format_prompt_slice_for_scratch(slice: &PromptSlice) -> String {
+fn format_prompt_slice_for_scratch(
+    slice: &PromptSlice,
+    spec: &crate::response_protocol::PromptBoundarySpec,
+) -> String {
     format!(
         "[BEGIN SCRATCH OFFLOAD BLOCK]\ndelta_id: {}\ntime_ms: {}\nrole: {}\n{}\n[END SCRATCH OFFLOAD BLOCK]",
         slice.delta_id,
         slice.time_ms,
-        prompt_type_role_for_scratch(&slice.prompt_type),
+        prompt_type_role_for_scratch(&slice.prompt_type, spec),
         slice.text
     )
 }

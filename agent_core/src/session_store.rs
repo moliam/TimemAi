@@ -130,9 +130,10 @@ pub struct SessionResumeNotice {
 }
 
 impl SessionResumeNotice {
-    pub fn render(&self) -> String {
+    pub fn render(&self, spec: &crate::response_protocol::PromptBoundarySpec) -> String {
         format!(
-            "## RUNTIME\n\nRuntime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them.\n\n{}\n\nCurrent cwd: {}",
+            "{}\n\nRuntime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them.\n\n{}\n\nCurrent cwd: {}",
+            spec.runtime_heading_line(),
             chat_history_prompt_format_hint(&self.history_path),
             self.current_dir.display()
         )

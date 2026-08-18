@@ -199,13 +199,14 @@ fn action_related_audit_event_builders_are_structured() {
         false,
         3,
         1,
+        &crate::response_protocol::XML_PROMPT_BOUNDARIES,
     );
     assert_eq!(repair_output["kind"], "model_output_repair");
     assert_eq!(repair_output["assistant_name"], "Ai1");
     assert!(repair_output["rendered"]
         .as_str()
         .unwrap()
-        .contains("## assistant:\n<response>bad</response>"));
+        .contains("## ASSISTANT:\n<response>bad</response>"));
     assert!(repair_output["rendered"]
         .as_str()
         .unwrap()

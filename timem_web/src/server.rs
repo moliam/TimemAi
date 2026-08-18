@@ -4149,6 +4149,22 @@ fn resume_unfinished_core_command_after_restore(
         return Ok(());
     };
     let worker = primary_worker_handle(state, session_id)?;
+    let spec = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session
+            .runtime
+            .settings
+            .config
+            .response_protocol
+            .suite()
+            .prompt_boundaries()
+    };
     let (command_id, text, attachments, kind) = entries[0].clone();
     if kind == "toolgen_instruction" {
         worker.run_toolgen_with_command_id(ToolGenRequest::new(Some(text)), Some(command_id))
@@ -4163,7 +4179,7 @@ fn resume_unfinished_core_command_after_restore(
                 .filter(|(_, _, _, kind)| kind == "supplement")
                 .map(|(command_id, text, attachments, _)| {
                     let mut worker_text = text.clone();
-                    if let Some(context) = uploaded_files_context(attachments) {
+                    if let Some(context) = uploaded_files_context(attachments, spec) {
                         worker_text.push_str("\n\n");
                         worker_text.push_str(&context);
                     }
@@ -4650,7 +4666,23 @@ fn try_append_turn_supplement(
             .ok_or_else(|| "session_not_found".to_string())?;
         pending_attachments_for_ids(session, attachment_ids)?
     };
-    let uploaded_context = uploaded_files_context(&selected_attachments);
+    let spec = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session
+            .runtime
+            .settings
+            .config
+            .response_protocol
+            .suite()
+            .prompt_boundaries()
+    };
+    let uploaded_context = uploaded_files_context(&selected_attachments, spec);
     let role_context = worker_roles_context(&worker_roles);
     let additional_context =
         combine_additional_contexts([uploaded_context.as_deref(), role_context.as_deref()]);
@@ -6324,6 +6356,13 @@ fn session_context_with_roles(
         session
     };
     let current_dir = session.current_dir;
+    let spec = session
+        .runtime
+        .settings
+        .config
+        .response_protocol
+        .suite()
+        .prompt_boundaries();
     let runtime = runtime_info_context(&["host: local_web", "transport: websocket"]);
     let resume_notice = if session.resume_notice_pending {
         Some(
@@ -6331,7 +6370,7 @@ fn session_context_with_roles(
                 history_path: current_session_store(state)?.history_path_for_session(session_id),
                 current_dir: PathBuf::from(&current_dir),
             }
-            .render(),
+            .render(spec),
         )
     } else {
         None
@@ -6354,7 +6393,7 @@ fn session_context_with_roles(
         }
         WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => None,
     };
-    let uploaded_files = uploaded_files_context(attachments);
+    let uploaded_files = uploaded_files_context(attachments, spec);
     let worker_roles = worker_roles_context(worker_roles);
     Ok(combine_additional_contexts([
         runtime.as_deref(),
@@ -6366,12 +6405,16 @@ fn session_context_with_roles(
     ]))
 }
 
-fn uploaded_files_context(attachments: &[WebAttachment]) -> Option<String> {
+fn uploaded_files_context(
+    attachments: &[WebAttachment],
+    spec: &agent_core::response_protocol::PromptBoundarySpec,
+) -> Option<String> {
     if attachments.is_empty() {
         return None;
     }
     Some(format!(
-        "## RUNTIME\nFiles explicitly uploaded by the user for this session:\n{}",
+        "{}\nFiles explicitly uploaded by the user for this session:\n{}",
+        spec.runtime_heading_line(),
         attachments
             .iter()
             .map(|file| format!("- {} ({})", file.name, file.path))
