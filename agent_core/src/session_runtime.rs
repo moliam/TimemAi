@@ -597,6 +597,10 @@ impl ActionRuntime for TurnActionRuntime<'_> {
         self.ui.on_core_topic_events(events);
     }
 
+    fn on_model_response_parsed(&mut self, tool_count: usize) {
+        self.ui.on_model_response_parsed(tool_count);
+    }
+
     fn on_long_running_command(
         &mut self,
         _status: &LongRunningCommandStatus,
@@ -627,6 +631,7 @@ fn call_model_with_system_retries(
         total_model_wait = total_model_wait.saturating_add(model_wait);
         match result {
             Ok(response) => {
+                ui.on_model_request_completed(model_wait);
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&response.model_name, &response.usage, model_wait);
                 }

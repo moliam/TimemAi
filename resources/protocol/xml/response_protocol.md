@@ -7,16 +7,16 @@ write anything before or after it.
 
 Start with `<response>` label.
 Then, optionally, write `<free_talk>` first, expressing your thought.
-Then, if you think the task may stop now, add a `<finish_confirm>` label and starts exactly with prefix:
+Or, if you think the task may stop now, add a `<finish_confirm>` label and starts exactly with prefix:
 CONFIRM_PREFIX: "Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action."
-Then, follow exactly one state branch:
+Then, then follow exactly one state branch:
 
 - `<actions>`: work should continue, generate actions.
 - `<context_compact>`: maintain/reorganize dynamic context for future better work.
 - `<final_answer>`: the current user task is completed.
 
-`<free_talk>` is a brief user-visible working thought. Occasionally report to user while working, make user well informed of progress, for great user experience. Especially the files/dirs you create/remove.
-`<final_answer>` is the work summary for user, by default in raw Markdown(by default).
+`<free_talk>` is a brief user-visible working thought. Report important action to user while working, make user well informed of progress, ESPECIALLY your working direction/framework, the files/dirs you create/remove, for great user experience and timely user interference.
+`<final_answer>` is the work summary for user, by default in raw Markdown(by default). the whole work will stop after output, BE RESPONSIBLE.
 `<actions>` are those function provided by capability catalog. Refer to capabiltiy for available actions.
 
 Every concrete tool action must have a short, descriptive `name` attribute of
@@ -38,36 +38,37 @@ These demonstrate protocol shape; they are not requests to execute.
 
 EXAMPLE1: All user's tasks are finished
 <response>
-  <free_talk>The reason for the bug has been thoroughly investigated.</free_talk>
+  <free_talk> Bug report is created: .... The reason for the bug has been thoroughly investigated.</free_talk>
   <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Yes, the deduction chain is solid, no jump in thought. The bug can be ABA confirmed.</finish_confirm>
-  <final_answer>I have finish the debug task. The reason is: .... </final_answer>
+  <final_answer>I have finish the debug task. Report doc: ... The reason is: .... </final_answer>
 </response>
 
-EXAMPLE2: Task ongoing. First inspect in parallel, then run one sequential test:
+EXAMPLE2: Task ongoing. Issue multiple actions simultaneously for performance:
 <response>
-  <free_talk>I will inspect the workspace, then run its test. For performance serveral commands can be issued simutaneously. </free_talk>
+  <free_talk>I will do ... </free_talk>
   <actions>
     <parallel>
-      <run_bash name="inspect current directory" timeout_ms="5000">
-        <cmd>pwd</cmd>
-      </run_bash>
       <run_bash name="check git status" timeout_ms="5000">
-        <cmd>git status --short</cmd>
+        <cmd>git status</cmd>
       </run_bash>
-      <run_bash name="list workspace files" timeout_ms="5000">
+      <run_bash name="a..." timeout_ms="5000">
+        <cmd>...</cmd>
+      </run_bash>
+      <run_bash name="b..." timeout_ms="5000">
         <cmd><![CDATA[find . -maxdepth 2 -type f | sort]]></cmd>
       </run_bash>
     </parallel>
-    <run_bash name="run project tests" timeout_ms="120000">
+    <run_bash name="c..." timeout_ms="120000">
       <cmd>cargo test</cmd>
     </run_bash>
   </actions>
 </response>
+NOTE: better one action per run_bash
 
 EXAMPLE3: Planned to stop, but "think twice" changes your idea and you continue the work.
 <response>
   <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. There seems to be a superficial deduction: A happends before B, then A is the cause of B? Could be super wrong. Let me check more.</finish_confirm>
-  <actions><run_bash name="inspect current directory"><cmd>pwd</cmd></run_bash></actions>
+  <actions><run_bash name="xxx..."><cmd>...</cmd></run_bash></actions>
 </response>
 
 EXAMPLE3: context compact
@@ -79,7 +80,7 @@ EXAMPLE3: context compact
     <summary>
     The current user's task is: ...
     The whole picture of active works' status are:
-     A: completed,
+     A: almost done, need to clean up xxx
      B: todo
      C: todo
      ...

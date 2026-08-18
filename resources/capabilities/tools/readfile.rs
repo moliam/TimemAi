@@ -306,10 +306,28 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
         content.to_string()
     };
     let canonical = fs::canonicalize(&candidate).unwrap_or(candidate);
+    let canonical_path = canonical.to_string_lossy();
+    let file_name = canonical
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| canonical_path.clone());
+    let start_line = line_number_at(text, start);
+    let end_line = selected_end_line(text, start, end);
+    let output_heading = matcher_expression(starter.as_ref(), ender.as_ref())
+        .map(|matcher| {
+            format!(
+                "{}, matcher '{}' line is [{}, {}]:",
+                file_name,
+                escape_matcher_expression(&matcher),
+                start_line,
+                end_line
+            )
+        })
+        .unwrap_or_else(|| format!("{}, line [{}, {}]:", file_name, start_line, end_line));
 
     Ok(format!(
-        "Action result: readfile\nstatus: ok\npath: {}\nencoding: {}\nfile_bytes: {}\nstart_utf8_byte: {}\nend_utf8_byte_exclusive: {}\ncontent_bytes: {}\nlimited: {}\ntail_out: {}\ncontent:\n{}",
-        quote(&canonical.to_string_lossy()),
+        "Action result: readfile\nstatus: ok\npath: {}\nencoding: {}\nfile_bytes: {}\nstart_utf8_byte: {}\nend_utf8_byte_exclusive: {}\ncontent_bytes: {}\nlimited: {}\ntail_out: {}\n{}\ncontent:\n{}",
+        quote(&canonical_path),
         encoding.name(),
         raw.len(),
         start,
@@ -317,6 +335,7 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
         content.len(),
         limited,
         tail_out,
+        output_heading,
         rendered_content
     ))
 }
@@ -639,6 +658,71 @@ fn line_start(text: &str, line: u64) -> Option<usize> {
 fn line_end(text: &str, line: u64) -> Option<usize> {
     let start = line_start(text, line)?;
     next_line_end(text, start).map(|(end, _)| end)
+}
+
+fn escape_matcher_expression(matcher: &str) -> String {
+    matcher
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
+fn matcher_expression(starter: Option<&Selector>, ender: Option<&Selector>) -> Option<String> {
+    let starter = match starter {
+        Some(Selector::Match(pattern)) => Some(pattern.as_str()),
+        _ => None,
+    };
+    let ender = match ender {
+        Some(Selector::Match(pattern)) => Some(pattern.as_str()),
+        _ => None,
+    };
+
+    match (starter, ender) {
+        (Some(starter), Some(ender)) if starter == ender => Some(starter.to_string()),
+        (Some(starter), Some(ender)) => Some(format!("{starter} ... {ender}")),
+        (Some(starter), None) => Some(starter.to_string()),
+        (None, Some(ender)) => Some(ender.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn line_number_at(text: &str, offset: usize) -> u64 {
+    let offset = offset.min(text.len());
+    let bytes = text.as_bytes();
+    let mut line = 1;
+    let mut index = 0;
+
+    while index < offset {
+        match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                line += 1;
+                index += 2;
+            }
+            b'\r' | b'\n' => {
+                line += 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    line
+}
+
+fn selected_end_line(text: &str, start: usize, end: usize) -> u64 {
+    if end <= start {
+        return line_number_at(text, start);
+    }
+
+    let mut last_content_byte = end - 1;
+    if text.as_bytes().get(last_content_byte) == Some(&b'\n')
+        && last_content_byte > start
+        && text.as_bytes().get(last_content_byte - 1) == Some(&b'\r')
+    {
+        last_content_byte -= 1;
+    }
+    line_number_at(text, last_content_byte)
 }
 
 fn next_line_end(text: &str, start: usize) -> Option<(usize, bool)> {

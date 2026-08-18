@@ -804,10 +804,35 @@ pub struct LongRunningCommandStatus {
     pub timeout_ms: Option<i64>,
 }
 
+fn thread_cpu_time() -> Option<Duration> {
+    #[cfg(unix)]
+    {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut value) };
+        if result != 0 || value.tv_sec < 0 || value.tv_nsec < 0 {
+            return None;
+        }
+        return Some(Duration::new(value.tv_sec as u64, value.tv_nsec as u32));
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn elapsed_thread_cpu(start: Option<Duration>) -> Option<Duration> {
+    thread_cpu_time().and_then(|end| end.checked_sub(start?))
+}
+
 pub trait ActionRuntime {
     fn should_cancel(&mut self) -> bool;
 
     fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
+
+    fn on_model_response_parsed(&mut self, _tool_count: usize) {}
 
     fn on_long_running_command(
         &mut self,
@@ -2014,6 +2039,14 @@ impl AgentCore {
         let protocol_suite = self.response_protocol.suite();
         let parsed = protocol_suite.parse(&response.content, &self.capabilities);
         let mut slices = Vec::new();
+        if parsed.repair_issue.is_none() {
+            let tool_count = parsed
+                .action_groups
+                .iter()
+                .map(|group| group.actions.len())
+                .sum();
+            runtime.on_model_response_parsed(tool_count);
+        }
         if let Some(issue) = parsed.repair_issue.clone() {
             if self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
                 let instruction =
@@ -2537,6 +2570,7 @@ impl AgentCore {
                 runtime,
             );
         }
+        let action_cpu_start = thread_cpu_time();
         let outcome = if approved {
             match &pending.approved_action {
                 PendingApprovedAction::RunBash {
@@ -2589,6 +2623,12 @@ impl AgentCore {
                 ),
             },
             &outcome,
+            match &pending.approved_action {
+                PendingApprovedAction::RunBash { .. } => None,
+                PendingApprovedAction::ToolgenPublish { .. } => {
+                    elapsed_thread_cpu(action_cpu_start)
+                }
+            },
             runtime,
         );
         let prompt_result = self.format_pending_action_result(&pending, &outcome.text);
@@ -3629,11 +3669,12 @@ impl AgentCore {
         &mut self,
         idx: usize,
         action: ParsedAction,
-    ) -> thread::JoinHandle<(usize, ParsedAction, ActionOutcome)> {
+    ) -> thread::JoinHandle<(usize, ParsedAction, ActionOutcome, Option<Duration>)> {
         let action_for_thread = action.clone();
         let cwd = self.current_prompt_cwd().to_path_buf();
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
+            let cpu_start = thread_cpu_time();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 readfile::execute_with_timeout_outcome(
                     &cwd,
@@ -3646,7 +3687,7 @@ impl AgentCore {
                     "Action result: readfile\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.",
                 )
             });
-            (idx, action, outcome)
+            (idx, action, outcome, elapsed_thread_cpu(cpu_start))
         })
     }
 
@@ -3655,7 +3696,13 @@ impl AgentCore {
         idx: usize,
         pending: PendingApproval,
         cancel_requested: Arc<AtomicBool>,
-    ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, ActionOutcome)> {
+    ) -> thread::JoinHandle<(
+        usize,
+        ParsedAction,
+        PendingApproval,
+        ActionOutcome,
+        Option<Duration>,
+    )> {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
@@ -3707,7 +3754,7 @@ impl AgentCore {
                     )
                 }
             };
-            (idx, action, pending_for_thread, result)
+            (idx, action, pending_for_thread, result, None)
         })
     }
 
@@ -3716,7 +3763,7 @@ impl AgentCore {
         idx: usize,
         action: ParsedAction,
         cancel_requested: Arc<AtomicBool>,
-    ) -> thread::JoinHandle<(usize, ParsedAction, ActionOutcome)> {
+    ) -> thread::JoinHandle<(usize, ParsedAction, ActionOutcome, Option<Duration>)> {
         let action_for_audit = action.clone();
         let shell_jobs = self.shell_jobs.clone();
         let session_id = self.current_session_id();
@@ -3766,13 +3813,15 @@ impl AgentCore {
                     command,
                 )),
             };
-            (idx, action_for_audit, outcome)
+            (idx, action_for_audit, outcome, None)
         })
     }
 
     fn collect_parallel_action_handles(
         &self,
-        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, ActionOutcome)>>,
+        mut handles: Vec<
+            thread::JoinHandle<(usize, ParsedAction, ActionOutcome, Option<Duration>)>,
+        >,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
         cancel_requested: &Arc<AtomicBool>,
@@ -3787,9 +3836,9 @@ impl AgentCore {
             };
             let handle = handles.swap_remove(position);
             match handle.join() {
-                Ok((idx, action, outcome)) => {
+                Ok((idx, action, outcome, cpu_time)) => {
                     self.record_action_audit(&action, outcome.status.as_str(), Some(&outcome.text));
-                    self.emit_action_finish_topic(&action, &outcome, runtime);
+                    self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
                         *slot = Some(self.format_action_result(&action, &outcome.text));
                     }
@@ -3807,7 +3856,15 @@ impl AgentCore {
 
     fn collect_approved_parallel_bash_handles(
         &self,
-        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, ActionOutcome)>>,
+        mut handles: Vec<
+            thread::JoinHandle<(
+                usize,
+                ParsedAction,
+                PendingApproval,
+                ActionOutcome,
+                Option<Duration>,
+            )>,
+        >,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
         cancel_requested: &Arc<AtomicBool>,
@@ -3822,9 +3879,9 @@ impl AgentCore {
             };
             let handle = handles.swap_remove(position);
             match handle.join() {
-                Ok((idx, action, pending, outcome)) => {
+                Ok((idx, action, pending, outcome, cpu_time)) => {
                     self.record_pending_approval_audit(&pending, true, &outcome.text);
-                    self.emit_action_finish_topic(&action, &outcome, runtime);
+                    self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
                         *slot = Some(self.format_action_result(&action, &outcome.text));
                     }
@@ -3921,6 +3978,7 @@ impl AgentCore {
         action: ParsedAction,
         runtime: &mut dyn ActionRuntime,
     ) -> ActionExecution {
+        let action_cpu_start = thread_cpu_time();
         let action_for_audit = action.clone();
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
@@ -3934,7 +3992,12 @@ impl AgentCore {
                     outcome.status.as_str(),
                     Some(&outcome.text),
                 );
-                self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+                self.emit_action_finish_topic(
+                    &action_for_audit,
+                    &outcome,
+                    elapsed_thread_cpu(action_cpu_start),
+                    runtime,
+                );
                 return ActionExecution::Completed(outcome);
             }
         };
@@ -3948,7 +4011,12 @@ impl AgentCore {
                 action.action, issue
             ));
             self.record_action_audit(&action_for_audit, "invalid_input", Some(&outcome.text));
-            self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+            self.emit_action_finish_topic(
+                &action_for_audit,
+                &outcome,
+                elapsed_thread_cpu(action_cpu_start),
+                runtime,
+            );
             return ActionExecution::Completed(outcome);
         }
 
@@ -3959,7 +4027,7 @@ impl AgentCore {
                 outcome.status.as_str(),
                 Some(&outcome.text),
             );
-            self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+            self.emit_action_finish_topic(&action_for_audit, &outcome, None, runtime);
             return ActionExecution::Completed(outcome);
         }
 
@@ -3992,7 +4060,7 @@ impl AgentCore {
                 outcome.status.as_str(),
                 Some(&outcome.text),
             );
-            self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+            self.emit_action_finish_topic(&action_for_audit, &outcome, None, runtime);
             return ActionExecution::Completed(outcome);
         }
 
@@ -4024,7 +4092,12 @@ impl AgentCore {
                     dispatch_name
                 ));
                 self.record_action_audit(&action_for_audit, "internal_error", Some(&outcome.text));
-                self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+                self.emit_action_finish_topic(
+                    &action_for_audit,
+                    &outcome,
+                    elapsed_thread_cpu(action_cpu_start),
+                    runtime,
+                );
                 return ActionExecution::Completed(outcome);
             }
         };
@@ -4036,7 +4109,12 @@ impl AgentCore {
                     outcome.status.as_str(),
                     Some(&outcome.text),
                 );
-                self.emit_action_finish_topic(&action_for_audit, &outcome, runtime);
+                let cpu_time = if action_for_audit.action == "run_bash" {
+                    None
+                } else {
+                    elapsed_thread_cpu(action_cpu_start)
+                };
+                self.emit_action_finish_topic(&action_for_audit, &outcome, cpu_time, runtime);
                 ActionExecution::Completed(outcome)
             }
             ActionExecution::NeedsApproval(mut pending) => {
@@ -4059,6 +4137,7 @@ impl AgentCore {
         &self,
         action: &ParsedAction,
         outcome: &ActionOutcome,
+        cpu_time: Option<Duration>,
         runtime: &mut dyn ActionRuntime,
     ) {
         let notification = notification::notification_from_action(action);
@@ -4068,6 +4147,16 @@ impl AgentCore {
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
         event.payload["status"] = json!(outcome.status.as_str());
+        match cpu_time {
+            Some(duration) => {
+                event.payload["cpu_time_ns"] =
+                    json!(duration.as_nanos().min(u64::MAX as u128) as u64);
+                event.payload["cpu_time_available"] = json!(true);
+            }
+            None => {
+                event.payload["cpu_time_available"] = json!(false);
+            }
+        }
         if action.action == "self_tool"
             && action.input_lower("type") == "cwd"
             && outcome
