@@ -162,6 +162,23 @@ pub(crate) fn render_xml_action_result(
     format!("{prefix}{escaped_result}{suffix}")
 }
 
+fn render_prompt_delta_example(boundaries: crate::response_protocol::PromptBoundarySpec) -> String {
+    let mut example = boundaries.render_delta_open("pd_1", 123);
+    example.push_str(
+        "\n`pd_1` is the runtime-generated identity. It is a simple globally increasing sequence: pd_1, pd_2, ...\n\n\
+## USER\n\
+new user input, or user supplement entered while the current turn was already in\n\
+progress.\n\n\
+## {{ASSSISTANT_ID}}\n\
+your response in this round\n\n\
+## SYSTEM\n\
+Timem Runtime's feedback, tips, etc.\n\
+SYSTEM's 'TIPS' will occasionally show up. They are the philosophy you should really seriously respect.\n\n",
+    );
+    example.push_str(boundaries.delta_close());
+    example
+}
+
 pub(crate) fn render_static_prompt(
     static_prompt: &str,
     capabilities: &CapabilityRegistry,
@@ -176,6 +193,10 @@ pub(crate) fn render_static_prompt(
     );
     let with_protocol =
         with_protocol.replace("{{CURRENT_PROTOCOL_LANG}}", protocol_suite.lang_format());
+    let with_protocol = with_protocol.replace(
+        "{{PROMPT_DELTA_EXAMPLE}}",
+        &render_prompt_delta_example(*protocol_suite.prompt_boundaries()),
+    );
     let assistant_heading = assistant_heading.trim();
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
     let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
