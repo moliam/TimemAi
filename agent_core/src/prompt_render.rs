@@ -96,7 +96,7 @@ pub(crate) fn render_static_prompt(
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
     let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
     let with_protocol = with_protocol.replace("{{STARTUP_STAMP}}", startup_stamp);
-    // 2. Fill {{TOOL_CATALOG}} and {{SKILL_HEADERS}} from capabilities
+    // 2. Fill {{TOOL_CATALOG}} from capabilities
     let with_caps = capabilities
         .enrich_static_prompt_for_protocol(&with_protocol, protocol_suite.lang_format());
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec

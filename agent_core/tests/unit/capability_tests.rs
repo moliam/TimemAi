@@ -162,11 +162,10 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
 }
 
 #[test]
-fn tool_catalog_is_injected_but_skill_headers_are_suppressed() {
+fn tool_catalog_is_injected_for_the_active_protocol() {
     let registry = CapabilityRegistry::builtin();
 
     let tools_only = registry.enrich_static_prompt_for_protocol("{{TOOL_CATALOG}}", "XML");
-    let skills_only = registry.enrich_static_prompt("{{SKILL_HEADERS}}");
 
     assert!(tools_only.contains("#### `readfile`"), "{tools_only}");
     assert!(
@@ -174,8 +173,6 @@ fn tool_catalog_is_injected_but_skill_headers_are_suppressed() {
         "{tools_only}"
     );
     assert!(!tools_only.contains("{{TOOL_CATALOG}}"));
-    assert!(skills_only.trim().is_empty(), "{skills_only}");
-    assert!(!skills_only.contains("{{SKILL_HEADERS}}"));
 }
 
 #[test]
@@ -512,15 +509,13 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
 #[test]
 fn registry_enriches_static_prompt_tool_catalog() {
     let registry = CapabilityRegistry::builtin();
-    let enriched =
-        registry.enrich_static_prompt("## Tools\n{{TOOL_CATALOG}}\n## Skills\n{{SKILL_HEADERS}}");
+    let enriched = registry.enrich_static_prompt("## Tools\n{{TOOL_CATALOG}}");
 
     assert!(enriched.contains("#### `memmgr`"));
     assert!(!enriched.contains("\"release_quality_gate\""));
     assert!(enriched.contains("#### `run_bash`"));
     assert!(!enriched.contains("No optional skills are currently loaded."));
     assert!(!enriched.contains("{{TOOL_CATALOG}}"));
-    assert!(!enriched.contains("{{SKILL_HEADERS}}"));
 }
 
 #[test]

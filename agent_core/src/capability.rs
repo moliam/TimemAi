@@ -683,14 +683,12 @@ impl CapabilityRegistry {
         static_prompt: &str,
         protocol_format: &str,
     ) -> String {
-        let with_catalog = replace_markdown_placeholder_with_text(
+        replace_markdown_placeholder_with_text(
             static_prompt,
             "{{TOOL_CATALOG}}",
             &self.render_tool_catalog_markdown_for_protocol(protocol_format),
         )
-        .unwrap_or_else(|| static_prompt.to_string());
-        replace_markdown_placeholder_with_text(&with_catalog, "{{SKILL_HEADERS}}", "")
-            .unwrap_or(with_catalog)
+        .unwrap_or_else(|| static_prompt.to_string())
     }
 }
 

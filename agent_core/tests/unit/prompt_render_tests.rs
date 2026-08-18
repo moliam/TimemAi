@@ -44,8 +44,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     };
     let rendered_static = render_static_prompt(
         "{{RESPONSE_PROTOCOL_SECTION}}
-{{TOOL_CATALOG}}
-{{SKILL_HEADERS}}",
+{{TOOL_CATALOG}}",
         &CapabilityRegistry::builtin(),
         &MarkdownSuiteV1,
         "TIMEM_ASSISTANT",
@@ -199,8 +198,7 @@ fn prompt_renderer_replaces_current_protocol_language() {
 
 #[test]
 fn prompt_renderer_uses_protocol_native_tool_synopses() {
-    let template =
-        "# Tools\n\n{{TOOL_CATALOG}}\n\n{{SKILL_HEADERS}}\n\n{{RESPONSE_PROTOCOL_SECTION}}";
+    let template = "# Tools\n\n{{TOOL_CATALOG}}\n\n{{RESPONSE_PROTOCOL_SECTION}}";
     let xml = render_static_prompt(
         template,
         &CapabilityRegistry::builtin(),
