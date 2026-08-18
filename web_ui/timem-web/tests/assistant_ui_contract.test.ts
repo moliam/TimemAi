@@ -680,6 +680,13 @@ expect(styles).toContain(".worker-role-editor input { height: 34px; padding: 0 9
 expect(styles).toContain(".worker-role-editor textarea { min-height: 112px; resize: vertical; padding: 9px; font-size: var(--content-size); line-height: 1.5; }");
 expect(styles).not.toContain("font: 12px/1.45 var(--ui-font);");
 expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(160px, 30dvh, 360px);");
+expect(source).toContain('className="worker-role-action worker-role-edit"');
+expect(source).toContain('className={`worker-role-action worker-role-delete ${deleteConfirmId === role.id ? "confirm-delete" : ""}`}');
+expect(styles).toContain(".worker-role-panel .worker-role-action {");
+expect(styles).toContain(".worker-role-panel .worker-role-edit:hover:not(:disabled)");
+expect(styles).toContain(".worker-role-panel .worker-role-delete:hover:not(:disabled)");
+expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-role-action');
+expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-role-delete.confirm-delete');
   });
 
   it("shows a live elapsed duration only while the turn is working", () => {
