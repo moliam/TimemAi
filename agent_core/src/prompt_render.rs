@@ -189,10 +189,17 @@ pub(crate) fn render_static_prompt(
         protocol_suite.response_schema_summary(),
     );
 
-    format!(
-        "[BEGIN SYSTEM PROMPT]\n{}\n[END SYSTEM PROMPT]",
-        static_prompt
-    )
+    if protocol_suite.lang_format().eq_ignore_ascii_case("XML") {
+        format!(
+            "<Timem System Prompt>\n{}\n</Timem System Prompt>",
+            static_prompt
+        )
+    } else {
+        format!(
+            "[BEGIN SYSTEM PROMPT]\n{}\n[END SYSTEM PROMPT]",
+            static_prompt
+        )
+    }
 }
 
 pub(crate) fn render_prompt_with_rendered_static(

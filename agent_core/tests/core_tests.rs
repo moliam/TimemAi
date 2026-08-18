@@ -6569,6 +6569,9 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
+    assert!(xml_prompt.starts_with("<Timem System Prompt>\n"));
+    assert!(xml_prompt.contains("\n</Timem System Prompt>\n"));
+    assert!(!xml_prompt.contains("[BEGIN SYSTEM PROMPT]"));
     assert!(xml_prompt.contains("# System Response Protocol"));
     assert!(xml_prompt.contains("protocol-compliant response in XML format"));
     assert!(xml_prompt.contains("`<actions>` are those function provided by capability catalog"));

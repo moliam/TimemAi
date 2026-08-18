@@ -76,6 +76,33 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
 }
 
 #[test]
+fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
+    let rendered = render_static_prompt(
+        "STATIC",
+        &CapabilityRegistry::builtin(),
+        &XmlSuiteV1,
+        "TIMEM_ASSISTANT",
+        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
+    );
+
+    assert!(rendered.starts_with("<Timem System Prompt>\n"));
+    assert!(rendered.ends_with("\n</Timem System Prompt>"));
+    assert!(!rendered.contains("[BEGIN SYSTEM PROMPT]"));
+    assert!(!rendered.contains("[END SYSTEM PROMPT]"));
+
+    let markdown = render_static_prompt(
+        "STATIC",
+        &CapabilityRegistry::builtin(),
+        &MarkdownSuiteV1,
+        "TIMEM_ASSISTANT",
+        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
+    );
+    assert!(markdown.starts_with("[BEGIN SYSTEM PROMPT]\n"));
+    assert!(markdown.ends_with("\n[END SYSTEM PROMPT]"));
+    assert!(!markdown.contains("<Timem System Prompt>"));
+}
+
+#[test]
 fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
     let delta = PromptDelta {
         delta_id: "pd_xml_14".to_string(),
