@@ -2027,7 +2027,18 @@ fn web_shutdown_signal_names_cover_terminal_and_service_stops() {
     {
         assert!(web_shutdown_signal_names().contains(&"SIGTERM"));
         assert!(web_shutdown_signal_names().contains(&"SIGHUP"));
+        assert!(web_shutdown_signal_names().contains(&"parent shell exit"));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_parent_monitor_detects_shell_exit_and_ignores_a_live_parent() {
+    assert!(!launch_parent_has_exited(42, 42));
+    assert!(launch_parent_has_exited(42, 1));
+    assert!(launch_parent_has_exited(42, 99));
+    assert!(!launch_parent_has_exited(1, 1));
+    assert!(!launch_parent_has_exited(0, 1));
 }
 
 #[test]

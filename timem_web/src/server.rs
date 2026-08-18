@@ -1067,6 +1067,7 @@ pub async fn run_from_env() -> Result<(), String> {
     }
 
     let launch = WebLaunchOptions::parse(&args)?;
+    let launch_parent = LaunchParent::capture();
     let template = WorkerTemplate::from_environment(&launch)?;
     println!("Starting Timem Web and restoring the selected workspace...");
     let token = generate_token()?;
@@ -1169,7 +1170,7 @@ pub async fn run_from_env() -> Result<(), String> {
         web_shutdown_signal_names().join("/")
     );
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(launch_parent))
         .await
         .map_err(|error| error.to_string());
     let shutdown_result = shutdown_web_runtime(&state);
@@ -1178,13 +1179,29 @@ pub async fn run_from_env() -> Result<(), String> {
     Ok(())
 }
 
-async fn shutdown_signal() {
+#[derive(Debug, Clone, Copy)]
+struct LaunchParent {
+    #[cfg(unix)]
+    pid: libc::pid_t,
+}
+
+impl LaunchParent {
+    fn capture() -> Self {
+        Self {
+            #[cfg(unix)]
+            pid: unsafe { libc::getppid() },
+        }
+    }
+}
+
+async fn shutdown_signal(launch_parent: LaunchParent) {
     #[cfg(unix)]
     {
-        shutdown_signal_unix().await;
+        shutdown_signal_unix(launch_parent).await;
     }
     #[cfg(not(unix))]
     {
+        let _ = launch_parent;
         let _ = tokio::signal::ctrl_c().await;
     }
 }
@@ -1192,7 +1209,7 @@ async fn shutdown_signal() {
 fn web_shutdown_signal_names() -> &'static [&'static str] {
     #[cfg(unix)]
     {
-        &["Ctrl+C", "SIGTERM", "SIGHUP"]
+        &["Ctrl+C", "SIGTERM", "SIGHUP", "parent shell exit"]
     }
     #[cfg(not(unix))]
     {
@@ -1201,7 +1218,7 @@ fn web_shutdown_signal_names() -> &'static [&'static str] {
 }
 
 #[cfg(unix)]
-async fn shutdown_signal_unix() {
+async fn shutdown_signal_unix(launch_parent: LaunchParent) {
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut terminate = signal(SignalKind::terminate()).ok();
@@ -1210,7 +1227,37 @@ async fn shutdown_signal_unix() {
         _ = tokio::signal::ctrl_c() => {},
         _ = recv_optional_signal(&mut terminate) => {},
         _ = recv_optional_signal(&mut hangup) => {},
+        _ = wait_for_launch_parent_exit(launch_parent.pid) => {},
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_launch_parent_exit(initial_parent_pid: libc::pid_t) {
+    if initial_parent_pid <= 1 {
+        std::future::pending::<()>().await;
+        return;
+    }
+
+    let mut check = tokio::time::interval(Duration::from_millis(250));
+    check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        check.tick().await;
+        let current_parent_pid = unsafe { libc::getppid() };
+        if launch_parent_has_exited(initial_parent_pid, current_parent_pid) {
+            eprintln!(
+                "Timem Web launcher process {initial_parent_pid} exited; shutting down the Web runtime."
+            );
+            return;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn launch_parent_has_exited(
+    initial_parent_pid: libc::pid_t,
+    current_parent_pid: libc::pid_t,
+) -> bool {
+    initial_parent_pid > 1 && current_parent_pid != initial_parent_pid
 }
 
 #[cfg(unix)]
