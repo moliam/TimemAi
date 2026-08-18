@@ -1,6 +1,9 @@
 import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
+import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Menu, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
-import { Children, Dispatch, isValidElement, memo, MutableRefObject, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Children, CSSProperties, Dispatch, isValidElement, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
@@ -1590,6 +1593,44 @@ function RuntimeRestartDivider({ marker }: { marker: ChatMessage }) {
   </div>;
 }
 
+type SortableQueuedMessageRenderState = {
+  setNodeRef: (node: HTMLElement | null) => void;
+  style: CSSProperties;
+  attributes: ReturnType<typeof useSortable>["attributes"];
+  listeners: ReturnType<typeof useSortable>["listeners"];
+  isDragging: boolean;
+};
+
+function SortableQueuedMessage({
+  id,
+  disabled,
+  children,
+}: {
+  id: string;
+  disabled: boolean;
+  children: (state: SortableQueuedMessageRenderState) => ReactNode;
+}) {
+  const sortable = useSortable({
+    id,
+    disabled,
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(.2, .8, .2, 1)",
+    },
+  });
+  return children({
+    setNodeRef: sortable.setNodeRef,
+    style: {
+      transform: CSS.Transform.toString(sortable.transform),
+      transition: sortable.transition,
+      zIndex: sortable.isDragging ? 4 : undefined,
+    },
+    attributes: sortable.attributes,
+    listeners: sortable.listeners,
+    isDragging: sortable.isDragging,
+  });
+}
+
 function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequest, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, selectedRoleIds, onRolesConsumed, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   activeSession: Session | undefined;
   sessions: Session[];
@@ -1635,6 +1676,11 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<Set<string>>(() => new Set());
   const [collapsedQueuePanelSessionIds, setCollapsedQueuePanelSessionIds] = useState<Set<string>>(() => new Set());
   const [draggedQueueMessageId, setDraggedQueueMessageId] = useState<string>();
+  const [queuedMessageOverId, setQueuedMessageOverId] = useState<string>();
+  const queueDragSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   const [editingQueuedMessage, setEditingQueuedMessage] = useState<{ sessionId: string; id: string; text: string }>();
   const queuedDispatchSessionIdsRef = useRef<Set<string>>(new Set());
   const queuedMessageClaimsRef = useRef<Set<string>>(new Set());
@@ -1661,6 +1707,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
  queuedMessageClaimsRef.current.clear();
  setQueuedMessageClaims(new Set());
  setDraggedQueueMessageId(undefined);
+ setQueuedMessageOverId(undefined);
  }, []);
  const pauseQueuedMessages = useCallback((reason: string) => {
  const pause: QueuedMessagesPauseState = { paused: true, reason, stoppedAtMs: Date.now() };
@@ -1691,6 +1738,16 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   const queuePanelCollapsed = !!activeSessionId && collapsedQueuePanelSessionIds.has(activeSessionId);
   const visibleQueuedMessages = queueExpanded ? displayQueuedMessages : displayQueuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
   const hiddenQueuedMessageCount = Math.max(0, displayQueuedMessages.length - COLLAPSED_QUEUE_LIMIT);
+  const draggedQueuedMessage = draggedQueueMessageId
+    ? visibleQueuedMessages.find((message) => message.id === draggedQueueMessageId)
+    : undefined;
+  const draggedQueuedMessagePosition = draggedQueuedMessage
+    ? reorderQueuedMessages(
+      queuedMessages,
+      draggedQueuedMessage.id,
+      queuedMessageOverId ?? draggedQueuedMessage.id,
+    ).findIndex((message) => message.id === draggedQueuedMessage.id) + 1
+    : 0;
  const reservedAttachmentIds = useMemo(() => reservedQueuedAttachmentIds(queuedMessages), [queuedMessages]);
  const availableAttachments = useMemo(
    () => (activeSession?.attachments ?? []).filter((attachment) => !reservedAttachmentIds.has(attachment.id)),
@@ -2085,13 +2142,24 @@ const toggleQueuedMessages = () => {
     });
   };
 
-  const dropQueuedMessage = (targetId: string) => {
-    if (!activeSessionId || !draggedQueueMessageId) return;
+  const previewQueuedMessageDrag = ({ over }: DragOverEvent) => {
+    setQueuedMessageOverId(over ? String(over.id) : undefined);
+  };
+
+  const finishQueuedMessageDrag = ({ active, over }: DragEndEvent) => {
+    setDraggedQueueMessageId(undefined);
+    setQueuedMessageOverId(undefined);
+    if (!activeSessionId || !over || active.id === over.id) return;
     updateQueuedMessages((current) => ({
       ...current,
-      [activeSessionId]: reorderQueuedMessages(current[activeSessionId] ?? [], draggedQueueMessageId, targetId, queuedMessageClaimsRef.current, activeSessionId),
+      [activeSessionId]: reorderQueuedMessages(
+        current[activeSessionId] ?? [],
+        String(active.id),
+        String(over.id),
+        queuedMessageClaimsRef.current,
+        activeSessionId,
+      ),
     }));
-    setDraggedQueueMessageId(undefined);
   };
 
   const saveQueuedMessageEdit = () => {
@@ -2149,13 +2217,27 @@ const toggleQueuedMessages = () => {
       />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
-        {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>{queuePanelCollapsed ? `${displayQueuedMessages.length} 条消息` : queuedMessagesPause ? "自动续发已暂停，手动发送仍可用" : "上一条完成后自动发送"}</small><div className="queued-message-header-actions">{!queuePanelCollapsed && queuedMessagesPause && <button type="button" className="queued-message-resume" onClick={resumeQueuedMessages}>继续发送</button>}{!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}<button type="button" className="queued-message-panel-toggle" aria-expanded={!queuePanelCollapsed} aria-controls={`queued-message-items-${activeSession.session_id}`} title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"} onClick={toggleQueuedMessagePanel}>{queuePanelCollapsed ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}<span>{queuePanelCollapsed ? "展开" : "折叠"}</span></button></div></header>{!queuePanelCollapsed && <div id={`queued-message-items-${activeSession.session_id}`} className="queued-message-items">{visibleQueuedMessages.map((message) => {
+        {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>{queuePanelCollapsed ? `${displayQueuedMessages.length} 条消息` : queuedMessagesPause ? "自动续发已暂停，手动发送仍可用" : "上一条完成后自动发送"}</small><div className="queued-message-header-actions">{!queuePanelCollapsed && queuedMessagesPause && <button type="button" className="queued-message-resume" onClick={resumeQueuedMessages}>继续发送</button>}{!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}<button type="button" className="queued-message-panel-toggle" aria-expanded={!queuePanelCollapsed} aria-controls={`queued-message-items-${activeSession.session_id}`} title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"} onClick={toggleQueuedMessagePanel}>{queuePanelCollapsed ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}<span>{queuePanelCollapsed ? "展开" : "折叠"}</span></button></div></header>{!queuePanelCollapsed && <DndContext
+          sensors={queueDragSensors}
+          collisionDetection={closestCenter}
+          onDragStart={({ active }) => {
+            setDraggedQueueMessageId(String(active.id));
+            setQueuedMessageOverId(String(active.id));
+          }}
+          onDragOver={previewQueuedMessageDrag}
+          onDragCancel={() => {
+            setDraggedQueueMessageId(undefined);
+            setQueuedMessageOverId(undefined);
+          }}
+          onDragEnd={finishQueuedMessageDrag}
+        ><SortableContext items={visibleQueuedMessages.map(({ id }) => id)} strategy={verticalListSortingStrategy}><div id={`queued-message-items-${activeSession.session_id}`} className="queued-message-items">{visibleQueuedMessages.map((message) => {
           const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
           const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
           const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));
           const messageRoleIds = message.roleIds ?? (message.roleId ? [message.roleId] : []);
           const messageRoleNames = messageRoleIds.map((roleId) => activeSession.roles.find((role) => role.id === roleId)?.name ?? roleId);
-          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && displayQueuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span><div className="queued-message-preview">{messageRoleNames.length > 0 && <small className="queued-message-roles" title={messageRoleNames.join(" | ")}><BriefcaseBusiness size={11}/><span className="queued-message-role-names">{messageRoleNames.map((roleName, roleIndex) => <span className="queued-message-role" key={`${messageRoleIds[roleIndex]}-${roleIndex}`}>{roleIndex > 0 && <i className="queued-message-role-separator" aria-hidden="true">|</i>}<span>{roleName}</span></span>)}</span></small>}{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}</p>}{message.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{message.attachmentIds.length} 个附件</small>}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</div><div className="queued-message-actions">{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" className="queued-message-edit-cancel" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
+          const dragDisabled = editing || claimed || displayQueuedMessages.length <= 1;
+          return <SortableQueuedMessage id={message.id} disabled={dragDisabled} key={message.id}>{({ setNodeRef, style, attributes, listeners, isDragging }) => <article ref={setNodeRef} style={style} className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${isDragging ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined}><button type="button" className="queued-message-drag" disabled={dragDisabled} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} {...attributes} {...listeners}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span><div className="queued-message-preview">{messageRoleNames.length > 0 && <small className="queued-message-roles" title={messageRoleNames.join(" | ")}><BriefcaseBusiness size={11}/><span className="queued-message-role-names">{messageRoleNames.map((roleName, roleIndex) => <span className="queued-message-role" key={`${messageRoleIds[roleIndex]}-${roleIndex}`}>{roleIndex > 0 && <i className="queued-message-role-separator" aria-hidden="true">|</i>}<span>{roleName}</span></span>)}</span></small>}{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}</p>}{message.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{message.attachmentIds.length} 个附件</small>}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</div><div className="queued-message-actions">{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" className="queued-message-edit-cancel" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
           if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSession.session_id, queuedMessagesBySession[activeSession.session_id] ?? [], message.id)) return;
           setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
           if (!onSendForSession(activeSession.session_id, message.text, message.id, message.attachmentIds, false, messageRoleIds)) {
@@ -2165,8 +2247,8 @@ const toggleQueuedMessages = () => {
             return;
           }
           if (message.deliveryError) updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: undefined } : candidate) }));
-        }}>{claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>;
-        })}</div>}</section>}
+        }}>{claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>}</SortableQueuedMessage>;
+        })}</div></SortableContext><DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>{draggedQueuedMessage && <article className="queued-message queued-message-overlay" aria-hidden="true"><span className="queued-message-drag"><GripVertical size={13}/></span><span className="queued-message-order">{draggedQueuedMessagePosition}</span><div className="queued-message-preview"><p>{draggedQueuedMessage.text}</p>{draggedQueuedMessage.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{draggedQueuedMessage.attachmentIds.length} 个附件</small>}</div></article>}</DragOverlay></DndContext>}</section>}
         {!!activeSession && (!!availableAttachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{availableAttachments.map((attachment) => {
           const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);
           const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `${sessionInteractionLockReason} · cannot remove ${attachment.name}` : `Remove ${attachment.name}`;
