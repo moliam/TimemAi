@@ -16,7 +16,12 @@ fi
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/timem-web-lifecycle.XXXXXX")"
 host_pid=""
+launcher_pid=""
 cleanup() {
+  if [ -n "$launcher_pid" ] && kill -0 "$launcher_pid" >/dev/null 2>&1; then
+    kill -TERM "$launcher_pid" >/dev/null 2>&1 || true
+    wait "$launcher_pid" >/dev/null 2>&1 || true
+  fi
   if [ -n "$host_pid" ] && kill -0 "$host_pid" >/dev/null 2>&1; then
     kill -TERM "$host_pid" >/dev/null 2>&1 || true
     wait "$host_pid" >/dev/null 2>&1 || true
@@ -111,4 +116,78 @@ if [ "$old_status" != "401" ]; then
 fi
 
 stop_host
+
+# Simulate the terminal/launcher shell crashing without forwarding SIGHUP,
+# SIGTERM, or Ctrl+C to timem-web. The Host must notice that its original
+# parent changed, perform the normal runtime shutdown, and release both its
+# listener and per-memory ownership lock.
+launcher_log="$test_root/launcher-crash.log"
+host_pid_file="$test_root/launcher-host.pid"
+launcher_script="$test_root/launcher.sh"
+cat >"$launcher_script" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+binary="$1"
+host_pid_file="$2"
+port="$3"
+data_dir="$4"
+
+"$binary" --no-open --port "$port" \
+  --data-dir "$data_dir" --space launcher-crash &
+child_pid=$!
+printf '%s\n' "$child_pid" >"$host_pid_file"
+wait "$child_pid"
+EOF
+chmod +x "$launcher_script"
+
+"$launcher_script" "$binary" "$host_pid_file" "$first_port" \
+  "$test_root/data" >"$launcher_log" 2>&1 &
+launcher_pid=$!
+
+for _ in $(seq 1 100); do
+  [ -s "$host_pid_file" ] && break
+  sleep 0.05
+done
+if [ ! -s "$host_pid_file" ]; then
+  echo "launcher did not publish the timem-web child PID" >&2
+  exit 1
+fi
+host_pid="$(cat "$host_pid_file")"
+launcher_url="$(wait_for_url "$launcher_log")"
+launcher_token="${launcher_url##*token=}"
+curl "${curl_common[@]}"   "http://127.0.0.1:$first_port/api/health?token=$launcher_token"   | grep -q '"ok":true'
+
+kill -KILL "$launcher_pid"
+wait "$launcher_pid" >/dev/null 2>&1 || true
+launcher_pid=""
+
+for _ in $(seq 1 100); do
+  if ! kill -0 "$host_pid" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+if kill -0 "$host_pid" >/dev/null 2>&1; then
+  echo "timem-web survived after its launcher shell was killed" >&2
+  sed -n '1,160p' "$launcher_log" >&2
+  exit 1
+fi
+host_pid=""
+
+if curl --silent --connect-timeout 1 --max-time 2   "http://127.0.0.1:$first_port/api/health?token=$launcher_token"   >/dev/null 2>&1; then
+  echo "timem-web port remained reachable after launcher shell exit" >&2
+  exit 1
+fi
+
+# Immediate same-space/same-port restart proves that no hidden Host process or
+# stale ownership lock remains after the launcher disappears.
+restart_log="$test_root/launcher-restart.log"
+"$binary" --no-open --port "$first_port"   --data-dir "$test_root/data" --space launcher-crash >"$restart_log" 2>&1 &
+host_pid=$!
+restart_url="$(wait_for_url "$restart_log")"
+curl "${curl_common[@]}" "$restart_url" >"$test_root/launcher-restarted.html"
+grep -q '<div id="root">' "$test_root/launcher-restarted.html"
+stop_host
+
 echo "web_runtime_lifecycle_smoke: ok"

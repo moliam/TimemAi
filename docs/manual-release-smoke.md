@@ -35,8 +35,11 @@ Suggested fake-model-server sequence:
 The automated `scripts/web_runtime_lifecycle_smoke.sh` additionally proves that
 the complete authenticated URL can be reused after independent page connections
 close, and that a stopped runtime can immediately restart with the same data and
-port. A restart intentionally rotates the token; the newly printed URL is the
-credential for the new Host process.
+port. It also force-kills the shell process that launched `timem-web` without
+forwarding a shutdown signal, then verifies that the Web Host exits on its own
+and immediately releases its port and per-memory ownership lock. A restart
+intentionally rotates the token; the newly printed URL is the credential for the
+new Host process.
 
 The automated `scripts/web_public_runtime_smoke.sh` runs the same lifecycle in
 explicit public mode. It verifies the advertised host, `0.0.0.0` bind report,
