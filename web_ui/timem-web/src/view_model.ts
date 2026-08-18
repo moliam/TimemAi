@@ -253,6 +253,7 @@ export function composerSendDecision(
   isMemSwitching = false,
 attachmentIds?: readonly string[],
 forceSupplement = false,
+forceNewTurn = false,
 ): ComposerSendDecision {
   if (!session) return { kind: "skip", reason: "no_session" };
   const trimmed = text.trim();
@@ -263,7 +264,7 @@ forceSupplement = false,
     kind: "send",
     text: trimmed,
     clearDraftOnSuccess: true,
-    command: forceSupplement || session.state === "working"
+    command: !forceNewTurn && (forceSupplement || session.state === "working")
  ? { type: "turn_supplement", session_id: session.session_id, text: trimmed, ...(attachmentIds === undefined ? {} : { attachment_ids: [...attachmentIds] }) }
  : { type: "turn_submit", session_id: session.session_id, text: trimmed, ...(attachmentIds === undefined ? {} : { attachment_ids: [...attachmentIds] }) },
   };
