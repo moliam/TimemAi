@@ -365,7 +365,7 @@ fn process_running(pid: u32) -> bool {
     #[cfg(unix)]
     {
         let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        return result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(not(unix))]
     {

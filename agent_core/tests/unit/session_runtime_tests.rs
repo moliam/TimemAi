@@ -3116,7 +3116,7 @@ fn session_turn_protocol_repair_failure_is_structured() {
     let mut model = ReplayModel::new((0..=crate::MAX_PROTOCOL_REPAIR_ATTEMPTS).map(|idx| {
         Ok(llm(
             format!("{{not valid json repair attempt {idx}"),
-            5_000 + idx as u32,
+            5_000 + idx,
             false,
         ))
     }));
@@ -3185,7 +3185,7 @@ fn session_turn_terminal_protocol_failure_does_not_consume_or_revive_late_supple
     let mut model = ReplayModel::new((0..=crate::MAX_PROTOCOL_REPAIR_ATTEMPTS).map(|idx| {
         Ok(llm(
             format!("{{not valid json repair attempt {idx}"),
-            5_000 + idx as u32,
+            5_000 + idx,
             false,
         ))
     }));
