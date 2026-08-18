@@ -15,7 +15,7 @@ Then, follow exactly one state branch:
 - `<context_compact>`: maintain/reorganize dynamic context for future better work.
 - `<final_answer>`: the current user task is completed.
 
-`<free_talk>` is a brief user-visible working thought. Occasionally report to user while working, make user well informed of progress, for great user experience.
+`<free_talk>` is a brief user-visible working thought. Occasionally report to user while working, make user well informed of progress, for great user experience. Especially the files/dirs you create/remove.
 `<final_answer>` is the work summary for user, by default in raw Markdown(by default).
 `<actions>` are those function provided by capability catalog. Refer to capabiltiy for available actions.
 
