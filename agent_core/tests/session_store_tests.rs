@@ -680,9 +680,11 @@ fn resume_notice_references_history_format_without_web_specific_language() {
     };
     let rendered = notice.render();
     assert!(rendered.starts_with("## SYSTEM"));
-    assert!(rendered
-        .contains("Runtime just restarted. Previous audit chat history's runtime info are valid."));
-    assert!(rendered
+    assert!(rendered.contains(
+        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
+    ));
+    assert!(!rendered.contains("Previous audit chat history's runtime info are valid."));
+    assert!(!rendered
         .contains("This session was restored and may not include the full previous context."));
     assert!(rendered.contains("path: /tmp/session/raw_chat_history.jsonl"));
     assert!(rendered.contains("format: JSONL, one record per line."));

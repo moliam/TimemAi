@@ -3761,9 +3761,11 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let context = session_context(&restarted, &session_id, &[])
         .unwrap()
         .expect("restored session should inject resume context");
-    assert!(context
-        .contains("Runtime just restarted. Previous audit chat history's runtime info are valid."));
-    assert!(context.contains("This session was restored"));
+    assert!(context.contains(
+        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
+    ));
+    assert!(!context.contains("Previous audit chat history's runtime info are valid."));
+    assert!(!context.contains("This session was restored"));
     assert!(context.contains("raw_chat_history.jsonl"));
     assert!(context.contains("format: JSONL, one record per line."));
     let context_after_first_use = session_context(&restarted, &session_id, &[])
