@@ -696,7 +696,7 @@ fn parse_xml_action_groups(
     Ok(groups)
 }
 
-const MAX_XML_ACTION_NAME_CHARS: usize = 160;
+const MAX_XML_ACTION_NAME_CHARS: usize = 128;
 
 fn parse_xml_tool_action(
     element: &XmlActionElement,
@@ -1414,7 +1414,7 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "Every XML tool action needs a non-empty, short, descriptive name attribute, for example <run_bash name=\"check git status\">...</run_bash>. The name is protocol metadata and is not passed to the tool."
         }
         issue if issue.ends_with(".name_too_long") => {
-            "The XML action name is too long. Shorten it to at most 160 characters while keeping it descriptive; the name is protocol metadata and is not passed to the tool."
+            "The XML action name is too long. Shorten it to at most 128 characters while keeping it descriptive; the name is protocol metadata and is not passed to the tool."
         }
         issue if issue.contains(".tool_text_not_allowed") => {
             "A tool element cannot contain bare text. Put each tool argument in an attribute or named child element."

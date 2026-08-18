@@ -293,7 +293,7 @@ fn xml_native_actions_require_non_empty_descriptive_names() {
 
 #[test]
 fn xml_action_names_have_a_bounded_character_length() {
-    let allowed_name = "界".repeat(160);
+    let allowed_name = "界".repeat(128);
     let allowed = parse_xml_envelope(
         &format!(
             r#"<response><actions><run_bash name="{allowed_name}"><cmd>pwd</cmd></run_bash></actions></response>"#
@@ -323,7 +323,7 @@ fn xml_action_names_have_a_bounded_character_length() {
     );
     assert!(
         xml_repair_instruction(oversized.repair_issue.as_deref().unwrap())
-            .contains("at most 160 characters")
+            .contains("at most 128 characters")
     );
 }
 
