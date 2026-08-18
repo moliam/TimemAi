@@ -1,3 +1,4 @@
+mod debug_session;
 mod event_journal;
 mod server;
 mod worker_roles;

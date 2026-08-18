@@ -136,7 +136,7 @@ describe("assistant-ui thread integration", () => {
   it("keeps the composer usable on narrow screens while stop and tool buttons are visible", () => {
     expect(styles).toContain("@media (max-width: 520px)");
     expect(styles).toContain(".composer-actions { align-items: flex-start; gap: 8px; justify-content: space-between; }");
-    expect(styles).toContain(".composer-actions > span { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
+    expect(styles).toContain(".composer-paths { min-width: 0; flex: 1 1 auto; }");
     expect(styles).toContain(".composer-buttons { width: 100%; flex-wrap: wrap; justify-content: flex-end; }");
     expect(styles).toContain(".attachment-strip { align-items: stretch; }");
     expect(styles).toContain(".pending-attachment { width: 100%; max-width: none; }");
@@ -185,9 +185,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('placeholder={!activeSession ? "Create a session to start…"');
     expect(source).toContain('aria-describedby={composerHintId}');
     expect(source).toContain('title={composerHint}');
-    expect(source).toContain('<div className="composer-actions"><span className="composer-cwd-inline"');
+    expect(source).toContain('<div className="composer-actions"><div className="composer-paths">');
     expect(source).toContain('<span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span>');
-    expect(source).toContain('<b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span>');
+    expect(source).toContain('<span className="composer-cwd-inline" title={activeSession.current_dir}><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></span>');
     expect(source).toContain('title={effectiveSendLabel}');
     expect(source).toContain('aria-label={effectiveSendLabel}');
     expect(source).toContain('className={`send-button ${submittingDraft ? "sending" : ""}`}');
@@ -354,7 +354,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}');
     expect(source).toContain('toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}');
     expect(source).toContain('toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}');
-    expect(source).toContain('function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen }');
+    expect(source).toContain('function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen, answerActions }');
     expect(source).toContain('onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}');
     expect(source).toContain('const toolGenLabel = toolGenPending ? "Starting ToolGen" : toolGenBlocked ? "ToolGen busy" : "ToolGen";');
     expect(source).toContain('const toolGenTitle = toolGenPending ? "ToolGen is starting for this task..." : toolGenBlocked ? "Another ToolGen task is already running in this session" : "Extract reusable tool from this task";');
@@ -730,13 +730,15 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
   it("renders Thought Action as an independent trigger attached to a softly tinted process panel", () => {
     expect(styles).toContain(".turn-assistant-frame { position: relative; overflow: visible; padding-left: 0; border: 0; border-radius: 0; background: transparent;");
     expect(styles).toContain('.turn-user-frame { width: fit-content; max-width: min(86%, 680px); margin: 0 0 11px auto; }');
-    expect(styles).toContain('.turn-user-content::after { content: ""; position: absolute; z-index: 2; inset: 0 0 0 auto; width: 1.5px; border-radius: 0 18px 18px 0; background: rgb(109 122 130 / 60%);');
+    expect(styles).not.toContain('.turn-user-content::after');
     expect(styles).toContain('.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border-radius: 11px; background: #353535; }');
     expect(styles).not.toContain('.turn-work-panel::before');
     expect(styles).not.toContain('.turn-assistant-heading::after');
     expect(styles).toContain('.turn-work-scroll { padding: 14px 10px 7px; }');
     expect(styles).toContain(':root[data-theme="light"] .turn-work-panel { background: #fafbfb; }');
-    expect(styles).toContain(':root[data-theme="light"] .turn-user-content::after { background: rgb(145 160 168 / 60%); }');
+    expect(styles).not.toContain(':root[data-theme="light"]\n:root[data-theme="light"] .turn-work-panel');
+    expect(styles).not.toContain(':root[data-theme="light"] :root[data-theme="light"] .turn-work-panel');
+    expect(styles).not.toContain(':root[data-theme="light"] .turn-user-content::after');
     expect(source).toContain('{workStreamVisible && <div className="turn-work-panel">');
   });
 
@@ -840,7 +842,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("attachTurnCompletion(session, event.outcome.message_id");
     expect(source).toContain('className="turn-final-delivery"');
     expect(source).toContain("<FinalAnswerDelivery text={turn.final_answer}");
-    expect(source).toContain('className="turn-final-toolbar"');
+    expect(source).not.toContain('className="turn-final-toolbar"');
+    expect(source).toContain('className="final-answer-actions"');
     expect(source).toContain('const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {');
     expect(source).toContain('copied: "Answer copied"');
     expect(source).toContain('failed: "Copy answer failed"');
@@ -848,7 +851,10 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('className={`final-copy ${copyClass}`}');
     expect(source).toContain('aria-label={copyLabel}');
     expect(source).toContain('title={copyLabel}');
-    expect(source).toContain('<span aria-live="polite">{copyLabel}</span></button>{onDelete && <button');
+    expect(source).toContain('aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied"');
+    expect(source).not.toContain('<span aria-live="polite">{copyLabel}</span>');
+    expect(source).toContain('answerActions={answerActions}');
+    expect(source).toContain('{answerActions}');
     expect(source).toContain('className="chat-message-delete assistant-message-delete"');
     expect(source).toContain('<figcaption><span title={language}>{language}</span>');
     expect(source).toContain("navigator.clipboard.writeText(text)");
@@ -862,7 +868,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('setCopyState("idle");\n  }, [text]);');
     expect(source).toContain("<CompletionCard completion={completion}");
     expect(styles).toContain(".completion-card");
-    expect(styles).toContain(".turn-final-toolbar");
+    expect(styles).toContain(".final-answer-actions");
+    expect(styles).not.toContain(".turn-final-toolbar");
     expect(styles).toContain(".final-copy");
     expect(styles).toContain(".final-copy.copy-success, .code-block figcaption button.copy-success");
     expect(styles).toContain(".final-copy.copy-failed, .code-block figcaption button.copy-failed");
@@ -1124,13 +1131,19 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).not.toContain('className="session-state">busy</span>');
     expect(styles).not.toContain(".session-state");
     expect(source).toContain('className="composer-cwd-inline"');
-    expect(source).toContain('<b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span>');
+    expect(source).toContain('<span className="composer-cwd-inline" title={activeSession.current_dir}><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></span>');
     expect(source.indexOf('className="queued-message-list"')).toBeLessThan(source.indexOf('<form className="composer"'));
     expect(source.indexOf('aria-label="Message Timem"')).toBeLessThan(source.lastIndexOf('className="composer-cwd-inline"'));
     expect(styles).toContain(".path-tail { direction: rtl; text-align: left; unicode-bidi: plaintext; }");
     expect(viewModelSource).toContain("context_state");
     expect(styles).toContain(".session-cwd");
     expect(styles).toContain(".composer-cwd-inline");
+    expect(source).toContain('activeSession?.debug_dir && <span className="composer-cwd-inline composer-debug-inline" title={activeSession.debug_dir}><b>DEBUG:</b><span>{activeSession.debug_dir}</span></span>');
+    expect(source).not.toContain("tailPath(activeSession.debug_dir, 64)");
+    expect(styles).toContain('.composer-paths { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; overflow: hidden; }');
+    expect(styles).toContain(".composer-debug-inline { align-items: flex-start; overflow: visible; }");
+    expect(styles).toContain(".composer-debug-inline span { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; user-select: text; }");
+    expect(styles).toContain('font-family: "SFMono-Regular", Consolas, monospace;');
   });
 
   it("announces runtime connection state and explains mem switch availability", () => {
@@ -1623,7 +1636,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(styles).toContain('border-bottom-left-radius: 5px');
     expect(styles).toContain('.session-profile { display: inline-flex; align-items: center; gap: 6px;');
     expect(source).toContain('className="composer-cwd-inline"');
-    expect(source).toContain('<b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span>');
+    expect(source).toContain('<span className="composer-cwd-inline" title={activeSession.current_dir}><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></span>');
   });
 
   it("removes the access token from the visible URL while retaining the session credential", () => {
