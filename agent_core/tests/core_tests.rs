@@ -519,6 +519,52 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
 }
 
 #[test]
+fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content() {
+    let cwd = tmp_dir("xml_readfile_result_heading");
+    fs::write(cwd.join("notes.txt"), "before\nSTART\nmiddle\nEND\nafter\n").unwrap();
+
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("xml_readfile_result_heading_memory"),
+    );
+    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_response_protocol(ResponseProtocolKind::Xml);
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+    let _ = core.begin_turn("read a matched file range", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: r#"<response>
+  <actions>
+    <readfile name="read matched notes">
+      <path>notes.txt</path>
+      <starter><match>START</match></starter>
+      <ender><match>END</match></ender>
+    </readfile>
+  </actions>
+</response>"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected readfile action result, got {other:?}"),
+    };
+
+    assert!(
+        prompt.contains(r#"<action_result><readfile name="read matched notes">"#),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "notes.txt, matcher 'START ... END' line is [2, 4]:\ncontent:\nSTART\nmiddle\nEND",
+        ),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
     let mut core = AgentCore::new(
         "STATIC",

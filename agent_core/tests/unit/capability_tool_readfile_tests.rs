@@ -671,3 +671,113 @@ fn tail_out_must_be_boolean() {
     assert!(result.contains("status: error"), "{result}");
     assert!(result.contains("error: invalid_tail_out"), "{result}");
 }
+
+#[test]
+fn content_heading_reports_file_name_and_actual_line_range() {
+    let dir = TempDir::new("content_heading_lines");
+    fs::write(dir.path().join("lines.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "lines.txt",
+            "starter": {"line_nr": 2},
+            "ender": {"line_nr": 3}
+        }),
+    );
+    assert!(
+        result.contains("lines.txt, line [2, 3]:\ncontent:\ntwo\nthree\n"),
+        "{result}"
+    );
+}
+
+#[test]
+fn content_heading_reports_matcher_expression_and_actual_lines() {
+    let dir = TempDir::new("content_heading_matcher");
+    fs::write(
+        dir.path().join("matches.txt"),
+        "before\nSTART\nmiddle\nEND\nafter\n",
+    )
+    .unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "matches.txt",
+            "starter": {"match": "START"},
+            "ender": {"match": "END"}
+        }),
+    );
+    assert!(
+        result.contains(
+            "matches.txt, matcher 'START ... END' line is [2, 4]:\ncontent:\nSTART\nmiddle\nEND",
+        ),
+        "{result}"
+    );
+}
+
+#[test]
+fn content_heading_uses_lines_of_returned_truncated_content() {
+    let dir = TempDir::new("content_heading_truncated");
+    fs::write(
+        dir.path().join("large.txt"),
+        "first\nsecond\nthird\nfourth\n",
+    )
+    .unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "large.txt",
+            "max_bytes": 12
+        }),
+    );
+    assert!(
+        result.contains("large.txt, line [1, 2]:\ncontent:\nfirst\nsecond"),
+        "{result}"
+    );
+}
+
+#[test]
+fn matcher_heading_escapes_single_quotes() {
+    let dir = TempDir::new("content_heading_quote");
+    fs::write(dir.path().join("quote.txt"), "before\nit's here\nafter").unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "quote.txt",
+            "starter": {"match": "it's"},
+            "ender": {"match": "here"}
+        }),
+    );
+
+    assert!(
+        result.contains("matcher 'it\\'s ... here' line is [2, 2]:"),
+        "{result}"
+    );
+}
+
+#[test]
+fn matcher_heading_keeps_control_characters_on_one_line() {
+    let dir = TempDir::new("content_heading_control_chars");
+    fs::write(
+        dir.path().join("control.txt"),
+        "before\nSTART\tvalue\nEND\nafter",
+    )
+    .unwrap();
+
+    let result = execute(
+        dir.path(),
+        &json!({
+            "path": "control.txt",
+            "starter": {"match": "START\t"},
+            "ender": {"match": "\nEND"}
+        }),
+    );
+
+    assert!(
+        result.contains("matcher 'START\\t ... \\nEND' line is [2, 3]:"),
+        "{result}"
+    );
+}

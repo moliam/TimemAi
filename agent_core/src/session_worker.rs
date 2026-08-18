@@ -233,10 +233,18 @@ pub enum CoreSessionWorkerEvent {
     Topics(Vec<CoreTopicEvent>),
     ModelRequest {
         round: u32,
+        prompt: String,
+    },
+    ModelRequestCompleted {
+        latency: Duration,
+    },
+    ModelResponseParsed {
+        tool_count: usize,
     },
     ModelResponse {
         round: u32,
         usage: UsageStats,
+        content: String,
         runtime_phase: Option<String>,
     },
     ModelRetry {
@@ -1733,16 +1741,30 @@ impl TurnUi for WorkerTurnUi {
             .unwrap_or_default()
     }
 
-    fn on_model_request(&mut self, round: u32, _prompt: &str) {
-        let _ = self
-            .event_tx
-            .send(CoreSessionWorkerEvent::ModelRequest { round });
+    fn on_model_request(&mut self, round: u32, prompt: &str) {
+        let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelRequest {
+            round,
+            prompt: prompt.to_string(),
+        });
     }
 
-    fn on_model_response(&mut self, round: u32, usage: &UsageStats, _content: &str) {
+    fn on_model_request_completed(&mut self, latency: Duration) {
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::ModelRequestCompleted { latency });
+    }
+
+    fn on_model_response_parsed(&mut self, tool_count: usize) {
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::ModelResponseParsed { tool_count });
+    }
+
+    fn on_model_response(&mut self, round: u32, usage: &UsageStats, content: &str) {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelResponse {
             round,
             usage: usage.clone(),
+            content: content.to_string(),
             runtime_phase: self.phase.clone(),
         });
     }

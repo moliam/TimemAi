@@ -36,17 +36,19 @@ const DYNAMIC_TAIL_CACHE_BLOCKS: usize = 3;
 
 pub fn split_prompt(full_prompt: &str) -> (String, String) {
     for boundaries in KNOWN_PROMPT_BOUNDARIES {
-        let Some(begin_idx) = full_prompt.find(boundaries.static_begin) else {
+        let Some(after_begin) = full_prompt.strip_prefix(boundaries.static_begin) else {
             continue;
         };
-        let content_start = begin_idx + boundaries.static_begin.len();
-        let Some(end_idx) = full_prompt[content_start..].find(boundaries.static_end) else {
+        let content = after_begin
+            .strip_prefix("\r\n")
+            .or_else(|| after_begin.strip_prefix('\n'))
+            .unwrap_or(after_begin);
+        let end_marker = format!("\n{}", boundaries.static_end);
+        let Some(end_idx) = content.find(&end_marker) else {
             continue;
         };
-        let static_content = full_prompt[content_start..content_start + end_idx]
-            .trim()
-            .to_string();
-        let dynamic_part = full_prompt[content_start + end_idx + boundaries.static_end.len()..]
+        let static_content = content[..end_idx].trim().to_string();
+        let dynamic_part = content[end_idx + end_marker.len()..]
             .trim_start_matches(['\n', '\r', ' ', '\t'])
             .to_string();
         return (static_content, dynamic_part);

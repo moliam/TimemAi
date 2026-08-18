@@ -324,7 +324,6 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(!xml.contains("{{PROMPT_DELTA_EXAMPLE}}"));
 }
 
-
 #[test]
 fn prompt_renderer_uses_protocol_native_tool_synopses() {
     let template = "# Tools\n\n{{TOOL_CATALOG}}\n\n{{RESPONSE_PROTOCOL_SECTION}}";
@@ -378,4 +377,75 @@ fn prompt_renderer_replaces_startup_stamp() {
 
     assert!(rendered.contains("## TIMESTAMP\n2026-08-17 12:34:56 local_time, weekday=周一/Monday"));
     assert!(!rendered.contains("{{STARTUP_STAMP}}"));
+}
+
+#[test]
+fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
+    fn delta(id: &str, time_ms: i64, prompt_type: &str, text: &str) -> PromptDelta {
+        PromptDelta {
+            delta_id: id.to_string(),
+            time_ms,
+            hidden_slice_ids: Vec::new(),
+            slices: vec![PromptSlice {
+                delta_id: id.to_string(),
+                slice_id: format!("ps_{}_s001", id.trim_start_matches("pd_")),
+                component_id: format!("component_{id}"),
+                prompt_type: prompt_type.to_string(),
+                time_ms,
+                text: text.to_string(),
+                slice_index: 1,
+                slice_count: 1,
+            }],
+        }
+    }
+
+    let rendered_static = render_static_prompt(
+        "STATIC",
+        &CapabilityRegistry::builtin(),
+        &XmlSuiteV1,
+        "TIMEM_ASSISTANT",
+        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
+    );
+    let first_deltas = vec![
+        delta("pd_1", 100, "user_question", "first question"),
+        delta("pd_2", 200, "llm_response", "first answer"),
+    ];
+
+    let first = render_prompt_with_rendered_static(
+        &rendered_static,
+        &first_deltas,
+        "TIMEM_ASSISTANT",
+        &XmlSuiteV1,
+    );
+    let repeated = render_prompt_with_rendered_static(
+        &rendered_static,
+        &first_deltas,
+        "TIMEM_ASSISTANT",
+        &XmlSuiteV1,
+    );
+    assert_eq!(
+        first, repeated,
+        "serializing unchanged structured context must be byte stable"
+    );
+
+    let mut appended_deltas = first_deltas;
+    appended_deltas.push(delta("pd_3", 300, "user_supplement", "second question"));
+    let appended = render_prompt_with_rendered_static(
+        &rendered_static,
+        &appended_deltas,
+        "TIMEM_ASSISTANT",
+        &XmlSuiteV1,
+    );
+
+    let (first_prefix, first_trailer) = split_formatted_response_trailer(&first);
+    let (appended_prefix, appended_trailer) = split_formatted_response_trailer(&appended);
+    assert_eq!(first_trailer.as_deref(), Some(RESPONSE_TRAILER));
+    assert_eq!(appended_trailer.as_deref(), Some(RESPONSE_TRAILER));
+    assert!(
+        appended_prefix.starts_with(first_prefix),
+        "without context maintenance, protocol/identity changes, or static refresh, \
+         previously rendered bytes must remain an exact prefix"
+    );
+    assert!(appended_prefix.contains("pd_3"));
+    assert!(appended_prefix.contains("second question"));
 }

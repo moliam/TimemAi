@@ -24,6 +24,7 @@ description: |
   long local work that should keep running across interaction rounds, use
   background=true. Background and timeout jobs return a pid; manage them with
   normal shell commands if the user asks you to inspect or stop them.
+  NOTE: CAREFULLY USE MULTI-LINE CMD. Try to split them into individual run_bash calls via parallel/serial execution. Properly set 'set -euo pipefail' for better error collection in multi-line cmd.
 prompt_input: |
   Use cmd for a shell command. Optional: timeout_ms, background=true, and
   tail_out=true. Use
